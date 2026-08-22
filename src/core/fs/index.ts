@@ -6,6 +6,7 @@
  * mutation emits the live `fs/observed` notification (not a session event).
  */
 import { emitEvent, serviceKey, waterfallEvent } from '../../kernel/index.ts'
+import type { Agent } from '../agent/types.ts'
 import type { Session } from '../session/index.ts'
 
 export type FsErrorCode =
@@ -54,9 +55,13 @@ export type FsWriteIntent =
 
 export type FsObservation = { readonly kind: 'present'; readonly version: string } | { readonly kind: 'absent' }
 
-/** An opaque actor passed to policy listeners; carries the acting agent when known. */
+/**
+ * The actor of an fs operation; carries the acting agent when known. The
+ * `fs/*` events are dispatched in the actor's agent scope (`agent.ctx`), so a
+ * policy registered through one agent's context observes that agent alone.
+ */
 export interface FsActor {
-  readonly agent?: { readonly session: Session }
+  readonly agent?: Agent
 }
 
 export interface Fs {

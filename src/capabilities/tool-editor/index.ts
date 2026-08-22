@@ -5,7 +5,7 @@
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { FS, FS_EDIT_INTENT, FsError, type Fs, type FsActor, type FsTarget } from '../../core/fs/index.ts'
+import { FS, FS_EDIT_INTENT, FsError, type Fs, type FsActor, type FsObservation, type FsTarget } from '../../core/fs/index.ts'
 import { defineTool, TOOLS, type ToolCallView } from '../../core/tools/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 
@@ -47,6 +47,11 @@ function truncate(text: string, max: number): string {
 
 function cwdOf(agent: Agent | undefined): string {
   return agent?.session.header.cwd ?? process.cwd()
+}
+
+/** Asks the read-before-edit policy in the acting agent's scope; without a policy, edits are unconditional. */
+function editIntent(ctx: Context, target: FsTarget, actor: FsActor): FsObservation {
+  return (actor.agent?.ctx ?? ctx).waterfall(FS_EDIT_INTENT, target, actor, () => ({ kind: 'present', version: '' }) as const)
 }
 
 export const toolEditorPlugin: Plugin<EditorConfig | undefined> = {
@@ -125,7 +130,7 @@ async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, a
   if (args.old_str === undefined) throw new FsError('FS_IO', '"str_replace" requires old_str')
   // The observed version is the CAS token: a file changed since the model read it
   // must be rejected, so we must NOT re-derive the version from a fresh read.
-  const observed = ctx.waterfall(FS_EDIT_INTENT, target, actor, () => ({ kind: 'present', version: '' }) as const)
+  const observed = editIntent(ctx, target, actor)
   const read = await fs.readText(target, actor)
   const text = read.text
   const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version
@@ -143,7 +148,7 @@ async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, a
 
 async function insert(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
   if (args.insert_line === undefined || args.new_str === undefined) throw new FsError('FS_IO', '"insert" requires insert_line and new_str')
-  const observed = ctx.waterfall(FS_EDIT_INTENT, target, actor, () => ({ kind: 'present', version: '' }) as const)
+  const observed = editIntent(ctx, target, actor)
   const read = await fs.readText(target, actor)
   const text = read.text
   const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version

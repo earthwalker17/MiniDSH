@@ -4,7 +4,7 @@
  * decision is a turn-enclosed audit pair in the session log — never in the
  * model transcript.
  */
-import { serviceKey, waterfallEvent, type Context, type Plugin } from '../../kernel/index.ts'
+import { serviceKey, waterfallEvent, type Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
 import type { CallId } from '../ids.ts'
 import { eventKind, type EventEnvelope } from '../session/types.ts'
@@ -33,11 +33,7 @@ export const APPROVAL_ASKED = eventKind<{ id: string; toolName: string; callId?:
 export const APPROVAL_DECIDED = eventKind<{ id: string; outcome: ApprovalOutcome }>('approval/decided')
 
 class ApprovalService implements Approval {
-  private readonly ctx: Context
   private counter = 0
-  constructor(ctx: Context) {
-    this.ctx = ctx
-  }
 
   async request(request: ApprovalRequest): Promise<ApprovalOutcome> {
     const session = request.agent.session
@@ -50,7 +46,9 @@ class ApprovalService implements Approval {
     })
     let outcome: ApprovalOutcome
     try {
-      outcome = await this.ctx.waterfall(APPROVAL_REQUEST, request, async () => 'unavailable' as ApprovalOutcome)
+      // Dispatched in the requesting agent's scope: an answerer registered through
+      // one agent's context never answers for another agent.
+      outcome = await request.agent.ctx.waterfall(APPROVAL_REQUEST, request, async () => 'unavailable' as ApprovalOutcome)
       if (!VALID_OUTCOMES.has(outcome)) outcome = 'unavailable'
     } catch {
       outcome = 'unavailable'
@@ -65,7 +63,7 @@ class ApprovalService implements Approval {
 export const approvalPlugin: Plugin = {
   name: 'core-approval',
   apply(ctx) {
-    ctx.provide(APPROVAL, new ApprovalService(ctx))
+    ctx.provide(APPROVAL, new ApprovalService())
   },
 }
 

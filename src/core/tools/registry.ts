@@ -5,6 +5,7 @@ import { APPROVAL } from '../approval/index.ts'
 import { asCallId, type CallId } from '../ids.ts'
 import { deepFreeze, snapshotJson, type JsonValue } from '../json.ts'
 import type { ContentBlock, Message, ToolSchema } from '../llm/types.ts'
+import { ScopedLayers } from '../scope.ts'
 import type {
   AnyToolDefinition,
   PostToolDecision,
@@ -53,28 +54,24 @@ function errorResult(message: string, name: string, code: string): ToolResult {
   return { isError: true, content: [{ type: 'text', text: `Error: ${message}` }], error: { message, info: { name, code } } }
 }
 
+/**
+ * Definitions and guards are per-agent layered (see `core/scope.ts`), and the
+ * pipeline's events are dispatched through the acting agent's scope so that a
+ * listener registered via one agent's context never sees another agent's
+ * calls. Registry-membership notifications (`tools/change`) stay global.
+ */
 class ToolRegistry implements Tools {
-  private readonly global = new Map<string, AnyToolDefinition>()
-  private readonly scoped = new WeakMap<object, Map<string, AnyToolDefinition>>()
-  private readonly guards = new Set<ToolGuard>()
+  private readonly definitions = new ScopedLayers<AnyToolDefinition>()
+  private readonly guards = new ScopedLayers<ToolGuard>()
+  private guardSeq = 0
   private readonly ctx: Context
   constructor(ctx: Context) {
     this.ctx = ctx
   }
 
-  private layerFor(scope: unknown, create: boolean): Map<string, AnyToolDefinition> | undefined {
-    if (scope === undefined || scope === null || typeof scope !== 'object') return this.global
-    let layer = this.scoped.get(scope)
-    if (!layer && create) {
-      layer = new Map()
-      this.scoped.set(scope, layer)
-    }
-    return layer
-  }
-
   register<Args, Value extends JsonValue>(owner: Context, definition: ToolDefinition<Args, Value>): Disposer {
     const def = definition as unknown as AnyToolDefinition
-    const layer = this.layerFor(owner.scope, true)!
+    const layer = this.definitions.layerFor(owner)
     if (layer.has(def.name)) throw new Error(`tool "${def.name}" is already registered in this scope`)
     layer.set(def.name, def)
     this.ctx.emit(TOOLS_CHANGE)
@@ -85,20 +82,23 @@ class ToolRegistry implements Tools {
   }
 
   guard(owner: Context, guard: ToolGuard): Disposer {
-    this.guards.add(guard)
-    return owner.effect(() => () => void this.guards.delete(guard), 'tool.guard')
+    const layer = this.guards.layerFor(owner)
+    const key = `guard#${++this.guardSeq}`
+    layer.set(key, guard)
+    return owner.effect(() => () => void layer.delete(key), 'tool.guard')
   }
 
   get(name: string, agent?: Agent): AnyToolDefinition | undefined {
-    const scopedLayer = agent ? this.scoped.get(agent) : undefined
-    return scopedLayer?.get(name) ?? this.global.get(name)
+    return this.definitions.get(name, agent)
   }
 
   list(agent?: Agent): AnyToolDefinition[] {
-    const merged = new Map<string, AnyToolDefinition>(this.global)
-    const scopedLayer = agent ? this.scoped.get(agent) : undefined
-    if (scopedLayer) for (const [name, def] of scopedLayer) merged.set(name, def)
-    return [...merged.values()].toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return [...this.definitions.view(agent).values()].toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  }
+
+  /** Events about a call are dispatched in the acting agent's scope; agent-less calls are unscoped. */
+  private scopeOf(agent: Agent | undefined): Context {
+    return agent?.ctx ?? this.ctx
   }
 
   schemas(agent?: Agent): ToolSchema[] {
@@ -132,15 +132,16 @@ class ToolRegistry implements Tools {
       concludeTurn: () => void (concludesTurn = true),
     }
 
+    const scope = this.scopeOf(call.agent)
     let result: ToolResult
     try {
-      const gate = await this.gate(execution)
+      const gate = await this.gate(execution, scope)
       if (gate) {
         result = gate
       } else {
         const body = () => this.runBody(tool, validated.data as unknown, execution)
-        const candidate = await this.ctx.waterfall(TOOLS_EXECUTE, execution, body)
-        result = await this.post(execution, candidate)
+        const candidate = await scope.waterfall(TOOLS_EXECUTE, execution, body)
+        result = await this.post(execution, candidate, scope)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -150,14 +151,14 @@ class ToolRegistry implements Tools {
     if (additionalContexts.length > 0 && !result.additionalContexts) result = { ...result, additionalContexts }
     if (concludesTurn && !result.concludesTurn) result = { ...result, concludesTurn: true }
     const frozen = deepFreeze({ ...result, content: [...result.content] })
-    this.ctx.emit(TOOLS_RESULT, execution, frozen)
+    scope.emit(TOOLS_RESULT, execution, frozen)
     return frozen
   }
 
   /** Runs pre-execute policy, approval, and guards. Returns a denial result, or undefined to proceed. */
-  private async gate(execution: ToolContext): Promise<ToolResult | undefined> {
+  private async gate(execution: ToolContext, scope: Context): Promise<ToolResult | undefined> {
     if (execution.signal.aborted) return errorResult('tool call aborted before dispatch', 'AbortError', 'ABORTED_BEFORE_DISPATCH')
-    const decision = await this.ctx.waterfall(TOOLS_PRE_EXECUTE, execution, async () => ({ kind: 'allow' }) as PreToolDecision)
+    const decision = await scope.waterfall(TOOLS_PRE_EXECUTE, execution, async () => ({ kind: 'allow' }) as PreToolDecision)
     if (decision.kind === 'deny') return errorResult(`denied: ${decision.reason}`, 'Denied', 'DENIED')
     if (decision.kind === 'ask') {
       const approval = this.ctx.tryGet(APPROVAL)
@@ -171,7 +172,7 @@ class ToolRegistry implements Tools {
       })
       if (outcome !== 'allowed-once') return errorResult(`approval ${outcome}`, 'Denied', outcome === 'cancelled' ? 'ABORTED' : 'DENIED')
     }
-    for (const guard of this.guards) {
+    for (const guard of this.guards.view(execution.agent).values()) {
       const denial = guard(execution)
       if (denial !== undefined) return errorResult(`denied: ${denial}`, 'Denied', 'DENIED')
     }
@@ -185,8 +186,8 @@ class ToolRegistry implements Tools {
     return { isError: false, content, value: snapshotJson(value) as JsonValue }
   }
 
-  private async post(execution: ToolContext, candidate: ToolResult): Promise<ToolResult> {
-    const decision = await this.ctx.waterfall(TOOLS_POST_EXECUTE, execution, candidate, async () => ({ kind: 'accept' }) as PostToolDecision)
+  private async post(execution: ToolContext, candidate: ToolResult, scope: Context): Promise<ToolResult> {
+    const decision = await scope.waterfall(TOOLS_POST_EXECUTE, execution, candidate, async () => ({ kind: 'accept' }) as PostToolDecision)
     if (decision.kind === 'block') return { isError: true, content: [...decision.feedback], error: { message: 'blocked by policy', info: { name: 'Blocked', code: 'BLOCKED' } } }
     if (decision.kind === 'accept-value') return { ...candidate, value: decision.value }
     if (decision.content) return { ...candidate, content: [...decision.content] }

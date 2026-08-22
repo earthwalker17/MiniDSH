@@ -2,10 +2,15 @@
  * System-prompt assembly: an ordered named-section registry plus strict
  * `{{var}}` interpolation and the model tool schemas. Sections must be stable
  * within a session (prefix-cache safety); time-varying context goes through
- * `agent/pre-step` as a durable message, not a section.
+ * `agent/pre-step` as a durable message, not a section. Sections and
+ * variables are per-agent layered (`core/scope.ts`): a section registered
+ * through an agent's context is visible to that agent alone and may shadow a
+ * same-named global (a subagent persona); `system-prompt/assemble` is
+ * dispatched in the agent's scope.
  */
 import { serviceKey, waterfallEvent, type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
+import { ScopedLayers } from '../scope.ts'
 import { TOOLS, type Tools } from '../tools/index.ts'
 import type { ToolSchema } from '../llm/types.ts'
 
@@ -40,44 +45,49 @@ export const SYSTEM_PROMPT_ASSEMBLE = waterfallEvent<[draft: PromptDraft], Promi
 const VARIABLE = /\{\{([a-z][a-z0-9_]*)\}\}/g
 
 class PromptRegistry implements Prompt {
-  private readonly sections = new Set<PromptSection>()
-  private readonly variables = new Map<string, () => string | undefined>()
+  private readonly sections = new ScopedLayers<PromptSection>()
+  private readonly variables = new ScopedLayers<() => string | undefined>()
   private readonly ctx: Context
   constructor(ctx: Context) {
     this.ctx = ctx
   }
 
   section(owner: Context, section: PromptSection): Disposer {
-    for (const existing of this.sections) {
-      if (existing.name === section.name) throw new Error(`prompt section "${section.name}" is already registered`)
-    }
-    this.sections.add(section)
-    return owner.effect(() => () => void this.sections.delete(section), `prompt.section("${section.name}")`)
+    const layer = this.sections.layerFor(owner)
+    if (layer.has(section.name)) throw new Error(`prompt section "${section.name}" is already registered in this scope`)
+    layer.set(section.name, section)
+    return owner.effect(() => () => {
+      if (layer.get(section.name) === section) layer.delete(section.name)
+    }, `prompt.section("${section.name}")`)
   }
 
   variable(owner: Context, name: string, provider: () => string | undefined): Disposer {
-    if (this.variables.has(name)) throw new Error(`prompt variable "${name}" is already registered`)
-    this.variables.set(name, provider)
-    return owner.effect(() => () => void this.variables.delete(name), `prompt.variable("${name}")`)
+    const layer = this.variables.layerFor(owner)
+    if (layer.has(name)) throw new Error(`prompt variable "${name}" is already registered in this scope`)
+    layer.set(name, provider)
+    return owner.effect(() => () => {
+      if (layer.get(name) === provider) layer.delete(name)
+    }, `prompt.variable("${name}")`)
   }
 
   async assemble(agent?: Agent): Promise<AssembledPrompt> {
-    const draft: PromptDraft = { agent, sections: [...this.sections] }
-    const finalDraft = await this.ctx.waterfall(SYSTEM_PROMPT_ASSEMBLE, draft, async () => draft)
+    const draft: PromptDraft = { agent, sections: [...this.sections.view(agent).values()] }
+    const finalDraft = await (agent?.ctx ?? this.ctx).waterfall(SYSTEM_PROMPT_ASSEMBLE, draft, async () => draft)
     const ordered = finalDraft.sections.toSorted((a, b) => a.order - b.order)
     const complete = ordered.filter((section) => section.complete)
     if (complete.length > 1) throw new Error(`multiple complete prompt sections: ${complete.map((s) => s.name).join(', ')}`)
 
-    const render = (section: PromptSection): string => this.interpolate(typeof section.text === 'function' ? section.text(agent) : section.text)
+    const render = (section: PromptSection): string =>
+      this.interpolate(typeof section.text === 'function' ? section.text(agent) : section.text, agent)
     const system = complete.length === 1 ? render(complete[0]!) : ordered.map(render).filter((text) => text.length > 0).join('\n\n')
 
     const tools = this.ctx.tryGet(TOOLS)?.schemas(agent) ?? []
     return { system, tools }
   }
 
-  private interpolate(text: string): string {
+  private interpolate(text: string, agent: Agent | undefined): string {
     return text.replace(VARIABLE, (_match, name: string) => {
-      const provider = this.variables.get(name)
+      const provider = this.variables.get(name, agent)
       if (!provider) throw new Error(`unknown prompt variable "${name}"`)
       const value = provider()
       if (value === undefined) throw new Error(`prompt variable "${name}" resolved to undefined`)

@@ -75,8 +75,13 @@ class LocalFs implements Fs {
     }
     const info = await stat(target.path)
     const version = versionOf(info)
-    this.ctx.emit(FS_OBSERVED, target, { kind: 'present', version }, actor)
+    this.scopeOf(actor).emit(FS_OBSERVED, target, { kind: 'present', version }, actor)
     return { text, version }
+  }
+
+  /** `fs/*` events about an agent's operation are dispatched in that agent's scope. */
+  private scopeOf(actor: FsActor): Context {
+    return actor.agent?.ctx ?? this.ctx
   }
 
   async writeText(target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }> {
@@ -90,7 +95,7 @@ class LocalFs implements Fs {
     await writeFile(target.path, text, 'utf8')
     const info = await stat(target.path)
     const version = versionOf(info)
-    this.ctx.emit(FS_OBSERVED, target, { kind: 'present', version }, actor)
+    this.scopeOf(actor).emit(FS_OBSERVED, target, { kind: 'present', version }, actor)
     return { version }
   }
 
