@@ -8,7 +8,9 @@
     "no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^_" }],
     "no-var": "error",
     "prefer-const": "error",
-    "eqeqeq": "error"
+    "eqeqeq": "error",
+    "no-underscore-dangle": "off",
+    "unicorn/consistent-function-scoping": "off"
   },
   "ignorePatterns": ["node_modules/**", "coverage/**", "dist/**"]
 }
