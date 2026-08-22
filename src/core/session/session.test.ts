@@ -145,7 +145,7 @@ describe('Session: seed, fork, replay-equivalence', () => {
     const origin = sessions.get(asSessionId('origin'))!
     const seed = origin.events.map((event) => ({ ...event }))
 
-    const replay = new Session({ version: 0, id: asSessionId('replay'), createdAt: 1, cwd: '/w' }, { onCommit: () => {}, flush: async () => {} }, seed)
+    const replay = new Session({ version: 0, id: asSessionId('replay'), createdAt: 1, cwd: '/w' }, { prepare: () => () => {}, flush: async () => {} }, seed)
     expect(JSON.stringify(replay.deriveMessages())).toBe(JSON.stringify(origin.deriveMessages()))
     expect(replay.foldRequestHeader()).toEqual(origin.foldRequestHeader())
     // A seeded session marks where its own writes begin.
@@ -181,7 +181,7 @@ describe('Session: crash repair', () => {
     expect((turnEnd.data as { reason: { kind: string } }).reason.kind).toBe('interrupted')
     // Seeding a fresh session from log + closers validates against the surface + relational rules.
     const seed = [...session.events, ...closers].map((event) => ({ ...event }))
-    const repaired = new Session({ version: 0, id: asSessionId('r'), createdAt: 1, cwd: '/w' }, { onCommit: () => {}, flush: async () => {} }, seed)
+    const repaired = new Session({ version: 0, id: asSessionId('r'), createdAt: 1, cwd: '/w' }, { prepare: () => () => {}, flush: async () => {} }, seed)
     expect(repaired.deriveMessages().at(-1)?.content[0]).toMatchObject({ type: 'tool-result', isError: true })
   })
 
@@ -203,6 +203,24 @@ describe('Session: relational invariant', () => {
     expect(() =>
       session.append(TOOL_RESULT, { turn: 1, step: 1, callId: 'missing', message: orphan }, { surfaceOp: { op: 'append' }, sourceEventSeqs: [] }),
     ).toThrowError(/no pending tool\/call/)
+  })
+
+  it('rejects an invariant-violating event before it is committed, leaving the log intact', async () => {
+    const { sessions } = await harness(true)
+    const session = sessions.create({ cwd: '/w' })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    const before = session.events.length
+    const orphan = createToolResultMessage(asCallId('missing'), [{ type: 'text', text: 'x' }], false)
+    expect(() =>
+      session.append(TOOL_RESULT, { turn: 1, step: 1, callId: 'missing', message: orphan }, { surfaceOp: { op: 'append' }, sourceEventSeqs: [] }),
+    ).toThrowError(/no pending tool\/call/)
+    // Pre-commit: the rejected event never entered the log or the surface.
+    expect(session.events.length).toBe(before)
+    expect(session.deriveMessages()).toEqual([])
+    // The session is still usable and the next valid event gets the expected seq.
+    const next = session.append(STEP_END, { turn: 1, step: 1 })
+    expect(next.seq).toBe(before)
   })
 
   it('throws on a non-contiguous turn number', async () => {

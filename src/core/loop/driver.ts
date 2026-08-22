@@ -284,10 +284,12 @@ export class ReactLoopAgent implements Agent {
     })
     markLoopRequest(request, this.session)
 
+    let attempt = 0
     for (;;) {
+      attempt += 1
       const assembler = new BlockAssembler()
       for await (const chunk of deps.llm.stream(request)) {
-        this.session.append(ASSISTANT_CHUNK, { turn, step, chunk: chunk as unknown as JsonValue })
+        this.session.append(ASSISTANT_CHUNK, { turn, step, attempt, chunk: chunk as unknown as JsonValue })
         assembler.push(chunk)
       }
       const finish = assembler.finish
@@ -380,6 +382,7 @@ export class ReactLoopAgent implements Agent {
       tools: assembled.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters as JsonValue })),
       ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
       ...(config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens }),
+      ...(config.temperature === undefined ? {} : { temperature: config.temperature }),
     }
   }
 }

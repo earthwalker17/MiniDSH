@@ -118,6 +118,54 @@ describe('agent loop: turn/step lifecycle', () => {
     expect((agent.session.events.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('max-tokens')
   })
 
+  it('logs a new request/header when an agent/request listener changes the temperature', async () => {
+    harness = await coreHarness()
+    harness.adapter.script(assistantText('one'), assistantText('two'))
+    const { agent } = await harness.create()
+    const { AGENT_REQUEST } = await import('../agent/index.ts')
+    let temperature = 0.1
+    agent.ctx.on(AGENT_REQUEST, async (_context, next) => ({ ...(await next()), temperature }))
+    agent.followup(createUserMessage('first'))
+    await agent.whenIdle()
+    temperature = 0.9
+    agent.followup(createUserMessage('second'))
+    await agent.whenIdle()
+    const headers = agent.session.events
+      .filter((event) => event.type === 'request/header')
+      .map((event) => (event.data as { header: { temperature?: number } }).header.temperature)
+    expect(headers).toEqual([0.1, 0.9])
+    expect(harness.adapter.calls.map((call) => call.temperature)).toEqual([0.1, 0.9])
+  })
+
+  it('a followup that lands during cancellation is not lost', async () => {
+    harness = await coreHarness()
+    const hang = defineTool({
+      name: 'hang',
+      description: 'wait until aborted',
+      input: z.object({}),
+      output: z.object({}),
+      execute: (_args, exec) =>
+        new Promise((_resolve, reject) => {
+          exec.signal.addEventListener('abort', () => reject(new Error('aborted')))
+        }),
+      render: () => [{ type: 'text', text: 'never' }],
+    })
+    harness.root.get(TOOLS).register(harness.root, hang)
+    harness.adapter.script(assistantToolCall('c1', 'hang', {}), assistantText('after'))
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await waitFor(() => agent.session.events.some((event) => event.type === 'tool/call'))
+    agent.cancel({ kind: 'user' })
+    // Arrives after cancel() but before the cancelled turn has converged.
+    agent.followup(createUserMessage('again'))
+    await agent.whenIdle()
+    const reasons = agent.session.events
+      .filter((event) => event.type === 'turn/end')
+      .map((event) => (event.data as { reason: { kind: string } }).reason.kind)
+    expect(reasons).toEqual(['cancelled', 'completed'])
+    expect(messageText(agent.session.deriveMessages().at(-1)!)).toBe('after')
+  })
+
   it('retries a failed request when agent/request-error returns retry', async () => {
     harness = await coreHarness()
     harness.adapter.script(

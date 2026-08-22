@@ -25,7 +25,10 @@ export const SESSIONS = serviceKey<Sessions>('sessions')
 
 /** A new live session was published. Listeners may snapshot its header. */
 export const SESSION_CREATED = emitEvent<[session: Session]>('session/created')
-/** One durable event was appended (post-commit, fire-and-forget, contained). */
+/**
+ * One durable event was appended (fire-and-forget, contained). Observers run
+ * before the commit and may reject it; listeners run after.
+ */
 export const SESSION_EVENT = emitEvent<[session: Session, event: EventEnvelope]>('session/event')
 /** Awaited durability checkpoint. */
 export const SESSION_FLUSH = parallelEvent<[session: Session]>('session/flush')
@@ -38,8 +41,8 @@ class SessionStore implements Sessions, SessionHost {
     this.ctx = ctx
   }
 
-  onCommit(session: Session, event: EventEnvelope): void {
-    this.ctx.emit(SESSION_EVENT, session, event)
+  prepare(session: Session, event: EventEnvelope): () => void {
+    return this.ctx.prepareEmit(SESSION_EVENT, session, event)
   }
 
   async flush(session: Session): Promise<void> {

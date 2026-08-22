@@ -55,4 +55,38 @@ describe('llm-replay', () => {
     expect(messageText(handle.agent.session.deriveMessages().at(-1)!)).toBe('recorded answer')
     await handle.dispose()
   })
+
+  it('replays a session whose step was retried, using the attempt the agent acted on', async () => {
+    const recorder = await coreHarness()
+    harnesses.push(recorder)
+    recorder.root.get(TOOLS).register(recorder.root, echo)
+    recorder.adapter.script(
+      () => {
+        throw new Error('flaky provider')
+      },
+      assistantToolCall('c1', 'echo', { text: 'pong' }),
+      assistantText('recorded answer'),
+    )
+    const { agent } = await recorder.create()
+    const { AGENT_REQUEST_ERROR } = await import('../core/agent/index.ts')
+    agent.ctx.on(AGENT_REQUEST_ERROR, async (_context, next) => (await next()) ?? { kind: 'retry' })
+    agent.followup(createUserMessage('run it'))
+    await agent.whenIdle()
+    const events = agent.session.events.map((event) => ({ ...event }))
+    const attempts = events.filter((event) => event.type === 'assistant/chunk').map((event) => (event.data as { attempt: number }).attempt)
+    expect(new Set(attempts)).toEqual(new Set([1, 2]))
+
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    // No retry policy here: the failed attempt must not be replayed at all.
+    const replay = installLlmReplay(harness.root, { events, provider: 'replay' })
+    harness.root.get(TOOLS).register(harness.root, echo)
+    const handle = await harness.root.get(AGENTS).create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    handle.agent.followup(createUserMessage('run it'))
+    await handle.agent.whenIdle()
+    expect(replay.steps).toBe(2)
+    replay.assertConsumed()
+    expect(messageText(handle.agent.session.deriveMessages().at(-1)!)).toBe('recorded answer')
+    await handle.dispose()
+  })
 })

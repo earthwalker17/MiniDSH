@@ -13,9 +13,11 @@ function canonHeader(header: RequestHeader): string {
     tools: header.tools,
     reasoningEffort: header.reasoningEffort ?? null,
     maxTokens: header.maxTokens ?? null,
+    temperature: header.temperature ?? null,
   })
 }
 
+/** Every model-visible field of the request outside `messages`; adding one to LlmRequest means adding it here and to RequestHeader. */
 function requestAsHeader(request: LlmRequest): string {
   return JSON.stringify({
     provider: request.provider,
@@ -24,6 +26,7 @@ function requestAsHeader(request: LlmRequest): string {
     tools: (request.tools ?? []).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
     reasoningEffort: request.reasoningEffort ?? null,
     maxTokens: request.maxTokens ?? null,
+    temperature: request.temperature ?? null,
   })
 }
 

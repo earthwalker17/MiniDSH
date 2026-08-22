@@ -14,7 +14,13 @@ import {
 
 /** The callbacks a session uses to reach its store's dispatch surface. */
 export interface SessionHost {
-  onCommit(session: Session, event: EventEnvelope): void
+  /**
+   * Pre-commit observation: runs the dispatch observers (the invariants) for
+   * a live event and returns the delivery step. A throw here rejects the
+   * append before the event enters the log; the returned function publishes
+   * `session/event` once the event is committed.
+   */
+  prepare(session: Session, event: EventEnvelope): () => void
   flush(session: Session): Promise<void>
 }
 
@@ -110,16 +116,17 @@ export class Session {
       data: snapshotJson(raw.data),
       ...(raw.surfaceOp ? { surfaceOp: snapshotJson(raw.surfaceOp) } : {}),
       ...(raw.sourceEventSeqs ? { sourceEventSeqs: raw.sourceEventSeqs.slice() } : {}),
-      ...(raw.ignorable ? { ignorable: true as const } : {}),
     }
     return deepFreeze(event)
   }
 
+  /** validate → observe (may reject) → push → surface → deliver. Nothing enters the log that an observer rejected. */
   private commit(event: EventEnvelope, live: boolean): EventEnvelope {
     this.surface.validate(event)
+    const deliver = live ? this.host.prepare(this, event) : undefined
     this.log.push(event)
     this.surface.apply(event)
-    if (live) this.host.onCommit(this, event)
+    deliver?.()
     return event
   }
 

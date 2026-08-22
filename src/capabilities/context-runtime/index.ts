@@ -25,11 +25,12 @@ export const contextRuntimePlugin: Plugin<ContextRuntimeConfig | undefined> = {
     const prompt = ctx.get(PROMPT)
     prompt.section(ctx, { name: 'persona', order: -50, text: config?.persona ?? DEFAULT_PERSONA })
 
-    const dialect = ctx.tryGet(SHELL)?.dialect
     prompt.section(ctx, {
       name: 'runtime-context',
       order: 200,
       text: (agent: Agent | undefined) => {
+        // Resolved at render time, not at mount time: the section must not depend on row order.
+        const dialect = ctx.tryGet(SHELL)?.dialect
         const cwd = agent?.session.header.cwd ?? process.cwd()
         const lines = [
           'Runtime context (stable for this session):',

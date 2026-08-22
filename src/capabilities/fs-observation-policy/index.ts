@@ -1,19 +1,11 @@
 /**
  * Read-before-edit policy. An event-only plugin (no service): it records every
- * `fs/observed` per session and refines write/edit intents. Without it, the fs
- * provider writes unconditionally.
+ * `fs/observed` per session and answers `fs/edit-intent` with the observed
+ * version (the CAS token) or refuses an edit of a file never read. Without it,
+ * edits are unconditional.
  */
 import type { Plugin } from '../../kernel/index.ts'
-import {
-  FS_EDIT_INTENT,
-  FS_OBSERVED,
-  FS_WRITE_INTENT,
-  FsError,
-  type FsActor,
-  type FsObservation,
-  type FsTarget,
-  type FsWriteIntent,
-} from '../../core/fs/index.ts'
+import { FS_EDIT_INTENT, FS_OBSERVED, FsError, type FsActor, type FsObservation, type FsTarget } from '../../core/fs/index.ts'
 import type { Session } from '../../core/session/index.ts'
 
 export const fsObservationPolicyPlugin: Plugin = {
@@ -34,12 +26,6 @@ export const fsObservationPolicyPlugin: Plugin = {
 
     ctx.on(FS_OBSERVED, (target: FsTarget, observation: FsObservation, actor: FsActor) => {
       bySession(actor)?.set(target.path, observation)
-    })
-
-    ctx.on(FS_WRITE_INTENT, (target: FsTarget, actor: FsActor): FsWriteIntent => {
-      const observed = bySession(actor)?.get(target.path)
-      if (observed?.kind === 'present') return { kind: 'replaceIfVersion', version: observed.version }
-      return { kind: 'createIfAbsent' }
     })
 
     ctx.on(FS_EDIT_INTENT, (target: FsTarget, actor: FsActor): FsObservation => {

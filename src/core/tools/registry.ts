@@ -189,7 +189,6 @@ class ToolRegistry implements Tools {
   private async post(execution: ToolContext, candidate: ToolResult, scope: Context): Promise<ToolResult> {
     const decision = await scope.waterfall(TOOLS_POST_EXECUTE, execution, candidate, async () => ({ kind: 'accept' }) as PostToolDecision)
     if (decision.kind === 'block') return { isError: true, content: [...decision.feedback], error: { message: 'blocked by policy', info: { name: 'Blocked', code: 'BLOCKED' } } }
-    if (decision.kind === 'accept-value') return { ...candidate, value: decision.value }
     if (decision.content) return { ...candidate, content: [...decision.content] }
     return candidate
   }

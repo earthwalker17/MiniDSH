@@ -54,9 +54,9 @@ export type PreToolDecision =
   | { readonly kind: 'deny'; readonly reason: string }
   | { readonly kind: 'ask'; readonly reason?: string }
 
+/** After the body: accept (optionally replacing the model-facing content) or block with feedback. */
 export type PostToolDecision =
   | { readonly kind: 'accept'; readonly content?: readonly ContentBlock[] }
-  | { readonly kind: 'accept-value'; readonly value: JsonValue }
   | { readonly kind: 'block'; readonly feedback: readonly ContentBlock[] }
 
 /** Monotonic, deny-only. Returns a reason to deny, or undefined to abstain. */

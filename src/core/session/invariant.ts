@@ -99,7 +99,11 @@ const installSessionInvariant: InvariantInstaller = (ctx, fail) => {
       }
       traces.set(session, trace)
     }
-    validate(trace, event, fail)
+    // Observation is pre-commit: a rejected event never enters the log, so the
+    // trace must advance only when the event is accepted.
+    const next: Trace = { ...trace, pending: new Set(trace.pending) }
+    validate(next, event, fail)
+    traces.set(session, next)
   })
 }
 

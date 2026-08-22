@@ -1,9 +1,10 @@
 /**
  * The filesystem seam (Definition only; a capability provides it).
  *
- * `writeText`/edit go through the `fs/write-intent` and `fs/edit-intent`
- * single-slot waterfalls so a read-before-edit policy can gate them, and every
- * mutation emits the live `fs/observed` notification (not a session event).
+ * Writes carry an explicit `FsWriteIntent` chosen by the caller; an edit first
+ * asks the `fs/edit-intent` single-slot waterfall so a read-before-edit policy
+ * can supply the expected version (or refuse). Every read and mutation emits
+ * the live `fs/observed` notification (not a session event).
  */
 import { emitEvent, serviceKey, waterfallEvent } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
@@ -77,8 +78,6 @@ export interface Fs {
 
 export const FS = serviceKey<Fs>('fs')
 
-/** Refine a write's conditionality (default provider uses `unconditional`). */
-export const FS_WRITE_INTENT = waterfallEvent<[target: FsTarget, actor: FsActor], FsWriteIntent>('fs/write-intent')
 /** Assert an edit is allowed and return the expected version, or throw FS_NOT_OBSERVED. */
 export const FS_EDIT_INTENT = waterfallEvent<[target: FsTarget, actor: FsActor], FsObservation>('fs/edit-intent')
 /** Live notification that a target's state was observed (read or written). Sync, non-throwing. */

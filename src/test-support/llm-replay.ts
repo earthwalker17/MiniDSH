@@ -8,22 +8,33 @@ import type { Context, Disposer } from '../kernel/index.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
 import { matches, ASSISTANT_CHUNK, type EventEnvelope } from '../core/session/index.ts'
 
-/** Groups recorded `assistant/chunk` payloads into one chunk list per (turn, step), in order. */
+/**
+ * Groups recorded `assistant/chunk` payloads into one chunk list per (turn,
+ * step), in order. A step that was retried carries several attempts; only the
+ * last attempt is what the agent acted on, so it alone is replayed (logs
+ * written before `attempt` existed count as a single attempt).
+ */
 export function deriveReplayScript(events: readonly EventEnvelope[]): StreamChunk[][] {
-  const groups = new Map<string, StreamChunk[]>()
+  const groups = new Map<string, { attempt: number; chunks: StreamChunk[] }>()
   const order: string[] = []
   for (const event of events) {
     if (!matches(event, ASSISTANT_CHUNK)) continue
     const key = `${event.data.turn}:${event.data.step}`
+    const attempt = event.data.attempt ?? 1
     let group = groups.get(key)
     if (!group) {
-      group = []
+      group = { attempt, chunks: [] }
       groups.set(key, group)
       order.push(key)
+    } else if (attempt > group.attempt) {
+      group.attempt = attempt
+      group.chunks = []
+    } else if (attempt < group.attempt) {
+      continue
     }
-    group.push(event.data.chunk as unknown as StreamChunk)
+    group.chunks.push(event.data.chunk as unknown as StreamChunk)
   }
-  return order.map((key) => groups.get(key)!)
+  return order.map((key) => groups.get(key)!.chunks)
 }
 
 class ReplayAdapter implements LlmAdapter {
