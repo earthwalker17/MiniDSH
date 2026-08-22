@@ -25,6 +25,95 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
   }
 }
 
+describe('agent creation', () => {
+  it('rolls back a throwing setup: no session, no agent, no scope left behind', async () => {
+    harness = await coreHarness()
+    const { SESSIONS } = await import('../session/index.ts')
+    const agents = harness.root.get(AGENTS)
+    await expect(
+      agents.create(harness.root, {
+        cwd: process.cwd(),
+        agentOptions: { provider: 'scripted', model: 'scripted-model' },
+        setup: () => {
+          throw new Error('bad setup')
+        },
+      }),
+    ).rejects.toThrowError(/bad setup/)
+    expect(agents.list()).toEqual([])
+    expect(harness.root.get(SESSIONS).list()).toEqual([])
+  })
+
+  it('publishes the agent only once everything mounted during setup is active, and fails loud otherwise', async () => {
+    harness = await coreHarness()
+    const agents = harness.root.get(AGENTS)
+    const tools = harness.root.get(TOOLS)
+    const scopedTool = defineTool({
+      name: 'scoped',
+      description: 'scoped',
+      input: z.object({}),
+      output: z.object({}),
+      execute: () => ({}),
+      render: () => [],
+    })
+    const handle = await agents.create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      setup: (agentCtx) => {
+        agentCtx.plugin({
+          name: 'slow-scoped-tool',
+          inject: [TOOLS],
+          async apply(ctx) {
+            await new Promise((resolve) => setTimeout(resolve, 20))
+            ctx.get(TOOLS).register(ctx, scopedTool)
+          },
+        })
+      },
+    })
+    expect(tools.get('scoped', handle.agent)).toBeDefined()
+    expect(tools.get('scoped')).toBeUndefined()
+    await handle.dispose()
+
+    const { SESSIONS } = await import('../session/index.ts')
+    await expect(
+      agents.create(harness.root, {
+        cwd: process.cwd(),
+        agentOptions: { provider: 'scripted', model: 'scripted-model' },
+        setup: (agentCtx) => {
+          agentCtx.plugin({
+            name: 'broken-scoped',
+            apply: () => {
+              throw new Error('cannot mount')
+            },
+          })
+        },
+      }),
+    ).rejects.toThrowError(/did not settle/)
+    expect(agents.list()).toEqual([])
+    expect(harness.root.get(SESSIONS).list()).toEqual([])
+  })
+
+  it('binds the agent lifetime to its owner context, without leaking a record on explicit dispose', async () => {
+    harness = await coreHarness()
+    const { SESSIONS } = await import('../session/index.ts')
+    const agents = harness.root.get(AGENTS)
+    const sessions = harness.root.get(SESSIONS)
+    const owner = harness.root.child({ label: 'surface' })
+    const before = owner.effects().length
+
+    const explicit = await agents.create(owner, { cwd: process.cwd(), agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    expect(owner.effects().length).toBe(before + 1)
+    await explicit.dispose()
+    expect(owner.effects().length).toBe(before)
+
+    const ownerBound = await agents.create(owner, { cwd: process.cwd(), agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    const id = ownerBound.agent.id
+    await owner.dispose()
+    expect(agents.get(id)).toBeUndefined()
+    expect(sessions.get(id)).toBeUndefined()
+    await ownerBound.dispose() // idempotent after the owner-driven disposal
+  })
+})
+
 describe('agent loop: turn/step lifecycle', () => {
   it('runs a text turn with the canonical event order', async () => {
     harness = await coreHarness()

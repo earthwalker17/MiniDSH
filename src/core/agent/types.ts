@@ -48,10 +48,17 @@ export interface CreateAgentOptions {
   readonly sessionId?: SessionId
   readonly agentOptions: AgentOptions
   readonly seed?: readonly import('../session/index.ts').EventEnvelope[]
+  /**
+   * Composes the agent's local world before publication: registrations and
+   * plugins mounted through `agentCtx` are visible to this agent alone and
+   * unwind with it. Creation fails (and rolls back) if setup throws or a
+   * mounted plugin cannot activate.
+   */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
 }
 
 export interface AgentFactory {
+  /** Creates and publishes an agent whose lifetime is bound to `owner`: disposing the owner disposes the agent. */
   create(owner: Context, options: CreateAgentOptions): Promise<AgentHandle>
 }
 
