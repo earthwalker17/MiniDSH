@@ -12,6 +12,7 @@ import {
   repairInterruptedTail,
   SESSION_CREATED,
   SESSION_EVENT,
+  SESSION_FLUSH,
   type EventEnvelope,
   type Session,
   type SessionHeader,
@@ -88,6 +89,8 @@ export function listSessionHeaders(root: string): SessionHeader[] {
 class JsonlArchive implements Archive {
   private readonly root: string
   private readonly files = new WeakMap<Session, string>()
+  /** A write failure is remembered and rethrown at the next flush checkpoint. */
+  private readonly failures = new WeakMap<Session, unknown>()
   constructor(root: string) {
     this.root = root
     mkdirSync(root, { recursive: true })
@@ -96,14 +99,33 @@ class JsonlArchive implements Archive {
   onCreated(session: Session): void {
     const file = join(this.root, `${encodeURIComponent(session.id)}.jsonl`)
     this.files.set(session, file)
-    const header: HeaderLine = { kind: 'session', ...session.header }
-    writeFileSync(file, `${JSON.stringify(header)}\n`, 'utf8')
-    for (const event of session.events) appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8')
+    try {
+      const header: HeaderLine = { kind: 'session', ...session.header }
+      writeFileSync(file, `${JSON.stringify(header)}\n`, 'utf8')
+      for (const event of session.events) appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8')
+    } catch (error) {
+      this.failures.set(session, error)
+    }
   }
 
   onEvent(session: Session, event: EventEnvelope): void {
     const file = this.files.get(session)
-    if (file) appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8')
+    if (!file) return
+    try {
+      appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8')
+    } catch (error) {
+      if (!this.failures.has(session)) this.failures.set(session, error)
+    }
+  }
+
+  /** The awaited durability checkpoint: a swallowed write error surfaces here. */
+  onFlush(session: Session): void {
+    const failure = this.failures.get(session)
+    if (failure === undefined) return
+    this.failures.delete(session)
+    throw new Error(`session ${session.id} could not be persisted: ${failure instanceof Error ? failure.message : String(failure)}`, {
+      cause: failure,
+    })
   }
 
   read(id: string): StoredSession | undefined {
@@ -130,5 +152,6 @@ export const persistenceJsonlPlugin: Plugin<PersistenceConfig> = {
     ctx.provide(ARCHIVE, archive)
     ctx.on(SESSION_CREATED, (session) => archive.onCreated(session))
     ctx.on(SESSION_EVENT, (session, event) => archive.onEvent(session, event))
+    ctx.on(SESSION_FLUSH, (session) => archive.onFlush(session))
   },
 }

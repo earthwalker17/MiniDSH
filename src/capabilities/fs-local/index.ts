@@ -5,7 +5,7 @@
  */
 import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve as resolvePath } from 'node:path'
+import { basename, dirname, isAbsolute, resolve as resolvePath } from 'node:path'
 import type { Plugin } from '../../kernel/index.ts'
 import type { Context } from '../../kernel/index.ts'
 import {
@@ -35,7 +35,9 @@ function canonical(path: string): string {
     }
     const parent = dirname(current)
     if (parent === current) return resolvePath(path)
-    suffix.unshift(current.slice(parent.length + 1))
+    // basename, not slice(parent.length + 1): a root parent ("C:\") already ends
+    // in a separator, and slicing would eat the first character of the segment.
+    suffix.unshift(basename(current))
     current = parent
   }
 }

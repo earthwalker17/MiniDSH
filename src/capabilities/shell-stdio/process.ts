@@ -36,7 +36,9 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export class ShellProcess implements ShellSession {
   private child: ChildProcessWithoutNullStreams | undefined
   private buffer = ''
-  private readonly marker = `__DSH_${crypto.randomUUID().replace(/-/g, '')}__`
+  private readonly markerBase = `__DSH_${crypto.randomUUID().replace(/-/g, '')}__`
+  /** Per-command nonce: a stale marker from a killed command can never match the next one. */
+  private commandSeq = 0
   private queue: Promise<unknown> = Promise.resolve()
   private disposed = false
   private readonly dialect: ShellDialect
@@ -63,8 +65,12 @@ export class ShellProcess implements ShellSession {
     const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] })
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (data: string) => (this.buffer += data))
-    child.stderr.on('data', (data: string) => (this.buffer += data))
+    // Identity-guarded: output from a killed child never lands in the live buffer.
+    const append = (data: string): void => {
+      if (this.child === child) this.buffer += data
+    }
+    child.stdout.on('data', append)
+    child.stderr.on('data', append)
     child.on('error', () => {})
     child.stdin.write(initLine(this.dialect))
     this.child = child
@@ -75,18 +81,27 @@ export class ShellProcess implements ShellSession {
     if (this.disposed) return { output: '', timedOut: false, truncated: false, reset: false }
     const child = this.ensureChild()
     this.buffer = ''
+    const marker = `${this.markerBase}${++this.commandSeq}`
     const base64 = Buffer.from(request.command, 'utf8').toString('base64')
-    child.stdin.write(wrapper(this.dialect, base64, this.marker))
+    child.stdin.write(wrapper(this.dialect, base64, marker))
 
-    const pattern = new RegExp(`${this.marker}:(-?\\d+)`)
+    const pattern = new RegExp(`${marker}:(-?\\d+)`)
     const deadline = Date.now() + (request.timeoutMs ?? DEFAULT_TIMEOUT_MS)
     for (;;) {
       const match = pattern.exec(this.buffer)
       if (match) {
-        const output = this.buffer.slice(0, this.buffer.indexOf(this.marker))
+        const output = this.buffer.slice(0, this.buffer.indexOf(marker))
         this.buffer = ''
         const exitCode = Number(match[1])
         return this.finalize(output, { exitCode, timedOut: false, reset: false })
+      }
+      // The shell itself died (e.g. the command was `exit`): report immediately
+      // instead of polling until the deadline.
+      if (child.exitCode !== null || child.killed) {
+        const output = this.buffer
+        this.child = undefined
+        this.buffer = ''
+        return this.finalize(output, { timedOut: false, reset: true })
       }
       if (request.signal?.aborted) return this.finalize(this.buffer, { timedOut: false, reset: await this.reset() })
       if (Date.now() > deadline) return this.finalize(this.buffer, { timedOut: true, reset: await this.reset() })

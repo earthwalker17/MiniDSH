@@ -123,8 +123,12 @@ async function create(_ctx: Context, fs: Fs, target: FsTarget, args: Input, acto
 
 async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
   if (args.old_str === undefined) throw new FsError('FS_IO', '"str_replace" requires old_str')
-  ctx.waterfall(FS_EDIT_INTENT, target, actor, () => ({ kind: 'present', version: '' }) as const)
-  const { text, version } = await fs.readText(target, actor)
+  // The observed version is the CAS token: a file changed since the model read it
+  // must be rejected, so we must NOT re-derive the version from a fresh read.
+  const observed = ctx.waterfall(FS_EDIT_INTENT, target, actor, () => ({ kind: 'present', version: '' }) as const)
+  const read = await fs.readText(target, actor)
+  const text = read.text
+  const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version
   const occurrences = text.split(args.old_str).length - 1
   if (occurrences === 0) {
     throw new FsError('FS_EDIT_NOT_FOUND', `old_str did not appear in ${target.displayPath}. No replacement made.`)
@@ -139,8 +143,10 @@ async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, a
 
 async function insert(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
   if (args.insert_line === undefined || args.new_str === undefined) throw new FsError('FS_IO', '"insert" requires insert_line and new_str')
-  ctx.waterfall(FS_EDIT_INTENT, target, actor, () => ({ kind: 'present', version: '' }) as const)
-  const { text, version } = await fs.readText(target, actor)
+  const observed = ctx.waterfall(FS_EDIT_INTENT, target, actor, () => ({ kind: 'present', version: '' }) as const)
+  const read = await fs.readText(target, actor)
+  const text = read.text
+  const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version
   const lines = text.split('\n')
   if (args.insert_line < 0 || args.insert_line > lines.length) {
     throw new FsError('FS_IO', `insert_line ${args.insert_line} is out of range [0, ${lines.length}]`)

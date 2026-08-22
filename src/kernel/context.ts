@@ -207,9 +207,18 @@ class PluginInstance implements EffectOwner, PluginHandle {
 
   /** Epoch-gated activation: the single mechanism behind wait, unload-on-loss, and reload-on-swap. */
   refresh(): void {
-    if (!this.mounted || this.state === 'failed') return
+    if (!this.mounted) return
     const next = this.computeEpoch()
     if (next === this.epoch) return
+    if (this.state === 'failed') {
+      // A failed plugin retries when its dependency set actually changes (a
+      // corrected provider replaced the one it failed under), never on its own.
+      this.epoch = next
+      this.error = undefined
+      this.state = 'pending'
+      if (next !== INACTIVE) this.schedule(() => this.load())
+      return
+    }
     const previous = this.epoch
     this.epoch = next
     if (next === INACTIVE) {

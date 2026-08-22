@@ -56,19 +56,17 @@ export class DeepSeekTranslator {
     const delta = choice.delta
     if (!delta) return out
 
-    if (typeof delta.reasoning_content === 'string') {
+    // Only real content opens a block: DeepSeek's conventional empty first delta
+    // must not create an empty block (which would defeat EMPTY_RESPONSE detection).
+    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
       const block = this.ensure('reasoning', out)
-      if (delta.reasoning_content.length > 0) {
-        block.text += delta.reasoning_content
-        out.push({ type: 'reasoning-delta', index: block.index, text: delta.reasoning_content })
-      }
+      block.text += delta.reasoning_content
+      out.push({ type: 'reasoning-delta', index: block.index, text: delta.reasoning_content })
     }
-    if (typeof delta.content === 'string') {
+    if (typeof delta.content === 'string' && delta.content.length > 0) {
       const block = this.ensure('text', out)
-      if (delta.content.length > 0) {
-        block.text += delta.content
-        out.push({ type: 'text-delta', index: block.index, text: delta.content })
-      }
+      block.text += delta.content
+      out.push({ type: 'text-delta', index: block.index, text: delta.content })
     }
     for (const call of delta.tool_calls ?? []) {
       let block = this.tools.get(call.index)

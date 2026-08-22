@@ -6,18 +6,30 @@
  * with per-call sandbox policy shared by fs and shell.
  */
 import { relative as posixRelative } from 'node:path/posix'
-import { relative as winRelative } from 'node:path/win32'
+import { parse as winParse, relative as winRelative } from 'node:path/win32'
 import type { Plugin } from '../../kernel/index.ts'
 import { FS, type Fs } from '../../core/fs/index.ts'
 import { TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
 
 const MUTATING = new Set(['create', 'str_replace', 'insert'])
 
-/** True when `target` is inside `root` (case-insensitive on win32). */
-function isInside(root: string, target: string): boolean {
-  const win = process.platform === 'win32'
-  const rel = win ? winRelative(root.toLowerCase(), target.toLowerCase()) : posixRelative(root, target)
-  return rel === '' || (!rel.startsWith('..') && !rel.startsWith('/') && !/^[a-z]:/i.test(rel))
+/**
+ * True when `target` is inside `root` (case-insensitive on win32).
+ *
+ * Path roots must match first: `path.relative` between different roots (a UNC
+ * share vs a drive, or two different drives) returns the target verbatim, which
+ * would otherwise read as "inside".
+ */
+export function isInside(root: string, target: string): boolean {
+  if (process.platform === 'win32') {
+    const rootParsed = winParse(root)
+    const targetParsed = winParse(target)
+    if (rootParsed.root.toLowerCase() !== targetParsed.root.toLowerCase()) return false
+    const rel = winRelative(root.toLowerCase(), target.toLowerCase())
+    return rel === '' || (!rel.startsWith('..') && !winParse(rel).root)
+  }
+  const rel = posixRelative(root, target)
+  return rel === '' || (!rel.startsWith('..') && !rel.startsWith('/'))
 }
 
 export const policyWorkspacePlugin: Plugin = {

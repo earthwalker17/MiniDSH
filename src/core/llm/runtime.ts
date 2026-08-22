@@ -1,5 +1,5 @@
 import { type Context, type Disposer, type Plugin, serviceKey, waterfallEvent } from '../../kernel/index.ts'
-import { LlmError, type LlmAdapter, type LlmRequest, type ResolvedModel, type StreamChunk } from './types.ts'
+import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type ResolvedModel, type StreamChunk } from './types.ts'
 
 /** The adapter registry and provider-neutral stream service. */
 export interface Llm {
@@ -75,29 +75,46 @@ function adapterFailureChunk(error: unknown, signal: AbortSignal | undefined): S
   return { type: 'finish', reason: aborted ? { kind: 'aborted', failure } : { kind: 'error', failure } }
 }
 
+const DELTA_BLOCK_TYPE = {
+  'text-delta': 'text',
+  'reasoning-delta': 'reasoning',
+  'tool-call-delta': 'tool-call',
+} as const
+
 /**
- * Enforces the three stream-protocol invariants on the final stream: deltas
- * only into open blocks, usage before finish, and exactly one terminal finish.
- * A violation is a bug in an adapter or middleware and throws.
+ * Enforces the stream-protocol invariants on the final stream: a delta may only
+ * address an open block of its own type (a first delta implicitly opens one, as
+ * delta-only protocols require, but a closed or mistyped block is a violation),
+ * usage appears at most once and before finish, and exactly one terminal finish
+ * ends the stream. A violation is a bug in an adapter or middleware and throws.
  */
 async function* validateStream(source: AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
-  const open = new Map<number, StreamChunk & { type: 'block-start' }>()
+  const open = new Map<number, ContentBlockType>()
+  const closed = new Set<number>()
   let usageSeen = false
   let finished = false
   for await (const chunk of source) {
     if (finished) throw new LlmError('PROTOCOL_VIOLATION', `chunk "${chunk.type}" after finish`)
     switch (chunk.type) {
       case 'block-start':
-        if (open.has(chunk.index)) throw new LlmError('PROTOCOL_VIOLATION', `block index ${chunk.index} opened twice`)
-        open.set(chunk.index, chunk)
+        if (open.has(chunk.index) || closed.has(chunk.index)) throw new LlmError('PROTOCOL_VIOLATION', `block index ${chunk.index} opened twice`)
+        open.set(chunk.index, chunk.blockType)
         break
       case 'text-delta':
       case 'reasoning-delta':
-      case 'tool-call-delta':
-        // Deltas may implicitly open a block (delta-only protocols); no assertion needed.
+      case 'tool-call-delta': {
+        const expected = DELTA_BLOCK_TYPE[chunk.type]
+        if (closed.has(chunk.index)) throw new LlmError('PROTOCOL_VIOLATION', `"${chunk.type}" addresses closed block ${chunk.index}`)
+        const current = open.get(chunk.index)
+        if (current === undefined) open.set(chunk.index, expected)
+        else if (current !== expected) {
+          throw new LlmError('PROTOCOL_VIOLATION', `"${chunk.type}" addresses block ${chunk.index} of type "${current}"`)
+        }
         break
+      }
       case 'block-end':
         open.delete(chunk.index)
+        closed.add(chunk.index)
         break
       case 'usage':
         if (usageSeen) throw new LlmError('PROTOCOL_VIOLATION', 'usage reported twice')

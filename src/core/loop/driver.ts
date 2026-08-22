@@ -84,6 +84,13 @@ export class ReactLoopAgent implements Agent {
   attach(ctx: Context): void {
     this._ctx = ctx
     this.deps = { llm: ctx.get(LLM), tools: ctx.get(TOOLS), prompt: ctx.get(PROMPT) }
+    // A seeded (forked) session already contains turns; numbering must continue, not restart.
+    for (const event of this.session.events) {
+      if (event.type === TURN_START.type) {
+        const turn = (event.data as { turn: number }).turn
+        if (turn > this.turnCount) this.turnCount = turn
+      }
+    }
   }
 
   get ctx(): Context {
@@ -147,7 +154,16 @@ export class ReactLoopAgent implements Agent {
     this.setStatus('running')
     try {
       do {
-        await this.turn()
+        try {
+          await this.turn()
+        } catch (error) {
+          // turn() handles its own failures; what reaches here escaped the turn
+          // boundary (an append/flush failure in its finally). Contain it — the
+          // driver promise is fire-and-forget and must never reject unobserved.
+          this.ctx.emit(AGENT_ERROR, this, error)
+          this.ctx.logger.error(`agent ${this.id}: turn boundary failure`, error)
+          break
+        }
       } while (this.inbox.hasWakingPending && !this.disposed)
     } finally {
       this.running = false
@@ -166,6 +182,7 @@ export class ReactLoopAgent implements Agent {
       let step = 0
       let firstStep = true
       while (true) {
+        if (signal.aborted) throw new Error('turn aborted')
         step += 1
         const claimed = this.inbox.claim(firstStep)
         const decision = await this.ctx.waterfall(
@@ -183,9 +200,10 @@ export class ReactLoopAgent implements Agent {
           break
         }
         this.session.append(STEP_START, { turn, step })
-        for (const message of entered) this.session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'append' } })
         let result: StepResult
         try {
+          // Inside the try: a message append failure must still close the step.
+          for (const message of entered) this.session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'append' } })
           result = await this.step(turn, step, signal)
         } finally {
           // step/end must close the step even when the request throws (e.g. cancellation),
@@ -276,9 +294,12 @@ export class ReactLoopAgent implements Agent {
       const blocks = assembler.blocks()
 
       if (finish.kind === 'aborted') {
+        // Keep the visible prefix but drop tool-call blocks: an assistant message
+        // carrying tool calls with no results would poison every later request.
+        const visible = blocks.filter((block) => block.type !== 'tool-call')
         this.session.append(
           ASSISTANT_MESSAGE,
-          { turn, step, message: createAssistantMessage(blocks, config.provider, config.model), interrupted: true },
+          { turn, step, message: createAssistantMessage(visible, config.provider, config.model), interrupted: true },
           { surfaceOp: { op: 'append' } },
         )
         throw new Error('request aborted')
@@ -289,6 +310,9 @@ export class ReactLoopAgent implements Agent {
           { agent: this, turn, step, provider: config.provider, failure: finish.failure, signal },
           async () => undefined,
         )
+        // A cancellation that lands during recovery (e.g. retry backoff) is a
+        // cancellation, not a provider failure.
+        if (signal.aborted) throw new Error('request aborted during recovery')
         if (action?.kind === 'retry') continue
         return { kind: 'error', reason: { kind: 'error', code: finish.failure.code, message: finish.failure.message } }
       }

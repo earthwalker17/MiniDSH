@@ -1,0 +1,206 @@
+/**
+ * Permanent regressions for the Session 1 adversarial review. Each test fails
+ * against the code as it was before the corresponding fix.
+ */
+import { z } from 'zod'
+import { afterEach, describe, expect, it } from 'vitest'
+import { createRoot, type Logger, type Plugin } from '../../kernel/index.ts'
+import { serviceKey } from '../../kernel/index.ts'
+import { AGENTS } from '../agent/index.ts'
+import { asCallId } from '../ids.ts'
+import { createUserMessage } from '../llm/message.ts'
+import { LLM, LlmError } from '../llm/index.ts'
+import { SESSIONS } from '../session/index.ts'
+import { defineTool, TOOLS } from '../tools/index.ts'
+import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
+import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
+
+const silent: Logger = { warn: () => {}, error: () => {} }
+
+let harness: CoreHarness | undefined
+afterEach(async () => {
+  await harness?.dispose()
+  harness = undefined
+})
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+describe('review regressions: cancellation', () => {
+  it('never persists an assistant message whose tool calls have no results', async () => {
+    harness = await coreHarness()
+    const hang = defineTool({
+      name: 'hang',
+      description: 'waits for abort',
+      input: z.object({}),
+      output: z.object({}),
+      execute: (_args, exec) =>
+        new Promise((_resolve, reject) => exec.signal.addEventListener('abort', () => reject(new Error('aborted')))),
+      render: () => [{ type: 'text', text: 'never' }],
+    })
+    harness.root.get(TOOLS).register(harness.root, hang)
+    harness.adapter.script(assistantToolCall('c1', 'hang', {}))
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await waitFor(() => agent.session.events.some((event) => event.type === 'tool/call'))
+    agent.cancel({ kind: 'user' })
+    await agent.whenIdle()
+
+    // Every tool-call block in derived history must have a matching tool result.
+    const messages = agent.session.deriveMessages()
+    const callIds = new Set<string>()
+    const resultIds = new Set<string>()
+    for (const message of messages) {
+      for (const block of message.content) {
+        if (block.type === 'tool-call') callIds.add(block.id)
+        if (block.type === 'tool-result') resultIds.add(block.toolCallId)
+      }
+    }
+    for (const id of callIds) expect(resultIds.has(id)).toBe(true)
+  })
+
+  it('reports a cancellation during request-error recovery as cancelled, not error', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const { AGENT_REQUEST_ERROR } = await import('../agent/index.ts')
+    harness.adapter.script(() => {
+      throw new LlmError('SERVER', 'boom')
+    })
+    agent.ctx.on(AGENT_REQUEST_ERROR, async (context, next) => {
+      await next()
+      // A recovery policy that is interrupted by the user mid-backoff.
+      agent.cancel({ kind: 'user' })
+      void context
+      return undefined
+    })
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    const turnEnd = agent.session.events.at(-1)!
+    expect((turnEnd.data as { reason: { kind: string } }).reason.kind).toBe('cancelled')
+  })
+})
+
+describe('review regressions: seeded sessions', () => {
+  it('continues turn numbering over a forked session instead of restarting at 1', async () => {
+    harness = await coreHarness()
+    harness.adapter.script(assistantText('first'), assistantText('second'))
+    const first = await harness.create()
+    first.agent.followup(createUserMessage('hi'))
+    await first.agent.whenIdle()
+    // The fork's log is the seed for a NEW agent's session (fork() already
+    // published its own session under a different id).
+    const forked = harness.root.get(SESSIONS).fork(first.agent.session)
+    const seed = forked.events.map((event) => ({ ...event }))
+
+    const handle = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      seed,
+    })
+    handle.agent.followup(createUserMessage('again'))
+    await handle.agent.whenIdle()
+    const turnNumbers = handle.agent.session.events
+      .filter((event) => event.type === 'turn/start')
+      .map((event) => (event.data as { turn: number }).turn)
+    expect(new Set(turnNumbers).size).toBe(turnNumbers.length) // no duplicates
+    expect(turnNumbers.at(-1)).toBe(2)
+    await handle.dispose()
+  })
+})
+
+describe('review regressions: driver containment', () => {
+  it('contains a rejecting session/flush listener instead of an unhandled rejection', async () => {
+    harness = await coreHarness()
+    const { SESSION_FLUSH } = await import('../session/index.ts')
+    harness.root.on(SESSION_FLUSH, () => {
+      throw new Error('durability failure')
+    })
+    harness.adapter.script(assistantText('ok'))
+    const { agent } = await harness.create()
+    const errors: unknown[] = []
+    const { AGENT_ERROR } = await import('../agent/index.ts')
+    agent.ctx.on(AGENT_ERROR, (_agent, error) => void errors.push(error))
+    agent.followup(createUserMessage('hi'))
+    await expect(agent.whenIdle()).resolves.toBeUndefined()
+    expect(agent.status).toBe('idle')
+    expect(errors).toHaveLength(1)
+  })
+})
+
+describe('review regressions: kernel', () => {
+  it('reloads a failed plugin when its provider is replaced', async () => {
+    const KEY = serviceKey<{ ok: boolean }>('flaky')
+    const root = createRoot({ logger: silent })
+    const loads: boolean[] = []
+    const dependent: Plugin = {
+      name: 'dependent',
+      inject: [KEY],
+      apply(ctx) {
+        const value = ctx.get(KEY)
+        loads.push(value.ok)
+        if (!value.ok) throw new Error('bad provider')
+      },
+    }
+    const bad = root.plugin({ name: 'bad', apply: (ctx) => void ctx.provide(KEY, { ok: false }) })
+    const handle = root.plugin(dependent)
+    await root.settle()
+    expect(handle.state).toBe('failed')
+
+    await bad.dispose()
+    root.plugin({ name: 'good', apply: (ctx) => void ctx.provide(KEY, { ok: true }) })
+    await root.settle()
+    expect(handle.state).toBe('active')
+    expect(loads).toEqual([false, true])
+    await root.dispose()
+  })
+})
+
+describe('review regressions: stream protocol', () => {
+  it('rejects a delta addressing a closed block', async () => {
+    const root = createRoot({ logger: silent })
+    const { llmPlugin } = await import('../llm/index.ts')
+    root.plugin(llmPlugin)
+    await root.settle()
+    const llm = root.get(LLM)
+    llm.registerAdapter(
+      root,
+      new ScriptedAdapter().script([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'x' } },
+        { type: 'text-delta', index: 0, text: 'late' },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]),
+    )
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of llm.stream({ provider: 'scripted', model: 'm', messages: [] })) void _chunk
+    }
+    await expect(consume()).rejects.toThrowError(/closed block/)
+    await root.dispose()
+  })
+
+  it('rejects a delta whose type does not match its block', async () => {
+    const root = createRoot({ logger: silent })
+    const { llmPlugin } = await import('../llm/index.ts')
+    root.plugin(llmPlugin)
+    await root.settle()
+    const llm = root.get(LLM)
+    llm.registerAdapter(
+      root,
+      new ScriptedAdapter().script([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'tool-call-delta', index: 0, id: asCallId('c'), name: 'x', argumentsDelta: '{}' },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]),
+    )
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of llm.stream({ provider: 'scripted', model: 'm', messages: [] })) void _chunk
+    }
+    await expect(consume()).rejects.toThrowError(/of type "text"/)
+    await root.dispose()
+  })
+})
