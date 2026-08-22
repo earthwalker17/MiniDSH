@@ -112,6 +112,77 @@ describe('agent creation', () => {
     expect(sessions.get(id)).toBeUndefined()
     await ownerBound.dispose() // idempotent after the owner-driven disposal
   })
+
+  it('disposes a live agent when the loop plugin that owns its scope unloads, world first, then the registry', async () => {
+    harness = await coreHarness()
+    const { AGENT_DISPOSED } = await import('../agent/index.ts')
+    const { SESSIONS } = await import('../session/index.ts')
+    const agents = harness.root.get(AGENTS)
+    const handle = await agents.create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    const id = handle.agent.id
+    const order: string[] = []
+    handle.agent.ctx.effect(() => () => void order.push('scope-unwound'))
+    harness.root.on(AGENT_DISPOSED, () => void order.push('agent/disposed'))
+    await harness.loop.dispose()
+    expect(order).toEqual(['scope-unwound', 'agent/disposed'])
+    expect(agents.get(id)).toBeUndefined()
+    expect(harness.root.get(SESSIONS).get(id)).toBeUndefined()
+    await handle.dispose() // idempotent after the loop-driven disposal
+  })
+
+  it('a concurrent dispose resolves only once the agent is fully gone', async () => {
+    harness = await coreHarness()
+    const hang = defineTool({
+      name: 'hang',
+      description: 'wait until aborted',
+      input: z.object({}),
+      output: z.object({}),
+      execute: (_args, exec) =>
+        new Promise((_resolve, reject) => {
+          exec.signal.addEventListener('abort', () => reject(new Error('aborted')))
+        }),
+      render: () => [{ type: 'text', text: 'never' }],
+    })
+    harness.root.get(TOOLS).register(harness.root, hang)
+    harness.adapter.script(assistantToolCall('c1', 'hang', {}))
+    const agents = harness.root.get(AGENTS)
+    const owner = harness.root.child({ label: 'surface' })
+    const handle = await agents.create(owner, { cwd: process.cwd(), agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    handle.agent.followup(createUserMessage('go'))
+    await waitFor(() => handle.agent.session.events.some((event) => event.type === 'tool/call'))
+    const ownerGone = owner.dispose()
+    await handle.dispose()
+    expect(handle.agent.status).toBe('idle')
+    expect(agents.get(handle.agent.id)).toBeUndefined()
+    await ownerGone
+  })
+
+  it('a rolled-back creation leaves no session file behind', async () => {
+    harness = await coreHarness()
+    const { mkdtempSync, readdirSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { persistenceJsonlPlugin } = await import('../../capabilities/persistence-jsonl/index.ts')
+    const root = mkdtempSync(join(tmpdir(), 'minidsh-rollback-'))
+    try {
+      harness.root.plugin(persistenceJsonlPlugin, { root })
+      await harness.root.settle()
+      await expect(
+        harness.root.get(AGENTS).create(harness.root, {
+          cwd: process.cwd(),
+          agentOptions: { provider: 'scripted', model: 'scripted-model' },
+          setup: () => {
+            throw new Error('bad setup')
+          },
+        }),
+      ).rejects.toThrowError(/bad setup/)
+      expect(readdirSync(root).filter((name) => name.endsWith('.jsonl'))).toEqual([])
+    } finally {
+      await harness.dispose()
+      harness = undefined
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
+  })
 })
 
 describe('agent loop: turn/step lifecycle', () => {

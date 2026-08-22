@@ -68,15 +68,17 @@ export class EventBus {
   }
 
   /**
-   * Admission rule: an unscoped dispatch reaches every listener; a scoped
-   * dispatch reaches unscoped listeners, listeners of the same scope, and
-   * `global` listeners.
+   * Admission rule: a dispatch reaches unscoped listeners and `global`
+   * listeners, plus — when it carries a scope — the listeners of that same
+   * scope. A scoped listener therefore never sees a dispatch about another
+   * scope or about no scope at all; it observes its own subject only.
    */
   select(name: string, scope: unknown): Hook['fn'][] {
     const list = this.hooks.get(name)
     if (!list) return []
-    if (scope === undefined) return list.map((hook) => hook.fn)
-    return list.filter((hook) => hook.global || hook.scope === undefined || hook.scope === scope).map((hook) => hook.fn)
+    return list
+      .filter((hook) => hook.global || hook.scope === undefined || (scope !== undefined && hook.scope === scope))
+      .map((hook) => hook.fn)
   }
 
   /** Runs observers before delivery. An observer throw rejects the dispatch. */

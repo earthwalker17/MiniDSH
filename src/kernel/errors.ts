@@ -5,6 +5,7 @@ export type KernelErrorCode =
   | 'INACTIVE_OWNER'
   | 'PLUGIN_FAILED'
   | 'DISPATCH_REJECTED'
+  | 'SCOPE_NESTED'
 
 /** Every kernel failure carries a stable code; message text is for humans. */
 export class KernelError extends Error {

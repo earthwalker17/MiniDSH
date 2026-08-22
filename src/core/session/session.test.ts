@@ -223,6 +223,24 @@ describe('Session: relational invariant', () => {
     expect(next.seq).toBe(before)
   })
 
+  it('keeps its trace in step with the log when a later observer rejects an event', async () => {
+    const { root, sessions } = await harness(true)
+    let veto = false
+    root.observe((info) => {
+      if (veto && info.name === 'session/event' && (info.args[1] as { type: string }).type === 'step/start') throw new Error('vetoed')
+    })
+    const session = sessions.create({ cwd: '/w' })
+    session.append(TURN_START, { turn: 1 })
+    veto = true
+    expect(() => session.append(STEP_START, { turn: 1, step: 1 })).toThrowError(/vetoed/)
+    veto = false
+    // The relational trace must not have advanced past the vetoed event.
+    expect(session.append(STEP_START, { turn: 1, step: 1 }).seq).toBe(1)
+    session.append(STEP_END, { turn: 1, step: 1 })
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+    expect(session.events.length).toBe(4)
+  })
+
   it('throws on a non-contiguous turn number', async () => {
     const { sessions } = await harness(true)
     const session = sessions.create({ cwd: '/w' })

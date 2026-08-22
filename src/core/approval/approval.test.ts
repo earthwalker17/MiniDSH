@@ -40,25 +40,50 @@ describe('approval seam', () => {
     expect((decided.data as { outcome: string }).outcome).toBe('cancelled')
   })
 
-  it('ids stay unique in a session seeded from an earlier lifecycle', async () => {
+  it('an already-cancelled request is decided cancelled without consulting any answerer', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    let consulted = false
+    harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => {
+      consulted = true
+      return 'allowed-once'
+    })
+    const controller = new AbortController()
+    controller.abort()
+    expect(await harness.root.get(APPROVAL).request({ agent, toolName: 'upper', signal: controller.signal })).toBe('cancelled')
+    expect(consulted).toBe(false)
+    const pair = agent.session.events.filter((event) => matches(event, APPROVAL_ASKED) || matches(event, APPROVAL_DECIDED))
+    expect(pair.map((event) => event.type)).toEqual(['approval/asked', 'approval/decided'])
+    expect((pair[1]!.data as { outcome: string }).outcome).toBe('cancelled')
+  })
+
+  it('ids stay unique across a same-id resume in a fresh process (no per-process counter)', async () => {
+    const asked = (agent: { session: { events: readonly { type: string; seq: number; data: unknown }[] } }) =>
+      agent.session.events.filter((event) => event.type === APPROVAL_ASKED.type).map((event) => ({ seq: event.seq, id: (event.data as { id: string }).id }))
+
+    const first = await coreHarness()
+    first.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'rejected')
+    const original = await first.create()
+    await first.root.get(APPROVAL).request({ agent: original.agent, toolName: 'a' })
+    await first.root.get(APPROVAL).request({ agent: original.agent, toolName: 'b' })
+    const id = original.agent.id
+    const seed = original.agent.session.forkSeed()
+    const before = asked(original.agent)
+    await first.dispose()
+
     harness = await coreHarness()
     harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'rejected')
-    const approval = harness.root.get(APPROVAL)
-    const first = await harness.create()
-    await approval.request({ agent: first.agent, toolName: 'a' })
-    await approval.request({ agent: first.agent, toolName: 'b' })
-    const seeded = first.agent.session.events.filter((event) => matches(event, APPROVAL_ASKED)).map((event) => (event.data as { id: string }).id)
-    expect(new Set(seeded).size).toBe(2)
-
     const resumed = await harness.root.get(AGENTS).create(harness.root, {
       cwd: process.cwd(),
+      sessionId: id,
       agentOptions: { provider: 'scripted', model: 'scripted-model' },
-      seed: first.agent.session.forkSeed(),
+      seed,
     })
-    await approval.request({ agent: resumed.agent, toolName: 'c' })
-    const ids = resumed.agent.session.events.filter((event) => matches(event, APPROVAL_ASKED)).map((event) => (event.data as { id: string }).id)
-    expect(ids.slice(0, 2)).toEqual(seeded)
-    expect(seeded).not.toContain(ids[2])
+    await harness.root.get(APPROVAL).request({ agent: resumed.agent, toolName: 'c' })
+    const all = asked(resumed.agent)
+    expect(all.slice(0, 2)).toEqual(before)
+    expect(new Set(all.map((entry) => entry.id)).size).toBe(3)
+    for (const entry of all) expect(entry.id).toBe(`approval-${entry.seq}`)
     await resumed.dispose()
   })
 })

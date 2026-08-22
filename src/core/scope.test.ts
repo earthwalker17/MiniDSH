@@ -5,13 +5,17 @@
  * every event about an agent's operation (tools/*, approval/request,
  * system-prompt/assemble, fs/*). Unscoped registrations see every agent.
  */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { z } from 'zod'
 import { afterEach, describe, expect, it } from 'vitest'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
+import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { coreHarness, type CoreHarness } from '../test-support/harness.ts'
 import type { Agent } from './agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST, type ApprovalOutcome } from './approval/index.ts'
-import { FS, FS_OBSERVED } from './fs/index.ts'
+import { FS, FS_EDIT_INTENT, FS_OBSERVED } from './fs/index.ts'
 import { PROMPT, SYSTEM_PROMPT_ASSEMBLE, type PromptDraft } from './prompt/index.ts'
 import { defineTool, toolCall, TOOLS, TOOLS_PRE_EXECUTE, TOOLS_RESULT, type PreToolDecision } from './tools/index.ts'
 
@@ -120,6 +124,39 @@ describe('scope contract', () => {
     await fs.readText(target, { agent: a })
     await fs.readText(target, { agent: b })
     expect(seen).toEqual([a.id])
+  })
+
+  it('the editor dispatches fs/edit-intent and fs/observed in the acting agent scope', async () => {
+    harness = await coreHarness()
+    const root = harness.root
+    root.plugin(fsLocalPlugin)
+    root.plugin(toolEditorPlugin, {})
+    await root.settle()
+    const dir = mkdtempSync(join(tmpdir(), 'minidsh-scope-'))
+    try {
+      writeFileSync(join(dir, 'a.txt'), 'hello world', 'utf8')
+      const a = (await harness.create({ cwd: dir })).agent
+      const b = (await harness.create({ cwd: dir })).agent
+      const intents: string[] = []
+      const observed: string[] = []
+      a.ctx.on(FS_EDIT_INTENT, (_target, actor, next) => {
+        intents.push((actor.agent as Agent).id)
+        return next()
+      })
+      a.ctx.on(FS_OBSERVED, (_target, _observation, actor) => void observed.push((actor.agent as Agent).id))
+      const tools = root.get(TOOLS)
+      const signal = new AbortController().signal
+      const edit = (callId: string, agent: Agent, from: string, to: string) =>
+        tools.execute(toolCall(callId, 'str_replace_editor', JSON.stringify({ command: 'str_replace', path: 'a.txt', old_str: from, new_str: to }), agent, signal))
+      expect((await edit('c1', a, 'hello', 'bye')).isError).toBe(false)
+      expect((await edit('c2', b, 'bye', 'hi')).isError).toBe(false)
+      expect(intents).toEqual([a.id])
+      expect(observed).toEqual([a.id, a.id]) // A's read and A's write; nothing of B's
+    } finally {
+      await harness.dispose()
+      harness = undefined
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
   })
 
   it('refuses registrations through a non-object scope tag instead of filing them globally', async () => {

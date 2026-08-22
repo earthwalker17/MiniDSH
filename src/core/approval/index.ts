@@ -53,6 +53,12 @@ class ApprovalService implements Approval {
       ...(request.callId === undefined ? {} : { callId: request.callId }),
       ...(request.reason === undefined ? {} : { reason: request.reason }),
     })
+    // A request cancelled before it could be asked is decided without consulting
+    // anyone: no answerer should ever see a prompt whose outcome is already fixed.
+    if (request.signal?.aborted) {
+      session.append(APPROVAL_DECIDED, { id, outcome: 'cancelled' })
+      return 'cancelled'
+    }
     const prompt: ApprovalPrompt = { ...request, id }
     let outcome: ApprovalOutcome
     try {
@@ -60,7 +66,7 @@ class ApprovalService implements Approval {
       // one agent's context never answers for another agent. The seam, not the
       // answerer, owns cancellation: an aborted signal settles the request even
       // if an answerer (a disconnected client) never does.
-      const answer = request.agent.ctx.waterfall(APPROVAL_REQUEST, prompt, async () => 'unavailable' as ApprovalOutcome)
+      const answer = Promise.resolve(request.agent.ctx.waterfall(APPROVAL_REQUEST, prompt, async () => 'unavailable' as ApprovalOutcome))
       outcome = await settleOrCancel(answer, request.signal)
       if (!VALID_OUTCOMES.has(outcome)) outcome = 'unavailable'
     } catch {

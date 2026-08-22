@@ -121,7 +121,7 @@ async function view(fs: Fs, target: FsTarget, args: Input, max: number, actor: F
 
 async function create(_ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
   if (args.file_text === undefined) throw new FsError('FS_IO', '"create" requires file_text')
-  // create is intrinsically create-if-absent; it does not consult the write-intent policy.
+  // create passes its intent explicitly and never asks `fs/edit-intent`, which only str_replace/insert consult.
   await fs.writeText(target, args.file_text, { kind: 'createIfAbsent' }, actor)
   return `Created ${target.displayPath}.`
 }

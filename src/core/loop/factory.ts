@@ -31,20 +31,23 @@ class LoopFactory implements AgentFactory {
     const scope = this.ctx.child({ scope: agent, label: `agent:${session.id}` })
     agent.attach(scope)
 
-    const lifetime: { detach?: Disposer; release?: Disposer | undefined; disposed: boolean } = { disposed: false }
-    const dispose = async (): Promise<void> => {
-      if (lifetime.disposed) return
-      lifetime.disposed = true
+    // One disposal, run at most once, shared by every path that can end the agent:
+    // an explicit handle.dispose(), the creator's unwind, the loop plugin's unwind
+    // (which owns the scope), and creation rollback.
+    const lifetime: { detach?: Disposer; releases: Disposer[]; task?: Promise<void> } = { releases: [] }
+    const run = async (): Promise<void> => {
       agent.cancel({ kind: 'disposed' })
       await agent.whenIdle()
-      await lifetime.detach?.()
       await scope.dispose()
+      await lifetime.detach?.()
       await sessions.detach(session)
-      // An explicit dispose removes the owner's record; an owner-driven one finds it already gone.
-      const release = lifetime.release
-      lifetime.release = undefined
-      if (release) await release()
+      // Drop the lifetime records on the loop and the owner. Each re-enters dispose(),
+      // which returns this very task, so they are released without being awaited.
+      const releases = lifetime.releases
+      lifetime.releases = []
+      for (const release of releases) void release().catch(() => undefined)
     }
+    const dispose = (): Promise<void> => (lifetime.task ??= run())
 
     try {
       if (options.setup) await options.setup(scope)
@@ -55,14 +58,14 @@ class LoopFactory implements AgentFactory {
         const failed = report.failed.map((entry) => entry.name).join('; ')
         throw new Error(`agent ${session.id}: setup did not settle — pending: [${pending}] failed: [${failed}]`, { cause: report.failed[0]?.error })
       }
-      // The agent lives with its creator: disposing the owner disposes the agent.
-      lifetime.release = owner.effect(() => () => dispose(), `agent(${session.id})`)
+      lifetime.detach = agents.register(agent)
+      // Whichever dies first — the loop plugin that owns the scope, or the creator — disposes the whole agent.
+      lifetime.releases.push(this.ctx.effect(() => () => dispose(), `agent-lifetime(${session.id})`))
+      lifetime.releases.push(owner.effect(() => () => dispose(), `agent(${session.id})`))
     } catch (error) {
-      await scope.dispose()
-      await sessions.detach(session)
+      await dispose()
       throw error
     }
-    lifetime.detach = agents.register(agent)
     return { agent, dispose }
   }
 }

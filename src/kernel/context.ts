@@ -154,6 +154,7 @@ class PluginInstance implements EffectOwner, PluginHandle {
       parent: mount,
       realm: mount.realm,
       owner: this,
+      plugin: this,
       scope: mount.scope,
       inject: allowed,
     })
@@ -341,6 +342,8 @@ interface ContextInit {
   parent: Context | null
   realm: Realm
   owner: EffectOwner
+  /** The plugin this context (or the scope it derives from) belongs to; `null` for the root and its scopes. */
+  plugin: PluginInstance | null
   scope: unknown
   /**
    * Allowed strict reads; `null` = unrestricted. The root and scopes derived
@@ -362,6 +365,7 @@ export class Context {
   readonly scope: unknown
   readonly owner: EffectOwner
   readonly root: RootState
+  private readonly ownerPlugin: PluginInstance | null
   private readonly inject: Set<string> | null
   private readonly ownScope: Scope | null
 
@@ -370,6 +374,7 @@ export class Context {
     this.parent = init.parent
     this.realm = init.realm
     this.owner = init.owner
+    this.ownerPlugin = init.plugin
     this.scope = init.scope
     this.inject = init.inject
     this.ownScope = ownScope
@@ -400,9 +405,9 @@ export class Context {
     return impl.value as T
   }
 
-  /** A service is readable once its provider is active — or by its own provider while it is still loading. */
+  /** A service is readable once its provider is active — or by its own provider (and that plugin's scopes) while it is still loading. */
   private available(impl: Impl): boolean {
-    return impl.provider === null || impl.provider === this.owner || impl.provider.state === 'active'
+    return impl.provider === null || impl.provider === this.ownerPlugin || impl.provider.state === 'active'
   }
 
   /** Claims a service key in this context's realm. An effect: unprovided on unwind. */
@@ -444,8 +449,17 @@ export class Context {
     return this.owner.addEffect({ dispose, label })
   }
 
-  /** Derives a disposable scoped child context. Its realm may shadow services. */
+  /**
+   * Derives a disposable scoped child context. Its realm may shadow services.
+   * Scopes are flat: a child beneath a scoped context inherits that scope and
+   * cannot be re-tagged, so a registration can never land in a layer nobody
+   * views. A scope derived from a plugin context shares that plugin's
+   * declared reads (it cannot widen them).
+   */
   child(options: { scope?: unknown; label?: string } = {}): Context {
+    if (options.scope !== undefined && this.scope !== undefined && options.scope !== this.scope) {
+      throw new KernelError('SCOPE_NESTED', `cannot re-tag a child of ${this.owner.label}: scopes are flat`)
+    }
     const scope = new Scope(options.label ?? `scope(${String(options.scope ?? 'anonymous')})`, this.root.logger)
     const ctx = new Context(
       {
@@ -453,8 +467,9 @@ export class Context {
         parent: this,
         realm: new Realm(this.realm),
         owner: scope,
+        plugin: this.ownerPlugin,
         scope: options.scope ?? this.scope,
-        inject: this.inject ? new Set(this.inject) : null,
+        inject: this.inject,
       },
       scope,
     )
@@ -561,22 +576,22 @@ export class Context {
   // ---- root-level --------------------------------------------------------
 
   /**
-   * Waits until no plugin transition is in flight and reports pending and
-   * failed plugins. `filter` narrows the wait and the report to a subset (e.g.
-   * the plugins mounted under one scope), so a creator can settle its own
-   * world without waiting for, or reporting, unrelated plugins.
+   * Waits until no plugin transition is in flight anywhere on the root
+   * (quiescence is root-wide: a selected dependent may be waiting on an
+   * unselected provider that is still loading) and reports pending and failed
+   * plugins. `filter` narrows the report to a subset — e.g. the plugins
+   * mounted under one scope — so a creator can fail loud on its own world
+   * without reporting unrelated plugins.
    */
   async settle(filter?: (plugin: PluginHandle) => boolean): Promise<SettleReport> {
-    const select = (): PluginInstance[] => [...this.root.instances].filter((instance) => !filter || filter(instance))
     for (let round = 0; round < 1000; round++) {
-      const snapshot = select()
+      const snapshot = [...this.root.instances]
       await Promise.all(snapshot.map((instance) => instance.settled().catch(() => undefined)))
       const quiet = snapshot.every((instance) => instance.state !== 'loading' && instance.state !== 'unloading')
-      const current = select()
-      const sameSet = current.length === snapshot.length && current.every((instance) => snapshot.includes(instance))
+      const sameSet = snapshot.length === this.root.instances.size && snapshot.every((instance) => this.root.instances.has(instance))
       if (quiet && sameSet) break
     }
-    const instances = select()
+    const instances = [...this.root.instances].filter((instance) => !filter || filter(instance))
     const pending = instances
       .filter((instance) => instance.state === 'pending')
       .map((instance) => ({ name: instance.name, missing: instance.missing() }))
@@ -601,5 +616,5 @@ export function createRoot(options: RootOptions = {}): Context {
   const logger = options.logger ?? consoleLogger
   const root = new RootState(logger)
   const scope = new Scope('root', logger)
-  return new Context({ root, parent: null, realm: new Realm(null), owner: scope, scope: undefined, inject: null })
+  return new Context({ root, parent: null, realm: new Realm(null), owner: scope, plugin: null, scope: undefined, inject: null })
 }

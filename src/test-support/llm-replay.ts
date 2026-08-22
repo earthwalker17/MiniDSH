@@ -20,8 +20,13 @@ export function deriveReplayScript(events: readonly EventEnvelope[]): StreamChun
   for (const event of events) {
     if (!matches(event, ASSISTANT_CHUNK)) continue
     const key = `${event.data.turn}:${event.data.step}`
-    const attempt = event.data.attempt ?? 1
     let group = groups.get(key)
+    let attempt = event.data.attempt as number | undefined
+    if (attempt === undefined) {
+      // Logs recorded before `attempt` existed: exactly one finish ends an attempt,
+      // so a chunk arriving after a finish belongs to the next attempt.
+      attempt = !group ? 1 : group.chunks.at(-1)?.type === 'finish' ? group.attempt + 1 : group.attempt
+    }
     if (!group) {
       group = { attempt, chunks: [] }
       groups.set(key, group)

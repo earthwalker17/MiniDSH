@@ -85,6 +85,7 @@ const NAME = 'core-session'
 
 const installSessionInvariant: InvariantInstaller = (ctx, fail) => {
   const traces = new WeakMap<Session, Trace>()
+  const staged = new WeakMap<Session, Trace>()
   ctx.observe((info) => {
     if (info.name !== SESSION_EVENT.name) return
     const session = info.args[0] as Session
@@ -99,11 +100,16 @@ const installSessionInvariant: InvariantInstaller = (ctx, fail) => {
       }
       traces.set(session, trace)
     }
-    // Observation is pre-commit: a rejected event never enters the log, so the
-    // trace must advance only when the event is accepted.
+    // Observation is pre-commit and any observer may still reject this event, so
+    // the advanced trace is only staged here and committed once the event lands.
     const next: Trace = { ...trace, pending: new Set(trace.pending) }
     validate(next, event, fail)
-    traces.set(session, next)
+    staged.set(session, next)
+  })
+  ctx.on(SESSION_EVENT, (session, event) => {
+    const next = staged.get(session)
+    staged.delete(session)
+    if (next && next.lastSeq === event.seq) traces.set(session, next)
   })
 }
 

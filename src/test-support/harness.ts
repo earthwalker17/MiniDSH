@@ -3,7 +3,7 @@
  * kernel, with only the LLM adapter scripted. Invariants are on. This is the
  * "real entry path" — no hand-wired service mocks.
  */
-import { createRoot, type Context, type Logger } from '../kernel/index.ts'
+import { createRoot, type Context, type Logger, type PluginHandle } from '../kernel/index.ts'
 import { AGENTS, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
 import { approvalPlugin } from '../core/approval/index.ts'
 import { invariantsPlugin } from '../core/invariants/index.ts'
@@ -21,6 +21,8 @@ const silentLogger: Logger = { warn: () => {}, error: () => {} }
 export interface CoreHarness {
   readonly root: Context
   readonly adapter: ScriptedAdapter
+  /** The loop plugin's handle, so tests can unload the driver under live agents. */
+  readonly loop: PluginHandle
   create(options?: Partial<AgentOptions> & { cwd?: string }): Promise<AgentHandle>
   dispose(): Promise<void>
 }
@@ -36,7 +38,7 @@ export async function coreHarness(options: { persona?: string; logger?: Logger }
   root.plugin(approvalPlugin)
   root.plugin(agentPlugin)
   root.plugin(agentInvariantPlugin)
-  root.plugin(loopPlugin)
+  const loop = root.plugin(loopPlugin)
   root.plugin(loopInvariantPlugin)
   await root.settle()
 
@@ -48,6 +50,7 @@ export async function coreHarness(options: { persona?: string; logger?: Logger }
   return {
     root,
     adapter,
+    loop,
     async create(over = {}) {
       const agentOptions: AgentOptions = {
         provider: 'scripted',

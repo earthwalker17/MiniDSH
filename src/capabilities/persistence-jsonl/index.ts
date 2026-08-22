@@ -5,12 +5,13 @@
  * exposes a reader for the `sessions show` surface. A torn tail is truncated on
  * read; an interrupted turn is repaired via the session repair helper.
  */
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { serviceKey, type Context, type Plugin } from '../../kernel/index.ts'
 import {
   repairInterruptedTail,
   SESSION_CREATED,
+  SESSION_DISPOSED,
   SESSION_EVENT,
   SESSION_FLUSH,
   type EventEnvelope,
@@ -118,6 +119,18 @@ class JsonlArchive implements Archive {
     }
   }
 
+  /** A session disposed before any fact was recorded (a rolled-back creation) leaves no file behind. */
+  onDisposed(session: Session): void {
+    const file = this.files.get(session)
+    this.files.delete(session)
+    if (!file || session.events.length > 0) return
+    try {
+      unlinkSync(file)
+    } catch {
+      // Already gone or unremovable; a header-only file is harmless.
+    }
+  }
+
   /** The awaited durability checkpoint: a swallowed write error surfaces here. */
   onFlush(session: Session): void {
     const failure = this.failures.get(session)
@@ -153,5 +166,6 @@ export const persistenceJsonlPlugin: Plugin<PersistenceConfig> = {
     ctx.on(SESSION_CREATED, (session) => archive.onCreated(session))
     ctx.on(SESSION_EVENT, (session, event) => archive.onEvent(session, event))
     ctx.on(SESSION_FLUSH, (session) => archive.onFlush(session))
+    ctx.on(SESSION_DISPOSED, (session) => archive.onDisposed(session))
   },
 }

@@ -219,7 +219,7 @@ describe('kernel: temporal composability', () => {
     const root = createRoot({ logger: testLogger() })
     const order: string[] = []
     const outer = root.child({ scope: 'outer' })
-    const inner = outer.child({ scope: 'inner' })
+    const inner = outer.child({ label: 'inner' })
     inner.effect(() => () => order.push('inner'))
     outer.effect(() => () => order.push('outer'))
     await outer.dispose()
@@ -292,6 +292,49 @@ describe('kernel: temporal composability', () => {
     expect(report.pending).toEqual([])
     expect((await root.settle()).pending.map((entry) => entry.name)).toEqual(['stuck'])
   })
+
+  it('settle(filter) waits for root-wide quiescence, so a selected dependent of a still-loading unselected provider activates', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const tag = { name: 'agent-b' }
+    root.plugin({
+      name: 'slow-counter',
+      async apply(ctx) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        ctx.provide(COUNTER, { value: 1 })
+      },
+    })
+    const scope = root.child({ scope: tag })
+    const handle = scope.plugin({ name: 'needs-counter', inject: [COUNTER], apply: (ctx) => void ctx.get(COUNTER) })
+    const report = await scope.settle((plugin) => plugin.scope === tag)
+    expect(report.pending).toEqual([])
+    expect(handle.state).toBe('active')
+  })
+
+  it('refuses to re-tag a child beneath a scope: scopes are flat', () => {
+    const root = createRoot({ logger: testLogger() })
+    const agent = root.child({ scope: { id: 'a' } })
+    expect(() => agent.child({ scope: { id: 'nested' } })).toThrowError(KernelError)
+    expect(() => agent.child({ scope: 'nested' })).toThrowError(/scopes are flat/)
+    // Inheriting the scope (a label-only child) stays allowed, as does re-stating the same tag.
+    expect(agent.child({ label: 'inner' }).scope).toBe(agent.scope)
+    expect(agent.child({ scope: agent.scope }).scope).toBe(agent.scope)
+  })
+
+  it('a scope derived from a plugin context reads the key its plugin provides, even when provided afterwards', async () => {
+    const root = createRoot({ logger: testLogger() })
+    let seen: number | undefined
+    root.plugin({
+      name: 'scoped-provider',
+      apply(ctx) {
+        const inner = ctx.child({ label: 'inner' })
+        ctx.provide(COUNTER, { value: 9 })
+        seen = inner.get(COUNTER).value
+      },
+    })
+    const report = await root.settle()
+    expect(report.failed).toEqual([])
+    expect(seen).toBe(9)
+  })
 })
 
 describe('kernel: events', () => {
@@ -345,7 +388,7 @@ describe('kernel: events', () => {
     expect(log).toEqual(['two'])
   })
 
-  it('admits listeners by scope: same scope, unscoped, or global', () => {
+  it('admits listeners by scope: a scoped dispatch reaches unscoped, same-scope and global listeners; an unscoped one never reaches scoped listeners', () => {
     const root = createRoot({ logger: testLogger() })
     const a = root.child({ scope: 'a' })
     const b = root.child({ scope: 'b' })
@@ -357,8 +400,9 @@ describe('kernel: events', () => {
     a.emit(PING, 1)
     expect(seen).toEqual(['root', 'a', 'b-global'])
     seen.length = 0
+    // A dispatch with no subject is not about any scope: scoped listeners observe their own subject only.
     root.emit(PING, 2)
-    expect(seen).toEqual(['root', 'a', 'b', 'b-global'])
+    expect(seen).toEqual(['root', 'b-global'])
   })
 
   it('listeners registered through a plugin context are removed when the plugin unloads', async () => {

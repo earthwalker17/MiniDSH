@@ -52,7 +52,9 @@ export interface CreateAgentOptions {
    * Composes the agent's local world before publication: registrations and
    * plugins mounted through `agentCtx` are visible to this agent alone and
    * unwind with it. Creation fails (and rolls back) if setup throws or a
-   * mounted plugin cannot activate.
+   * mounted plugin cannot activate. Services are read by the plugins mounted
+   * here (which declare `inject`) or via `tryGet`; `agentCtx.get` is limited
+   * to what the loop itself injects.
    */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
 }
