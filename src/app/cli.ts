@@ -1,0 +1,167 @@
+/**
+ * The headless CLI surface. It renders exclusively from `session/event`, drives
+ * only `ctx.agents`/`ctx.sessions` via the runner, and exits 0 iff the turn
+ * completed. `--json` streams raw session events to stdout; `sessions show`
+ * reads the log only.
+ */
+import { messageText, restoreMessage } from '../core/llm/message.ts'
+import type { EventEnvelope } from '../core/session/index.ts'
+import { listSessionHeaders, readSessionFile } from '../capabilities/persistence-jsonl/index.ts'
+import { compose, defaultDialect } from './compose.ts'
+import { runTask } from './headless.ts'
+import { sessionsDir } from './home.ts'
+
+interface ParsedArgs {
+  readonly command: string
+  readonly positional: string[]
+  readonly flags: Map<string, string | true>
+}
+
+const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps'])
+
+function parseArgs(argv: readonly string[]): ParsedArgs {
+  const positional: string[] = []
+  const flags = new Map<string, string | true>()
+  const command = argv[0] ?? 'help'
+  for (let i = 1; i < argv.length; i++) {
+    const token = argv[i]!
+    if (token.startsWith('--')) {
+      const name = token.slice(2)
+      if (VALUE_FLAGS.has(name)) flags.set(name, argv[++i] ?? '')
+      else flags.set(name, true)
+    } else {
+      positional.push(token)
+    }
+  }
+  return { command, positional, flags }
+}
+
+function preview(text: string, max = 80): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
+}
+
+/** Human-readable progress line for one session event, or undefined to skip. */
+function renderEvent(event: EventEnvelope): string | undefined {
+  switch (event.type) {
+    case 'user/message': {
+      const message = restoreMessage((event.data as { message: Parameters<typeof restoreMessage>[0] }).message)
+      return message.source.kind === 'user' ? undefined : `  · context (${message.source.kind})`
+    }
+    case 'tool/call': {
+      const data = event.data as { name: string; arguments: string }
+      return `  → ${data.name} ${preview(data.arguments)}`
+    }
+    case 'tool/result': {
+      const data = event.data as { error?: { code: string } }
+      return data.error ? `    ✗ ${data.error.code}` : '    ✓'
+    }
+    case 'assistant/message': {
+      const text = messageText(restoreMessage((event.data as { message: Parameters<typeof restoreMessage>[0] }).message))
+      return text.length > 0 ? `  ${preview(text, 120)}` : undefined
+    }
+    case 'turn/end': {
+      const data = event.data as { reason: { kind: string } }
+      return `  [turn ${data.reason.kind}]`
+    }
+    default:
+      return undefined
+  }
+}
+
+async function runCommand(args: ParsedArgs): Promise<number> {
+  const task = args.positional.join(' ').trim()
+  if (task.length === 0) {
+    process.stderr.write('usage: minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n')
+    return 2
+  }
+  const json = args.flags.get('json') === true
+  const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
+  const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : process.env.MINIDSH_MODEL ?? 'deepseek-v4-flash'
+  const effort = typeof args.flags.get('effort') === 'string' ? (args.flags.get('effort') as string) : undefined
+  const maxStepsRaw = args.flags.get('max-steps')
+  const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
+
+  if (args.flags.get('dump-config') === true) {
+    const rows = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect() })
+    process.stdout.write(`${JSON.stringify(rows.map((row) => ({ id: row.id, plugin: row.plugin.name, config: row.config ?? null })), null, 2)}\n`)
+    return 0
+  }
+
+  const onEvent = json
+    ? (event: EventEnvelope) => process.stdout.write(`${JSON.stringify(event)}\n`)
+    : (event: EventEnvelope) => {
+        const line = renderEvent(event)
+        if (line) process.stderr.write(`${line}\n`)
+      }
+
+  try {
+    const result = await runTask(
+      {
+        task,
+        cwd,
+        model,
+        sessionsRoot: sessionsDir(),
+        ...(effort === undefined ? {} : { reasoningEffort: effort }),
+        ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
+        approve: args.flags.get('approve') === true,
+      },
+      onEvent,
+    )
+    if (!json) process.stdout.write(`${result.text}\n`)
+    if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
+    process.stderr.write(`session: ${result.sessionId}\n`)
+    return result.exitCode
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
+  }
+}
+
+function sessionsCommand(args: ParsedArgs): number {
+  const sub = args.positional[0]
+  const root = sessionsDir()
+  if (sub === 'list') {
+    for (const header of listSessionHeaders(root)) {
+      process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\n`)
+    }
+    return 0
+  }
+  if (sub === 'show') {
+    const id = args.positional[1]
+    if (!id) {
+      process.stderr.write('usage: minidsh sessions show <id>\n')
+      return 2
+    }
+    const stored = readSessionFile(root, id)
+    if (!stored) {
+      process.stderr.write(`no session "${id}"\n`)
+      return 1
+    }
+    if (args.flags.get('json') === true) {
+      for (const event of stored.events) process.stdout.write(`${JSON.stringify(event)}\n`)
+    } else {
+      process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+      for (const event of stored.events) {
+        const line = renderEvent(event)
+        process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line.trim()}` : ''}\n`)
+      }
+    }
+    return 0
+  }
+  process.stderr.write('usage: minidsh sessions <list|show>\n')
+  return 2
+}
+
+export async function main(argv: readonly string[]): Promise<number> {
+  const args = parseArgs(argv)
+  switch (args.command) {
+    case 'run':
+      return runCommand(args)
+    case 'sessions':
+      return sessionsCommand(args)
+    default:
+      process.stdout.write('MiniDSH — usage:\n  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n  minidsh sessions list\n  minidsh sessions show <id> [--json]\n')
+      return args.command === 'help' ? 0 : 2
+  }
+}

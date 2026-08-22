@@ -38,6 +38,53 @@ export interface PersistenceConfig {
   readonly root: string
 }
 
+/** Reads a stored session's header and contiguous events; stops at a torn tail. */
+export function readSessionFile(root: string, id: string): StoredSession | undefined {
+  const file = join(root, `${encodeURIComponent(id)}.jsonl`)
+  let text: string
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    return undefined
+  }
+  const lines = text.split('\n')
+  const headerLine = lines.shift()
+  if (!headerLine) return undefined
+  const header = JSON.parse(headerLine) as HeaderLine
+  const events: EventEnvelope[] = []
+  for (const line of lines) {
+    if (line.trim() === '') continue
+    try {
+      const event = JSON.parse(line) as EventEnvelope
+      if (event.seq !== events.length) break
+      events.push(event)
+    } catch {
+      break
+    }
+  }
+  return { header, events }
+}
+
+/** Lists stored session headers, newest first. */
+export function listSessionHeaders(root: string): SessionHeader[] {
+  let names: string[]
+  try {
+    names = readdirSync(root).filter((name) => name.endsWith('.jsonl'))
+  } catch {
+    return []
+  }
+  const headers: SessionHeader[] = []
+  for (const name of names) {
+    try {
+      const first = readFileSync(join(root, name), 'utf8').split('\n', 1)[0]
+      if (first) headers.push(JSON.parse(first) as SessionHeader)
+    } catch {
+      // Skip an unreadable file.
+    }
+  }
+  return headers.toSorted((a, b) => b.createdAt - a.createdAt)
+}
+
 class JsonlArchive implements Archive {
   private readonly root: string
   private readonly files = new WeakMap<Session, string>()
@@ -60,29 +107,7 @@ class JsonlArchive implements Archive {
   }
 
   read(id: string): StoredSession | undefined {
-    const file = join(this.root, `${encodeURIComponent(id)}.jsonl`)
-    let text: string
-    try {
-      text = readFileSync(file, 'utf8')
-    } catch {
-      return undefined
-    }
-    const lines = text.split('\n')
-    const headerLine = lines.shift()
-    if (!headerLine) return undefined
-    const header = JSON.parse(headerLine) as HeaderLine
-    const events: EventEnvelope[] = []
-    for (const line of lines) {
-      if (line.trim() === '') continue
-      try {
-        const event = JSON.parse(line) as EventEnvelope
-        if (event.seq !== events.length) break // torn / non-contiguous tail
-        events.push(event)
-      } catch {
-        break // torn final record
-      }
-    }
-    return { header, events }
+    return readSessionFile(this.root, id)
   }
 
   repaired(id: string): StoredSession | undefined {
@@ -93,22 +118,7 @@ class JsonlArchive implements Archive {
   }
 
   list(): SessionHeader[] {
-    let names: string[]
-    try {
-      names = readdirSync(this.root).filter((name) => name.endsWith('.jsonl'))
-    } catch {
-      return []
-    }
-    const headers: SessionHeader[] = []
-    for (const name of names) {
-      try {
-        const first = readFileSync(join(this.root, name), 'utf8').split('\n', 1)[0]
-        if (first) headers.push(JSON.parse(first) as SessionHeader)
-      } catch {
-        // Skip an unreadable file.
-      }
-    }
-    return headers.toSorted((a, b) => b.createdAt - a.createdAt)
+    return listSessionHeaders(this.root)
   }
 }
 
