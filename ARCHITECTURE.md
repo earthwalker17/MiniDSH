@@ -1,7 +1,5 @@
 # MiniDSH Architecture
 
-> Status: Session 1 target shape. This file is reconciled to the implemented code at the end of Session 1 and then describes the current state only.
-
 MiniDSH is one runtime composed from plugins over a tiny kernel. Everything the model can see is derived from an append-only session log; everything the model can do goes through a guarded tool pipeline; every surface (headless CLI today, protocol clients and GUIs later) only renders the log and drives the agent registry. The reference it re-derives from is DeepSeek Harness (DSH); §12 lists where MiniDSH deliberately differs.
 
 ## 1. Layers and dependency direction
@@ -61,7 +59,9 @@ The log is the single source of truth. Envelope `{type, seq, time, data}`, `seq 
 
 Vocabulary (Session 1): `turn/start`, `turn/end{reason}` (`completed | blocked | cancelled | error | max-tokens | max-steps | interrupted`), `step/start`, `step/end`, `user/message`, `request/header{provider, model, reasoningEffort?, maxTokens?, system, tools; reason: initial|change|resume}`, `assistant/chunk` (replay/UI fidelity, never derived), `assistant/message{message, usage?, interrupted?}`, `tool/call`, `tool/result`, `inbox/spliced`, `approval/asked`, `approval/decided`, `session/end-seed`. The header `{version, id, createdAt, cwd, parentId?, seedLength?}` lives beside the log, not in it. `SESSION_FORMAT_VERSION = 0`; unknown event types are refused on load unless marked `ignorable`.
 
-**Model-visible ⟺ logged.** Every request the loop sends equals `deriveMessages()` plus the folded `request/header`; a runtime invariant rebuilds both at `llm/stream` and fails on any divergence. Persistence is a subscriber (`session/event` → append one JSON line; `session/flush` awaited at turn end), stored under `MINIDSH_HOME` (default `~/.minidsh`) as `sessions/<id>.jsonl` with the header as line 1.
+**Model-visible ⟺ logged.** Every request the loop sends equals `deriveMessages()` plus the folded `request/header`; a runtime invariant rebuilds both at `llm/stream` and fails on any divergence. Persistence is a subscriber (`session/event` → append one JSON line; `session/flush` awaited at turn end, where a swallowed write error is rethrown), stored under `MINIDSH_HOME` (default `~/.minidsh`) as `sessions/<id>.jsonl` with the header as line 1.
+
+Prefix stability is a corollary, not a feature: because the log is append-only and the header is written only when it actually changes, consecutive requests are append-extensions of their predecessors. The Session 1 live run showed this directly — one `request/header` across seven steps, and 18,816 cache-read tokens against 3,372 uncached input tokens.
 
 ## 5. LLM vocabulary and the DeepSeek adapter
 
@@ -103,7 +103,11 @@ A surface is a plugin that injects only `agents` and `sessions`, owns transport 
 
 ## 10. Verification
 
-Tests mount real compositions through the kernel; only the model is scripted (`test-support/scripted-adapter`) or replayed from a recorded session log (`test-support/llm-replay`, which derives the script from `assistant/chunk` groups and asserts every recorded call was consumed). Runtime invariants — session relational trace (seq, turn/step balance, call/result pairing), agent status no-repeat, request reconstruction (registered with `prepend` so nothing can silence it) — run in every test and in live runs. End-to-end tests assert the world (re-run the test suite, byte-compare untouched files), never the agent's self-report. Gates: `tsc --noEmit`, `oxlint`, `check-deps`, `vitest`; live E2E against the real provider before a session closes.
+Tests mount real compositions through the kernel; only the model is scripted (`test-support/scripted-adapter`) or replayed from a recorded session log (`test-support/llm-replay`, which derives the script from `assistant/chunk` groups and asserts every recorded call was consumed). Because the replay script is derived from the same JSONL the harness persists, **a live session log is its own test oracle**: recording costs one real run.
+
+Runtime invariants — the session relational trace (seq contiguity, turn/step balance, numbering, call/result pairing), agent status no-repeat, and request reconstruction (registered with `prepend` so nothing can silence it) — run in every test *and* in live runs, because `compose()` mounts them by default. End-to-end verification asserts the world (re-run the test suite, byte-compare untouched files), never the agent's self-report.
+
+Gates: `pnpm check` = `tsc --noEmit` + `oxlint` + `check-deps` + `vitest`; plus a live run against the real provider before a session closes.
 
 ## 11. Where new things go
 
@@ -129,14 +133,43 @@ If a new thing has no row here, that is an architecture question to settle befor
 - Persistent shell over piped stdio with marker framing instead of a PTY.
 - No YAML loader, presets, settings/credentials services, attachments, Code Mode, subagents, compaction backend, workspace entity, session projections, or chunk-row packing until a session needs them.
 
-## 13. Known limitations (Session 1)
+## 13. Known limitations (current)
 
-- The shell is unconfined while the editor is workspace-fenced — an asymmetry DSH's single `writableRoots` forbids. Session 3 replaces `policy-workspace` with per-call sandbox policy shared by fs and shell.
-- No `resume`: persistence writes and reads logs, but the core has no persistence Definition yet (Session 2).
-- Session events are appended synchronously in the `session/event` listener (no write-behind).
-- Commands that read stdin block until the shell timeout and reset.
-- Single provider (DeepSeek); no images.
+- **The shell is unconfined while the editor is workspace-fenced.** `policy-workspace` is a seam demonstration, not a boundary: a model can write outside the workspace through the shell tool. DSH's single `writableRoots` exists precisely to forbid this asymmetry; Session 3 replaces the plugin with per-call sandbox policy shared by fs and shell.
+- **No `resume`.** Persistence writes and reads logs and the seed path is exercised by fork/replay, but the core has no persistence Definition, so `agents.resume(id)` does not exist yet (Session 2).
+- Session events are appended synchronously inside the `session/event` listener; a write failure is remembered and rethrown at the next `session/flush`, but there is no write-behind batching.
+- A shell command that reads stdin blocks until the tool timeout, then resets the shell.
+- Single provider (DeepSeek), text only: no images, no attachment plane.
+- The inbox is in-memory; its splices are not yet durable events, so a resumed session would not reconstruct pending input.
+- No compaction: a long enough session grows its request until the provider's context window rejects it.
 
 ## 14. File map
 
-Filled in at the end of Session 1 from the implemented tree.
+```
+src/kernel/     tokens.ts (service/event keys) · bus.ts (listeners, scope filter, observers)
+                context.ts (Context, plugin instances, effects, realms) · errors.ts · index.ts
+src/core/       json.ts (JSON discipline) · ids.ts (branded ids)
+  session/      types.ts (event kinds, envelope, header) · session.ts (the log) · surface.ts
+                (deriveEventMessage, foldRequestHeader, Surface) · store.ts (ctx.sessions + events)
+                repair.ts (interrupted-tail closers) · invariant.ts (relational trace)
+  llm/          types.ts (vocabulary, adapter contract) · message.ts · assembler.ts
+                runtime.ts (ctx.llm, llm/stream waterfall, protocol validator)
+  tools/        types.ts · registry.ts (ctx.tools + pipeline) · presentation.ts · index.ts (defineTool)
+  prompt/       index.ts (ctx.prompt, sections, variables, assemble)
+  approval/     index.ts (ctx.approval, approval/request waterfall, audit events)
+  fs/           index.ts (Definition: FsTarget, intents, fs/* events)
+  shell/        index.ts (Definition: ShellSession)
+  agent/        types.ts · index.ts (Agent, ctx.agents, Inbox, agent/* events) · invariant.ts
+  loop/         driver.ts (the turn/step machine) · factory.ts (ctx.agents factory + plugin)
+                marker.ts (loop-request identity) · invariant.ts (request reconstruction)
+  invariants/   index.ts (ctx.invariants registry)
+src/capabilities/
+  llm-deepseek/ sse.ts · translate.ts · serialize.ts · adapter.ts · index.ts
+  llm-retry/ · fs-local/ · fs-observation-policy/ · tool-editor/ · shell-stdio/ (index + process)
+  tool-shell/ · persistence-jsonl/ · approval-headless/ · policy-workspace/ · context-runtime/
+src/app/        home.ts · compose.ts (rows, applyPatches, mount) · headless.ts (runTask) · cli.ts
+src/test-support/ scripted-adapter.ts · harness.ts (real composition) · llm-replay.ts
+scripts/        check-deps.ts (dependency-direction gate)
+```
+
+About 5,500 lines of implementation and 1,700 lines of tests across 70 files.
