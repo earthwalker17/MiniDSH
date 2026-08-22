@@ -14,6 +14,8 @@ export type PluginState = 'pending' | 'loading' | 'active' | 'unloading' | 'disp
 export interface PluginHandle {
   readonly name: string
   readonly state: PluginState
+  /** Scope tag of the context the plugin was mounted on (`undefined` at the root). */
+  readonly scope: unknown
   /** The error of the last failed load, if any. */
   readonly error: unknown
   /** Resolves once no transition is in flight; rejects if the plugin failed. */
@@ -161,6 +163,10 @@ class PluginInstance implements EffectOwner, PluginHandle {
     return `plugin "${this.name}"`
   }
 
+  get scope(): unknown {
+    return this.mount.scope
+  }
+
   get active(): boolean {
     return this.state === 'loading' || this.state === 'active'
   }
@@ -303,6 +309,8 @@ class Scope implements EffectOwner {
   active = true
   private readonly effects = new EffectList()
   private readonly logger: Logger
+  /** Removes this scope's unwind record from its parent owner; set by `child()`. */
+  private parentRelease: Disposer | null = null
   constructor(label: string, logger: Logger) {
     this.label = label
     this.logger = logger
@@ -311,10 +319,17 @@ class Scope implements EffectOwner {
     if (!this.active) throw new KernelError('INACTIVE_OWNER', `cannot register "${record.label}" on disposed ${this.label}`)
     return this.effects.add(record)
   }
+  attachParentRelease(release: Disposer): void {
+    this.parentRelease = release
+  }
   async unwind(): Promise<void> {
     if (!this.active) return
     this.active = false
     await this.effects.unwindAll(this.logger, this.label)
+    // A scope disposed on its own must not leave a dead record on its parent.
+    const release = this.parentRelease
+    this.parentRelease = null
+    if (release) await release()
   }
   effectLabels(): string[] {
     return this.effects.labels()
@@ -327,7 +342,12 @@ interface ContextInit {
   realm: Realm
   owner: EffectOwner
   scope: unknown
-  /** Allowed strict reads; `null` = unrestricted (root and scopes). */
+  /**
+   * Allowed strict reads; `null` = unrestricted. The root and scopes derived
+   * from it are unrestricted; a scope derived from a plugin context inherits
+   * that plugin's declared set, because reload tracking is keyed on the
+   * declared `inject` and a scope must not widen what its plugin may read.
+   */
   inject: Set<string> | null
 }
 
@@ -367,7 +387,7 @@ export class Context {
       throw new KernelError('SERVICE_NOT_INJECTED', `cannot read service "${key.name}" from ${this.owner.label} without inject`)
     }
     const impl = this.realm.lookup(key.name)
-    if (!impl || (impl.provider && impl.provider.state !== 'active')) {
+    if (!impl || !this.available(impl)) {
       throw new KernelError('SERVICE_UNAVAILABLE', `service "${key.name}" is not available`)
     }
     return impl.value as T
@@ -376,8 +396,13 @@ export class Context {
   /** Lenient read for optional dependencies; `undefined` when absent or inactive. */
   tryGet<T>(key: ServiceKey<T>): T | undefined {
     const impl = this.realm.lookup(key.name)
-    if (!impl || (impl.provider && impl.provider.state !== 'active')) return undefined
+    if (!impl || !this.available(impl)) return undefined
     return impl.value as T
+  }
+
+  /** A service is readable once its provider is active — or by its own provider while it is still loading. */
+  private available(impl: Impl): boolean {
+    return impl.provider === null || impl.provider === this.owner || impl.provider.state === 'active'
   }
 
   /** Claims a service key in this context's realm. An effect: unprovided on unwind. */
@@ -433,8 +458,8 @@ export class Context {
       },
       scope,
     )
-    // A scope unwinds with its parent owner.
-    this.owner.addEffect({ dispose: () => scope.unwind(), label: scope.label })
+    // A scope unwinds with its parent owner; disposing it early releases that record.
+    scope.attachParentRelease(this.owner.addEffect({ dispose: () => scope.unwind(), label: scope.label }))
     return ctx
   }
 
@@ -535,19 +560,27 @@ export class Context {
 
   // ---- root-level --------------------------------------------------------
 
-  /** Waits until no plugin transition is in flight and reports pending and failed plugins. */
-  async settle(): Promise<SettleReport> {
+  /**
+   * Waits until no plugin transition is in flight and reports pending and
+   * failed plugins. `filter` narrows the wait and the report to a subset (e.g.
+   * the plugins mounted under one scope), so a creator can settle its own
+   * world without waiting for, or reporting, unrelated plugins.
+   */
+  async settle(filter?: (plugin: PluginHandle) => boolean): Promise<SettleReport> {
+    const select = (): PluginInstance[] => [...this.root.instances].filter((instance) => !filter || filter(instance))
     for (let round = 0; round < 1000; round++) {
-      const snapshot = [...this.root.instances]
+      const snapshot = select()
       await Promise.all(snapshot.map((instance) => instance.settled().catch(() => undefined)))
       const quiet = snapshot.every((instance) => instance.state !== 'loading' && instance.state !== 'unloading')
-      const sameSet = snapshot.length === this.root.instances.size && snapshot.every((instance) => this.root.instances.has(instance))
+      const current = select()
+      const sameSet = current.length === snapshot.length && current.every((instance) => snapshot.includes(instance))
       if (quiet && sameSet) break
     }
-    const pending = [...this.root.instances]
+    const instances = select()
+    const pending = instances
       .filter((instance) => instance.state === 'pending')
       .map((instance) => ({ name: instance.name, missing: instance.missing() }))
-    const failed = [...this.root.instances]
+    const failed = instances
       .filter((instance) => instance.state === 'failed')
       .map((instance) => ({ name: instance.name, error: instance.error }))
     return { pending, failed }

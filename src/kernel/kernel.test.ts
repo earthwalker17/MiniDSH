@@ -236,6 +236,62 @@ describe('kernel: temporal composability', () => {
     await root.dispose()
     expect(order).toEqual(['b', 'a'])
   })
+
+  it('a child scope disposed on its own leaves no record on its parent', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const before = root.effects().length
+    const unwound: string[] = []
+    for (let i = 0; i < 3; i++) {
+      const child = root.child({ scope: { id: i }, label: `scope-${i}` })
+      child.effect(() => () => unwound.push(`scope-${i}`))
+      await child.dispose()
+    }
+    expect(unwound).toEqual(['scope-0', 'scope-1', 'scope-2'])
+    expect(root.effects().length).toBe(before)
+    // The parent-driven path still works and is idempotent with an early dispose.
+    const late = root.child({ label: 'late' })
+    late.effect(() => () => unwound.push('late'))
+    await root.dispose()
+    expect(unwound.at(-1)).toBe('late')
+  })
+
+  it('a plugin can read back the service it just provided while still loading', async () => {
+    const root = createRoot({ logger: testLogger() })
+    let seen: number | undefined
+    let lenient: number | undefined
+    root.plugin({
+      name: 'self-reader',
+      apply(ctx) {
+        ctx.provide(COUNTER, { value: 5 })
+        seen = ctx.get(COUNTER).value
+        lenient = ctx.tryGet(COUNTER)?.value
+      },
+    })
+    const report = await root.settle()
+    expect(report.failed).toEqual([])
+    expect(seen).toBe(5)
+    expect(lenient).toBe(5)
+  })
+
+  it('settle(filter) waits for and reports only the selected plugins, and handles expose their mount scope', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const tag = { name: 'agent-a' }
+    const scope = root.child({ scope: tag })
+    const slow: Plugin = {
+      name: 'slow',
+      async apply(ctx) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        ctx.effect(() => () => {})
+      },
+    }
+    root.plugin({ name: 'stuck', inject: [GREETER], apply: () => {} })
+    const handle = scope.plugin(slow)
+    expect(handle.scope).toBe(tag)
+    const report = await scope.settle((plugin) => plugin.scope === tag)
+    expect(handle.state).toBe('active')
+    expect(report.pending).toEqual([])
+    expect((await root.settle()).pending.map((entry) => entry.name)).toEqual(['stuck'])
+  })
 })
 
 describe('kernel: events', () => {
