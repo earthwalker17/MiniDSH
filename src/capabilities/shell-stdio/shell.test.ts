@@ -1,0 +1,51 @@
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { ShellProcess, type ShellDialect } from './process.ts'
+
+const dialect: ShellDialect = process.platform === 'win32' ? 'pwsh' : 'bash'
+const binary = dialect === 'pwsh' ? 'pwsh' : 'bash'
+const available = spawnSync(binary, ['--version'], { stdio: 'ignore' }).status === 0
+
+let proc: ShellProcess | undefined
+let dir: string | undefined
+afterEach(async () => {
+  await proc?.dispose()
+  proc = undefined
+  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  dir = undefined
+})
+
+const echoCmd = (text: string): string => (dialect === 'pwsh' ? `Write-Output '${text}'` : `echo '${text}'`)
+const pwdCmd = (): string => (dialect === 'pwsh' ? '(Get-Location).Path' : 'pwd')
+// A native non-zero exit (as `node --test` produces) propagates reliably via $LASTEXITCODE / $?.
+const failCmd = (): string => 'node -e "process.exit(3)"'
+
+describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
+  it('runs a command and captures its output and exit code', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess(dialect, dir)
+    const result = await proc.exec({ command: echoCmd('hello world'), timeoutMs: 30_000 })
+    expect(result.output).toContain('hello world')
+    expect(result.exitCode).toBe(0)
+    expect(result.timedOut).toBe(false)
+  })
+
+  it('persists working directory across calls', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    mkdirSync(join(dir, 'sub'))
+    proc = new ShellProcess(dialect, dir)
+    await proc.exec({ command: dialect === 'pwsh' ? 'Set-Location sub' : 'cd sub', timeoutMs: 30_000 })
+    const result = await proc.exec({ command: pwdCmd(), timeoutMs: 30_000 })
+    expect(result.output.toLowerCase()).toContain('sub')
+  })
+
+  it('reports a non-zero exit code for a failing command', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess(dialect, dir)
+    const result = await proc.exec({ command: failCmd(), timeoutMs: 30_000 })
+    expect(result.exitCode).not.toBe(0)
+  })
+})

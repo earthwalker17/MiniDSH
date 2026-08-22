@@ -62,7 +62,8 @@ export interface FsActor {
 export interface Fs {
   resolve(path: string, cwd: string): FsTarget
   stat(target: FsTarget): Promise<FsInfo | undefined>
-  readText(target: FsTarget): Promise<{ text: string; version: string }>
+  /** Reads a file and emits `fs/observed` so the read-before-edit policy can record it. */
+  readText(target: FsTarget, actor: FsActor): Promise<{ text: string; version: string }>
   writeText(target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }>
   listDir(target: FsTarget): Promise<DirEntry[]>
   /** The canonical writable root for a session (its cwd). S3 generalizes this into policy. */
