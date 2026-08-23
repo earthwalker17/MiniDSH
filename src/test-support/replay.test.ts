@@ -72,19 +72,35 @@ describe('llm-replay', () => {
     await replayWithoutRetry(legacy)
   })
 
-  it('drops a trailing finish-less chunk group (a crash mid-stream) instead of replaying a protocol violation', async () => {
+  it('drops every finish-less chunk group (a crash mid-stream), trailing or mid-log', async () => {
     const recorded = await record()
     const { deriveReplayScript } = await import('./llm-replay.ts')
     const whole = deriveReplayScript(recorded.events)
     expect(whole).toHaveLength(2)
-    // Simulate a crash mid-stream on a later step: chunks with no terminal finish.
     const seq = recorded.events.length
-    const crashed = [
+    const crashChunk = (offset: number, turn: number, chunk: unknown): unknown => ({
+      type: 'assistant/chunk',
+      seq: seq + offset,
+      time: 1,
+      data: { turn, step: 1, attempt: 1, chunk },
+    })
+    // A crash on the trailing step: chunks with no terminal finish.
+    const trailing = [
       ...recorded.events,
-      { type: 'assistant/chunk', seq, time: 1, data: { turn: 2, step: 1, attempt: 1, chunk: { type: 'block-start', index: 0, blockType: 'text' } } },
-      { type: 'assistant/chunk', seq: seq + 1, time: 1, data: { turn: 2, step: 1, attempt: 1, chunk: { type: 'text-delta', index: 0, text: 'cut of' } } },
+      crashChunk(0, 2, { type: 'block-start', index: 0, blockType: 'text' }),
+      crashChunk(1, 2, { type: 'text-delta', index: 0, text: 'cut of' }),
     ] as unknown as Recorded
-    expect(deriveReplayScript(crashed)).toHaveLength(2)
+    expect(deriveReplayScript(trailing)).toHaveLength(2)
+    // A resumed log carries the artifact MID-log: completed turns follow it.
+    const resumed = [
+      ...trailing,
+      crashChunk(2, 3, { type: 'block-start', index: 0, blockType: 'text' }),
+      crashChunk(3, 3, { type: 'text-delta', index: 0, text: 'after the resume' }),
+      crashChunk(4, 3, { type: 'finish', reason: { kind: 'stop' } }),
+    ] as unknown as Recorded
+    const script = deriveReplayScript(resumed)
+    expect(script).toHaveLength(3)
+    expect(script.every((group) => group.some((chunk) => chunk.type === 'finish'))).toBe(true)
   })
 })
 

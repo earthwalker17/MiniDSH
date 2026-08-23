@@ -202,20 +202,35 @@ export class ReactLoopAgent implements Agent {
         if (signal.aborted) throw new Error('turn aborted')
         step += 1
         const { messages: claimed, splice: claimSplice } = this.inbox.claim(firstStep)
-        const decision = await this.ctx.waterfall(
-          AGENT_PRE_STEP,
-          { agent: this, messages: claimed, turn, step, signal },
-          async () => ({ kind: 'enter', messages: claimed }) as PreStepDecision,
-        )
-        if (decision.kind === 'reject') {
-          // The claim is committed with the block that consumed it: durable = live.
+        // Whatever consumed (or killed) the claim commits it, so durable = live
+        // on every exit path — including a pre-step listener throw or a cancel
+        // landing inside the pre-step await.
+        const commitClaim = (): void => {
           if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
+        }
+        let decision: PreStepDecision
+        try {
+          decision = await this.ctx.waterfall(
+            AGENT_PRE_STEP,
+            { agent: this, messages: claimed, turn, step, signal },
+            async () => ({ kind: 'enter', messages: claimed }) as PreStepDecision,
+          )
+        } catch (error) {
+          commitClaim()
+          throw error
+        }
+        if (signal.aborted) {
+          commitClaim()
+          throw new Error('turn aborted')
+        }
+        if (decision.kind === 'reject') {
+          commitClaim()
           reason = { kind: 'blocked' }
           break
         }
         const entered = decision.messages
         if (firstStep && entered.length === 0) {
-          if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
+          commitClaim()
           naturalStop = true
           break
         }
@@ -227,7 +242,7 @@ export class ReactLoopAgent implements Agent {
           // The claim record lands AFTER the entered messages: a crash inside the
           // pre-step await re-delivers a prompt on resume rather than losing it
           // (the accepted failure mode is a rare double-delivery, never a loss).
-          if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
+          commitClaim()
           result = await this.step(turn, step, signal)
         } finally {
           // step/end must close the step even when the request throws (e.g. cancellation),

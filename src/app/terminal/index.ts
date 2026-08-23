@@ -5,7 +5,9 @@
  * streaming output from durable `assistant/chunk` events, answers approval
  * frames by their durable ids, steers the running turn by typing, and cancels
  * on Ctrl+C. Attaching to a stored session (resume/fork) is prepared host-side
- * by the app assembly; the client then drives the live session over the wire.
+ * by the app assembly; the client then drives the live session over the wire —
+ * transcript snapshot first, live rendering only from the seq after it, so a
+ * self-waking resumed session never renders twice.
  */
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
@@ -41,6 +43,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   const host = await startProtocolHost({ ...options, input: toHost, output: fromHost })
   const out = options.io?.output ?? process.stdout
   const renderer = new TerminalRenderer()
+  const attaching = options.resumeId !== undefined || options.forkId !== undefined
 
   let done!: (code: number) => void
   const finished = new Promise<number>((resolve) => {
@@ -59,6 +62,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   let pendingApproval: { id: string; toolName: string } | undefined
   let exiting = false
   let lastInterrupt = 0
+  /** Until the attach snapshot is rendered, live frames wait in the backlog. */
+  let attached = !attaching
+  let liveFromSeq = 0
+  const backlog: SessionEventFrame[] = []
 
   const prompt = (): void => {
     if (!exiting) out.write('you> ')
@@ -67,26 +74,35 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     out.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
   }
 
+  const askApproval = (data: { id: string; toolName: string; reason?: string }): void => {
+    pendingApproval = { id: data.id, toolName: data.toolName }
+    out.write(`approve ${data.toolName}${data.reason ? ` (${data.reason})` : ''}? [y/N] `)
+  }
+
+  const handleFrame = (frame: SessionEventFrame): void => {
+    if (sessionId !== undefined && frame.sessionId !== sessionId) return
+    if (frame.event.seq < liveFromSeq) return // already in the rendered snapshot
+    const text = renderer.onEvent(frame.event)
+    if (text) out.write(text)
+    if (frame.event.type === 'approval/asked') {
+      askApproval(frame.event.data as { id: string; toolName: string; reason?: string })
+    } else if (frame.event.type === 'approval/decided') {
+      // Settled elsewhere (cancelled turn, another answerer): stop asking.
+      if (pendingApproval?.id === (frame.event.data as { id: string }).id) pendingApproval = undefined
+    }
+  }
+
   const client = new ProtocolClient(fromHost, toHost, {
     onNotification: (method, params) => {
       if (method === 'session.event') {
         const frame = params as SessionEventFrame
-        if (sessionId !== undefined && frame.sessionId !== sessionId) return
-        const text = renderer.onEvent(frame.event)
-        if (text) out.write(text)
-        if (frame.event.type === 'approval/asked') {
-          const data = frame.event.data as { id: string; toolName: string; reason?: string }
-          pendingApproval = { id: data.id, toolName: data.toolName }
-          out.write(`approve ${data.toolName}${data.reason ? ` (${data.reason})` : ''}? [y/N] `)
-        } else if (frame.event.type === 'approval/decided') {
-          // Settled elsewhere (cancelled turn, another answerer): stop asking.
-          if (pendingApproval?.id === (frame.event.data as { id: string }).id) pendingApproval = undefined
-        }
+        if (!attached) backlog.push(frame)
+        else handleFrame(frame)
       } else if (method === 'session.status') {
         const projected = params as { sessionId: string; status: 'idle' | 'running' }
         if (sessionId !== undefined && projected.sessionId !== sessionId) return
         status = projected.status
-        if (status === 'idle') prompt()
+        if (status === 'idle' && attached) prompt()
       }
     },
     onEnd: () => void exit(1),
@@ -94,9 +110,12 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
 
   const rl = createInterface({ input: options.io?.input ?? process.stdin, terminal: false })
 
+  const onSigint = (): void => void onInterrupt()
+
   async function exit(code: number): Promise<void> {
     if (exiting) return
     exiting = true
+    if (!options.io) process.removeListener('SIGINT', onSigint)
     try {
       await client.request('shutdown')
     } catch {
@@ -156,9 +175,18 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     await exit(0)
   }
 
-  rl.on('line', (raw) => void onLine(raw))
+  // Lines are strictly serialized: a pasted second line waits for the first
+  // prompt's response, sees its sessionId, and becomes a followup/steer instead
+  // of creating a second session.
+  let lineChain: Promise<void> = Promise.resolve()
+  const enqueueLine = (raw: string): void => {
+    lineChain = lineChain.then(() => onLine(raw)).catch(printError)
+  }
+  rl.on('line', enqueueLine)
   rl.on('close', () => void exit(0))
-  rl.on('SIGINT', () => void onInterrupt())
+  // readline never emits 'SIGINT' with terminal:false — on a real TTY Ctrl+C
+  // arrives as the process signal, so the interrupt handler must live there.
+  if (!options.io) process.on('SIGINT', onSigint)
 
   try {
     const init = await client.request<InitializeResult>('initialize')
@@ -166,7 +194,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const model = overrides.model ?? init.defaultAgentOptions.model
     out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model} (/exit quits, Ctrl+C cancels)\n`)
 
-    if (options.resumeId !== undefined || options.forkId !== undefined) {
+    if (attaching) {
       const agents = host.root.get(AGENTS)
       const continueOptions = { agentOptions: overrides, defaults: init.defaultAgentOptions }
       const handle =
@@ -174,13 +202,30 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
           ? await agents.resume(host.root, asSessionId(options.resumeId), continueOptions)
           : await agents.fork(host.root, asSessionId(options.forkId!), options.boundary, continueOptions)
       sessionId = handle.agent.id
+      // Snapshot first; live rendering starts at the seq after it, and the
+      // backlog replays whatever streamed while we attached (a resumed session
+      // may have woken on its restored inbox already).
       const history = await client.request<EventsResult>('session/events', { sessionId })
       const transcript = renderHistory(history.events)
       if (transcript) out.write(transcript)
       out.write(options.resumeId !== undefined ? `resumed ${sessionId}\n` : `forked ${options.forkId} → ${sessionId}\n`)
+      liveFromSeq = history.events.length === 0 ? 0 : history.events.at(-1)!.seq + 1
+      // A prompt already pending in the snapshot (asked, never decided) still needs an answer.
+      const asked = new Map<string, { id: string; toolName: string; reason?: string }>()
+      for (const event of history.events) {
+        if (event.type === 'approval/asked') {
+          const data = event.data as { id: string; toolName: string; reason?: string }
+          asked.set(data.id, data)
+        } else if (event.type === 'approval/decided') {
+          asked.delete((event.data as { id: string }).id)
+        }
+      }
+      for (const data of asked.values()) askApproval(data)
+      attached = true
+      for (const frame of backlog.splice(0)) handleFrame(frame)
     }
 
-    if (options.task !== undefined && options.task.length > 0) await onLine(options.task)
+    if (options.task !== undefined && options.task.length > 0) enqueueLine(options.task)
     else if (status === 'idle') prompt()
   } catch (error) {
     printError(error)

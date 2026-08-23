@@ -127,7 +127,9 @@ describe('persistence-jsonl: resume attach', () => {
       seed: stored.events,
       origin: 'resumed',
     })
-    expect(readFileSync(`${fileFor(base, 'torn')}.torn`, 'utf8')).toBe('{"type":"assistant/chu')
+    const sidecar = readFileSync(`${fileFor(base, 'torn')}.torn`, 'utf8')
+    expect(sidecar).toContain('{"type":"assistant/chu')
+    expect(sidecar).toMatch(/^# torn .+ \(22 bytes\)\n/) // fragments stay individually recoverable
     const after = readFileSync(fileFor(base, 'torn'))
     expect(after.subarray(0, intact.length).equals(intact)).toBe(true)
   })
@@ -149,23 +151,45 @@ describe('persistence-jsonl: resume attach', () => {
       seed: stored.events,
       origin: 'resumed',
     })
-    await expect(resumed.flush()).rejects.toSatisfy((error: unknown) => {
+    const damagedFlush = (error: unknown): boolean => {
       const first = (error as AggregateError).errors?.[0] as Error
       return /damaged/.test(first?.message ?? '')
+    }
+    await expect(resumed.flush()).rejects.toSatisfy(damagedFlush)
+    // A failed publication is permanent: EVERY flush keeps failing, not just the first.
+    await expect(resumed.flush()).rejects.toSatisfy(damagedFlush)
+  })
+
+  it('refuses to snapshot over an existing stored log (only resume may touch it)', async () => {
+    const { sessions } = await mount()
+    sessions.create({ cwd: '/w', id: asSessionId('dup') })
+    appendTurn(sessions, 'dup', 1)
+    await sessions.detach(sessions.get(asSessionId('dup'))!)
+
+    const clobber = sessions.create({ cwd: '/w', id: asSessionId('dup') }) // fresh, same id, NOT resumed
+    await expect(clobber.flush()).rejects.toSatisfy((error: unknown) => {
+      const first = (error as AggregateError).errors?.[0] as Error
+      return /already exists/.test(first?.message ?? '')
     })
+    // The stored log is intact.
+    const stored = root!.get(PERSISTENCE).load('dup')!
+    expect(stored.events.map((event) => event.type)).toEqual(['turn/start', 'user/message', 'turn/end'])
   })
 })
 
 describe('persistence-jsonl: the read Definition', () => {
-  it('lists stored headers newest first and loads by id', async () => {
-    const { sessions } = await mount()
+  it('lists stored headers newest first, loads by id, and skips foreign .jsonl files', async () => {
+    const { sessions, base } = await mount()
     sessions.create({ cwd: '/w', id: asSessionId('older'), createdAt: 1000 })
     appendTurn(sessions, 'older', 1)
     sessions.create({ cwd: '/w', id: asSessionId('newer'), createdAt: 2000 })
     appendTurn(sessions, 'newer', 1)
+    // A stray .jsonl whose first line is valid JSON but no session header.
+    appendFileSync(join(base, 'notes.jsonl'), '{"type":"turn/start","seq":0,"time":1,"data":{}}\n')
     const persistence = root!.get(PERSISTENCE)
     expect(persistence.list().map((header) => header.id)).toEqual(['newer', 'older'])
     expect(persistence.load('missing')).toBeUndefined()
+    expect(persistence.load('notes')).toBeUndefined()
     expect(persistence.load('older')!.events).toHaveLength(3)
   })
 })

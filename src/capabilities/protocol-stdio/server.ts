@@ -68,6 +68,8 @@ export class ProtocolServer {
   private readonly owned = new Map<string, AgentHandle>()
   /** In-flight resumes, so concurrent prompts for one stored id share a transaction. */
   private readonly resuming = new Map<string, Promise<Agent>>()
+  /** Every in-flight acquire, so shutdown can drain creations racing it. */
+  private readonly inflight = new Set<Promise<Agent>>()
   private closed = false
   private shuttingDown = false
 
@@ -151,7 +153,24 @@ export class ProtocolServer {
     const text = requireString(params, 'text', 'session/prompt')
     const mode = params.mode ?? 'followup'
     if (mode !== 'followup' && mode !== 'steer') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "mode" must be "followup" or "steer"')
-    const agent = await this.acquire(params)
+    const acquiring = this.acquire(params)
+    this.inflight.add(acquiring)
+    let agent: Agent
+    try {
+      agent = await acquiring
+    } finally {
+      this.inflight.delete(acquiring)
+    }
+    // A shutdown that raced this acquire has already swept `owned`: dispose the
+    // straggler instead of starting a turn after shutdown was answered.
+    if (this.shuttingDown) {
+      const handle = this.owned.get(agent.id)
+      if (handle) {
+        this.owned.delete(agent.id)
+        await handle.dispose()
+      }
+      throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+    }
     const message = createUserMessage(text)
     if (mode === 'steer') agent.steer(message)
     else agent.followup(message)
@@ -198,7 +217,7 @@ export class ProtocolServer {
     if (live) return { header: live.header, events: live.events.slice(fromSeq) }
     const stored = this.ctx.tryGet(PERSISTENCE)?.load(sessionId)
     if (!stored) throw new RpcFailure(INTERNAL_ERROR, `no session "${sessionId}"`)
-    return { header: stored.header, events: stored.events.slice(fromSeq) }
+    return { header: stored.header, events: stored.events.slice(fromSeq), ...(stored.damaged ? { damaged: true as const } : {}) }
   }
 
   private cancel(params: Record<string, unknown>): Record<string, never> {
@@ -227,9 +246,14 @@ export class ProtocolServer {
   /** Dispose-to-idle: owned turns close as `cancelled` and flush; durable queues survive for the next resume. */
   private async shutdown(): Promise<Record<string, never>> {
     this.shuttingDown = true
-    const handles = [...this.owned.values()]
-    this.owned.clear()
-    for (const handle of handles) await handle.dispose()
+    // Drain acquires racing the shutdown before sweeping, and sweep again for
+    // whatever they registered; `shuttingDown` stops new acquires at the door.
+    while (this.inflight.size > 0 || this.owned.size > 0) {
+      if (this.inflight.size > 0) await Promise.allSettled(this.inflight)
+      const handles = [...this.owned.values()]
+      this.owned.clear()
+      for (const handle of handles) await handle.dispose()
+    }
     return {}
   }
 

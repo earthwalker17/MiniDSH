@@ -163,6 +163,11 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   }
   const atRaw = args.flags.get('at')
   const boundary = typeof atRaw === 'string' ? Number(atRaw) : undefined
+  // A typo'd --at must not silently fork at the log head.
+  if (atRaw !== undefined && (typeof atRaw !== 'string' || atRaw.trim() === '' || !Number.isInteger(boundary))) {
+    process.stderr.write(`--at expects an integer event seq, got "${String(atRaw)}"\n`)
+    return 2
+  }
   const approve = args.flags.get('approve') === true
 
   if (!headless) {
@@ -280,6 +285,8 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
       }
       if (args.flags.get('json') === true) {
         for (const event of stored.events) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, event })}\n`)
+        // Machine readers must see damage too: a trailer object (no `event` field) a frame consumer skips.
+        if (stored.damaged) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, damaged: true })}\n`)
       } else {
         process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
         for (const event of stored.events) {

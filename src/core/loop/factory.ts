@@ -77,8 +77,10 @@ class LoopFactory implements AgentFactory {
       throw error
     }
     // A restored inbox may already owe work (a followup queued before a crash);
-    // only after publication may the first turn begin.
-    agent.wakeIfPending()
+    // only after publication may the first turn begin — and only for a RESUMED
+    // session: a fork is a passive branch, and creating it must not start a
+    // paid turn (the restored queue still enters that fork's next real turn).
+    if (session.origin === 'resumed') agent.wakeIfPending()
     return { agent, dispose }
   }
 }

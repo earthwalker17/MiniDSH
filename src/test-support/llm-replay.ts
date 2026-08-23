@@ -39,13 +39,12 @@ export function deriveReplayScript(events: readonly EventEnvelope[]): StreamChun
     }
     group.chunks.push(event.data.chunk as unknown as StreamChunk)
   }
-  const script = order.map((key) => groups.get(key)!.chunks)
-  // A trailing group with no terminal finish is a crash artifact: the process
-  // died mid-stream, the agent never acted on it, and replaying it would end a
-  // stream without finish (a protocol violation). Drop it.
-  const last = script.at(-1)
-  if (last && !last.some((chunk) => chunk.type === 'finish')) script.pop()
-  return script
+  // A group with no terminal finish is a crash artifact: the runtime always
+  // normalizes to a terminal finish, so its absence means the process died
+  // mid-stream and the agent never acted on the group. In a resumed log the
+  // artifact sits MID-log (completed turns follow it), so every finish-less
+  // group is dropped — replaying one would silently desynchronize the script.
+  return order.map((key) => groups.get(key)!.chunks).filter((chunks) => chunks.some((chunk) => chunk.type === 'finish'))
 }
 
 class ReplayAdapter implements LlmAdapter {

@@ -84,6 +84,8 @@ export interface EventsParams {
 export interface EventsResult {
   readonly header: SessionHeader
   readonly events: readonly EventEnvelope[]
+  /** The store holds bytes beyond `events` (corruption past a torn tail): the stream is a readable prefix, not the whole session. */
+  readonly damaged?: true
 }
 
 export interface CancelParams {

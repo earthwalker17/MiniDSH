@@ -254,6 +254,35 @@ describe('agents.fork', () => {
     await parent.dispose()
   })
 
+  it('is born idle even when the branch carries pending waking input (fork is a passive branch)', async () => {
+    const { harness: h } = await persistedHarness()
+    h.adapter.script(assistantText('first'))
+    const first = await h.create()
+    const id = first.agent.id
+    first.agent.followup(createUserMessage('hi'))
+    await first.agent.whenIdle()
+    first.agent.send(createUserMessage('queued for later'), 'next-turn', false)
+    await first.dispose()
+
+    const child = await h.root.get(AGENTS).fork(h.root, id)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    // Creating a branch must not start a paid turn — unlike resume.
+    expect(child.agent.status).toBe('idle')
+    expect(child.agent.session.events.filter((event) => event.type === 'turn/start')).toHaveLength(1)
+
+    // The restored queue still enters the fork's next real turns, FIFO.
+    h.adapter.script(assistantText('branch one'), assistantText('branch two'))
+    child.agent.followup(createUserMessage('go'))
+    await child.agent.whenIdle()
+    const texts = child.agent.session
+      .deriveMessages()
+      .filter((message) => message.role === 'user')
+      .map((message) => (message.content[0] as { text: string }).text)
+    expect(texts).toContain('queued for later')
+    expect(texts).toContain('go')
+    await child.dispose()
+  })
+
   it('forks a stored crashed session cold, repairing it first', async () => {
     const { harness: h } = await persistedHarness()
     storeCrashedLog(h, 'cold')

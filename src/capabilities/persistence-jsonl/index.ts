@@ -10,7 +10,7 @@
  * parse error or seq gap) marks the stored session `damaged` on read and
  * refuses attach.
  */
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { PERSISTENCE, type Persistence, type StoredSession } from '../../core/persistence/index.ts'
@@ -71,7 +71,11 @@ function scanSessionFile(file: string): ScanResult | undefined {
     }
     if (first) {
       try {
-        header = JSON.parse(line) as SessionHeader
+        const parsed = JSON.parse(line) as Partial<HeaderLine>
+        // Shape-check the discriminator the writer stamps: a stray .jsonl whose
+        // first line is some other JSON must read as "not a session", not crash.
+        if (parsed.kind !== 'session' || typeof parsed.id !== 'string' || typeof parsed.createdAt !== 'number') return undefined
+        header = parsed as SessionHeader
       } catch {
         return undefined
       }
@@ -111,7 +115,10 @@ function listStoredHeaders(root: string): SessionHeader[] {
   for (const name of names) {
     try {
       const first = readFileSync(join(root, name), 'utf8').split('\n', 1)[0]
-      if (first) headers.push(JSON.parse(first) as SessionHeader)
+      if (!first) continue
+      const parsed = JSON.parse(first) as Partial<HeaderLine>
+      if (parsed.kind !== 'session' || typeof parsed.id !== 'string' || typeof parsed.createdAt !== 'number') continue
+      headers.push(parsed as SessionHeader)
     } catch {
       // Skip an unreadable file.
     }
@@ -147,6 +154,12 @@ class JsonlArchive implements Persistence {
 
   /** The fresh/fork path: one whole-file write of the header plus every event so far. */
   private snapshot(session: Session, file: string): void {
+    // The store's duplicate-id throw guards LIVE ids only; the stored plane
+    // guards itself: a non-resumed publication must never overwrite a stored
+    // log (resume attaches; a fork mints a new id).
+    if (existsSync(file)) {
+      throw new Error(`session ${session.id}: a stored log with this id already exists; refusing to overwrite`)
+    }
     const header: HeaderLine = { kind: 'session', ...session.header }
     const lines = [JSON.stringify(header), ...session.events.map((event) => JSON.stringify(event))]
     writeFileSync(file, `${lines.join('\n')}\n`, 'utf8')
@@ -168,9 +181,13 @@ class JsonlArchive implements Persistence {
       throw new Error(`session ${session.id}: stored log is longer than the resumed session; refusing to attach`)
     }
     if (scan.tail === 'torn-line') {
-      // Preserve the crash artifact in a sidecar rather than destroying bytes.
+      // Preserve the crash artifact in a sidecar rather than destroying bytes;
+      // a delimiter keeps fragments from successive crashes individually
+      // recoverable (a torn fragment never ends in a newline).
       const torn = readFileSync(file).subarray(scan.validBytes)
+      appendFileSync(`${file}.torn`, `# torn ${new Date().toISOString()} (${torn.length} bytes)\n`)
       appendFileSync(`${file}.torn`, torn)
+      appendFileSync(`${file}.torn`, '\n')
       truncateSync(file, scan.validBytes)
     }
     const delta = session.events.slice(scan.events.length)
@@ -186,6 +203,10 @@ class JsonlArchive implements Persistence {
       appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8')
     } catch (error) {
       if (!this.failures.has(session)) this.failures.set(session, error)
+      // Quarantine the file: appending a LATER event after a dropped one would
+      // fabricate a seq gap and poison the stored log permanently. From here
+      // the session is dropped-and-flagged (every flush keeps failing).
+      this.files.delete(session)
     }
   }
 
@@ -196,6 +217,7 @@ class JsonlArchive implements Persistence {
     if (!file || session.events.length > 0) return
     try {
       unlinkSync(file)
+      unlinkSync(`${file}.torn`)
     } catch {
       // Already gone or unremovable; a header-only file is harmless.
     }
@@ -205,7 +227,11 @@ class JsonlArchive implements Persistence {
   onFlush(session: Session): void {
     const failure = this.failures.get(session)
     if (failure === undefined) return
-    this.failures.delete(session)
+    // A session with no live file entry (failed publication, or quarantined
+    // after a dropped append) is permanently un-persisted: EVERY flush must
+    // keep failing, not just the first. Only a transient error on a session
+    // still being written is cleared once reported.
+    if (this.files.has(session)) this.failures.delete(session)
     throw new Error(`session ${session.id} could not be persisted: ${failure instanceof Error ? failure.message : String(failure)}`, {
       cause: failure,
     })

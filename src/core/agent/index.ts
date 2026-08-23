@@ -306,11 +306,15 @@ function resolveSeedAgentOptions(seed: readonly EventEnvelope[], options: Resume
   const header = foldRequestHeader(seed)
   const merged: Record<string, unknown> = { ...options.defaults }
   if (header) {
+    // The header is the whole model-config authority: an optional it omits was
+    // genuinely absent, so a default must not resurrect it. Only `maxSteps`
+    // survives from defaults — it is deliberately not model-visible.
     merged.provider = header.provider
     merged.model = header.model
-    if (header.reasoningEffort !== undefined) merged.reasoningEffort = header.reasoningEffort
-    if (header.maxTokens !== undefined) merged.maxTokens = header.maxTokens
-    if (header.temperature !== undefined) merged.temperature = header.temperature
+    for (const key of ['reasoningEffort', 'maxTokens', 'temperature'] as const) {
+      if (header[key] !== undefined) merged[key] = header[key]
+      else delete merged[key]
+    }
   }
   for (const [key, value] of Object.entries(options.agentOptions ?? {})) {
     if (value !== undefined) merged[key] = value
