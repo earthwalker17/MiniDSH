@@ -67,6 +67,7 @@ export class ReactLoopAgent implements Agent {
   private deps: LoopDeps | undefined
   private readonly maxSteps: number
   private turnCount = 0
+  private firstLiveTurn = 1
   private abort = new AbortController()
   private running = false
   private disposed = false
@@ -84,13 +85,14 @@ export class ReactLoopAgent implements Agent {
   attach(ctx: Context): void {
     this._ctx = ctx
     this.deps = { llm: ctx.get(LLM), tools: ctx.get(TOOLS), prompt: ctx.get(PROMPT) }
-    // A seeded (forked) session already contains turns; numbering must continue, not restart.
+    // A seeded (forked/resumed) session already contains turns; numbering must continue, not restart.
     for (const event of this.session.events) {
       if (event.type === TURN_START.type) {
         const turn = (event.data as { turn: number }).turn
         if (turn > this.turnCount) this.turnCount = turn
       }
     }
+    this.firstLiveTurn = this.turnCount + 1
   }
 
   get ctx(): Context {
@@ -266,7 +268,10 @@ export class ReactLoopAgent implements Agent {
     const header = this.buildHeader(config, assembled)
     const folded = this.session.foldRequestHeader()
     if (!folded || JSON.stringify(folded) !== JSON.stringify(header)) {
-      this.session.append(REQUEST_HEADER, { turn, step, header, reason: folded ? 'change' : 'initial' })
+      // A change surfacing at the first step of a resumed lifecycle is explained
+      // by the resume (new composition, new tools) rather than a mid-run switch.
+      const resume = this.session.origin === 'resumed' && turn === this.firstLiveTurn && step === 1
+      this.session.append(REQUEST_HEADER, { turn, step, header, reason: !folded ? 'initial' : resume ? 'resume' : 'change' })
     }
 
     const messages = this.session.deriveMessages()

@@ -69,6 +69,23 @@ export interface AgentFactory {
   create(owner: Context, options: CreateAgentOptions): Promise<AgentHandle>
 }
 
+/**
+ * Options for continuing a stored session (`agents.resume` / `agents.fork`).
+ * Model config precedence: explicit `agentOptions` overrides > the seed's own
+ * folded `request/header` (the log is its own config authority) > `defaults`
+ * (a surface's default model, used only when the log recorded no request).
+ */
+export interface ResumeAgentOptions {
+  readonly agentOptions?: Partial<AgentOptions>
+  readonly defaults?: AgentOptions
+  readonly setup?: CreateAgentOptions['setup']
+}
+
+export interface ForkAgentOptions extends ResumeAgentOptions {
+  /** Explicit child session id; minted otherwise. */
+  readonly sessionId?: SessionId
+}
+
 // ---- pre-step / request interception --------------------------------------
 
 export interface PreStepContext {

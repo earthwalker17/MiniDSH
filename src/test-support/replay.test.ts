@@ -71,6 +71,21 @@ describe('llm-replay', () => {
     })
     await replayWithoutRetry(legacy)
   })
+
+  it('drops a trailing finish-less chunk group (a crash mid-stream) instead of replaying a protocol violation', async () => {
+    const recorded = await record()
+    const { deriveReplayScript } = await import('./llm-replay.ts')
+    const whole = deriveReplayScript(recorded.events)
+    expect(whole).toHaveLength(2)
+    // Simulate a crash mid-stream on a later step: chunks with no terminal finish.
+    const seq = recorded.events.length
+    const crashed = [
+      ...recorded.events,
+      { type: 'assistant/chunk', seq, time: 1, data: { turn: 2, step: 1, attempt: 1, chunk: { type: 'block-start', index: 0, blockType: 'text' } } },
+      { type: 'assistant/chunk', seq: seq + 1, time: 1, data: { turn: 2, step: 1, attempt: 1, chunk: { type: 'text-delta', index: 0, text: 'cut of' } } },
+    ] as unknown as Recorded
+    expect(deriveReplayScript(crashed)).toHaveLength(2)
+  })
 })
 
 type Recorded = readonly import('../core/session/index.ts').EventEnvelope[]

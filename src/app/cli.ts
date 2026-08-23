@@ -10,7 +10,7 @@ import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { compose, defaultDialect } from './compose.ts'
-import { runTask } from './headless.ts'
+import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { sessionsDir } from './home.ts'
 
 interface ParsedArgs {
@@ -19,7 +19,7 @@ interface ParsedArgs {
   readonly flags: Map<string, string | true>
 }
 
-const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps'])
+const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at'])
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
@@ -90,13 +90,6 @@ async function runCommand(args: ParsedArgs): Promise<number> {
     return 0
   }
 
-  const onEvent = json
-    ? (event: EventEnvelope) => process.stdout.write(`${JSON.stringify(event)}\n`)
-    : (event: EventEnvelope) => {
-        const line = renderEvent(event)
-        if (line) process.stderr.write(`${line}\n`)
-      }
-
   try {
     const result = await runTask(
       {
@@ -108,12 +101,59 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
         approve: args.flags.get('approve') === true,
       },
-      onEvent,
+      eventPrinter(json),
     )
-    if (!json) process.stdout.write(`${result.text}\n`)
-    if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
-    process.stderr.write(`session: ${result.sessionId}\n`)
-    return result.exitCode
+    return finishTask(result, json)
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
+  }
+}
+
+function eventPrinter(json: boolean): EventListener {
+  return json
+    ? (event: EventEnvelope) => process.stdout.write(`${JSON.stringify(event)}\n`)
+    : (event: EventEnvelope) => {
+        const line = renderEvent(event)
+        if (line) process.stderr.write(`${line}\n`)
+      }
+}
+
+function finishTask(result: TaskResult, json: boolean): number {
+  if (!json) process.stdout.write(`${result.text}\n`)
+  if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
+  process.stderr.write(`session: ${result.sessionId}\n`)
+  return result.exitCode
+}
+
+/** `minidsh resume <id> "task"` / `minidsh fork <id> "task" [--at seq]` — headless one-shots. */
+async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promise<number> {
+  const id = args.positional[0]
+  const task = args.positional.slice(1).join(' ').trim()
+  if (!id || task.length === 0) {
+    process.stderr.write(`usage: minidsh ${kind} <id> "<task>"${kind === 'fork' ? ' [--at seq]' : ''} [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n`)
+    return 2
+  }
+  const json = args.flags.get('json') === true
+  const model = args.flags.get('model')
+  const effort = args.flags.get('effort')
+  const maxStepsRaw = args.flags.get('max-steps')
+  const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
+  const atRaw = args.flags.get('at')
+  const boundary = typeof atRaw === 'string' ? Number(atRaw) : undefined
+  const options: ContinueOptions = {
+    id,
+    task,
+    sessionsRoot: sessionsDir(),
+    ...(typeof model === 'string' ? { model } : {}),
+    ...(typeof effort === 'string' ? { reasoningEffort: effort } : {}),
+    ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
+    ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
+    approve: args.flags.get('approve') === true,
+  }
+  try {
+    const result = kind === 'resume' ? await resumeTask(options, eventPrinter(json)) : await forkTask(options, eventPrinter(json))
+    return finishTask(result, json)
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
     return 1
@@ -181,10 +221,21 @@ export async function main(argv: readonly string[]): Promise<number> {
   switch (args.command) {
     case 'run':
       return runCommand(args)
+    case 'resume':
+      return continueCommand(args, 'resume')
+    case 'fork':
+      return continueCommand(args, 'fork')
     case 'sessions':
       return sessionsCommand(args)
     default:
-      process.stdout.write('MiniDSH — usage:\n  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n  minidsh sessions list\n  minidsh sessions show <id> [--json]\n')
+      process.stdout.write(
+        'MiniDSH — usage:\n' +
+          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
+          '  minidsh resume <id> "<task>" [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
+          '  minidsh fork <id> "<task>" [--at seq] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
+          '  minidsh sessions list\n' +
+          '  minidsh sessions show <id> [--json]\n',
+      )
       return args.command === 'help' ? 0 : 2
   }
 }
