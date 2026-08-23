@@ -14,7 +14,7 @@ import { createUserMessage } from '../core/llm/message.ts'
 import { applyPatches, compose, defaultAgentOptions, defaultDialect, mount, type Patch } from './compose.ts'
 import type { ShellDialect } from '../capabilities/shell-stdio/index.ts'
 
-interface BootOptions {
+export interface BootOptions {
   readonly approve?: boolean
   readonly invariants?: boolean
   readonly sessionsRoot: string
@@ -59,7 +59,8 @@ export type EventListener = (frame: SessionEventFrame) => void
 
 const silentLogger: Logger = { warn: () => {}, error: () => {} }
 
-async function boot(options: BootOptions, onEvent?: EventListener): Promise<Context> {
+/** Compose → mount → settle (fail loud) → prepare; the shared boot for every app entry. */
+export async function bootComposition(options: BootOptions, onEvent?: EventListener): Promise<Context> {
   const root = createRoot({ logger: options.logger ?? silentLogger })
   const rows = applyPatches(
     compose({
@@ -106,7 +107,7 @@ async function drive(handle: AgentHandle, task: string | undefined): Promise<Tas
 }
 
 export async function runTask(options: TaskOptions, onEvent?: EventListener): Promise<TaskResult> {
-  const root = await boot(options, onEvent)
+  const root = await bootComposition(options, onEvent)
   try {
     const agentOptions: AgentOptions = {
       provider: options.provider ?? defaultAgentOptions().provider,
@@ -135,7 +136,7 @@ function continueArgs(options: ContinueOptions): { agentOptions: Partial<AgentOp
 }
 
 export async function resumeTask(options: ContinueOptions, onEvent?: EventListener): Promise<TaskResult> {
-  const root = await boot(options, onEvent)
+  const root = await bootComposition(options, onEvent)
   try {
     const handle = await root.get(AGENTS).resume(root, asSessionId(options.id), continueArgs(options))
     return await drive(handle, options.task)
@@ -145,7 +146,7 @@ export async function resumeTask(options: ContinueOptions, onEvent?: EventListen
 }
 
 export async function forkTask(options: ContinueOptions, onEvent?: EventListener): Promise<TaskResult> {
-  const root = await boot(options, onEvent)
+  const root = await bootComposition(options, onEvent)
   try {
     const handle = await root.get(AGENTS).fork(root, asSessionId(options.id), options.boundary, continueArgs(options))
     return await drive(handle, options.task)

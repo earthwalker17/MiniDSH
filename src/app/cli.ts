@@ -12,6 +12,7 @@ import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.
 import { compose, defaultAgentOptions, defaultDialect } from './compose.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { sessionsDir } from './home.ts'
+import { startProtocolHost } from './serve.ts'
 
 interface ParsedArgs {
   readonly command: string
@@ -178,6 +179,25 @@ async function withPersistence<T>(use: (persistence: Persistence) => T): Promise
   }
 }
 
+/** `minidsh serve` — the JSON-RPC protocol on process stdio; stdout carries only frames. */
+async function serveCommand(args: ParsedArgs): Promise<number> {
+  const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
+  try {
+    const host = await startProtocolHost({
+      cwd,
+      sessionsRoot: sessionsDir(),
+      approve: args.flags.get('approve') === true,
+      logger: stderrLogger,
+    })
+    await host.closed
+    await host.dispose()
+    return 0
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
+  }
+}
+
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
   if (sub === 'list') {
@@ -226,6 +246,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       return continueCommand(args, 'resume')
     case 'fork':
       return continueCommand(args, 'fork')
+    case 'serve':
+      return serveCommand(args)
     case 'sessions':
       return sessionsCommand(args)
     default:
@@ -234,6 +256,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
           '  minidsh resume <id> "<task>" [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
           '  minidsh fork <id> "<task>" [--at seq] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
+          '  minidsh serve [--cwd dir] [--approve]\n' +
           '  minidsh sessions list\n' +
           '  minidsh sessions show <id> [--json]\n',
       )

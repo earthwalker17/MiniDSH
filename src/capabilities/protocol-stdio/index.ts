@@ -1,0 +1,66 @@
+/**
+ * The client protocol as a capability: one plugin, two carriers. Mounted on
+ * real process stdio it serves out-of-process clients (`minidsh serve`);
+ * mounted on an in-process duplex stream pair it serves the terminal surface —
+ * same frames, same semantics, no shared objects. It injects `agents` and
+ * `sessions` (the surface contract) plus `llm` read-only for the initialize
+ * catalog; `persistence` is deliberately NOT injected (a declared-but-absent
+ * key would pend the plugin forever in persistence-less compositions) — cold
+ * reads use a call-time optional lookup.
+ */
+import type { Plugin } from '../../kernel/index.ts'
+import { AGENTS, AGENT_STATUS, type AgentOptions } from '../../core/agent/index.ts'
+import { APPROVAL_REQUEST } from '../../core/approval/index.ts'
+import { LLM } from '../../core/llm/index.ts'
+import { SESSIONS, SESSION_EVENT } from '../../core/session/index.ts'
+import { ProtocolServer } from './server.ts'
+import { NdjsonTransport } from './transport.ts'
+
+export * from './frames.ts'
+export { ProtocolServer } from './server.ts'
+export { NdjsonTransport } from './transport.ts'
+
+export interface ProtocolConfig {
+  /** Defaults: process stdin/stdout. stdout is reserved for frames — log to stderr. */
+  readonly input?: NodeJS.ReadableStream
+  readonly output?: NodeJS.WritableStream
+  readonly cwd?: string
+  readonly defaultAgentOptions: AgentOptions
+  readonly serverVersion?: string
+  /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
+  readonly onClose?: () => void
+}
+
+export const protocolStdioPlugin: Plugin<ProtocolConfig> = {
+  name: 'protocol-stdio',
+  inject: [AGENTS, SESSIONS, LLM],
+  apply(ctx, config) {
+    const input = config.input ?? process.stdin
+    const output = config.output ?? process.stdout
+    const transport = new NdjsonTransport(input, output)
+    const server = new ProtocolServer(
+      ctx,
+      {
+        cwd: config.cwd ?? process.cwd(),
+        defaultAgentOptions: config.defaultAgentOptions,
+        serverVersion: config.serverVersion ?? '0.1.0',
+        ...(config.onClose === undefined ? {} : { onClose: config.onClose }),
+      },
+      (frame) => transport.send(frame),
+    )
+    ctx.on(SESSION_EVENT, (session, event) => server.onSessionEvent(session, event))
+    ctx.on(AGENT_STATUS, (agent, status) => server.onAgentStatus(agent, status))
+    ctx.on(APPROVAL_REQUEST, (prompt, next) => server.answerApproval(prompt, next))
+    ctx.effect(() => {
+      transport.start({
+        onFrame: (frame) => void server.onFrame(frame),
+        onEnd: () => server.close(),
+        onMalformed: (line) => ctx.logger.warn(`protocol-stdio: ignoring malformed frame: ${line.slice(0, 120)}`),
+      })
+      return () => {
+        server.close()
+        transport.stop()
+      }
+    }, 'protocol-transport')
+  },
+}
