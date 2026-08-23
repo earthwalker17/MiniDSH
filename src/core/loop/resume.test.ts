@@ -140,6 +140,97 @@ describe('agents.resume', () => {
   })
 })
 
+describe('durable inbox', () => {
+  it('records inserts, claims, and user clears; the fold of a settled log is empty', async () => {
+    const { harness: h } = await persistedHarness()
+    const { foldInbox } = await import('../agent/index.ts')
+    h.adapter.script(assistantText('done'))
+    const { agent } = await h.create()
+    agent.followup(createUserMessage('hi'))
+    await agent.whenIdle()
+    const splices = () => agent.session.events.filter((event) => event.type === 'inbox/spliced').map((event) => event.data as { op: string })
+    expect(splices().map((splice) => splice.op)).toEqual(['insert', 'claim'])
+    expect(splices().at(-1)).toMatchObject({ op: 'claim', steps: 0, turns: 1 })
+
+    const { createPluginMessage } = await import('../llm/message.ts')
+    agent.inject(createPluginMessage('test', 'quiet context'))
+    agent.cancel({ kind: 'user' })
+    expect(splices().map((splice) => splice.op)).toEqual(['insert', 'claim', 'insert', 'clear'])
+    const folded = foldInbox(agent.session.events)
+    expect(folded.turnQueue).toEqual([])
+    expect(folded.stepQueue).toEqual([])
+  })
+
+  it('a queued prompt survives graceful teardown and self-runs on resume', async () => {
+    const { harness: h } = await persistedHarness()
+    h.adapter.script(assistantText('first answer'))
+    const first = await h.create()
+    const id = first.agent.id
+    first.agent.followup(createUserMessage('hi'))
+    await first.agent.whenIdle()
+    // Queued without waking: still pending when the process "goes down".
+    first.agent.send(createUserMessage('finish the report'), 'next-turn', false)
+    await first.dispose() // a disposed-cancel must NOT durably clear the queue
+
+    h.adapter.script(assistantText('report finished'))
+    const resumed = await h.root.get(AGENTS).resume(h.root, id)
+    // No new input: the restored inbox wakes the agent by itself.
+    await resumed.agent.whenIdle()
+    const turns = resumed.agent.session.events.filter((event) => event.type === 'turn/start')
+    expect(turns).toHaveLength(2)
+    const lastUser = resumed.agent.session
+      .deriveMessages()
+      .filter((message) => message.role === 'user')
+      .at(-1)!
+    expect((lastUser.content[0] as { text: string }).text).toBe('finish the report')
+    await resumed.dispose()
+  })
+
+  it('a user cancel durably clears: resume restores nothing and stays idle', async () => {
+    const { harness: h } = await persistedHarness()
+    h.adapter.script(assistantText('one'))
+    const first = await h.create()
+    const id = first.agent.id
+    first.agent.followup(createUserMessage('hi'))
+    await first.agent.whenIdle()
+    first.agent.send(createUserMessage('never mind'), 'next-turn', false)
+    first.agent.cancel({ kind: 'user' })
+    await first.dispose()
+
+    const resumed = await h.root.get(AGENTS).resume(h.root, id)
+    await resumed.agent.whenIdle()
+    expect(resumed.agent.status).toBe('idle')
+    expect(resumed.agent.session.events.filter((event) => event.type === 'turn/start')).toHaveLength(1)
+    await resumed.dispose()
+  })
+
+  it('a steer landing during the pre-step await folds correctly (op records, not positions)', async () => {
+    const { harness: h } = await persistedHarness()
+    const { foldInbox, AGENT_PRE_STEP } = await import('../agent/index.ts')
+    h.adapter.script(assistantText('first'), assistantText('second'))
+    const { agent } = await h.create()
+    let steered = false
+    agent.ctx.on(AGENT_PRE_STEP, async (context, next) => {
+      if (!steered) {
+        steered = true
+        // Lands after the claim mutation but is LOGGED before the claim record.
+        context.agent.steer(createUserMessage('also consider this'))
+      }
+      return next()
+    })
+    agent.followup(createUserMessage('hi'))
+    await agent.whenIdle()
+    const folded = foldInbox(agent.session.events)
+    expect(folded.turnQueue).toEqual([])
+    expect(folded.stepQueue).toEqual([])
+    const texts = agent.session
+      .deriveMessages()
+      .filter((message) => message.role === 'user')
+      .map((message) => (message.content[0] as { text: string }).text)
+    expect(texts).toEqual(['hi', 'also consider this'])
+  })
+})
+
 describe('agents.fork', () => {
   it('branches a live session into a new agent with lineage, leaving the source untouched', async () => {
     const { harness: h, dir: base } = await persistedHarness()

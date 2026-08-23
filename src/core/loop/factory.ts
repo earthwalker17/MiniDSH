@@ -76,6 +76,9 @@ class LoopFactory implements AgentFactory {
       await dispose()
       throw error
     }
+    // A restored inbox may already owe work (a followup queued before a crash);
+    // only after publication may the first turn begin.
+    agent.wakeIfPending()
     return { agent, dispose }
   }
 }

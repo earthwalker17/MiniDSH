@@ -9,7 +9,9 @@ import {
   AGENT_REQUEST_ERROR,
   AGENT_STATUS,
   AGENT_TURN_STOPPING,
+  foldInbox,
   Inbox,
+  INBOX_SPLICED,
   type Agent,
   type AgentOptions,
   type AgentStatus,
@@ -78,7 +80,10 @@ export class ReactLoopAgent implements Agent {
     this.session = session
     this.options = options
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS
-    this.inbox = new Inbox((event, message, target) => this.onInbox(event, message, target))
+    this.inbox = new Inbox(
+      (event, message, target) => this.onInbox(event, message, target),
+      (splice) => this.session.append(INBOX_SPLICED, splice),
+    )
   }
 
   /** Called by the factory once the scoped context exists (the agent is its scope key). */
@@ -93,6 +98,14 @@ export class ReactLoopAgent implements Agent {
       }
     }
     this.firstLiveTurn = this.turnCount + 1
+    // A resumed (or forked) log may carry pending input; restore it silently —
+    // the records already in the log are its durable trace.
+    this.inbox.restore(foldInbox(this.session.events))
+  }
+
+  /** Post-publication: run restored waking work without new input (the factory calls this). */
+  wakeIfPending(): void {
+    if (!this.disposed && !this.running && this.inbox.hasWakingPending) void this.run()
   }
 
   get ctx(): Context {
@@ -130,7 +143,9 @@ export class ReactLoopAgent implements Agent {
 
   cancel(cause: CancelCause): void {
     if (cause.kind === 'disposed') this.disposed = true
-    this.inbox.clear()
+    // Graceful teardown must not durably erase the queue the log preserves for
+    // the next resume; a user/hook cancel means it.
+    this.inbox.clear(cause.kind !== 'disposed')
     if (this.running) this.abort.abort(cause)
   }
 
@@ -186,18 +201,21 @@ export class ReactLoopAgent implements Agent {
       while (true) {
         if (signal.aborted) throw new Error('turn aborted')
         step += 1
-        const claimed = this.inbox.claim(firstStep)
+        const { messages: claimed, splice: claimSplice } = this.inbox.claim(firstStep)
         const decision = await this.ctx.waterfall(
           AGENT_PRE_STEP,
           { agent: this, messages: claimed, turn, step, signal },
           async () => ({ kind: 'enter', messages: claimed }) as PreStepDecision,
         )
         if (decision.kind === 'reject') {
+          // The claim is committed with the block that consumed it: durable = live.
+          if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
           reason = { kind: 'blocked' }
           break
         }
         const entered = decision.messages
         if (firstStep && entered.length === 0) {
+          if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
           naturalStop = true
           break
         }
@@ -206,6 +224,10 @@ export class ReactLoopAgent implements Agent {
         try {
           // Inside the try: a message append failure must still close the step.
           for (const message of entered) this.session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'append' } })
+          // The claim record lands AFTER the entered messages: a crash inside the
+          // pre-step await re-delivers a prompt on resume rather than losing it
+          // (the accepted failure mode is a rare double-delivery, never a loss).
+          if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
           result = await this.step(turn, step, signal)
         } finally {
           // step/end must close the step even when the request throws (e.g. cancellation),

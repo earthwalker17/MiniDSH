@@ -5,9 +5,18 @@
  */
 import { emitEvent, serialEvent, serviceKey, waterfallEvent, type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
 import type { SessionId } from '../ids.ts'
+import { restoreMessage } from '../llm/message.ts'
 import type { Message } from '../llm/types.ts'
 import { PERSISTENCE, type StoredSession } from '../persistence/index.ts'
-import { foldRequestHeader, repairInterruptedTail, sliceForkSeed, type EventEnvelope, type Session } from '../session/index.ts'
+import {
+  eventKind,
+  foldRequestHeader,
+  matches,
+  repairInterruptedTail,
+  sliceForkSeed,
+  type EventEnvelope,
+  type Session,
+} from '../session/index.ts'
 import type {
   Agent,
   AgentFactory,
@@ -49,18 +58,65 @@ export const AGENT_TURN_STOPPING = serialEvent<[context: TurnStoppingContext]>('
 type InboxDispatch = (event: 'inserted' | 'discarded' | 'claimed', message: Message, target?: InboxTarget) => void
 
 /**
+ * The durable inbox record: op-shaped mutations, not positional splices —
+ * `claim` drains counts from the FRONT, which keeps the fold correct even for
+ * the one real reorder (an insert landing during the pre-step await is logged
+ * before the deferred claim record but appends to the back either way).
+ */
+export type InboxSplice =
+  | { readonly op: 'insert'; readonly queue: InboxTarget; readonly message: Message; readonly waking?: boolean }
+  | { readonly op: 'claim'; readonly steps: number; readonly turns: number }
+  | { readonly op: 'clear' }
+
+/** Log-only; a resumed session folds these to reconstruct its pending input. */
+export const INBOX_SPLICED = eventKind<InboxSplice>('inbox/spliced')
+
+type InboxRecord = (splice: InboxSplice) => void
+
+export interface InboxState {
+  readonly turnQueue: Message[]
+  readonly stepQueue: { message: Message; waking: boolean }[]
+}
+
+/** Reconstructs the pending inbox from a session log's `inbox/spliced` records. */
+export function foldInbox(events: readonly EventEnvelope[]): InboxState {
+  const turnQueue: Message[] = []
+  const stepQueue: { message: Message; waking: boolean }[] = []
+  for (const event of events) {
+    if (!matches(event, INBOX_SPLICED)) continue
+    const splice = event.data
+    if (splice.op === 'insert') {
+      const message = restoreMessage(splice.message as Parameters<typeof restoreMessage>[0])
+      if (splice.queue === 'next-turn') turnQueue.push(message)
+      else stepQueue.push({ message, waking: splice.waking === true })
+    } else if (splice.op === 'claim') {
+      stepQueue.splice(0, splice.steps)
+      turnQueue.splice(0, splice.turns)
+    } else {
+      turnQueue.length = 0
+      stepQueue.length = 0
+    }
+  }
+  return { turnQueue, stepQueue }
+}
+
+/**
  * Two-list message queue. `next-turn` holds prompts (one claimed per turn);
  * `next-step` holds steering (waking) and injected context (quiet), drained
- * wholesale at each step boundary. Live only in S1 (a durable projection
- * arrives with resume in S2).
+ * wholesale at each step boundary. Mutations are durable via `record`: inserts
+ * and clears at mutation time; a claim's record is RETURNED for the driver to
+ * log after the entered `user/message`s (so a crash in the pre-step await
+ * re-delivers a prompt rather than losing it).
  */
 export class Inbox {
   private readonly turnQueue: Message[] = []
   private readonly stepQueue: { message: Message; waking: boolean }[] = []
   private readonly dispatch: InboxDispatch
+  private readonly record: InboxRecord
 
-  constructor(dispatch: InboxDispatch) {
+  constructor(dispatch: InboxDispatch, record: InboxRecord = () => {}) {
     this.dispatch = dispatch
+    this.record = record
   }
 
   /** There is unconsumed waking work (a queued prompt or a steering message). */
@@ -76,22 +132,40 @@ export class Inbox {
   append(message: Message, target: InboxTarget, waking: boolean): void {
     if (target === 'next-turn') this.turnQueue.push(message)
     else this.stepQueue.push({ message, waking })
+    this.record({ op: 'insert', queue: target, message, ...(target === 'next-step' ? { waking } : {}) })
     this.dispatch('inserted', message, target)
   }
 
   /** Removes all next-step messages plus, on the first step, one next-turn message. */
-  claim(firstStep: boolean): Message[] {
-    const claimed = this.stepQueue.splice(0, this.stepQueue.length).map((entry) => entry.message)
-    if (firstStep && this.turnQueue.length > 0) claimed.unshift(this.turnQueue.shift()!)
+  claim(firstStep: boolean): { messages: Message[]; splice?: InboxSplice } {
+    const steps = this.stepQueue.length
+    const claimed = this.stepQueue.splice(0, steps).map((entry) => entry.message)
+    let turns = 0
+    if (firstStep && this.turnQueue.length > 0) {
+      claimed.unshift(this.turnQueue.shift()!)
+      turns = 1
+    }
     for (const message of claimed) this.dispatch('claimed', message)
-    return claimed
+    return { messages: claimed, ...(steps + turns > 0 ? { splice: { op: 'claim', steps, turns } as const } : {}) }
   }
 
-  clear(): void {
+  /**
+   * Drops everything. `durable: false` (graceful teardown) keeps the log's
+   * queue intact so the next resume still sees it; an empty clear records
+   * nothing either way.
+   */
+  clear(durable: boolean): void {
     const discarded = [...this.stepQueue.map((entry) => entry.message), ...this.turnQueue]
     this.stepQueue.length = 0
     this.turnQueue.length = 0
+    if (durable && discarded.length > 0) this.record({ op: 'clear' })
     for (const message of discarded) this.dispatch('discarded', message)
+  }
+
+  /** Restores a folded durable state (resume): no dispatch, no re-record. */
+  restore(state: InboxState): void {
+    this.turnQueue.push(...state.turnQueue)
+    this.stepQueue.push(...state.stepQueue)
   }
 }
 
