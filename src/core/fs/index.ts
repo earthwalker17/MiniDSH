@@ -5,10 +5,15 @@
  * asks the `fs/edit-intent` single-slot waterfall so a read-before-edit policy
  * can supply the expected version (or refuse). Every read and mutation emits
  * the live `fs/observed` notification (not a session event).
+ *
+ * **Authority contract.** A provider MUST fence every mutation with the acting
+ * session sandbox policy resolved from `ctx.sandbox` — refusing with
+ * `FS_SANDBOX_DENIED` before any effect, including creating parent
+ * directories. Reads always pass: the mode vocabulary governs file EFFECTS.
+ * The fence lives here, below every consumer, so no tool can be the boundary.
  */
 import { emitEvent, serviceKey, waterfallEvent } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
-import type { Session } from '../session/index.ts'
 
 export type FsErrorCode =
   | 'FS_NOT_FOUND'
@@ -16,7 +21,7 @@ export type FsErrorCode =
   | 'FS_STALE_VERSION'
   | 'FS_EDIT_NOT_FOUND'
   | 'FS_AMBIGUOUS_EDIT'
-  | 'FS_OUTSIDE_WORKSPACE'
+  | 'FS_SANDBOX_DENIED'
   | 'FS_EXISTS'
   | 'FS_IO'
 
@@ -72,8 +77,6 @@ export interface Fs {
   readText(target: FsTarget, actor: FsActor): Promise<{ text: string; version: string }>
   writeText(target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }>
   listDir(target: FsTarget): Promise<DirEntry[]>
-  /** The canonical writable root for a session (its cwd). S3 generalizes this into policy. */
-  workspaceRoot(session: Session): string
 }
 
 export const FS = serviceKey<Fs>('fs')

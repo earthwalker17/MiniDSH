@@ -7,6 +7,8 @@
  */
 import { createRoot, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
+import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
+import { SANDBOX, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
 import { messageText } from '../core/llm/message.ts'
 import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
@@ -17,6 +19,13 @@ import type { ShellDialect } from '../capabilities/shell-stdio/index.ts'
 export interface BootOptions {
   readonly approve?: boolean
   readonly invariants?: boolean
+  /**
+   * Authority for this run. Given explicitly, it is also applied to the agent
+   * as a durable switch, so it governs a RESUMED session whose log recorded
+   * something else; left out, the session keeps whatever it recorded.
+   */
+  readonly sandbox?: SandboxMode
+  readonly approvalPolicy?: ApprovalPolicy
   readonly sessionsRoot: string
   readonly dialect?: ShellDialect
   readonly patches?: readonly Patch[]
@@ -68,6 +77,8 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
       dialect: options.dialect ?? defaultDialect(),
       ...(options.approve === undefined ? {} : { approve: options.approve }),
       ...(options.invariants === undefined ? {} : { invariants: options.invariants }),
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+      ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
     }),
     options.patches ?? [],
     (message) => options.logger?.warn(message),
@@ -83,6 +94,15 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
   await options.prepare?.(root)
   if (onEvent) root.on(SESSION_EVENT, (session, event) => onEvent({ sessionId: session.id, event }))
   return root
+}
+
+/**
+ * An explicitly requested authority is a durable switch on the agent session,
+ * not just a composition default — so it also governs a resumed session.
+ */
+export function applyAuthority(root: Context, handle: AgentHandle, options: BootOptions): void {
+  if (options.sandbox !== undefined) root.get(SANDBOX).setMode(handle.agent.session, options.sandbox)
+  if (options.approvalPolicy !== undefined) root.get(APPROVAL).setPolicy(handle.agent.session, options.approvalPolicy)
 }
 
 /** Feed the task (if any), wait for quiescence, flush, fold the outcome; always disposes the handle. */
@@ -116,6 +136,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
       ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     }
     const handle = await root.get(AGENTS).create(root, { cwd: options.cwd, agentOptions })
+    applyAuthority(root, handle, options)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()
@@ -139,6 +160,7 @@ export async function resumeTask(options: ContinueOptions, onEvent?: EventListen
   const root = await bootComposition(options, onEvent)
   try {
     const handle = await root.get(AGENTS).resume(root, asSessionId(options.id), continueArgs(options))
+    applyAuthority(root, handle, options)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()
@@ -149,6 +171,7 @@ export async function forkTask(options: ContinueOptions, onEvent?: EventListener
   const root = await bootComposition(options, onEvent)
   try {
     const handle = await root.get(AGENTS).fork(root, asSessionId(options.id), options.boundary, continueArgs(options))
+    applyAuthority(root, handle, options)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()

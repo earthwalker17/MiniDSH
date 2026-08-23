@@ -55,6 +55,16 @@ function errorResult(message: string, name: string, code: string): ToolResult {
 }
 
 /**
+ * A thrown error that names its own failure keeps that name in the durable
+ * record: a policy denial must read as `FS_SANDBOX_DENIED` in the log, not as
+ * an indistinguishable `TOOL_FAILED`.
+ */
+function codeOf(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && code.length > 0 ? code : 'TOOL_FAILED'
+}
+
+/**
  * Definitions and guards are per-agent layered (see `core/scope.ts`), and the
  * pipeline's events are dispatched through the acting agent's scope so that a
  * listener registered via one agent's context never sees another agent's
@@ -145,7 +155,7 @@ class ToolRegistry implements Tools {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      result = errorResult(message, error instanceof Error ? error.name : 'Error', 'TOOL_FAILED')
+      result = errorResult(message, error instanceof Error ? error.name : 'Error', codeOf(error))
     }
 
     if (additionalContexts.length > 0 && !result.additionalContexts) result = { ...result, additionalContexts }
