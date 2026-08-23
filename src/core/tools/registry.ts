@@ -140,6 +140,7 @@ class ToolRegistry implements Tools {
       arguments: validated.data,
       agent: call.agent,
       signal: call.signal,
+      callSignal: call.signal,
       deferContext: (message) => void additionalContexts.push(message),
       concludeTurn: () => void (concludesTurn = true),
     }

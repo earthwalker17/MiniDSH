@@ -186,9 +186,18 @@ class SandboxService implements Sandbox {
   }
 
   setMode(session: Session, mode: SandboxMode): SandboxMode {
-    const previous = lastSandboxStamp(session.events)
+    const recorded = lastSandboxStamp(session.events)
+    // Compare against what actually governed the session, not only against what
+    // was recorded: a session that has not acted yet is under the default, and
+    // "switching" to it is not a switch.
+    const previous = recorded?.mode ?? this.defaultMode
+    // Record what the session started under BEFORE recording the change, so the
+    // first stamp is immutably the opening authority. Anything that renders it
+    // (the prompt's runtime-context block) then stays byte-identical for the
+    // session's whole life, and the audit reads "started X, then changed to Y".
+    if (!recorded) this.record(session, previous)
     this.record(session, mode)
-    if (previous && previous.mode === mode) return mode
+    if (previous === mode) return mode
     const note =
       `Sandbox mode is now "${mode}". ` +
       (mode === 'read-only'

@@ -17,6 +17,11 @@ import { eventKind, matches, type EventEnvelope } from '../session/types.ts'
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 const VALID_OUTCOMES: ReadonlySet<string> = new Set<ApprovalOutcome>(['allowed-once', 'rejected', 'cancelled', 'unavailable'])
 
+/** The closed outcome vocabulary, declared once — the seam and its invariant share it. */
+export function isApprovalOutcome(value: unknown): value is ApprovalOutcome {
+  return typeof value === 'string' && VALID_OUTCOMES.has(value)
+}
+
 /** `ask` consults the answerer chain; `never` refuses every request without asking anyone. */
 export type ApprovalPolicy = 'ask' | 'never'
 export const APPROVAL_POLICIES: readonly ApprovalPolicy[] = ['ask', 'never']
@@ -118,7 +123,7 @@ class ApprovalService implements Approval {
       // if an answerer (a disconnected client) never does.
       const answer = Promise.resolve(request.agent.ctx.waterfall(APPROVAL_REQUEST, prompt, async () => 'unavailable' as ApprovalOutcome))
       outcome = await settleOrCancel(answer, request.signal)
-      if (!VALID_OUTCOMES.has(outcome)) outcome = 'unavailable'
+      if (!isApprovalOutcome(outcome)) outcome = 'unavailable'
     } catch {
       outcome = 'unavailable'
     }

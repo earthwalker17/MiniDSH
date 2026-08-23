@@ -76,22 +76,24 @@ describe('tool deadlines', () => {
   })
 
   it('applies the registry default to a tool that declares none', async () => {
-    harness = await coreHarness()
+    harness = await coreHarness({ tools: { defaultTimeoutMs: 40 } })
     harness.root.get(TOOLS).register(harness.root, hangingTool('defaulted', undefined, { cooperative: false }))
-    // The default is minutes long, so the call must still be running.
-    const { agent } = await harness.create()
-    const pending = harness.root.get(TOOLS).execute(toolCall('call-1', 'defaulted', '{}', agent, never))
-    const settled = await Promise.race([pending.then(() => 'settled'), new Promise((resolve) => setTimeout(() => resolve('running'), 60))])
-    expect(settled).toBe('running')
+    const result = await run('defaulted')
+    expect(result.code).toBe('TOOL_TIMEOUT')
+    expect(result.text).toContain('timed out after 40ms')
   })
 
-  it('a tool that opts out with null is never deadlined', async () => {
-    harness = await coreHarness()
-    harness.root.get(TOOLS).register(harness.root, hangingTool('forever', null, { cooperative: false }))
+  it('a tool that opts out with null is never deadlined, even under a short default', async () => {
+    harness = await coreHarness({ tools: { defaultTimeoutMs: 40 } })
+    harness.root.get(TOOLS).register(harness.root, hangingTool('forever', null))
     const { agent } = await harness.create()
-    const pending = harness.root.get(TOOLS).execute(toolCall('call-1', 'forever', '{}', agent, never))
-    const settled = await Promise.race([pending.then(() => 'settled'), new Promise((resolve) => setTimeout(() => resolve('running'), 60))])
+    const controller = new AbortController()
+    const pending = harness.root.get(TOOLS).execute(toolCall('call-1', 'forever', '{}', agent, controller.signal))
+    const settled = await Promise.race([pending.then(() => 'settled'), new Promise((resolve) => setTimeout(() => resolve('running'), 120))])
     expect(settled).toBe('running')
+    // Let the body go, so nothing is left pending behind the test.
+    controller.abort()
+    await pending
   })
 
   it('does not spend the budget while a human is deciding', async () => {

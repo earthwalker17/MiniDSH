@@ -16,6 +16,7 @@ export {
   toolsPlugin,
   type Tools,
   type ToolCall,
+  type ToolsConfig,
 } from './registry.ts'
 
 /** Identity helper that infers a tool's arg and value types from its schemas. */

@@ -142,8 +142,9 @@ describe('sandbox mode: durable, folded, recorded when it changes', () => {
       seed,
     })
     expect(harness.root.get(SANDBOX).resolve({ session: resumed.agent.session }).mode).toBe('read-only')
-    // Nothing changed, so the pickup records nothing new.
-    expect(stamps(resumed.agent.session.events)).toHaveLength(1)
+    // Nothing changed, so the pickup records nothing new (the two stamps are the
+    // opening mode and the switch, both inherited from the seed).
+    expect(stamps(resumed.agent.session.events)).toHaveLength(2)
     await resumed.dispose()
   })
 

@@ -15,7 +15,7 @@ import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import type { SessionEventFrame } from '../../core/session/index.ts'
 import type { AuthorityView, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
-import type { BootOptions } from '../headless.ts'
+import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
 import { renderHistory, TerminalRenderer } from './render.ts'
@@ -232,6 +232,9 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
         options.resumeId !== undefined
           ? await agents.resume(host.root, asSessionId(options.resumeId), continueOptions)
           : await agents.fork(host.root, asSessionId(options.forkId!), options.boundary, continueOptions)
+      // An explicitly requested authority is a durable switch here too: a
+      // resumed session keeps what it recorded unless someone says otherwise.
+      applyAuthority(host.root, handle, options)
       sessionId = handle.agent.id
       // Snapshot first; live rendering starts at the seq after it, and the
       // backlog replays whatever streamed while we attached (a resumed session

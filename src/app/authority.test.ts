@@ -12,8 +12,11 @@ import { LLM } from '../core/llm/index.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
 import { matches, type EventEnvelope } from '../core/session/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
+import { AGENTS } from '../core/agent/index.ts'
+import { PROMPT } from '../core/prompt/index.ts'
+import { SANDBOX } from '../core/sandbox/index.ts'
 import { main } from './cli.ts'
-import { resumeTask, runTask, type BootOptions } from './headless.ts'
+import { applyAuthority, bootComposition, resumeTask, runTask, type BootOptions } from './headless.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 
@@ -207,6 +210,52 @@ describe('authority flags', () => {
       expect(await main(['resume', 'some-id', '--sandbox', 'bogus'])).toBe(2)
     } finally {
       process.stderr.write = write
+    }
+  })
+})
+
+describe('what the model is told about its authority', () => {
+  async function bootWithAgent(cwd: string, sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access') {
+    const root = await bootComposition({
+      sessionsRoot: tempDir('minidsh-sessions-'),
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (context) => void context.get(LLM).registerAdapter(context, new ScriptedAdapter()),
+      ...(sandbox === undefined ? {} : { sandbox }),
+    })
+    const handle = await root.get(AGENTS).create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    if (sandbox !== undefined) applyAuthority(root, handle, { sandbox, sessionsRoot: '' })
+    return { root, handle }
+  }
+
+  it('stays byte-identical across a mid-session switch, so the cached prefix survives it', async () => {
+    const { root, handle } = await bootWithAgent(tempDir('minidsh-cwd-'))
+    try {
+      const before = await root.get(PROMPT).assemble(handle.agent)
+      expect(before.system).toContain('Sandbox: workspace-write')
+      root.get(SANDBOX).setMode(handle.agent.session, 'read-only')
+      const after = await root.get(PROMPT).assemble(handle.agent)
+      // The switch reaches the model as a durable message, never by rewriting
+      // the section the whole session's prompt cache is keyed on.
+      expect(after.system).toBe(before.system)
+    } finally {
+      await handle.dispose()
+      await root.dispose()
+    }
+  })
+
+  it('states the mode the session actually opened under, and that a denial is policy', async () => {
+    const { root, handle } = await bootWithAgent(tempDir('minidsh-cwd-'), 'read-only')
+    try {
+      const assembled = await root.get(PROMPT).assemble(handle.agent)
+      expect(assembled.system).toContain('Sandbox: read-only')
+      expect(assembled.system).toContain('refused by policy')
+      expect(assembled.system).toContain('A denial is policy, not a bug')
+      // This host confines nothing, so the model is told what a refusal means.
+      expect(assembled.system).toContain('cannot confine shell commands')
+    } finally {
+      await handle.dispose()
+      await root.dispose()
     }
   })
 })

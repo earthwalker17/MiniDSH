@@ -7,7 +7,7 @@
  * mode/policy vocabularies would otherwise fold into a boundary nobody chose.
  */
 import type { Plugin } from '../../kernel/index.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, isApprovalPolicy, type ApprovalOutcome } from '../approval/index.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
 import { INVARIANTS, type InvariantFailure, type InvariantInstaller } from '../invariants/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
 import { SESSION_EVENT } from '../session/store.ts'
@@ -17,7 +17,6 @@ import { isSandboxMode, SANDBOX_MODE } from './index.ts'
 const ENFORCEMENTS: ReadonlySet<string> = new Set(['full', 'partial', 'none'])
 const SANDBOX_REASONS: ReadonlySet<string> = new Set(['initial', 'change', 'resume'])
 const POLICY_REASONS: ReadonlySet<string> = new Set(['initial', 'change'])
-const OUTCOMES: ReadonlySet<string> = new Set<ApprovalOutcome>(['allowed-once', 'rejected', 'cancelled', 'unavailable'])
 
 interface Trace {
   lastSeq: number
@@ -54,7 +53,7 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
   }
   if (matches(event, APPROVAL_DECIDED)) {
     const id = event.data.id
-    if (!OUTCOMES.has(event.data.outcome)) fail(`approval/decided carries an unknown outcome ${JSON.stringify(event.data.outcome)}`)
+    if (!isApprovalOutcome(event.data.outcome)) fail(`approval/decided carries an unknown outcome ${JSON.stringify(event.data.outcome)}`)
     if (!trace.asked.has(id)) fail(`approval/decided for "${id}" has no matching approval/asked`)
     if (trace.decided.has(id)) fail(`approval/decided for "${id}" was already decided`)
     trace.decided.add(id)

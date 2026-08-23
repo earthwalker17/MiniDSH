@@ -9,7 +9,7 @@ import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
-import { isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
+import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
 import { compose, defaultAgentOptions, defaultDialect } from './compose.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
@@ -158,7 +158,7 @@ function authorityFlags(args: ParsedArgs): { sandbox?: SandboxMode; approvalPoli
   if (sandbox !== undefined && !isSandboxMode(sandbox)) {
     return `--sandbox expects ${SANDBOX_MODES.join(' | ')}, got "${String(sandbox)}"`
   }
-  if (ask !== undefined && !isApprovalPolicy(ask)) return `--ask expects ask | never, got "${String(ask)}"`
+  if (ask !== undefined && !isApprovalPolicy(ask)) return `--ask expects ${APPROVAL_POLICIES.join(' | ')}, got "${String(ask)}"`
   return {
     ...(isSandboxMode(sandbox) ? { sandbox } : {}),
     ...(isApprovalPolicy(ask) ? { approvalPolicy: ask } : {}),

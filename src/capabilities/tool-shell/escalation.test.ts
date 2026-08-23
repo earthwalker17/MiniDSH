@@ -87,11 +87,37 @@ describe('the shell under a mode this host cannot enforce', () => {
 })
 
 describe('escalation', () => {
-  it('requires a justification alongside the requested mode', async () => {
+  it('requires a justification alongside the requested mode, and says so as an argument error', async () => {
     const { run } = await setup()
     const result = await run({ command: echoCmd, sandbox_permissions: 'danger-full-access' })
     expect(result.isError).toBe(true)
+    // Not TOOL_FAILED: a bad argument reads like every other bad argument.
+    expect(result.code).toBe('INVALID_ARGS')
     expect(result.text).toContain('must be given together')
+  })
+
+  it('never spends consent on a wider mode this host still could not confine', async () => {
+    const { agent, run } = await setup()
+    let asked = 0
+    harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => {
+      asked++
+      return 'allowed-once'
+    })
+    harness!.root.get(SANDBOX).setMode(agent.session, 'read-only')
+    // workspace-write IS strictly wider than read-only, but nothing here can
+    // enforce it either, so a grant would have bought a second refusal.
+    const result = await run({ command: echoCmd, sandbox_permissions: 'workspace-write', justification: 'need to write' })
+    expect(asked).toBe(0)
+    expect(approvals(agent)).toHaveLength(0)
+    expect(result.text).toContain('would not let the command run')
+  })
+
+  it('names only the modes an escalation could actually succeed under', async () => {
+    const { agent, run } = await setup()
+    harness!.root.get(SANDBOX).setMode(agent.session, 'read-only')
+    const result = await run({ command: echoCmd })
+    expect(result.text).toContain('"danger-full-access"')
+    expect(result.text).not.toContain('"workspace-write"')
   })
 
   it('refuses a request that is not strictly wider than the current mode', async () => {

@@ -12,7 +12,14 @@ export interface ToolExecution {
   /** Parsed model arguments (validated against the tool's input before the body runs). */
   readonly arguments: unknown
   readonly agent: Agent | undefined
+  /** The body's signal: the caller's cancellation OR this call's own deadline. */
   readonly signal: AbortSignal
+  /**
+   * The caller's cancellation alone, without this call's deadline. Consent is
+   * the human's time, not the tool's, so anything that waits on a person waits
+   * on this — and a cancelled turn still settles it.
+   */
+  readonly callSignal: AbortSignal
 }
 
 /** The context handed to a tool body. */

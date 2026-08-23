@@ -348,15 +348,17 @@ describe('protocol-stdio: the authority control plane', () => {
     const view = await client.result<{ sandbox: string; approval: string }>('session/authority', { sessionId, sandbox: 'read-only', approval: 'never' })
     expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none' })
 
-    const stamp = await client.waitFor(() => client.frames('sandbox/mode').at(-1), 'sandbox/mode frame')
-    expect(stamp.event.data).toEqual({ mode: 'read-only', enforcement: 'none', reason: 'initial' })
+    // Two stamps: the mode the session opened under, then the switch.
+    const stamp = await client.waitFor(() => client.frames('sandbox/mode').at(1), 'the switch frame')
+    expect(client.frames('sandbox/mode').at(0)!.event.data).toEqual({ mode: 'workspace-write', enforcement: 'none', reason: 'initial' })
+    expect(stamp.event.data).toEqual({ mode: 'read-only', enforcement: 'none', reason: 'change' })
     const policy = client.frames('approval/policy').at(-1)!
     expect(policy.event.data).toEqual({ policy: 'never', reason: 'initial' })
 
     // Reading takes no arguments and changes nothing.
     const again = await client.result<{ sandbox: string }>('session/authority', { sessionId })
     expect(again.sandbox).toBe('read-only')
-    expect(client.frames('sandbox/mode')).toHaveLength(1)
+    expect(client.frames('sandbox/mode')).toHaveLength(2)
   })
 
   it('refuses a mode outside the closed vocabulary', async () => {

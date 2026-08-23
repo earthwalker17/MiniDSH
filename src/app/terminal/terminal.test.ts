@@ -1,5 +1,5 @@
 /** The terminal surface: pure render folds plus scripted end-to-end runs over the loopback pair. */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -210,9 +210,52 @@ describe('terminal authority', () => {
     await driver.see('[sandbox: read-only')
 
     driver.type('/sandbox nonsense')
-    await driver.see('must be read-only')
+    await driver.see('must be one of read-only')
     driver.type('/exit')
     expect(await exitCode).toBe(0)
+  })
+
+  it('applies an explicitly requested authority to a session it attaches to', async () => {
+    const sessionsRoot = tempDir('minidsh-term-sessions-')
+    const cwd = tempDir('minidsh-term-cwd-')
+    // The first run performs a real write, so the session records the mode it
+    // ran under — the case the operator's flag has to be able to override.
+    const first = await runTask({
+      task: 'start something',
+      cwd,
+      model: 'scripted-model',
+      provider: 'scripted',
+      sessionsRoot,
+      ...scriptedBoot(
+        new ScriptedAdapter().script(
+          assistantToolCall('c1', 'str_replace_editor', { command: 'create', path: join(cwd, 'seed.txt'), file_text: 'x' }),
+          assistantText('started'),
+        ),
+      ),
+    })
+
+    const driver = terminalDriver()
+    const exitCode = runTerminal({
+      cwd,
+      sessionsRoot,
+      resumeId: first.sessionId,
+      // A resumed session keeps what it recorded — unless the operator says otherwise.
+      sandbox: 'read-only',
+      ...scriptedBoot(new ScriptedAdapter().script(assistantText('resumed'))),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    await driver.see('you> ')
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+
+    const stored = readFileSync(join(sessionsRoot, `${encodeURIComponent(first.sessionId)}.jsonl`), 'utf8')
+      .trim()
+      .split('\n')
+      .slice(1)
+      .map((line) => JSON.parse(line) as { type: string; data: { mode?: string; reason?: string } })
+    const switched = stored.filter((event) => event.type === 'sandbox/mode')
+    expect(switched.at(-1)?.data).toMatchObject({ mode: 'read-only', reason: 'change' })
   })
 
   it('answers a shell escalation with y and shows the durable decision', async () => {

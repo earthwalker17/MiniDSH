@@ -9,12 +9,12 @@
  */
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
-import { APPROVAL, APPROVAL_DECIDED, isApprovalPolicy, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
+import { APPROVAL, APPROVAL_DECIDED, APPROVAL_POLICIES, isApprovalPolicy, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
-import { isSandboxMode, SANDBOX } from '../../core/sandbox/index.ts'
+import { effectiveSandboxMode, isSandboxMode, SANDBOX, SANDBOX_MODES } from '../../core/sandbox/index.ts'
 import { SESSIONS, matches, type EventEnvelope, type Session } from '../../core/session/index.ts'
 import {
   INTERNAL_ERROR,
@@ -168,16 +168,18 @@ export class ProtocolServer {
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
     if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
     if (params.sandbox !== undefined && !isSandboxMode(params.sandbox)) {
-      throw new RpcFailure(INVALID_PARAMS, 'session/authority: "sandbox" must be read-only, workspace-write, or danger-full-access')
+      throw new RpcFailure(INVALID_PARAMS, `session/authority: "sandbox" must be one of ${SANDBOX_MODES.join(' | ')}`)
     }
     if (params.approval !== undefined && !isApprovalPolicy(params.approval)) {
-      throw new RpcFailure(INVALID_PARAMS, 'session/authority: "approval" must be "ask" or "never"')
+      throw new RpcFailure(INVALID_PARAMS, `session/authority: "approval" must be one of ${APPROVAL_POLICIES.join(' | ')}`)
     }
     const sandbox = this.ctx.get(SANDBOX)
     const approval = this.ctx.get(APPROVAL)
     if (params.sandbox !== undefined) sandbox.setMode(agent.session, params.sandbox)
     if (params.approval !== undefined) approval.setPolicy(agent.session, params.approval)
-    const mode = sandbox.resolve({ session: agent.session }).mode
+    // Read through the pure fold, never through `resolve` — resolving is the
+    // audit act of an effect boundary, and looking is not an effect.
+    const mode = effectiveSandboxMode(agent.session.events) ?? sandbox.defaultMode
     return { sandbox: mode, approval: approval.policyFor(agent.session), enforcement: sandbox.enforcementFor(mode) }
   }
 

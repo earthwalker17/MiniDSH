@@ -13,7 +13,7 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
-import { isWider, SANDBOX, SandboxError, type Sandbox, type SandboxExecutionPolicy } from '../../core/sandbox/index.ts'
+import { isWider, SANDBOX, SANDBOX_MODES, SandboxError, type Sandbox, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL } from '../../core/shell/index.ts'
 import { defineTool, TOOLS, type ToolCallView, type ToolContext } from '../../core/tools/index.ts'
 
@@ -38,14 +38,22 @@ const PWSH_DESCRIPTION = `Run a command in a persistent PowerShell (pwsh) shell.
 * Avoid commands that never terminate; long output is truncated.
 ${CONFINEMENT_GUIDANCE}`
 
-const InputSchema = z.object({
-  command: z.string(),
-  sandbox_permissions: z
-    .enum(['workspace-write', 'danger-full-access'])
-    .optional()
-    .describe('Request a wider sandbox mode for this one command. Requires justification and the user approval.'),
-  justification: z.string().optional().describe('Why this command needs the wider mode. Requires sandbox_permissions.'),
-})
+const InputSchema = z
+  .object({
+    command: z.string(),
+    sandbox_permissions: z
+      .enum(['workspace-write', 'danger-full-access'])
+      .optional()
+      .describe('Request a wider sandbox mode for this one command. Requires justification and the user approval.'),
+    justification: z.string().optional().describe('Why this command needs the wider mode. Requires sandbox_permissions.'),
+  })
+  // On the schema, not in the body: an argument mistake must read as an argument
+  // mistake (INVALID_ARGS), the way every other one does.
+  .superRefine((value, ctx) => {
+    if ((value.sandbox_permissions === undefined) !== (value.justification === undefined)) {
+      ctx.addIssue({ code: 'custom', message: 'sandbox_permissions and justification must be given together' })
+    }
+  })
 type Input = z.infer<typeof InputSchema>
 
 export const toolShellPlugin: Plugin<ShellToolConfig | undefined> = {
@@ -88,7 +96,7 @@ function buildShellTool(ctx: Context, timeoutMs: number) {
         if (error instanceof SandboxError && error.code === 'SANDBOX_UNAVAILABLE') {
           // A reported fact, not a failure: the command never ran, and the model
           // is told the one legitimate way to ask for more.
-          return { output: refusal(policy, error.message), exitCode: null }
+          return { output: refusal(sandbox, policy, error.message), exitCode: null }
         }
         throw error
       }
@@ -107,19 +115,23 @@ async function resolvePolicy(args: Input, agent: Agent, exec: ToolContext, deps:
   const session = agent.session
   const base = deps.sandbox.resolve({ session })
   const target = args.sandbox_permissions
-  if ((target === undefined) !== (args.justification === undefined)) {
-    throw new Error('sandbox_permissions and justification must be given together')
-  }
   if (target === undefined) return base
   if (!isWider(target, base.mode)) {
     throw new SandboxError('SANDBOX_NOT_WIDER', `escalation to "${target}" is not wider than this call's "${base.mode}" mode`)
+  }
+  // Never spend someone's consent on a mode that still could not run: a grant
+  // this host cannot honour would be refused anyway, one ask later.
+  if (!viableEscalations(deps.sandbox, base.mode).includes(target)) {
+    throw new SandboxError('SANDBOX_UNAVAILABLE', `"${target}" cannot be confined on this host either, so escalating to it would not let the command run`)
   }
   const outcome = await deps.approval.request({
     agent,
     toolName: deps.toolName,
     callId: exec.callId,
     reason: `run under "${target}": ${args.justification}`,
-    signal: exec.signal,
+    // The caller's signal, not the body's: a person deciding must not be racing
+    // this call's deadline.
+    signal: exec.callSignal,
   })
   if (outcome !== 'allowed-once') {
     // One ask per escalation: a refused command is finished, not re-asked.
@@ -128,10 +140,17 @@ async function resolvePolicy(args: Input, agent: Agent, exec: ToolContext, deps:
   return deps.sandbox.resolve({ session, mode: target })
 }
 
-function refusal(policy: SandboxExecutionPolicy, reason: string): string {
+/** The wider modes this host could actually run under — the only ones worth asking for. */
+function viableEscalations(sandbox: Sandbox, base: SandboxMode): SandboxMode[] {
+  return SANDBOX_MODES.filter((mode) => isWider(mode, base) && (mode === 'danger-full-access' || sandbox.enforcementFor(mode) !== 'none'))
+}
+
+function refusal(sandbox: Sandbox, policy: SandboxExecutionPolicy, reason: string): string {
+  const viable = viableEscalations(sandbox, policy.mode)
+  if (viable.length === 0) return `[sandbox: ${reason}]`
   return (
     `[sandbox: ${reason}]\n` +
-    `[escalation available — retry this exact command once with sandbox_permissions (the narrowest mode wider than "${policy.mode}" that suffices) ` +
+    `[escalation available — retry this exact command once with sandbox_permissions (the narrowest of ${viable.map((mode) => `"${mode}"`).join(', ')} that suffices) ` +
     `and justification; the user is asked to approve]`
   )
 }

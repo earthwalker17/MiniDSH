@@ -9,6 +9,9 @@ import { ShellProcess, type ShellDialect } from './process.ts'
 const dialect: ShellDialect = process.platform === 'win32' ? 'pwsh' : 'bash'
 const binary = dialect === 'pwsh' ? 'pwsh' : 'bash'
 const available = spawnSync(binary, ['--version'], { stdio: 'ignore' }).status === 0
+// The stdin redirect is a bash-dialect fix, so it is tested wherever bash exists
+// — not only where bash is the platform default.
+const bashAvailable = spawnSync('bash', ['--version'], { stdio: 'ignore' }).status === 0
 
 let proc: ShellProcess | undefined
 let dir: string | undefined
@@ -44,6 +47,18 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
     await proc.exec({ command: dialect === 'pwsh' ? 'Set-Location sub' : 'cd sub', policy: unconfined(dir), timeoutMs: 30_000 })
     const result = await proc.exec({ command: pwdCmd(), policy: unconfined(dir), timeoutMs: 30_000 })
     expect(result.output.toLowerCase()).toContain('sub')
+  })
+
+  it.skipIf(!bashAvailable)('a command that reads stdin gets EOF instead of the next command', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess('bash', dir)
+    // Without the redirect this `cat` would block until the deadline AND eat the
+    // next command out of the shared pipe, so the second call would never match.
+    const reader = await proc.exec({ command: 'cat', policy: unconfined(dir), timeoutMs: 5_000 })
+    expect(reader.timedOut).toBe(false)
+    const after = await proc.exec({ command: "echo 'still here'", policy: unconfined(dir), timeoutMs: 30_000 })
+    expect(after.output).toContain('still here')
+    expect(after.exitCode).toBe(0)
   })
 
   it('reports a non-zero exit code for a failing command', async () => {

@@ -12,7 +12,7 @@ import { PROMPT, promptPlugin } from '../core/prompt/index.ts'
 import { sandboxPlugin } from '../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
-import { toolsPlugin } from '../core/tools/index.ts'
+import { toolsPlugin, type ToolsConfig } from '../core/tools/index.ts'
 import { agentPlugin } from '../core/agent/index.ts'
 import { agentInvariantPlugin } from '../core/agent/invariant.ts'
 import { loopInvariantPlugin, loopPlugin } from '../core/loop/index.ts'
@@ -29,13 +29,13 @@ export interface CoreHarness {
   dispose(): Promise<void>
 }
 
-export async function coreHarness(options: { persona?: string; logger?: Logger } = {}): Promise<CoreHarness> {
+export async function coreHarness(options: { persona?: string; logger?: Logger; tools?: ToolsConfig } = {}): Promise<CoreHarness> {
   const root = createRoot({ logger: options.logger ?? silentLogger })
   root.plugin(invariantsPlugin, {})
   root.plugin(sessionPlugin)
   root.plugin(sessionInvariantPlugin)
   root.plugin(llmPlugin)
-  root.plugin(toolsPlugin)
+  root.plugin(toolsPlugin, options.tools ?? {})
   root.plugin(promptPlugin)
   root.plugin(approvalPlugin)
   root.plugin(sandboxPlugin, {})
