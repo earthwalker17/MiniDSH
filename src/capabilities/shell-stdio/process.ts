@@ -28,7 +28,10 @@ function wrapper(dialect: ShellDialect, base64: string, marker: string): string 
       `Write-Output ('${marker}:' + $(if($LASTEXITCODE -ne $null){$LASTEXITCODE}elseif($?){'0'}else{'1'}))\n`
     )
   }
-  return `eval "$(printf %s '${base64}' | base64 -d 2>/dev/null || printf %s '${base64}' | base64 --decode)"; printf '\\n${marker}:%s\\n' "$?"\n`
+  // `< /dev/null`: a command that reads stdin would otherwise block until the
+  // deadline AND swallow the next command out of the shared command pipe.
+  // PowerShell has no stdin redirect operator, so pwsh keeps only the deadline.
+  return `eval "$(printf %s '${base64}' | base64 -d 2>/dev/null || printf %s '${base64}' | base64 --decode)" < /dev/null; printf '\\n${marker}:%s\\n' "$?"\n`
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))

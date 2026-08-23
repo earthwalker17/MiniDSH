@@ -46,9 +46,11 @@ export interface SandboxPolicyRequest {
   readonly mode?: SandboxMode
 }
 
+export type SandboxErrorCode = 'SANDBOX_UNAVAILABLE' | 'SANDBOX_NOT_WIDER' | 'SANDBOX_ESCALATION_DENIED'
+
 export class SandboxError extends Error {
-  readonly code: 'SANDBOX_UNAVAILABLE' | 'SANDBOX_NOT_WIDER'
-  constructor(code: 'SANDBOX_UNAVAILABLE' | 'SANDBOX_NOT_WIDER', message: string) {
+  readonly code: SandboxErrorCode
+  constructor(code: SandboxErrorCode, message: string) {
     super(message)
     this.name = 'SandboxError'
     this.code = code
