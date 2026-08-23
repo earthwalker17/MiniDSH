@@ -52,7 +52,7 @@ export const toolShellPlugin: Plugin<ShellToolConfig | undefined> = {
   name: 'tool-shell',
   inject: [TOOLS, SHELL, SANDBOX, APPROVAL],
   apply(ctx, config) {
-    ctx.get(TOOLS).register(ctx, buildShellTool(ctx, config?.timeoutMs ?? 300_000))
+    ctx.get(TOOLS).register(ctx, buildShellTool(ctx, config?.timeoutMs ?? 120_000))
   },
 }
 
@@ -66,6 +66,10 @@ function buildShellTool(ctx: Context, timeoutMs: number) {
     description: shell.dialect === 'pwsh' ? PWSH_DESCRIPTION : BASH_DESCRIPTION,
     input: InputSchema,
     output: z.object({ output: z.string(), exitCode: z.number().nullable() }),
+    // The executor owns the useful deadline: it kills the child and returns the
+    // partial output. The registry budget is only the backstop for a body that
+    // never comes back at all, so it sits deliberately above the executor's.
+    timeoutMs: timeoutMs + 15_000,
     presentCall: (args): ToolCallView => ({ card: 'terminal', title: args.command }),
     render: (_args, value) => {
       const suffix = value.exitCode !== null && value.exitCode !== 0 ? `\n[exit code: ${value.exitCode}]` : ''

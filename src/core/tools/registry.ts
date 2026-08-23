@@ -75,8 +75,10 @@ class ToolRegistry implements Tools {
   private readonly guards = new ScopedLayers<ToolGuard>()
   private guardSeq = 0
   private readonly ctx: Context
-  constructor(ctx: Context) {
+  private readonly defaultTimeoutMs: number
+  constructor(ctx: Context, config: ToolsConfig) {
     this.ctx = ctx
+    this.defaultTimeoutMs = config.defaultTimeoutMs ?? 60_000
   }
 
   register<Args, Value extends JsonValue>(owner: Context, definition: ToolDefinition<Args, Value>): Disposer {
@@ -146,13 +148,7 @@ class ToolRegistry implements Tools {
     let result: ToolResult
     try {
       const gate = await this.gate(execution, scope)
-      if (gate) {
-        result = gate
-      } else {
-        const body = () => this.runBody(tool, validated.data as unknown, execution)
-        const candidate = await scope.waterfall(TOOLS_EXECUTE, execution, body)
-        result = await this.post(execution, candidate, scope)
-      }
+      result = gate ?? (await this.dispatch(tool, validated.data as unknown, execution, scope))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       result = errorResult(message, error instanceof Error ? error.name : 'Error', codeOf(error))
@@ -163,6 +159,41 @@ class ToolRegistry implements Tools {
     const frozen = deepFreeze({ ...result, content: [...result.content] })
     scope.emit(TOOLS_RESULT, execution, frozen)
     return frozen
+  }
+
+  /** The tool's own budget, else the registry default; a non-positive budget means none. */
+  private deadlineFor(tool: AnyToolDefinition): number | undefined {
+    if (tool.timeoutMs === null) return undefined
+    const ms = tool.timeoutMs ?? this.defaultTimeoutMs
+    return ms > 0 ? ms : undefined
+  }
+
+  /**
+   * The body, under its deadline. The clock starts here — after the gate — so
+   * an approval a human is still thinking about never spends it. When it
+   * fires, the call ends as TOOL_TIMEOUT and the body's signal is aborted so
+   * it can release what it holds; a late result is discarded. The deadline is
+   * therefore a backstop, not a way to collect partial work: a tool that has
+   * something useful to say about running out of time owns a shorter deadline
+   * of its own (the shell executor kills its child and returns the tail).
+   */
+  private async dispatch(tool: AnyToolDefinition, args: unknown, execution: ToolContext, scope: Context): Promise<ToolResult> {
+    const ms = this.deadlineFor(tool)
+    if (ms === undefined) {
+      const candidate = await scope.waterfall(TOOLS_EXECUTE, execution, () => this.runBody(tool, args, execution))
+      return this.post(execution, candidate, scope)
+    }
+    const timer = AbortSignal.timeout(ms)
+    const timed: ToolContext = { ...execution, signal: AbortSignal.any([execution.signal, timer]) }
+    const body = scope.waterfall(TOOLS_EXECUTE, timed, () => this.runBody(tool, args, timed))
+    const expired = new Promise<'timeout'>((resolve) => timer.addEventListener('abort', () => resolve('timeout'), { once: true }))
+    const outcome = await Promise.race([body.then((candidate) => ({ candidate })), expired])
+    if (outcome === 'timeout') {
+      // The body may still settle later; its rejection must not surface unhandled.
+      void body.catch(() => undefined)
+      return errorResult(`tool "${execution.name}" timed out after ${ms}ms`, 'ToolTimeoutError', 'TOOL_TIMEOUT')
+    }
+    return this.post(timed, outcome.candidate, scope)
   }
 
   /** Runs pre-execute policy, approval, and guards. Returns a denial result, or undefined to proceed. */
@@ -204,11 +235,16 @@ class ToolRegistry implements Tools {
   }
 }
 
+export interface ToolsConfig {
+  /** Budget for a tool that declares none (default 60s). Non-positive means no deadline at all. */
+  readonly defaultTimeoutMs?: number
+}
+
 /** The tool registry plugin: provides `ctx.tools`. */
-export const toolsPlugin: Plugin = {
+export const toolsPlugin: Plugin<ToolsConfig | undefined> = {
   name: 'core-tools',
-  apply(ctx) {
-    ctx.provide(TOOLS, new ToolRegistry(ctx))
+  apply(ctx, config) {
+    ctx.provide(TOOLS, new ToolRegistry(ctx, config ?? {}))
   },
 }
 

@@ -45,6 +45,13 @@ export interface ToolDefinition<Args = unknown, Value extends JsonValue = JsonVa
   render(args: Args, value: Value): ContentBlock[]
   execute(args: Args, exec: ToolContext): Value | Promise<Value>
   presentCall?(args: Args): ToolCallView
+  /**
+   * Wall-clock budget for the body, counted from AFTER the gate — a human
+   * deliberating over an approval never spends a tool's deadline. Omitted
+   * takes the registry default; `null` opts out (a tool that owns its own
+   * lifetime). Cooperative: the derived signal notifies, it does not kill.
+   */
+  readonly timeoutMs?: number | null
 }
 
 export type AnyToolDefinition = ToolDefinition<never, JsonValue>
