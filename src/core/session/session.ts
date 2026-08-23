@@ -9,6 +9,7 @@ import {
   type EventKind,
   type RequestHeader,
   type SessionHeader,
+  type SessionOrigin,
   type SurfaceIntent,
 } from './types.ts'
 
@@ -41,6 +42,8 @@ export class SessionForkError extends Error {
  */
 export class Session {
   readonly header: SessionHeader
+  /** Live-only provenance of this lifecycle; never persisted (see `SessionOrigin`). */
+  readonly origin: SessionOrigin
   private readonly log: EventEnvelope[] = []
   private readonly surface = new Surface()
   private readonly host: SessionHost
@@ -48,11 +51,12 @@ export class Session {
   private derived: readonly Message[] = []
   private derivedKey = -1
 
-  constructor(header: SessionHeader, host: SessionHost, seed?: readonly EventEnvelope[]) {
+  constructor(header: SessionHeader, host: SessionHost, seed?: readonly EventEnvelope[], origin?: SessionOrigin) {
     if (header.version !== SESSION_FORMAT_VERSION) {
       throw new Error(`session ${header.id}: version ${header.version} != ${SESSION_FORMAT_VERSION}`)
     }
     this.header = deepFreeze({ ...header, id: asSessionId(header.id) })
+    this.origin = origin ?? (seed && seed.length > 0 ? 'seeded' : 'new')
     this.host = host
     if (seed) {
       for (let i = 0; i < seed.length; i++) this.seedOne(seed[i]!, i)
@@ -155,16 +159,25 @@ export class Session {
 
   /** Seed for a fork at `boundary` (inclusive; defaults to the whole log). Rejects an open turn. */
   forkSeed(boundary?: number): EventEnvelope[] {
-    const end = boundary === undefined ? this.log.length - 1 : boundary
-    if (!Number.isInteger(end) || end < -1 || end >= this.log.length) {
-      throw new SessionForkError('INVALID_BOUNDARY', `fork boundary ${String(boundary)} is out of range`)
-    }
-    const slice = this.log.slice(0, end + 1)
-    for (let i = slice.length - 1; i >= 0; i--) {
-      const type = slice[i]!.type
-      if (type === 'turn/end') break
-      if (type === 'turn/start') throw new SessionForkError('OPEN_TURN', 'cannot fork inside an open turn')
-    }
-    return slice.map((event, index) => ({ ...event, seq: index }))
+    return sliceForkSeed(this.log, boundary)
   }
+}
+
+/**
+ * The pure fork derivation: the event prefix through `boundary` (inclusive;
+ * defaults to the whole log), re-sequenced from 0. Shared by live forks
+ * (`Session.forkSeed`) and cold forks over a stored log. Rejects an open turn.
+ */
+export function sliceForkSeed(events: readonly EventEnvelope[], boundary?: number): EventEnvelope[] {
+  const end = boundary === undefined ? events.length - 1 : boundary
+  if (!Number.isInteger(end) || end < -1 || end >= events.length) {
+    throw new SessionForkError('INVALID_BOUNDARY', `fork boundary ${String(boundary)} is out of range`)
+  }
+  const slice = events.slice(0, end + 1)
+  for (let i = slice.length - 1; i >= 0; i--) {
+    const type = slice[i]!.type
+    if (type === 'turn/end') break
+    if (type === 'turn/start') throw new SessionForkError('OPEN_TURN', 'cannot fork inside an open turn')
+  }
+  return slice.map((event, index) => ({ ...event, seq: index }))
 }

@@ -4,9 +4,11 @@
  * completed. `--json` streams raw session events to stdout; `sessions show`
  * reads the log only.
  */
+import { createRoot, type Logger } from '../kernel/index.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
+import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { listSessionHeaders, readSessionFile } from '../capabilities/persistence-jsonl/index.ts'
+import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { compose, defaultDialect } from './compose.ts'
 import { runTask } from './headless.ts'
 import { sessionsDir } from './home.ts'
@@ -118,14 +120,32 @@ async function runCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
-function sessionsCommand(args: ParsedArgs): number {
+const stderrLogger: Logger = {
+  warn: (message) => process.stderr.write(`warn: ${message}\n`),
+  error: (message) => process.stderr.write(`error: ${message}\n`),
+}
+
+/** Mounts the persistence provider on a bare root and hands its Definition to `use`. */
+async function withPersistence<T>(use: (persistence: Persistence) => T): Promise<T> {
+  const root = createRoot({ logger: stderrLogger })
+  root.plugin(persistenceJsonlPlugin, { root: sessionsDir() })
+  await root.settle()
+  try {
+    return use(root.get(PERSISTENCE))
+  } finally {
+    await root.dispose()
+  }
+}
+
+async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
-  const root = sessionsDir()
   if (sub === 'list') {
-    for (const header of listSessionHeaders(root)) {
-      process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\n`)
-    }
-    return 0
+    return withPersistence((persistence) => {
+      for (const header of persistence.list()) {
+        process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\n`)
+      }
+      return 0
+    })
   }
   if (sub === 'show') {
     const id = args.positional[1]
@@ -133,21 +153,24 @@ function sessionsCommand(args: ParsedArgs): number {
       process.stderr.write('usage: minidsh sessions show <id>\n')
       return 2
     }
-    const stored = readSessionFile(root, id)
-    if (!stored) {
-      process.stderr.write(`no session "${id}"\n`)
-      return 1
-    }
-    if (args.flags.get('json') === true) {
-      for (const event of stored.events) process.stdout.write(`${JSON.stringify(event)}\n`)
-    } else {
-      process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
-      for (const event of stored.events) {
-        const line = renderEvent(event)
-        process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line.trim()}` : ''}\n`)
+    return withPersistence((persistence) => {
+      const stored = persistence.load(id)
+      if (!stored) {
+        process.stderr.write(`no session "${id}"\n`)
+        return 1
       }
-    }
-    return 0
+      if (args.flags.get('json') === true) {
+        for (const event of stored.events) process.stdout.write(`${JSON.stringify(event)}\n`)
+      } else {
+        process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        for (const event of stored.events) {
+          const line = renderEvent(event)
+          process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line.trim()}` : ''}\n`)
+        }
+        if (stored.damaged) process.stderr.write('warning: the stored log is damaged beyond this point\n')
+      }
+      return 0
+    })
   }
   process.stderr.write('usage: minidsh sessions <list|show>\n')
   return 2

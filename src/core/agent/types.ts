@@ -48,6 +48,11 @@ export interface CreateAgentOptions {
   readonly sessionId?: SessionId
   readonly agentOptions: AgentOptions
   readonly seed?: readonly import('../session/index.ts').EventEnvelope[]
+  /** Session provenance, forwarded verbatim to the session header / live origin. */
+  readonly origin?: import('../session/index.ts').SessionOrigin
+  readonly parentId?: SessionId
+  readonly seedLength?: number
+  readonly createdAt?: number
   /**
    * Composes the agent's local world before publication: registrations and
    * plugins mounted through `agentCtx` are visible to this agent alone and

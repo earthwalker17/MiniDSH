@@ -1,6 +1,6 @@
 /** The session subsystem: the append-only log, its surface, and the store seam. */
 export * from './types.ts'
-export { Session, SessionForkError, type SessionHost } from './session.ts'
+export { Session, SessionForkError, sliceForkSeed, type SessionHost } from './session.ts'
 export { deriveEventMessage, foldRequestHeader, Surface } from './surface.ts'
 export { repairInterruptedTail } from './repair.ts'
 export {
@@ -10,7 +10,6 @@ export {
   SESSION_FLUSH,
   SESSION_DISPOSED,
   sessionPlugin,
-  createOwnedSession,
   type Sessions,
   type CreateSessionOptions,
 } from './store.ts'

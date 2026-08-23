@@ -21,10 +21,17 @@ class LoopFactory implements AgentFactory {
   async create(owner: Context, options: CreateAgentOptions): Promise<AgentHandle> {
     const sessions = this.ctx.get(SESSIONS)
     const agents = this.ctx.get(AGENTS)
+    // Unpublished: session publication follows agent publication, so a rolled-
+    // back creation is never announced and persistence never hears of it.
     const session = sessions.create({
       cwd: options.cwd,
+      publish: false,
       ...(options.sessionId === undefined ? {} : { id: options.sessionId }),
       ...(options.seed === undefined ? {} : { seed: options.seed }),
+      ...(options.origin === undefined ? {} : { origin: options.origin }),
+      ...(options.parentId === undefined ? {} : { parentId: options.parentId }),
+      ...(options.seedLength === undefined ? {} : { seedLength: options.seedLength }),
+      ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }),
     })
     const agent = new ReactLoopAgent(session, options.agentOptions)
     // The scope resolves services through the loop context and is keyed by the agent itself.
@@ -59,6 +66,9 @@ class LoopFactory implements AgentFactory {
         throw new Error(`agent ${session.id}: setup did not settle — pending: [${pending}] failed: [${failed}]`, { cause: report.failed[0]?.error })
       }
       lifetime.detach = agents.register(agent)
+      // Session publication follows agent publication: a session/created listener
+      // can already resolve the owning agent by id.
+      sessions.publish(session)
       // Whichever dies first — the loop plugin that owns the scope, or the creator — disposes the whole agent.
       lifetime.releases.push(this.ctx.effect(() => () => dispose(), `agent-lifetime(${session.id})`))
       lifetime.releases.push(owner.effect(() => () => dispose(), `agent(${session.id})`))

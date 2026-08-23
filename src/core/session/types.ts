@@ -98,3 +98,17 @@ export interface SessionHeader {
   readonly parentId?: SessionId
   readonly seedLength?: number
 }
+
+/**
+ * How this live session came to exist — deliberately NOT part of the durable
+ * header (a resumed session's header is identical to its stored one). A
+ * persistence provider keys its publication behavior on it: `resumed` attaches
+ * to the existing store append-only; everything else is a fresh write.
+ */
+export type SessionOrigin = 'new' | 'seeded' | 'resumed'
+
+/** One session event addressed for a surface or a wire: the interchange shape. */
+export interface SessionEventFrame {
+  readonly sessionId: SessionId
+  readonly event: EventEnvelope
+}

@@ -10,7 +10,6 @@ import { AGENTS } from '../agent/index.ts'
 import { asCallId } from '../ids.ts'
 import { createUserMessage } from '../llm/message.ts'
 import { LLM, LlmError } from '../llm/index.ts'
-import { SESSIONS } from '../session/index.ts'
 import { defineTool, TOOLS } from '../tools/index.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
@@ -92,15 +91,15 @@ describe('review regressions: seeded sessions', () => {
     const first = await harness.create()
     first.agent.followup(createUserMessage('hi'))
     await first.agent.whenIdle()
-    // The fork's log is the seed for a NEW agent's session (fork() already
-    // published its own session under a different id).
-    const forked = harness.root.get(SESSIONS).fork(first.agent.session)
-    const seed = forked.events.map((event) => ({ ...event }))
+    // The fork seed becomes a NEW agent's session with lineage in its header.
+    const seed = first.agent.session.forkSeed()
 
     const handle = await harness.root.get(AGENTS).create(harness.root, {
       cwd: process.cwd(),
       agentOptions: { provider: 'scripted', model: 'scripted-model' },
       seed,
+      parentId: first.agent.session.id,
+      seedLength: seed.length,
     })
     handle.agent.followup(createUserMessage('again'))
     await handle.agent.whenIdle()

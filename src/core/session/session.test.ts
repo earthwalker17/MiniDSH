@@ -153,18 +153,46 @@ describe('Session: seed, fork, replay-equivalence', () => {
     expect(replay.events.at(-1)?.type).toBe('session/end-seed')
   })
 
-  it('forks at a boundary and refuses an open turn', async () => {
+  it('derives a fork seed at a boundary and refuses an open turn', async () => {
     const { sessions } = await harness()
     sessions.create({ cwd: '/w', id: asSessionId('src') })
     runTextTurn(sessions, 1, 'hi', 'hello')
     const src = sessions.get(asSessionId('src'))!
     const boundary = src.events.findIndex((event) => event.type === 'turn/end')
-    const child = sessions.fork(src, boundary, asSessionId('child'))
+    const seed = src.forkSeed(boundary)
+    const child = sessions.create({ cwd: src.header.cwd, id: asSessionId('child'), parentId: src.id, seed, seedLength: seed.length })
     expect(child.header.parentId).toBe('src')
+    expect(child.header.seedLength).toBe(seed.length)
+    expect(child.origin).toBe('seeded')
     expect(child.deriveMessages()).toHaveLength(2)
 
     src.append(TURN_START, { turn: 2 })
     expect(() => src.forkSeed()).toThrowError(/open turn/)
+  })
+
+  it('defers publication until publish() and detaches an unpublished session silently', async () => {
+    const { root, sessions } = await harness()
+    const announced: string[] = []
+    root.on({ kind: 'event', mode: 'emit', name: 'session/created' } as never, ((s: { id: string }) => announced.push(`created:${s.id}`)) as never)
+    root.on({ kind: 'event', mode: 'emit', name: 'session/disposed' } as never, ((s: { id: string }) => announced.push(`disposed:${s.id}`)) as never)
+
+    const session = sessions.create({ cwd: '/w', id: asSessionId('deferred'), publish: false })
+    // Invisible but id-claiming: the duplicate-id throw is the liveness guard.
+    expect(sessions.get(asSessionId('deferred'))).toBeUndefined()
+    expect(sessions.list()).toHaveLength(0)
+    expect(() => sessions.create({ cwd: '/w', id: asSessionId('deferred') })).toThrowError(/already exists/)
+    expect(announced).toEqual([])
+
+    sessions.publish(session)
+    expect(announced).toEqual(['created:deferred'])
+    expect(sessions.get(asSessionId('deferred'))).toBe(session)
+    expect(() => sessions.publish(session)).toThrowError(/already published/)
+
+    const rollback = sessions.create({ cwd: '/w', id: asSessionId('gone'), publish: false })
+    await sessions.detach(rollback)
+    expect(announced).toEqual(['created:deferred']) // no disposed for the never-published one
+    await sessions.detach(session)
+    expect(announced).toEqual(['created:deferred', 'disposed:deferred'])
   })
 })
 

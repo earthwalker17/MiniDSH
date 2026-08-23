@@ -43,6 +43,23 @@ describe('agent creation', () => {
     expect(harness.root.get(SESSIONS).list()).toEqual([])
   })
 
+  it('publishes the session only after the agent, so session/created can resolve its owner', async () => {
+    harness = await coreHarness()
+    const { SESSION_CREATED } = await import('../session/index.ts')
+    const { AGENT_CREATED } = await import('../agent/index.ts')
+    const agents = harness.root.get(AGENTS)
+    const order: string[] = []
+    harness.root.on(AGENT_CREATED, (agent) => void order.push(`agent:${agent.id}`))
+    harness.root.on(SESSION_CREATED, (session) => {
+      order.push(`session:${session.id}:${agents.get(session.id) ? 'owner-visible' : 'orphan'}`)
+    })
+    const handle = await harness.create()
+    const id = handle.agent.id
+    expect(order).toEqual([`agent:${id}`, `session:${id}:owner-visible`])
+    expect(handle.agent.session.origin).toBe('new')
+    await handle.dispose()
+  })
+
   it('publishes the agent only once everything mounted during setup is active, and fails loud otherwise', async () => {
     harness = await coreHarness()
     const agents = harness.root.get(AGENTS)
