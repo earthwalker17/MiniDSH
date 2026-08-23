@@ -13,6 +13,7 @@ import { compose, defaultAgentOptions, defaultDialect } from './compose.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { sessionsDir } from './home.ts'
 import { startProtocolHost } from './serve.ts'
+import { runTerminal } from './terminal/index.ts'
 
 interface ParsedArgs {
   readonly command: string
@@ -128,34 +129,91 @@ function finishTask(result: TaskResult, json: boolean): number {
   return result.exitCode
 }
 
-/** `minidsh resume <id> "task"` / `minidsh fork <id> "task" [--at seq]` — headless one-shots. */
-async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promise<number> {
-  const id = args.positional[0]
-  const task = args.positional.slice(1).join(' ').trim()
-  if (!id || task.length === 0) {
-    process.stderr.write(`usage: minidsh ${kind} <id> "<task>"${kind === 'fork' ? ' [--at seq]' : ''} [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n`)
-    return 2
-  }
-  const json = args.flags.get('json') === true
+interface CommonModelFlags {
+  readonly model?: string
+  readonly reasoningEffort?: string
+  readonly maxSteps?: number
+}
+
+function modelFlags(args: ParsedArgs): CommonModelFlags {
   const model = args.flags.get('model')
   const effort = args.flags.get('effort')
   const maxStepsRaw = args.flags.get('max-steps')
   const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
+  return {
+    ...(typeof model === 'string' ? { model } : {}),
+    ...(typeof effort === 'string' ? { reasoningEffort: effort } : {}),
+    ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
+  }
+}
+
+/**
+ * `minidsh resume <id>` / `minidsh fork <id>` — interactive by default;
+ * `--headless` (task required) is the scripted one-shot.
+ */
+async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promise<number> {
+  const id = args.positional[0]
+  const task = args.positional.slice(1).join(' ').trim()
+  const headless = args.flags.get('headless') === true
+  if (!id || (headless && task.length === 0)) {
+    process.stderr.write(
+      `usage: minidsh ${kind} <id> ["<task>"]${kind === 'fork' ? ' [--at seq]' : ''} [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n`,
+    )
+    return 2
+  }
   const atRaw = args.flags.get('at')
   const boundary = typeof atRaw === 'string' ? Number(atRaw) : undefined
+  const approve = args.flags.get('approve') === true
+
+  if (!headless) {
+    try {
+      return await runTerminal({
+        cwd: process.cwd(),
+        sessionsRoot: sessionsDir(),
+        approve,
+        ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
+        ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
+        ...(task.length > 0 ? { task } : {}),
+        ...modelFlags(args),
+        logger: stderrLogger,
+      })
+    } catch (error) {
+      process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+      return 1
+    }
+  }
+
+  const json = args.flags.get('json') === true
   const options: ContinueOptions = {
     id,
     task,
     sessionsRoot: sessionsDir(),
-    ...(typeof model === 'string' ? { model } : {}),
-    ...(typeof effort === 'string' ? { reasoningEffort: effort } : {}),
-    ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
+    ...modelFlags(args),
     ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
-    approve: args.flags.get('approve') === true,
+    approve,
   }
   try {
     const result = kind === 'resume' ? await resumeTask(options, eventPrinter(json)) : await forkTask(options, eventPrinter(json))
     return finishTask(result, json)
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
+  }
+}
+
+/** `minidsh chat` — a fresh interactive session over the protocol. */
+async function chatCommand(args: ParsedArgs): Promise<number> {
+  const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
+  const task = args.positional.join(' ').trim()
+  try {
+    return await runTerminal({
+      cwd,
+      sessionsRoot: sessionsDir(),
+      approve: args.flags.get('approve') === true,
+      ...(task.length > 0 ? { task } : {}),
+      ...modelFlags(args),
+      logger: stderrLogger,
+    })
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
     return 1
@@ -242,6 +300,8 @@ export async function main(argv: readonly string[]): Promise<number> {
   switch (args.command) {
     case 'run':
       return runCommand(args)
+    case 'chat':
+      return chatCommand(args)
     case 'resume':
       return continueCommand(args, 'resume')
     case 'fork':
@@ -254,8 +314,9 @@ export async function main(argv: readonly string[]): Promise<number> {
       process.stdout.write(
         'MiniDSH — usage:\n' +
           '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
-          '  minidsh resume <id> "<task>" [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
-          '  minidsh fork <id> "<task>" [--at seq] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
+          '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--approve]\n' +
+          '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
+          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
           '  minidsh serve [--cwd dir] [--approve]\n' +
           '  minidsh sessions list\n' +
           '  minidsh sessions show <id> [--json]\n',
