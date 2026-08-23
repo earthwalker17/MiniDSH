@@ -9,6 +9,8 @@ import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
+import { isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
+import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
 import { compose, defaultAgentOptions, defaultDialect } from './compose.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { sessionsDir } from './home.ts'
@@ -21,7 +23,7 @@ interface ParsedArgs {
   readonly flags: Map<string, string | true>
 }
 
-const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at'])
+const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask'])
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
@@ -68,6 +70,20 @@ function renderEvent(event: EventEnvelope): string | undefined {
       const data = event.data as { reason: { kind: string } }
       return `  [turn ${data.reason.kind}]`
     }
+    case 'sandbox/mode': {
+      const data = event.data as { mode: string; enforcement: string; reason: string }
+      return `  [sandbox ${data.reason}: ${data.mode}, shell confinement ${data.enforcement}]`
+    }
+    case 'approval/policy':
+      return `  [approvals: ${(event.data as { policy: string }).policy}]`
+    case 'approval/asked': {
+      const data = event.data as { id: string; toolName: string; reason?: string }
+      return `  ? ${data.id} ${data.toolName}${data.reason ? `: ${data.reason}` : ''}`
+    }
+    case 'approval/decided': {
+      const data = event.data as { id: string; outcome: string }
+      return `  ! ${data.id} ${data.outcome}`
+    }
     default:
       return undefined
   }
@@ -76,7 +92,7 @@ function renderEvent(event: EventEnvelope): string | undefined {
 async function runCommand(args: ParsedArgs): Promise<number> {
   const task = args.positional.join(' ').trim()
   if (task.length === 0) {
-    process.stderr.write('usage: minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n')
+    process.stderr.write('usage: minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--approve] [--json]\n')
     return 2
   }
   const json = args.flags.get('json') === true
@@ -85,6 +101,11 @@ async function runCommand(args: ParsedArgs): Promise<number> {
   const effort = typeof args.flags.get('effort') === 'string' ? (args.flags.get('effort') as string) : undefined
   const maxStepsRaw = args.flags.get('max-steps')
   const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
+  const authority = authorityFlags(args)
+  if (typeof authority === 'string') {
+    process.stderr.write(authority + '" + NL + "')
+    return 2
+  }
 
   if (args.flags.get('dump-config') === true) {
     const rows = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect() })
@@ -102,6 +123,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
         approve: args.flags.get('approve') === true,
+        ...authority,
       },
       eventPrinter(json),
     )
@@ -127,6 +149,20 @@ function finishTask(result: TaskResult, json: boolean): number {
   if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
   process.stderr.write(`session: ${result.sessionId}\n`)
   return result.exitCode
+}
+
+/** `--sandbox` / `--ask`: an explicit authority for this run, validated before anything boots. */
+function authorityFlags(args: ParsedArgs): { sandbox?: SandboxMode; approvalPolicy?: ApprovalPolicy } | string {
+  const sandbox = args.flags.get('sandbox')
+  const ask = args.flags.get('ask')
+  if (sandbox !== undefined && !isSandboxMode(sandbox)) {
+    return `--sandbox expects ${SANDBOX_MODES.join(' | ')}, got "${String(sandbox)}"`
+  }
+  if (ask !== undefined && !isApprovalPolicy(ask)) return `--ask expects ask | never, got "${String(ask)}"`
+  return {
+    ...(isSandboxMode(sandbox) ? { sandbox } : {}),
+    ...(isApprovalPolicy(ask) ? { approvalPolicy: ask } : {}),
+  }
 }
 
 interface CommonModelFlags {
@@ -169,6 +205,11 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     return 2
   }
   const approve = args.flags.get('approve') === true
+  const authority = authorityFlags(args)
+  if (typeof authority === 'string') {
+    process.stderr.write(authority + '" + NL + "')
+    return 2
+  }
 
   if (!headless) {
     try {
@@ -180,6 +221,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
         ...(task.length > 0 ? { task } : {}),
         ...modelFlags(args),
+        ...authority,
         logger: stderrLogger,
       })
     } catch (error) {
@@ -196,6 +238,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     ...modelFlags(args),
     ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
     approve,
+    ...authority,
   }
   try {
     const result = kind === 'resume' ? await resumeTask(options, eventPrinter(json)) : await forkTask(options, eventPrinter(json))
@@ -210,6 +253,11 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
 async function chatCommand(args: ParsedArgs): Promise<number> {
   const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
   const task = args.positional.join(' ').trim()
+  const authority = authorityFlags(args)
+  if (typeof authority === 'string') {
+    process.stderr.write(authority + '" + NL + "')
+    return 2
+  }
   try {
     return await runTerminal({
       cwd,
@@ -217,6 +265,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
       ...modelFlags(args),
+      ...authority,
       logger: stderrLogger,
     })
   } catch (error) {
@@ -245,11 +294,17 @@ async function withPersistence<T>(use: (persistence: Persistence) => T): Promise
 /** `minidsh serve` — the JSON-RPC protocol on process stdio; stdout carries only frames. */
 async function serveCommand(args: ParsedArgs): Promise<number> {
   const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
+  const authority = authorityFlags(args)
+  if (typeof authority === 'string') {
+    process.stderr.write(authority + '" + NL + "')
+    return 2
+  }
   try {
     const host = await startProtocolHost({
       cwd,
       sessionsRoot: sessionsDir(),
       approve: args.flags.get('approve') === true,
+      ...authority,
       logger: stderrLogger,
     })
     await host.closed
@@ -258,6 +313,50 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
     return 1
+  }
+}
+
+/**
+ * The audit projection: what this session was permitted to do, when, and every
+ * time someone was asked. An escalation names only its tool, so the command it
+ * covered is joined in from the `tool/call` its `callId` points at - the same
+ * join a reader would otherwise do by hand.
+ */
+function renderAudit(events: readonly EventEnvelope[], write: (line: string) => void): void {
+  const calls = new Map<string, string>()
+  const denials = new Set(['DENIED', 'ABORTED', 'FS_SANDBOX_DENIED', 'SANDBOX_ESCALATION_DENIED', 'SANDBOX_NOT_WIDER'])
+  const at = (seq: number): string => String(seq).padStart(4)
+  for (const event of events) {
+    const data = event.data as Record<string, string | undefined>
+    switch (event.type) {
+      case 'tool/call':
+        calls.set(String(data.callId), `${String(data.name)} ${preview(String(data.arguments), 100)}`)
+        break
+      case 'sandbox/mode':
+        write(`${at(event.seq)}  sandbox     ${String(data.mode)} (${String(data.reason)}; shell confinement ${String(data.enforcement)})`)
+        break
+      case 'approval/policy':
+        write(`${at(event.seq)}  approvals   ${String(data.policy)} (${String(data.reason)})`)
+        break
+      case 'approval/asked': {
+        const covered = data.callId ? calls.get(String(data.callId)) : undefined
+        write(`${at(event.seq)}  asked       ${String(data.id)} ${String(data.toolName)}${data.reason ? `: ${data.reason}` : ''}`)
+        if (covered) write(`                    for: ${covered}`)
+        break
+      }
+      case 'approval/decided':
+        write(`${at(event.seq)}  decided     ${String(data.id)} ${String(data.outcome)}`)
+        break
+      case 'tool/result': {
+        const error = (event.data as { error?: { code: string } }).error
+        if (error && denials.has(error.code)) {
+          write(`${at(event.seq)}  denied      ${error.code}${data.callId ? ` (${calls.get(String(data.callId)) ?? ''})` : ''}`)
+        }
+        break
+      }
+      default:
+        break
+    }
   }
 }
 
@@ -274,7 +373,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   if (sub === 'show') {
     const id = args.positional[1]
     if (!id) {
-      process.stderr.write('usage: minidsh sessions show <id>\n')
+      process.stderr.write('usage: minidsh sessions show <id> [--json|--audit]\n')
       return 2
     }
     return withPersistence((persistence) => {
@@ -283,7 +382,10 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         process.stderr.write(`no session "${id}"\n`)
         return 1
       }
-      if (args.flags.get('json') === true) {
+      if (args.flags.get('audit') === true) {
+        process.stdout.write(`authority of ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        renderAudit(stored.events, (line) => process.stdout.write(line + '\n'))
+      } else if (args.flags.get('json') === true) {
         for (const event of stored.events) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, event })}\n`)
         // Machine readers must see damage too: a trailer object (no `event` field) a frame consumer skips.
         if (stored.damaged) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, damaged: true })}\n`)
@@ -320,13 +422,15 @@ export async function main(argv: readonly string[]): Promise<number> {
     default:
       process.stdout.write(
         'MiniDSH — usage:\n' +
-          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
-          '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--approve]\n' +
+          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--approve] [--json]\n' +
+          '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--approve]\n' +
           '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
           '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
-          '  minidsh serve [--cwd dir] [--approve]\n' +
+          '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--approve]\n' +
           '  minidsh sessions list\n' +
-          '  minidsh sessions show <id> [--json]\n',
+          '  minidsh sessions show <id> [--json|--audit]\n' +
+          '\nauthority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)\n' +
+          '           --ask ask|never; --approve grants every request in a headless run\n',
       )
       return args.command === 'help' ? 0 : 2
   }

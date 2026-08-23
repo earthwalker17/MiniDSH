@@ -331,3 +331,40 @@ describe('protocol-stdio: shutdown', () => {
     expect(lastTurnEnd.data.reason?.kind).toBe('completed')
   })
 })
+
+describe('protocol-stdio: the authority control plane', () => {
+  it('reports what a new session would start under, and what this host can enforce', async () => {
+    const { client } = await startHost(new ScriptedAdapter())
+    const result = await client.result<{ defaultAuthority: { sandbox: string; approval: string; enforcement: string } }>('initialize')
+    expect(result.defaultAuthority).toEqual({ sandbox: 'workspace-write', approval: 'ask', enforcement: 'none' })
+  })
+
+  it('switches a live session and streams the switch as the durable event', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+
+    const view = await client.result<{ sandbox: string; approval: string }>('session/authority', { sessionId, sandbox: 'read-only', approval: 'never' })
+    expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none' })
+
+    const stamp = await client.waitFor(() => client.frames('sandbox/mode').at(-1), 'sandbox/mode frame')
+    expect(stamp.event.data).toEqual({ mode: 'read-only', enforcement: 'none', reason: 'initial' })
+    const policy = client.frames('approval/policy').at(-1)!
+    expect(policy.event.data).toEqual({ policy: 'never', reason: 'initial' })
+
+    // Reading takes no arguments and changes nothing.
+    const again = await client.result<{ sandbox: string }>('session/authority', { sessionId })
+    expect(again.sandbox).toBe('read-only')
+    expect(client.frames('sandbox/mode')).toHaveLength(1)
+  })
+
+  it('refuses a mode outside the closed vocabulary', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const reply = await client.call('session/authority', { sessionId, sandbox: 'unfenced' })
+    expect(reply.error?.code).toBe(-32602)
+  })
+})

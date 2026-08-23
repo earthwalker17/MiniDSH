@@ -56,6 +56,15 @@ export class TerminalRenderer {
         const reason = (event.data as { reason: { kind: string } }).reason.kind
         return reason === 'completed' ? '' : `[turn ${reason}]\n`
       }
+      // Authority is visible where it changes: a surface that hides a widened
+      // boundary is a surface that lets one happen quietly.
+      case 'sandbox/mode': {
+        const data = event.data as { mode: string; enforcement: string; reason: string }
+        const enforced = data.mode === 'danger-full-access' ? 'unconfined' : `shell confinement: ${data.enforcement}`
+        return `[sandbox: ${data.mode} (${enforced})]\n`
+      }
+      case 'approval/policy':
+        return `[approvals: ${(event.data as { policy: string }).policy}]\n`
       default:
         return ''
     }

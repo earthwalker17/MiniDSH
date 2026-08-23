@@ -14,7 +14,7 @@ import { PassThrough } from 'node:stream'
 import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import type { SessionEventFrame } from '../../core/session/index.ts'
-import type { EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
+import type { AuthorityView, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
 import type { BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
@@ -146,6 +146,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       await exit(0)
       return
     }
+    if (line.startsWith('/sandbox') || line.startsWith('/ask')) {
+      await switchAuthority(line)
+      return
+    }
     if (line === '/cancel') {
       if (sessionId !== undefined && status === 'running') await client.request('session/cancel', { sessionId }).catch(printError)
       return
@@ -161,6 +165,33 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       printError(error)
       if (status === 'idle') prompt()
     }
+  }
+
+  /**
+   * Authority changes go over the wire like everything else: the terminal is a
+   * protocol client, and the switch it asks for becomes a durable event the
+   * renderer then reports back to it.
+   */
+  async function switchAuthority(line: string): Promise<void> {
+    const [command, value] = line.split(/\s+/, 2)
+    if (sessionId === undefined) {
+      out.write('no session yet - send a prompt first\n')
+      prompt()
+      return
+    }
+    if (!value) {
+      out.write(command === '/ask' ? 'usage: /ask <ask|never>\n' : 'usage: /sandbox <read-only|workspace-write|danger-full-access>\n')
+      prompt()
+      return
+    }
+    const params = command === '/ask' ? { sessionId, approval: value } : { sessionId, sandbox: value }
+    try {
+      const view = await client.request<AuthorityView>('session/authority', params)
+      out.write(`sandbox: ${view.sandbox} (shell confinement: ${view.enforcement}) · approvals: ${view.approval}\n`)
+    } catch (error) {
+      printError(error)
+    }
+    if (status === 'idle') prompt()
   }
 
   async function onInterrupt(): Promise<void> {

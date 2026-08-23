@@ -12,7 +12,8 @@ import { LLM } from '../core/llm/index.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
 import { matches, type EventEnvelope } from '../core/session/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
-import { runTask, type BootOptions } from './headless.ts'
+import { main } from './cli.ts'
+import { resumeTask, runTask, type BootOptions } from './headless.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 
@@ -95,5 +96,83 @@ describe('authority in a real composition', () => {
     const cwd = tempDir('minidsh-cwd-')
     const { events } = await editorRun(cwd, { command: 'create', path: join(cwd, 'note.txt'), file_text: 'kept' }, { sandbox: 'danger-full-access' })
     expect(modeStamps(events)).toEqual([{ mode: 'danger-full-access', enforcement: 'none', reason: 'initial' }])
+  })
+})
+
+describe('authority survives the process', () => {
+  it('a resumed session keeps the mode it recorded, not the deployment default', async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const first = await runTask({
+      task: 'note it',
+      cwd,
+      model: 'scripted-model',
+      sessionsRoot,
+      logger: silent,
+      sandbox: 'read-only',
+      ...scripted(new ScriptedAdapter().script(assistantText('noted'))),
+    })
+    expect(first.exitCode).toBe(0)
+
+    // The resumed run asks for nothing, so the deployment default applies -
+    // except that the session recorded read-only, and its own record wins.
+    const events: EventEnvelope[] = []
+    const target = join(cwd, 'after-resume.txt')
+    await resumeTask(
+      {
+        id: first.sessionId,
+        task: 'write the file',
+        sessionsRoot,
+        logger: silent,
+        ...scripted(new ScriptedAdapter().script(assistantToolCall('call-2', 'str_replace_editor', { command: 'create', path: target, file_text: 'x' }), assistantText('done'))),
+      },
+      (frame) => void events.push(frame.event),
+    )
+    expect(existsSync(target)).toBe(false)
+    expect(toolError(events)?.code).toBe('FS_SANDBOX_DENIED')
+    // Nothing changed, so the pickup records no new stamp.
+    expect(modeStamps(events)).toHaveLength(0)
+  })
+})
+
+describe('the audit view', () => {
+  it('projects what the session could do, when, and every denial', async () => {
+    const home = tempDir('minidsh-home-')
+    const cwd = tempDir('minidsh-cwd-')
+    const elsewhere = tempDir('minidsh-out-')
+    const previous = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    const chunks: string[] = []
+    const write = process.stdout.write.bind(process.stdout)
+    try {
+      const result = await runTask({
+        task: 'escape',
+        cwd,
+        model: 'scripted-model',
+        sessionsRoot: join(home, 'sessions'),
+        logger: silent,
+        ...scripted(
+          new ScriptedAdapter().script(
+            assistantToolCall('call-1', 'str_replace_editor', { command: 'create', path: join(elsewhere, 'owned.txt'), file_text: 'no' }),
+            assistantText('blocked'),
+          ),
+        ),
+      })
+      process.stdout.write = ((text: string) => {
+        chunks.push(text)
+        return true
+      }) as typeof process.stdout.write
+      const code = await main(['sessions', 'show', result.sessionId, '--audit'])
+      expect(code).toBe(0)
+    } finally {
+      process.stdout.write = write
+      if (previous === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previous
+    }
+    const audit = chunks.join('')
+    expect(audit).toContain('sandbox     workspace-write (initial; shell confinement none)')
+    expect(audit).toContain('denied      FS_SANDBOX_DENIED')
+    // The projection is authority only: ordinary conversation is not in it.
+    expect(audit).not.toContain('assistant/message')
   })
 })

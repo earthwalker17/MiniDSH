@@ -6,6 +6,7 @@ import { PassThrough } from 'node:stream'
 import { z } from 'zod'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../../kernel/index.ts'
+import { APPROVAL } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createAssistantMessage, createUserMessage } from '../../core/llm/message.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
@@ -183,6 +184,75 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     expect(driver.text()).toContain('plan remembered')
     driver.type('go on')
     await driver.see('continuing the plan')
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
+})
+
+describe('terminal authority', () => {
+  it('switches the session over the wire and shows the switch as the durable event', async () => {
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(assistantText('hello there'), assistantText('still here'))
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      ...scriptedBoot(adapter),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    await driver.see('you> ')
+    driver.type('hi')
+    await driver.see('hello there')
+
+    driver.type('/sandbox read-only')
+    await driver.see('sandbox: read-only')
+    // The durable event is what the transcript shows, not a client-side echo.
+    await driver.see('[sandbox: read-only')
+
+    driver.type('/sandbox nonsense')
+    await driver.see('must be read-only')
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
+
+  it('answers a shell escalation with y and shows the durable decision', async () => {
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(
+      assistantToolCall('c1', 'risky', { command: 'rm -rf /' }),
+      assistantText('escalation handled'),
+    )
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      ...scriptedBoot(adapter, (root) => {
+        root.get(TOOLS).register(
+          root,
+          defineTool({
+            name: 'risky',
+            description: 'asks to widen its own authority',
+            input: z.object({ command: z.string() }),
+            output: z.object({ ok: z.boolean() }),
+            render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+            execute: async (_args, exec) => {
+              const outcome = await root.get(APPROVAL).request({
+                agent: exec.agent!,
+                toolName: 'risky',
+                callId: exec.callId,
+                reason: 'run under "danger-full-access": the suite needs the network',
+              })
+              return { ok: outcome === 'allowed-once' }
+            },
+          }),
+        )
+      }),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    await driver.see('you> ')
+    driver.type('do the risky thing')
+    await driver.see('approve risky (run under "danger-full-access": the suite needs the network)? [y/N] ')
+    driver.type('y')
+    await driver.see('escalation handled')
     driver.type('/exit')
     expect(await exitCode).toBe(0)
   })

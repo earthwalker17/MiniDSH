@@ -6,7 +6,9 @@
  * event and notification types).
  */
 import type { AgentOptions } from '../../core/agent/index.ts'
+import type { ApprovalPolicy } from '../../core/approval/index.ts'
 import type { ProviderInfo } from '../../core/llm/index.ts'
+import type { SandboxEnforcement, SandboxMode } from '../../core/sandbox/index.ts'
 import type { EventEnvelope, SessionEventFrame, SessionHeader } from '../../core/session/index.ts'
 
 // ---- JSON-RPC 2.0 envelope ------------------------------------------------
@@ -57,6 +59,22 @@ export interface InitializeResult {
   readonly serverInfo: { readonly name: string; readonly version: string }
   readonly providers: readonly ProviderInfo[]
   readonly defaultAgentOptions: AgentOptions
+  /** What a session created now would start under, and what this host can enforce. */
+  readonly defaultAuthority: AuthorityView
+}
+
+/** The authority a session is under. `enforcement` is a reported fact about THIS host. */
+export interface AuthorityView {
+  readonly sandbox: SandboxMode
+  readonly approval: ApprovalPolicy
+  readonly enforcement: SandboxEnforcement
+}
+
+export interface AuthorityParams {
+  readonly sessionId: string
+  /** Either may be omitted; omitting both reads the current authority without changing it. */
+  readonly sandbox?: SandboxMode
+  readonly approval?: ApprovalPolicy
 }
 
 export type PromptMode = 'followup' | 'steer'
@@ -91,6 +109,7 @@ export interface EventsResult {
 export interface CancelParams {
   readonly sessionId: string
 }
+
 
 export interface ApprovalAnswerParams {
   readonly sessionId: string

@@ -3,15 +3,18 @@
  * real process stdio it serves out-of-process clients (`minidsh serve`);
  * mounted on an in-process duplex stream pair it serves the terminal surface —
  * same frames, same semantics, no shared objects. It injects `agents` and
- * `sessions` (the surface contract) plus `llm` read-only for the initialize
- * catalog; `persistence` is deliberately NOT injected (a declared-but-absent
+ * `sessions` (the surface contract) plus `llm` for the initialize catalog and
+ * the authority services for the policy control plane (a switch a client asks
+ * for IS its durable event, so no authority state lives on the wire);
+ * `persistence` is deliberately NOT injected (a declared-but-absent
  * key would pend the plugin forever in persistence-less compositions) — cold
  * reads use a call-time optional lookup.
  */
 import type { Plugin } from '../../kernel/index.ts'
 import { AGENTS, AGENT_STATUS, type AgentOptions } from '../../core/agent/index.ts'
-import { APPROVAL_REQUEST } from '../../core/approval/index.ts'
+import { APPROVAL, APPROVAL_REQUEST } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
+import { SANDBOX } from '../../core/sandbox/index.ts'
 import { SESSIONS, SESSION_EVENT } from '../../core/session/index.ts'
 import { ProtocolServer } from './server.ts'
 import { NdjsonTransport } from './transport.ts'
@@ -33,7 +36,7 @@ export interface ProtocolConfig {
 
 export const protocolStdioPlugin: Plugin<ProtocolConfig> = {
   name: 'protocol-stdio',
-  inject: [AGENTS, SESSIONS, LLM],
+  inject: [AGENTS, SESSIONS, LLM, SANDBOX, APPROVAL],
   apply(ctx, config) {
     const input = config.input ?? process.stdin
     const output = config.output ?? process.stdout

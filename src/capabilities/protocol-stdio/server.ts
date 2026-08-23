@@ -9,11 +9,12 @@
  */
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
-import { APPROVAL_DECIDED, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
+import { APPROVAL, APPROVAL_DECIDED, isApprovalPolicy, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
+import { isSandboxMode, SANDBOX } from '../../core/sandbox/index.ts'
 import { SESSIONS, matches, type EventEnvelope, type Session } from '../../core/session/index.ts'
 import {
   INTERNAL_ERROR,
@@ -21,6 +22,7 @@ import {
   METHOD_NOT_FOUND,
   RpcFailure,
   type ApprovalAnswerResult,
+  type AuthorityView,
   type EventsResult,
   type InitializeResult,
   type PromptResult,
@@ -133,6 +135,8 @@ export class ProtocolServer {
         return this.cancel(record)
       case 'approval/answer':
         return this.approvalAnswer(record)
+      case 'session/authority':
+        return this.authority(record)
       case 'shutdown':
         return this.shutdown()
       default:
@@ -145,7 +149,36 @@ export class ProtocolServer {
       serverInfo: { name: 'minidsh', version: this.config.serverVersion },
       providers: this.ctx.get(LLM).providers(),
       defaultAgentOptions: this.config.defaultAgentOptions,
+      defaultAuthority: this.defaultAuthority(),
     }
+  }
+
+  private defaultAuthority(): AuthorityView {
+    const sandbox = this.ctx.get(SANDBOX)
+    return { sandbox: sandbox.defaultMode, approval: this.ctx.get(APPROVAL).defaultPolicy, enforcement: sandbox.enforcementFor(sandbox.defaultMode) }
+  }
+
+  /**
+   * Read or switch a live session authority. Each switch IS its durable event,
+   * so a client never holds authority state of its own — it reads the log like
+   * every other surface.
+   */
+  private authority(params: Record<string, unknown>): AuthorityView {
+    const sessionId = requireString(params, 'sessionId', 'session/authority')
+    const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
+    if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
+    if (params.sandbox !== undefined && !isSandboxMode(params.sandbox)) {
+      throw new RpcFailure(INVALID_PARAMS, 'session/authority: "sandbox" must be read-only, workspace-write, or danger-full-access')
+    }
+    if (params.approval !== undefined && !isApprovalPolicy(params.approval)) {
+      throw new RpcFailure(INVALID_PARAMS, 'session/authority: "approval" must be "ask" or "never"')
+    }
+    const sandbox = this.ctx.get(SANDBOX)
+    const approval = this.ctx.get(APPROVAL)
+    if (params.sandbox !== undefined) sandbox.setMode(agent.session, params.sandbox)
+    if (params.approval !== undefined) approval.setPolicy(agent.session, params.approval)
+    const mode = sandbox.resolve({ session: agent.session }).mode
+    return { sandbox: mode, approval: approval.policyFor(agent.session), enforcement: sandbox.enforcementFor(mode) }
   }
 
   private async prompt(params: Record<string, unknown>): Promise<PromptResult> {
