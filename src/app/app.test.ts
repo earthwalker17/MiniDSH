@@ -37,15 +37,22 @@ describe('headless runner (real composition, scripted model)', () => {
     const sessionsRoot = tempDir('minidsh-sessions-')
     const adapter = new ScriptedAdapter().script(assistantText('all done'))
     const events: string[] = []
+    const frames: { sessionId: string; event: { type: string } }[] = []
     const result = await runTask(
       { task: 'do the thing', cwd, model: 'scripted-model', sessionsRoot, logger: silent, ...scripted(adapter) },
-      (event) => events.push(event.type),
+      (frame) => {
+        events.push(frame.event.type)
+        frames.push(frame)
+      },
     )
     expect(result.exitCode).toBe(0)
     expect(result.reason).toBe('completed')
     expect(result.text).toBe('all done')
     expect(events).toContain('turn/start')
     expect(events).toContain('assistant/message')
+    // The stream is the wire envelope: {sessionId, event}, sessionId first.
+    expect(frames.every((frame) => frame.sessionId === result.sessionId)).toBe(true)
+    expect(JSON.stringify(frames[0]).startsWith('{"sessionId":')).toBe(true)
     // The session was persisted as JSONL.
     const files = readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))
     expect(files).toHaveLength(1)

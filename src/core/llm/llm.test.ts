@@ -75,6 +75,17 @@ describe('LlmRuntime', () => {
     expect(() => llm.registerAdapter(root, new ScriptedAdapter())).toThrowError(LlmError)
   })
 
+  it('lists registered providers with their advertised models', async () => {
+    const { root, llm } = await harness()
+    expect(llm.providers()).toEqual([])
+    llm.registerAdapter(root, new ScriptedAdapter())
+    const catalog = llm.providers()
+    expect(catalog).toHaveLength(1)
+    expect(catalog[0]!.id).toBe('scripted')
+    expect(catalog[0]!.models.length).toBeGreaterThan(0)
+    expect(catalog[0]!.models[0]).toMatchObject({ id: expect.any(String) as string, name: expect.any(String) as string })
+  })
+
   it('unregisters an adapter when its owning context disposes', async () => {
     const { root, llm } = await harness()
     const child = root.child({ label: 'owner' })

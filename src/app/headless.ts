@@ -9,9 +9,9 @@ import { createRoot, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
 import { messageText } from '../core/llm/message.ts'
-import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope } from '../core/session/index.ts'
+import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
-import { applyPatches, compose, defaultDialect, mount, type Patch } from './compose.ts'
+import { applyPatches, compose, defaultAgentOptions, defaultDialect, mount, type Patch } from './compose.ts'
 import type { ShellDialect } from '../capabilities/shell-stdio/index.ts'
 
 interface BootOptions {
@@ -54,7 +54,8 @@ export interface TaskResult {
   readonly reason: string
 }
 
-export type EventListener = (event: EventEnvelope) => void
+/** Streams `{sessionId, event}` — the same frame the wire carries (ARCHITECTURE §8). */
+export type EventListener = (frame: SessionEventFrame) => void
 
 const silentLogger: Logger = { warn: () => {}, error: () => {} }
 
@@ -79,7 +80,7 @@ async function boot(options: BootOptions, onEvent?: EventListener): Promise<Cont
     throw new Error(`composition did not settle — pending: [${pending}] failed: [${failed}]`)
   }
   await options.prepare?.(root)
-  if (onEvent) root.on(SESSION_EVENT, (_session, event) => onEvent(event))
+  if (onEvent) root.on(SESSION_EVENT, (session, event) => onEvent({ sessionId: session.id, event }))
   return root
 }
 
@@ -108,7 +109,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
   const root = await boot(options, onEvent)
   try {
     const agentOptions: AgentOptions = {
-      provider: options.provider ?? 'deepseek',
+      provider: options.provider ?? defaultAgentOptions().provider,
       model: options.model,
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
       ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
@@ -129,7 +130,7 @@ function continueArgs(options: ContinueOptions): { agentOptions: Partial<AgentOp
       ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     },
     // Used only when the stored log recorded no request at all.
-    defaults: { provider: 'deepseek', model: process.env.MINIDSH_MODEL ?? 'deepseek-v4-flash' },
+    defaults: defaultAgentOptions(),
   }
 }
 

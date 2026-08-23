@@ -5,7 +5,7 @@
  */
 import type { Context, Plugin } from '../kernel/index.ts'
 import { agentInvariantPlugin } from '../core/agent/invariant.ts'
-import { agentPlugin } from '../core/agent/index.ts'
+import { agentPlugin, type AgentOptions } from '../core/agent/index.ts'
 import { approvalPlugin } from '../core/approval/index.ts'
 import { invariantsPlugin } from '../core/invariants/index.ts'
 import { llmPlugin } from '../core/llm/index.ts'
@@ -75,6 +75,11 @@ export interface ComposeOptions {
 
 export function defaultDialect(): ShellDialect {
   return process.platform === 'win32' ? 'pwsh' : 'bash'
+}
+
+/** The one place the default provider/model live; every surface shares them. */
+export function defaultAgentOptions(): AgentOptions {
+  return { provider: 'deepseek', model: process.env.MINIDSH_MODEL ?? 'deepseek-v4-flash' }
 }
 
 /** The default MiniDSH composition. DeepSeek is the provider; the model is chosen per run. */

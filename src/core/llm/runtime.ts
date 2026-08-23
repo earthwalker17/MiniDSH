@@ -1,10 +1,18 @@
 import { type Context, type Disposer, type Plugin, serviceKey, waterfallEvent } from '../../kernel/index.ts'
-import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type ResolvedModel, type StreamChunk } from './types.ts'
+import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from './types.ts'
+
+/** One registered provider and the models it advertises. */
+export interface ProviderInfo {
+  readonly id: string
+  readonly models: readonly ModelInfo[]
+}
 
 /** The adapter registry and provider-neutral stream service. */
 export interface Llm {
   registerAdapter(owner: Context, adapter: LlmAdapter): Disposer
   hasProvider(provider: string): boolean
+  /** The catalog: registered providers with their advertised models (surface handshakes). */
+  providers(): ProviderInfo[]
   resolveModel(provider: string, model: string): ResolvedModel
   stream(request: LlmRequest): AsyncIterable<StreamChunk>
 }
@@ -37,6 +45,10 @@ class LlmRuntime implements Llm {
 
   hasProvider(provider: string): boolean {
     return this.adapters.has(provider)
+  }
+
+  providers(): ProviderInfo[] {
+    return [...this.adapters.values()].map((adapter) => ({ id: adapter.provider, models: adapter.listModels() }))
   }
 
   resolveModel(provider: string, model: string): ResolvedModel {

@@ -9,7 +9,7 @@ import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
-import { compose, defaultDialect } from './compose.ts'
+import { compose, defaultAgentOptions, defaultDialect } from './compose.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { sessionsDir } from './home.ts'
 
@@ -79,7 +79,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
   }
   const json = args.flags.get('json') === true
   const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
-  const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : process.env.MINIDSH_MODEL ?? 'deepseek-v4-flash'
+  const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : defaultAgentOptions().model
   const effort = typeof args.flags.get('effort') === 'string' ? (args.flags.get('effort') as string) : undefined
   const maxStepsRaw = args.flags.get('max-steps')
   const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
@@ -111,10 +111,11 @@ async function runCommand(args: ParsedArgs): Promise<number> {
 }
 
 function eventPrinter(json: boolean): EventListener {
+  // --json emits the wire frame: one {sessionId, event} per line.
   return json
-    ? (event: EventEnvelope) => process.stdout.write(`${JSON.stringify(event)}\n`)
-    : (event: EventEnvelope) => {
-        const line = renderEvent(event)
+    ? (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`)
+    : (frame) => {
+        const line = renderEvent(frame.event)
         if (line) process.stderr.write(`${line}\n`)
       }
 }
@@ -200,7 +201,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         return 1
       }
       if (args.flags.get('json') === true) {
-        for (const event of stored.events) process.stdout.write(`${JSON.stringify(event)}\n`)
+        for (const event of stored.events) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, event })}\n`)
       } else {
         process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
         for (const event of stored.events) {
