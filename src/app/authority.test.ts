@@ -176,3 +176,37 @@ describe('the audit view', () => {
     expect(audit).not.toContain('assistant/message')
   })
 })
+
+describe('authority flags', () => {
+  it('refuses an unknown mode before anything boots, and says what it expects', async () => {
+    const lines: string[] = []
+    const write = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((text: string) => {
+      lines.push(text)
+      return true
+    }) as typeof process.stderr.write
+    let code: number
+    try {
+      code = await main(['run', 'anything', '--sandbox', 'bogus'])
+    } finally {
+      process.stderr.write = write
+    }
+    expect(code).toBe(2)
+    const message = lines.join('')
+    expect(message).toContain('--sandbox expects read-only | workspace-write | danger-full-access')
+    expect(message.endsWith('\n')).toBe(true)
+  })
+
+  it('refuses an unknown approval policy the same way', async () => {
+    const write = process.stderr.write.bind(process.stderr)
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      expect(await main(['run', 'anything', '--ask', 'sometimes'])).toBe(2)
+      expect(await main(['serve', '--sandbox', 'bogus'])).toBe(2)
+      expect(await main(['chat', '--ask', 'maybe'])).toBe(2)
+      expect(await main(['resume', 'some-id', '--sandbox', 'bogus'])).toBe(2)
+    } finally {
+      process.stderr.write = write
+    }
+  })
+})

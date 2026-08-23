@@ -103,7 +103,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
   const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
   const authority = authorityFlags(args)
   if (typeof authority === 'string') {
-    process.stderr.write(authority + '" + NL + "')
+    process.stderr.write(`${authority}\n`)
     return 2
   }
 
@@ -207,7 +207,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   const approve = args.flags.get('approve') === true
   const authority = authorityFlags(args)
   if (typeof authority === 'string') {
-    process.stderr.write(authority + '" + NL + "')
+    process.stderr.write(`${authority}\n`)
     return 2
   }
 
@@ -255,7 +255,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
   const task = args.positional.join(' ').trim()
   const authority = authorityFlags(args)
   if (typeof authority === 'string') {
-    process.stderr.write(authority + '" + NL + "')
+    process.stderr.write(`${authority}\n`)
     return 2
   }
   try {
@@ -296,7 +296,7 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
   const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
   const authority = authorityFlags(args)
   if (typeof authority === 'string') {
-    process.stderr.write(authority + '" + NL + "')
+    process.stderr.write(`${authority}\n`)
     return 2
   }
   try {

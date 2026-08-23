@@ -22,10 +22,13 @@ pnpm install
 pnpm check                                  # typecheck + lint + dependency gate + tests
 pnpm minidsh run "fix the failing test" --cwd path/to/workspace --approve
 pnpm minidsh run "summarize this repo" --json   # one JSON line per session event on stdout
-pnpm minidsh sessions show <session-id>
+pnpm minidsh chat --cwd path/to/workspace       # interactive terminal (y/N approvals, /sandbox, /exit)
+pnpm minidsh sessions show <session-id> --audit  # what this session was allowed to do, and when
 ```
 
 Session logs live under `%USERPROFILE%\.minidsh\sessions` (override with `MINIDSH_HOME`). The default model is `deepseek-v4-flash`; pass `--model deepseek-v4-pro` or set `MINIDSH_MODEL`.
+
+**Authority.** Runs default to `--sandbox workspace-write`: file modifications are fenced to the working directory in process, and reads are unrestricted. No host can confine shell commands yet, so the shell refuses to run under a confined mode and the model must ask for a one-shot escalation, which a person approves (`--approve` grants them in a headless run, `--sandbox danger-full-access` drops confinement for the whole session). Every mode, policy, request and decision is a durable event you can read back with `sessions show --audit`.
 
 ## License
 
