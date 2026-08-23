@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import type { ShellRunResult, ShellSession } from '../../core/shell/index.ts'
+import { SandboxError, type SandboxEnforcement, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
+import type { ShellExecRequest, ShellRunResult, ShellSession } from '../../core/shell/index.ts'
 
 export type ShellDialect = 'bash' | 'pwsh'
 
@@ -45,18 +46,42 @@ export class ShellProcess implements ShellSession {
   private readonly cwd: string
   private readonly shellPath: string | undefined
   private readonly maxOutputChars: number
+  private readonly enforcementFor: (mode: SandboxMode) => SandboxEnforcement
 
-  constructor(dialect: ShellDialect, cwd: string, options: { shellPath?: string; maxOutputChars?: number } = {}) {
+  constructor(
+    dialect: ShellDialect,
+    cwd: string,
+    options: { shellPath?: string; maxOutputChars?: number; enforcementFor?: (mode: SandboxMode) => SandboxEnforcement } = {},
+  ) {
     this.dialect = dialect
     this.cwd = cwd
     this.shellPath = options.shellPath
     this.maxOutputChars = options.maxOutputChars ?? 16_000
+    // A piped child shell confines nothing on its own; a provider that wraps the
+    // spawn in an OS sandbox supplies a truthful probe here instead.
+    this.enforcementFor = options.enforcementFor ?? (() => 'none')
   }
 
-  exec(request: { command: string; timeoutMs?: number; signal?: AbortSignal }): Promise<ShellRunResult> {
+  exec(request: ShellExecRequest): Promise<ShellRunResult> {
     const run = this.queue.then(() => this.runOne(request))
     this.queue = run.catch(() => undefined)
     return run
+  }
+
+  /**
+   * Deny-only, never negotiating: a confined policy this world cannot enforce
+   * refuses rather than running unconfined. Escalation is the tool job.
+   */
+  private confine(policy: SandboxExecutionPolicy): SandboxEnforcement {
+    if (policy.mode === 'danger-full-access') return 'none'
+    const enforcement = this.enforcementFor(policy.mode)
+    if (enforcement === 'none') {
+      throw new SandboxError(
+        'SANDBOX_UNAVAILABLE',
+        `this host has no confinement backend, so a command cannot run under "${policy.mode}" mode`,
+      )
+    }
+    return enforcement
   }
 
   private ensureChild(): ChildProcessWithoutNullStreams {
@@ -77,8 +102,10 @@ export class ShellProcess implements ShellSession {
     return child
   }
 
-  private async runOne(request: { command: string; timeoutMs?: number; signal?: AbortSignal }): Promise<ShellRunResult> {
-    if (this.disposed) return { output: '', timedOut: false, truncated: false, reset: false }
+  private async runOne(request: ShellExecRequest): Promise<ShellRunResult> {
+    const enforcement = this.confine(request.policy)
+    const sandbox = { mode: request.policy.mode, enforcement }
+    if (this.disposed) return { output: '', timedOut: false, truncated: false, reset: false, sandbox }
     const child = this.ensureChild()
     this.buffer = ''
     const marker = `${this.markerBase}${++this.commandSeq}`
@@ -93,7 +120,7 @@ export class ShellProcess implements ShellSession {
         const output = this.buffer.slice(0, this.buffer.indexOf(marker))
         this.buffer = ''
         const exitCode = Number(match[1])
-        return this.finalize(output, { exitCode, timedOut: false, reset: false })
+        return this.finalize(output, { exitCode, timedOut: false, reset: false }, sandbox)
       }
       // The shell itself died (e.g. the command was `exit`): report immediately
       // instead of polling until the deadline.
@@ -101,15 +128,15 @@ export class ShellProcess implements ShellSession {
         const output = this.buffer
         this.child = undefined
         this.buffer = ''
-        return this.finalize(output, { timedOut: false, reset: true })
+        return this.finalize(output, { timedOut: false, reset: true }, sandbox)
       }
-      if (request.signal?.aborted) return this.finalize(this.buffer, { timedOut: false, reset: await this.reset() })
-      if (Date.now() > deadline) return this.finalize(this.buffer, { timedOut: true, reset: await this.reset() })
+      if (request.signal?.aborted) return this.finalize(this.buffer, { timedOut: false, reset: await this.reset() }, sandbox)
+      if (Date.now() > deadline) return this.finalize(this.buffer, { timedOut: true, reset: await this.reset() }, sandbox)
       await sleep(POLL_MS)
     }
   }
 
-  private finalize(raw: string, extra: { exitCode?: number; timedOut: boolean; reset: boolean }): ShellRunResult {
+  private finalize(raw: string, extra: { exitCode?: number; timedOut: boolean; reset: boolean }, sandbox: ShellRunResult['sandbox']): ShellRunResult {
     const trimmed = raw.replace(/^\n+/, '').replace(/\n+$/, '')
     const truncated = trimmed.length > this.maxOutputChars
     const output = truncated ? `${trimmed.slice(0, this.maxOutputChars)}\n[output truncated at ${this.maxOutputChars} characters]` : trimmed
@@ -118,6 +145,7 @@ export class ShellProcess implements ShellSession {
       timedOut: extra.timedOut,
       truncated,
       reset: extra.reset,
+      sandbox,
       ...(extra.exitCode === undefined ? {} : { exitCode: extra.exitCode }),
     }
   }

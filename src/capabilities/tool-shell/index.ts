@@ -5,6 +5,7 @@
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
+import { SANDBOX, SandboxError } from '../../core/sandbox/index.ts'
 import { SHELL } from '../../core/shell/index.ts'
 import { defineTool, TOOLS, type ToolCallView } from '../../core/tools/index.ts'
 
@@ -25,7 +26,7 @@ const PWSH_DESCRIPTION = `Run a command in a persistent PowerShell (pwsh) shell.
 
 export const toolShellPlugin: Plugin<ShellToolConfig | undefined> = {
   name: 'tool-shell',
-  inject: [TOOLS, SHELL],
+  inject: [TOOLS, SHELL, SANDBOX],
   apply(ctx, config) {
     ctx.get(TOOLS).register(ctx, buildShellTool(ctx, config?.timeoutMs ?? 300_000))
   },
@@ -33,6 +34,7 @@ export const toolShellPlugin: Plugin<ShellToolConfig | undefined> = {
 
 function buildShellTool(ctx: Context, timeoutMs: number) {
   const shell = ctx.get(SHELL)
+  const sandbox = ctx.get(SANDBOX)
   const name = shell.dialect === 'pwsh' ? 'pwsh' : 'bash'
   return defineTool({
     name,
@@ -46,8 +48,17 @@ function buildShellTool(ctx: Context, timeoutMs: number) {
     },
     execute: async (args, exec) => {
       if (!exec.agent) throw new Error('the shell tool requires an owning agent')
-      const session = shell.sessionFor(exec.agent)
-      const result = await session.exec({ command: args.command, timeoutMs, signal: exec.signal })
+      const policy = sandbox.resolve({ session: exec.agent.session })
+      const shellSession = shell.sessionFor(exec.agent)
+      let result
+      try {
+        result = await shellSession.exec({ command: args.command, policy, timeoutMs, signal: exec.signal })
+      } catch (error) {
+        if (error instanceof SandboxError && error.code === 'SANDBOX_UNAVAILABLE') {
+          return { output: `[sandbox: ${error.message}]`, exitCode: null }
+        }
+        throw error
+      }
       const notice = result.timedOut ? `\n[timed out after ${timeoutMs}ms; the shell was reset]` : ''
       return { output: result.output + notice, exitCode: result.exitCode ?? null }
     },

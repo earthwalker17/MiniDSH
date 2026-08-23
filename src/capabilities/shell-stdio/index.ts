@@ -5,6 +5,7 @@
  */
 import type { Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
+import type { SandboxEnforcement, SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL, type Shell, type ShellSession } from '../../core/shell/index.ts'
 import { ShellProcess, type ShellDialect } from './process.ts'
 
@@ -23,10 +24,21 @@ class ShellStdioProvider implements Shell {
     this.config = config
   }
 
+  /**
+   * A piped child shell is not confined: this provider enforces nothing, so a
+   * confined command refuses rather than running unconfined. Real enforcement
+   * arrives as a provider that wraps the spawn in an OS sandbox (bwrap,
+   * Landlock, Seatbelt, a Windows restricted token) and reports it here.
+   */
+  enforcementFor(_mode: SandboxMode): SandboxEnforcement {
+    return 'none'
+  }
+
   sessionFor(agent: Agent): ShellSession {
     const existing = this.sessions.get(agent)
     if (existing) return existing
     const process = new ShellProcess(this.dialect, agent.session.header.cwd, {
+      enforcementFor: (mode) => this.enforcementFor(mode),
       ...(this.config.shellPath === undefined ? {} : { shellPath: this.config.shellPath }),
       ...(this.config.maxOutputChars === undefined ? {} : { maxOutputChars: this.config.maxOutputChars }),
     })

@@ -9,6 +9,8 @@ import { approvalPlugin } from '../core/approval/index.ts'
 import { invariantsPlugin } from '../core/invariants/index.ts'
 import { LLM, llmPlugin } from '../core/llm/index.ts'
 import { PROMPT, promptPlugin } from '../core/prompt/index.ts'
+import { sandboxPlugin } from '../core/sandbox/index.ts'
+import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { toolsPlugin } from '../core/tools/index.ts'
 import { agentPlugin } from '../core/agent/index.ts'
@@ -36,6 +38,8 @@ export async function coreHarness(options: { persona?: string; logger?: Logger }
   root.plugin(toolsPlugin)
   root.plugin(promptPlugin)
   root.plugin(approvalPlugin)
+  root.plugin(sandboxPlugin, {})
+  root.plugin(authorityInvariantPlugin)
   root.plugin(agentPlugin)
   root.plugin(agentInvariantPlugin)
   const loop = root.plugin(loopPlugin)

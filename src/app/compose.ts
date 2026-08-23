@@ -6,11 +6,13 @@
 import type { Context, Plugin } from '../kernel/index.ts'
 import { agentInvariantPlugin } from '../core/agent/invariant.ts'
 import { agentPlugin, type AgentOptions } from '../core/agent/index.ts'
-import { approvalPlugin } from '../core/approval/index.ts'
+import { approvalPlugin, type ApprovalPolicy } from '../core/approval/index.ts'
 import { invariantsPlugin } from '../core/invariants/index.ts'
 import { llmPlugin } from '../core/llm/index.ts'
 import { loopInvariantPlugin, loopPlugin } from '../core/loop/index.ts'
 import { promptPlugin } from '../core/prompt/index.ts'
+import { sandboxPlugin, type SandboxMode } from '../core/sandbox/index.ts'
+import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { toolsPlugin } from '../core/tools/index.ts'
 import { approvalHeadlessPlugin } from '../capabilities/approval-headless/index.ts'
@@ -19,7 +21,6 @@ import { deepseekPlugin } from '../capabilities/llm-deepseek/index.ts'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
 import { fsObservationPolicyPlugin } from '../capabilities/fs-observation-policy/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
-import { policyWorkspacePlugin } from '../capabilities/policy-workspace/index.ts'
 import { retryPlugin } from '../capabilities/llm-retry/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
@@ -71,6 +72,10 @@ export interface ComposeOptions {
   readonly dialect: ShellDialect
   readonly approve?: boolean
   readonly invariants?: boolean
+  /** Deployment default for sessions that have recorded no mode of their own. */
+  readonly sandbox?: SandboxMode
+  /** Deployment default approval policy (`never` refuses every request unattended). */
+  readonly approvalPolicy?: ApprovalPolicy
 }
 
 export function defaultDialect(): ShellDialect {
@@ -94,11 +99,12 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('llm-retry', retryPlugin, {}))
   rows.push(defineRow('tools', toolsPlugin))
   rows.push(defineRow('prompt', promptPlugin))
-  rows.push(defineRow('approval', approvalPlugin))
+  rows.push(defineRow('approval', approvalPlugin, options.approvalPolicy === undefined ? {} : { policy: options.approvalPolicy }))
   rows.push(defineRow('approval-headless', approvalHeadlessPlugin, { approve: options.approve ?? false }))
+  rows.push(defineRow('sandbox', sandboxPlugin, options.sandbox === undefined ? {} : { mode: options.sandbox }))
+  if (withInvariants) rows.push(defineRow('authority-invariant', authorityInvariantPlugin))
   rows.push(defineRow('fs', fsLocalPlugin))
   rows.push(defineRow('fs-observation-policy', fsObservationPolicyPlugin))
-  rows.push(defineRow('policy-workspace', policyWorkspacePlugin))
   rows.push(defineRow('shell', shellStdioPlugin, { dialect: options.dialect }))
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))

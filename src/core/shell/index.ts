@@ -2,14 +2,26 @@
  * The shell seam (Definition only; a capability provides it).
  *
  * One persistent shell session per agent, calls serialized per owner. The
- * provider owns the process table and binds each session's disposal to the
- * owning agent's context.
+ * provider owns the process table and binds each shell disposal to the owning
+ * agent context.
+ *
+ * **Authority contract.** Every command carries the caller resolved
+ * `SandboxExecutionPolicy` (from `ctx.sandbox`, never assembled by hand). A
+ * provider must enforce what it claims in `enforcementFor` and must REFUSE —
+ * `SandboxError('SANDBOX_UNAVAILABLE')` — a confined policy it cannot enforce:
+ * silent unconfined passthrough is never legal. The provider is deny-only and
+ * never negotiates; escalation is the tool and approval seam job. A confining
+ * provider must also bind its persistent child to the policy it was spawned
+ * under, restarting it when the effective policy changes.
  */
 import { serviceKey } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
+import type { SandboxEnforcement, SandboxExecutionPolicy, SandboxMode } from '../sandbox/index.ts'
 
 export interface ShellExecRequest {
   readonly command: string
+  /** The per-call authority stamp; resolved by the caller from `ctx.sandbox`. */
+  readonly policy: SandboxExecutionPolicy
   readonly timeoutMs?: number
   readonly signal?: AbortSignal
 }
@@ -21,6 +33,8 @@ export interface ShellRunResult {
   readonly truncated: boolean
   /** True when the shell was reset (after a timeout); the next call starts fresh. */
   readonly reset: boolean
+  /** What actually governed this run — a reported fact, not a promise. */
+  readonly sandbox: { readonly mode: SandboxMode; readonly enforcement: SandboxEnforcement }
 }
 
 export interface ShellSession {
@@ -32,8 +46,10 @@ export interface ShellSession {
 export interface Shell {
   /** The persistent shell for an agent, created on first use and disposed with the agent. */
   sessionFor(agent: Agent): ShellSession
-  /** The dialect this provider speaks (for the tool's description and name). */
+  /** The dialect this provider speaks (for the tool description and name). */
   readonly dialect: 'bash' | 'pwsh'
+  /** What this execution world can enforce for a confined mode on this host. */
+  enforcementFor(mode: SandboxMode): SandboxEnforcement
 }
 
 export const SHELL = serviceKey<Shell>('shell')
