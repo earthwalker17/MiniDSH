@@ -1,0 +1,152 @@
+/**
+ * The S3 live end-to-end: authority against the real model, over the real wire.
+ *
+ * `minidsh serve` runs as a child process WITHOUT `--approve`, under the
+ * default `workspace-write`, so every consent in this arc is a real decision
+ * answered by the client. Arc: an edit inside the workspace lands → an edit
+ * outside it is refused by the fence (probed on disk, not asserted from the
+ * agent's word) → a shell command is refused because this host cannot confine
+ * it, the model escalates with a justification, the client approves, and the
+ * command runs → the session is switched to `read-only` over the wire and the
+ * next write is refused → a fresh single-turn log replays keylessly, proving
+ * the new durable authority events leave the oracle intact.
+ *
+ * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
+ */
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
+import type { Logger } from '../kernel/index.ts'
+import type { EventEnvelope } from '../core/session/index.ts'
+import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { runTask } from './headless.ts'
+import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
+
+const KEY = process.env.DEEPSEEK_API_KEY
+const silent: Logger = { warn: () => {}, error: () => {} }
+
+let dirs: string[] = []
+afterAll(() => {
+  killSpawnedServes()
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  dirs = []
+})
+
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  dirs.push(dir)
+  return dir
+}
+
+const dataOf = <T>(event: EventEnvelope): T => event.data as T
+
+describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
+  it('fences the filesystem, refuses what it cannot confine, and records every decision', { timeout: 600_000 }, async () => {
+    const workspace = tempDir('minidsh-auth-ws-')
+    const outside = tempDir('minidsh-auth-out-')
+    const home = tempDir('minidsh-auth-home-')
+    const escape = join(outside, 'owned.txt')
+    const decoy = join(workspace, 'decoy.txt')
+    writeFileSync(decoy, 'must never change\n', 'utf8')
+    const decoyBytes = readFileSync(decoy)
+
+    // No --approve: every consent below is a real decision answered by this client.
+    const serve = new ServeProcess(workspace, home, {})
+    const init = await serve.request<{ defaultAuthority: { sandbox: string; enforcement: string } }>('initialize')
+    expect(init.defaultAuthority.sandbox).toBe('workspace-write')
+
+    // ---- 1. inside the workspace: ordinary work, no consent needed ---------
+    const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', {
+      text: 'Create a file named notes.txt in the working directory containing exactly this single line: authority holds',
+    })
+    await serve.waitForCompletedTurn(sessionId, 1)
+    expect(readFileSync(join(workspace, 'notes.txt'), 'utf8').trim()).toBe('authority holds')
+    expect(serve.events('approval/asked', sessionId)).toHaveLength(0)
+
+    // The boundary that governed that work is in the log before any effect of
+    // it is: the call record is written before dispatch, the stamp when the
+    // policy is first resolved, and both before the result the effect produced.
+    const stamp = serve.events('sandbox/mode', sessionId).at(0)!
+    expect(dataOf<{ mode: string; reason: string }>(stamp)).toMatchObject({ mode: 'workspace-write', reason: 'initial' })
+    const firstResult = serve.events('tool/result', sessionId).at(0)!
+    expect(stamp.seq).toBeLessThan(firstResult.seq)
+
+    // ---- 2. outside the workspace: refused, and nothing reaches the disk ---
+    await serve.request('session/prompt', {
+      sessionId,
+      text: `Using the file editor tool, create a file at the absolute path ${escape.replace(/\\/g, '/')} containing the text "owned". If a tool refuses, stop and say why.`,
+    })
+    await serve.waitForCompletedTurn(sessionId, 2)
+    expect(existsSync(escape)).toBe(false)
+    const denials = serve
+      .events('tool/result', sessionId)
+      .filter((event) => dataOf<{ error?: { code: string } }>(event).error?.code === 'FS_SANDBOX_DENIED')
+    expect(denials.length).toBeGreaterThan(0)
+
+    // ---- 3. the shell: refused, escalated by the model, approved by us -----
+    const stop = serve.answerApprovals('allowed-once')
+    await serve.request('session/prompt', {
+      sessionId,
+      text: 'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
+    })
+    await serve.waitForCompletedTurn(sessionId, 3)
+    stop()
+
+    const asked = serve.events('approval/asked', sessionId)
+    expect(asked.length).toBeGreaterThan(0)
+    const ask = dataOf<{ id: string; toolName: string; callId?: string; reason?: string }>(asked[0]!)
+    expect(ask.reason).toContain('danger-full-access')
+    // The ask names only its tool; the command it covered is joined by callId.
+    const covered = serve.events('tool/call', sessionId).find((event) => dataOf<{ callId: string }>(event).callId === ask.callId)
+    expect(dataOf<{ arguments: string }>(covered!).arguments).toContain('sandbox_permissions')
+    const decided = serve.events('approval/decided', sessionId).find((event) => dataOf<{ id: string }>(event).id === ask.id)
+    expect(dataOf<{ outcome: string }>(decided!).outcome).toBe('allowed-once')
+    // The grant covered one call: it is not a session switch.
+    expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
+
+    // ---- 4. a durable switch, and the next write is refused ----------------
+    // Anything asked for from here is refused, the way a person saying no is.
+    const refuse = serve.answerApprovals('rejected')
+    const view = await serve.request<{ sandbox: string }>('session/authority', { sessionId, sandbox: 'read-only' })
+    expect(view.sandbox).toBe('read-only')
+    const change = serve.events('sandbox/mode', sessionId).at(-1)!
+    expect(dataOf<{ mode: string; reason: string }>(change)).toMatchObject({ mode: 'read-only', reason: 'change' })
+
+    await serve.request('session/prompt', {
+      sessionId,
+      text: 'Append a second line reading "after the switch" to notes.txt. If a tool refuses, stop and say why.',
+    })
+    await serve.waitForCompletedTurn(sessionId, 4)
+    refuse()
+    expect(readFileSync(join(workspace, 'notes.txt'), 'utf8')).not.toContain('after the switch')
+    expect(readFileSync(decoy).equals(decoyBytes)).toBe(true)
+
+    // ---- 5. the log is still its own oracle -------------------------------
+    const fresh = await serve.request<{ sessionId: string }>('session/prompt', {
+      text: 'Create a file named done.txt in the working directory containing exactly: ok',
+    })
+    await serve.waitForCompletedTurn(fresh.sessionId, 1)
+    const freshLog = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId: fresh.sessionId })
+    await serve.shutdown()
+    expect(freshLog.events.some((event) => event.type === 'sandbox/mode')).toBe(true)
+
+    let replayHandle: ReturnType<typeof installLlmReplay> | undefined
+    const replayed = await runTask(
+      {
+        task: 'Create a file named done.txt in the working directory containing exactly: ok',
+        cwd: tempDir('minidsh-auth-replay-ws-'),
+        model: 'deepseek-v4-flash',
+        sessionsRoot: tempDir('minidsh-auth-replay-'),
+        logger: silent,
+        patches: [{ id: 'llm-deepseek', disabled: true }],
+        prepare: (root) => {
+          replayHandle = installLlmReplay(root, { events: freshLog.events })
+        },
+      },
+      undefined,
+    )
+    expect(replayed.exitCode).toBe(0)
+    replayHandle!.assertConsumed()
+  })
+})

@@ -12,26 +12,21 @@
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createInterface } from 'node:readline'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
-const BIN = join(import.meta.dirname, '..', '..', 'bin', 'minidsh.js')
-
 let dirs: string[] = []
-let children: ChildProcess[] = []
 afterAll(() => {
-  for (const child of children) if (child.exitCode === null) child.kill('SIGKILL')
-  children = []
+  killSpawnedServes()
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   dirs = []
 })
@@ -40,100 +35,6 @@ function tempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix))
   dirs.push(dir)
   return dir
-}
-
-interface Reply {
-  result?: unknown
-  error?: { code: number; message: string }
-}
-
-/** A minimal external JSON-RPC client speaking to a spawned `minidsh serve`. */
-class ServeProcess {
-  readonly child: ChildProcess
-  readonly frames: { sessionId: string; event: EventEnvelope }[] = []
-  readonly statuses: { sessionId: string; status: string }[] = []
-  stderr = ''
-  private nextId = 1
-  private readonly pending = new Map<number, (reply: Reply) => void>()
-  private readonly exited: Promise<number | null>
-
-  constructor(cwd: string, home: string) {
-    this.child = spawn(process.execPath, [BIN, 'serve', '--cwd', cwd, '--approve'], {
-      env: { ...process.env, MINIDSH_HOME: home },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-    children.push(this.child)
-    this.exited = new Promise((resolve) => this.child.on('exit', (code) => resolve(code)))
-    this.child.stderr!.on('data', (chunk: Buffer) => {
-      this.stderr += String(chunk)
-    })
-    const reader = createInterface({ input: this.child.stdout!, crlfDelay: Infinity })
-    reader.on('line', (line) => {
-      let frame: Record<string, unknown>
-      try {
-        frame = JSON.parse(line) as Record<string, unknown>
-      } catch {
-        return
-      }
-      if (frame.method === 'session.event') this.frames.push(frame.params as { sessionId: string; event: EventEnvelope })
-      else if (frame.method === 'session.status') this.statuses.push(frame.params as { sessionId: string; status: string })
-      else if (typeof frame.id === 'number') {
-        this.pending.get(frame.id)?.(frame as Reply)
-        this.pending.delete(frame.id)
-      }
-    })
-  }
-
-  async request<T>(method: string, params?: unknown): Promise<T> {
-    const id = this.nextId++
-    const reply = new Promise<Reply>((resolve) => this.pending.set(id, resolve))
-    this.child.stdin!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) })}\n`)
-    const settled = await reply
-    if (settled.error) throw new Error(`${method} failed: ${settled.error.message}`)
-    return settled.result as T
-  }
-
-  events(type: string, sessionId?: string): EventEnvelope[] {
-    return this.frames.filter((frame) => frame.event.type === type && (sessionId === undefined || frame.sessionId === sessionId)).map((frame) => frame.event)
-  }
-
-  async waitFor<T>(pick: () => T | undefined, what: string, timeoutMs = 180_000): Promise<T> {
-    const start = Date.now()
-    for (;;) {
-      const value = pick()
-      if (value !== undefined) return value
-      if (this.child.exitCode !== null) throw new Error(`serve exited while waiting for ${what}\nstderr: ${this.stderr}`)
-      if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}\nstderr: ${this.stderr}`)
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-  }
-
-  waitForCompletedTurn(sessionId: string, turn: number): Promise<EventEnvelope> {
-    return this.waitFor(
-      () => this.events('turn/end', sessionId).find((event) => (event.data as { turn: number; reason: { kind: string } }).turn === turn),
-      `turn ${turn} to end`,
-    )
-  }
-
-  kill(): Promise<number | null> {
-    this.child.kill('SIGKILL')
-    return this.exited
-  }
-
-  async shutdown(): Promise<void> {
-    await this.request('shutdown')
-    this.child.stdin!.end()
-    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000))
-    await Promise.race([this.exited, timeout])
-    if (this.child.exitCode === null) this.child.kill('SIGKILL')
-  }
-}
-
-/** The bytes of the valid line prefix (through the last newline). */
-function validPrefix(file: string): Buffer {
-  const bytes = readFileSync(file)
-  const lastNewline = bytes.lastIndexOf(0x0a)
-  return bytes.subarray(0, lastNewline + 1)
 }
 
 describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire', () => {
@@ -145,7 +46,7 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     const decoyBytes = readFileSync(decoy)
 
     // ---- lifecycle 1: complete task A, then die mid-task-B ----------------
-    const first = new ServeProcess(workspace, home)
+    const first = new ServeProcess(workspace, home, { approve: true })
     const init = await first.request<{ serverInfo: { name: string }; providers: { id: string }[] }>('initialize')
     expect(init.serverInfo.name).toBe('minidsh')
     expect(init.providers.some((provider) => provider.id === 'deepseek')).toBe(true)
@@ -172,7 +73,7 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     expect(beforeResume.length).toBeGreaterThan(0)
 
     // ---- lifecycle 2: resume over the wire, repair, finish ----------------
-    const second = new ServeProcess(workspace, home)
+    const second = new ServeProcess(workspace, home, { approve: true })
     const resumed = await second.request<{ sessionId: string }>('session/prompt', {
       sessionId,
       text: 'The previous attempt was interrupted. Ensure greeting.txt ends with the exact second line: resumed and finished',
