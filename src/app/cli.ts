@@ -11,9 +11,11 @@ import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
+import { dirname, resolve } from 'node:path'
 import { compose, defaultDialect } from './compose.ts'
+import { applyLayers, loadCompositionFile, toPatches, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
-import { credentialsPath, sessionsDir, settingsPath } from './home.ts'
+import { compositionPath, credentialsPath, resolveHome, sessionsDir, settingsPath } from './home.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
 import { runTerminal } from './terminal/index.ts'
@@ -22,6 +24,8 @@ interface ParsedArgs {
   readonly command: string
   readonly positional: string[]
   readonly flags: Map<string, string | true>
+  /** `--patch <file>` is repeatable; the flags map is last-wins, so it collects here. */
+  readonly patchFiles: string[]
 }
 
 const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask'])
@@ -29,18 +33,20 @@ const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandb
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
   const flags = new Map<string, string | true>()
+  const patchFiles: string[] = []
   const command = argv[0] ?? 'help'
   for (let i = 1; i < argv.length; i++) {
     const token = argv[i]!
     if (token.startsWith('--')) {
       const name = token.slice(2)
-      if (VALUE_FLAGS.has(name)) flags.set(name, argv[++i] ?? '')
+      if (name === 'patch') patchFiles.push(argv[++i] ?? '')
+      else if (VALUE_FLAGS.has(name)) flags.set(name, argv[++i] ?? '')
       else flags.set(name, true)
     } else {
       positional.push(token)
     }
   }
-  return { command, positional, flags }
+  return { command, positional, flags, patchFiles }
 }
 
 function preview(text: string, max = 80): string {
@@ -112,11 +118,10 @@ async function runCommand(args: ParsedArgs): Promise<number> {
     return 2
   }
   const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : settings.agent.model
-
-  if (args.flags.get('dump-config') === true) {
-    const rows = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect() })
-    process.stdout.write(`${JSON.stringify(rows.map((row) => ({ id: row.id, plugin: row.plugin.name, config: row.config ?? null })), null, 2)}\n`)
-    return 0
+  const configLayers = await loadConfigLayers(args.patchFiles)
+  if (typeof configLayers === 'string') {
+    process.stderr.write(`${configLayers}\n`)
+    return 2
   }
 
   try {
@@ -128,6 +133,10 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         sessionsRoot: sessionsDir(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
+        configLayers,
+        // Warnings (an unknown patch id, a kernel listener error) must reach the
+        // user; the boot's default logger is silent.
+        logger: stderrLogger,
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
         approve: args.flags.get('approve') === true,
@@ -163,6 +172,29 @@ function finishTask(result: TaskResult, json: boolean): number {
 function loadSettings(): ResolvedSettings | string {
   try {
     return resolveSettings({ path: settingsPath() })
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/**
+ * The disk layers, in fixed order: home composition.json, then each `--patch`
+ * file. A missing home file is absent; a missing or malformed `--patch` file
+ * is a usage error — someone asked for it by name.
+ */
+async function loadConfigLayers(patchFiles: readonly string[]): Promise<NamedLayer[] | string> {
+  try {
+    const layers: NamedLayer[] = []
+    const home = loadCompositionFile(compositionPath())
+    if (home) layers.push({ name: 'home', patches: await toPatches(home, resolveHome()) })
+    for (const raw of patchFiles) {
+      if (raw.trim().length === 0) return '--patch expects a file path'
+      const path = resolve(raw)
+      const file = loadCompositionFile(path)
+      if (!file) return `--patch file not found or unreadable: ${raw}`
+      layers.push({ name: `patch:${raw}`, patches: await toPatches(file, dirname(path)) })
+    }
+    return layers
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
@@ -232,6 +264,11 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     process.stderr.write(`${settings}\n`)
     return 2
   }
+  const configLayers = await loadConfigLayers(args.patchFiles)
+  if (typeof configLayers === 'string') {
+    process.stderr.write(`${configLayers}\n`)
+    return 2
+  }
 
   if (!headless) {
     try {
@@ -240,6 +277,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         sessionsRoot: sessionsDir(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
+        configLayers,
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
         ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
@@ -261,6 +299,8 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     sessionsRoot: sessionsDir(),
     credentialsPath: credentialsPath(),
     agentDefaults: settings.agent,
+    configLayers,
+    logger: stderrLogger,
     ...modelFlags(args),
     ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
     approve,
@@ -289,12 +329,18 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${settings}\n`)
     return 2
   }
+  const configLayers = await loadConfigLayers(args.patchFiles)
+  if (typeof configLayers === 'string') {
+    process.stderr.write(`${configLayers}\n`)
+    return 2
+  }
   try {
     return await runTerminal({
       cwd,
       sessionsRoot: sessionsDir(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
+      configLayers,
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
       ...modelFlags(args),
@@ -310,6 +356,76 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
 const stderrLogger: Logger = {
   warn: (message) => process.stderr.write(`warn: ${message}\n`),
   error: (message) => process.stderr.write(`error: ${message}\n`),
+}
+
+/** Rows a config layer can widen authority or blind the runtime through — flagged loudly, never silently. */
+const AUTHORITY_SENSITIVE = new Set([
+  'sandbox',
+  'approval',
+  'approval-headless',
+  'invariants',
+  'session-invariant',
+  'authority-invariant',
+  'agent-invariant',
+  'loop-invariant',
+])
+
+/**
+ * `minidsh config` — the EFFECTIVE composition: the same base and layer
+ * algorithm a boot uses, with per-row provenance. This is what `--dump-config`
+ * never was: the rows that would actually mount, not a pristine default.
+ */
+async function configCommand(args: ParsedArgs): Promise<number> {
+  const authority = authorityFlags(args)
+  if (typeof authority === 'string') {
+    process.stderr.write(`${authority}\n`)
+    return 2
+  }
+  const settings = loadSettings()
+  if (typeof settings === 'string') {
+    process.stderr.write(`${settings}\n`)
+    return 2
+  }
+  const configLayers = await loadConfigLayers(args.patchFiles)
+  if (typeof configLayers === 'string') {
+    process.stderr.write(`${configLayers}\n`)
+    return 2
+  }
+  try {
+    const base = compose({
+      sessionsRoot: sessionsDir(),
+      dialect: defaultDialect(),
+      credentialsPath: credentialsPath(),
+      ...authority,
+    })
+    const effective = applyLayers(base, configLayers, (message) => process.stderr.write(`warn: ${message}\n`))
+    const touched = (id: string): string => effective.provenance.get(id) ?? 'built-in'
+    if (args.flags.get('json') === true) {
+      const rows = effective.rows.map((row) => ({
+        id: row.id,
+        plugin: row.plugin.name,
+        ...(row.disabled === true ? { disabled: true } : {}),
+        layer: touched(row.id),
+      }))
+      process.stdout.write(`${JSON.stringify({ hash: effective.descriptor.hash, layers: effective.descriptor.layers, agentDefaults: settings.agent, rows }, null, 2)}\n`)
+      return 0
+    }
+    process.stdout.write(`composition ${effective.descriptor.hash} (layers: ${effective.descriptor.layers.join(' → ')})\n`)
+    process.stdout.write(`agent defaults: ${settings.agent.provider}/${settings.agent.model}\n\n`)
+    const warnings: string[] = []
+    for (const row of effective.rows) {
+      const layer = touched(row.id)
+      const sensitive = AUTHORITY_SENSITIVE.has(row.id) && layer !== 'built-in'
+      const marks = [row.disabled === true ? 'disabled' : undefined, sensitive ? '!' : undefined].filter((mark) => mark !== undefined)
+      process.stdout.write(`  ${row.id.padEnd(22)} ${row.plugin.name.padEnd(28)} ${layer}${marks.length > 0 ? `  [${marks.join(' ')}]` : ''}\n`)
+      if (sensitive) warnings.push(`row "${row.id}" is authority-sensitive and was ${row.disabled === true ? 'DISABLED' : 'modified'} by layer "${layer}"`)
+    }
+    for (const warning of warnings) process.stderr.write(`warn: ${warning}\n`)
+    return 0
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+    return 1
+  }
 }
 
 /** Mounts the persistence provider on a bare root and hands its Definition to `use`. */
@@ -337,12 +453,18 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${settings}\n`)
     return 2
   }
+  const configLayers = await loadConfigLayers(args.patchFiles)
+  if (typeof configLayers === 'string') {
+    process.stderr.write(`${configLayers}\n`)
+    return 2
+  }
   try {
     const host = await startProtocolHost({
       cwd,
       sessionsRoot: sessionsDir(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
+      configLayers,
       approve: args.flags.get('approve') === true,
       ...authority,
       logger: stderrLogger,
@@ -457,6 +579,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       return continueCommand(args, 'fork')
     case 'serve':
       return serveCommand(args)
+    case 'config':
+      return configCommand(args)
     case 'sessions':
       return sessionsCommand(args)
     default:
@@ -467,9 +591,12 @@ export async function main(argv: readonly string[]): Promise<number> {
           '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
           '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
           '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--approve]\n' +
+          '  minidsh config [--json]\n' +
           '  minidsh sessions list\n' +
           '  minidsh sessions show <id> [--json|--audit]\n' +
-          '\nauthority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)\n' +
+          '\nconfig:    ~/.minidsh/composition.json + settings.json layer over the built-ins;\n' +
+          '           --patch <file> (repeatable) layers after them on any command\n' +
+          'authority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)\n' +
           '           --ask ask|never; --approve grants every request in a headless run\n',
       )
       return args.command === 'help' ? 0 : 2

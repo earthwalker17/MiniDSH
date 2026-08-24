@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -69,7 +69,11 @@ describe('headless runner (real composition, scripted model)', () => {
 })
 
 describe('cli surface', () => {
-  it('dumps the composed config without a network call', async () => {
+  it('prints the effective composition with provenance, without a network call', async () => {
+    const home = tempDir('minidsh-home-')
+    const previousHome = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    writeFileSync(join(home, 'composition.json'), JSON.stringify({ patches: [{ id: 'llm-retry', disabled: true }] }))
     const chunks: string[] = []
     const write = process.stdout.write.bind(process.stdout)
     process.stdout.write = ((text: string) => {
@@ -78,14 +82,23 @@ describe('cli surface', () => {
     }) as typeof process.stdout.write
     let code: number
     try {
-      code = await main(['run', 'noop', '--dump-config'])
+      code = await main(['config', '--json'])
     } finally {
       process.stdout.write = write
+      if (previousHome === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previousHome
     }
     expect(code).toBe(0)
-    const parsed = JSON.parse(chunks.join('')) as { id: string; plugin: string }[]
-    expect(parsed.some((row) => row.id === 'loop' && row.plugin === 'core-agent-loop')).toBe(true)
-    expect(parsed.some((row) => row.id === 'llm-deepseek')).toBe(true)
+    const parsed = JSON.parse(chunks.join('')) as {
+      hash: string
+      layers: string[]
+      rows: { id: string; plugin: string; disabled?: boolean; layer: string }[]
+    }
+    expect(parsed.layers).toEqual(['built-in', 'home'])
+    expect(parsed.rows.some((row) => row.id === 'loop' && row.plugin === 'core-agent-loop' && row.layer === 'built-in')).toBe(true)
+    // The home layer's touch is visible as provenance, not silently merged away.
+    const retry = parsed.rows.find((row) => row.id === 'llm-retry')
+    expect(retry).toMatchObject({ disabled: true, layer: 'home' })
   })
 
   it('prints help and returns 0', async () => {

@@ -13,7 +13,9 @@ import { asSessionId, type SessionId } from '../core/ids.ts'
 import { messageText } from '../core/llm/message.ts'
 import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
-import { applyPatches, compose, defaultAgentOptions, defaultDialect, mount, type Patch } from './compose.ts'
+import { compose, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
+import { applyLayers, type NamedLayer } from './config.ts'
+import { compositionRecordPlugin } from '../capabilities/composition-record/index.ts'
 import type { ShellDialect } from '../capabilities/shell-stdio/index.ts'
 
 export interface BootOptions {
@@ -30,7 +32,12 @@ export interface BootOptions {
   /** Secret-store path for the credentials row; omitted = env-only (hermetic tests). */
   readonly credentialsPath?: string
   readonly dialect?: ShellDialect
+  /** The programmatic app/test layer, applied before any disk layer. */
   readonly patches?: readonly Patch[]
+  /** Disk layers (home composition.json, `--patch` files), applied in order after `patches`. */
+  readonly configLayers?: readonly NamedLayer[]
+  /** Rows the caller contributes to the BASE, before layering (serve's protocol row) — so disk patches can target them. */
+  readonly extraBaseRows?: readonly Row[]
   /** Resolved agent defaults (settings layer); falls back to the pure built-ins. */
   readonly agentDefaults?: AgentOptions
   readonly logger?: Logger
@@ -72,11 +79,11 @@ export type EventListener = (frame: SessionEventFrame) => void
 
 const silentLogger: Logger = { warn: () => {}, error: () => {} }
 
-/** Compose → mount → settle (fail loud) → prepare; the shared boot for every app entry. */
+/** Base + layers → mount → settle (fail loud) → prepare; the shared boot for every app entry. */
 export async function bootComposition(options: BootOptions, onEvent?: EventListener): Promise<Context> {
   const root = createRoot({ logger: options.logger ?? silentLogger })
-  const rows = applyPatches(
-    compose({
+  const base: Row[] = [
+    ...compose({
       sessionsRoot: options.sessionsRoot,
       dialect: options.dialect ?? defaultDialect(),
       ...(options.credentialsPath === undefined ? {} : { credentialsPath: options.credentialsPath }),
@@ -85,9 +92,17 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
       ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
     }),
-    options.patches ?? [],
-    (message) => options.logger?.warn(message),
-  )
+    ...(options.extraBaseRows ?? []),
+  ]
+  const layers: NamedLayer[] = [
+    ...(options.patches !== undefined && options.patches.length > 0 ? [{ name: 'app', patches: options.patches }] : []),
+    ...(options.configLayers ?? []),
+  ]
+  const effective = applyLayers(base, layers, (message) => options.logger?.warn(message))
+  // The recorder sits OUTSIDE the layered composition: its config IS the
+  // descriptor of the effective rows, and no layer can silently remove the
+  // record of what the layers did.
+  const rows = [...effective.rows, defineRow('composition-record', compositionRecordPlugin, { descriptor: effective.descriptor })]
   mount(root, rows)
   const report = await root.settle()
   if (report.pending.length > 0 || report.failed.length > 0) {

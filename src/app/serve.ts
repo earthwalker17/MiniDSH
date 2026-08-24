@@ -34,9 +34,17 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     ...(options.input === undefined ? {} : { input: options.input }),
     ...(options.output === undefined ? {} : { output: options.output }),
   }
+  // The protocol row joins the BASE, not a patch layer: a disk patch may
+  // target row id "protocol" (it exists before layering), and a layer that
+  // disables it is refused here instead of serving a dead socket.
+  let protocolDisabled = false
+  for (const patch of [...(options.patches ?? []), ...(options.configLayers ?? []).flatMap((layer) => layer.patches)]) {
+    if (!('insert' in patch) && patch.id === 'protocol' && patch.disabled !== undefined) protocolDisabled = patch.disabled
+  }
+  if (protocolDisabled) throw new Error('the composition disables row "protocol"; a protocol host cannot run without its surface')
   const root = await bootComposition({
     ...options,
-    patches: [...(options.patches ?? []), { insert: [defineRow('protocol', protocolStdioPlugin, protocolConfig)] }],
+    extraBaseRows: [...(options.extraBaseRows ?? []), defineRow('protocol', protocolStdioPlugin, protocolConfig)],
   })
   let disposed: Promise<void> | undefined
   return {

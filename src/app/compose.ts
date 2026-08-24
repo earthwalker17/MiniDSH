@@ -34,6 +34,43 @@ export interface Row {
   disabled?: boolean
 }
 
+/**
+ * Every shipped plugin by its kernel name — what a disk row's `plugin` string
+ * resolves against before falling back to a module import. The protocol plugin
+ * is deliberately absent: its config carries live streams and callbacks no
+ * disk file can construct (serve contributes its row as part of the base).
+ */
+export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
+  (
+    [
+      invariantsPlugin,
+      sessionPlugin,
+      sessionInvariantPlugin,
+      credentialsLocalPlugin,
+      llmPlugin,
+      deepseekPlugin,
+      retryPlugin,
+      toolsPlugin,
+      promptPlugin,
+      approvalPlugin,
+      approvalHeadlessPlugin,
+      sandboxPlugin,
+      authorityInvariantPlugin,
+      fsLocalPlugin,
+      fsObservationPolicyPlugin,
+      shellStdioPlugin,
+      toolEditorPlugin,
+      toolShellPlugin,
+      contextRuntimePlugin,
+      agentPlugin,
+      agentInvariantPlugin,
+      loopPlugin,
+      loopInvariantPlugin,
+      persistenceJsonlPlugin,
+    ] as readonly Plugin<never>[]
+  ).map((plugin) => [plugin.name, plugin as Plugin<unknown>]),
+)
+
 export type Patch = { readonly id: string; readonly config?: unknown; readonly disabled?: boolean } | { readonly insert: readonly Row[] }
 
 /** Declares a row, capturing the plugin's config type at the call site. */

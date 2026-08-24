@@ -52,7 +52,7 @@ function readSettingsFile(path: string): SettingsFile {
   try {
     parsed = JSON.parse(raw)
   } catch (error) {
-    throw new Error(`settings file ${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`settings file ${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
   }
   const result = settingsSchema.safeParse(parsed)
   if (!result.success) {
