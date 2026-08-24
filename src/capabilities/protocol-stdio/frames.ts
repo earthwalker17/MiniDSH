@@ -68,6 +68,8 @@ export interface AuthorityView {
   readonly sandbox: SandboxMode
   readonly approval: ApprovalPolicy
   readonly enforcement: SandboxEnforcement
+  /** Derived from the pair against the preset table (`custom` = no match); absent when no presets capability is mounted. */
+  readonly preset?: string
 }
 
 export interface AuthorityParams {

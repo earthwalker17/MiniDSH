@@ -16,6 +16,7 @@ import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { toolsPlugin } from '../core/tools/index.ts'
 import { approvalHeadlessPlugin } from '../capabilities/approval-headless/index.ts'
+import { authorityPresetsPlugin } from '../capabilities/authority-presets/index.ts'
 import { contextRuntimePlugin } from '../capabilities/context-runtime/index.ts'
 import { credentialsLocalPlugin } from '../capabilities/credentials-local/index.ts'
 import { deepseekPlugin } from '../capabilities/llm-deepseek/index.ts'
@@ -56,6 +57,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       approvalHeadlessPlugin,
       sandboxPlugin,
       authorityInvariantPlugin,
+      authorityPresetsPlugin,
       fsLocalPlugin,
       fsObservationPolicyPlugin,
       shellStdioPlugin,
@@ -148,6 +150,7 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('approval-headless', approvalHeadlessPlugin, { approve: options.approve ?? false }))
   rows.push(defineRow('sandbox', sandboxPlugin, options.sandbox === undefined ? {} : { mode: options.sandbox }))
   if (withInvariants) rows.push(defineRow('authority-invariant', authorityInvariantPlugin))
+  rows.push(defineRow('authority-presets', authorityPresetsPlugin, {}))
   rows.push(defineRow('fs', fsLocalPlugin))
   rows.push(defineRow('fs-observation-policy', fsObservationPolicyPlugin))
   rows.push(defineRow('shell', shellStdioPlugin, { dialect: options.dialect }))

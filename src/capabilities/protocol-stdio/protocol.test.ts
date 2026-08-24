@@ -336,7 +336,7 @@ describe('protocol-stdio: the authority control plane', () => {
   it('reports what a new session would start under, and what this host can enforce', async () => {
     const { client } = await startHost(new ScriptedAdapter())
     const result = await client.result<{ defaultAuthority: { sandbox: string; approval: string; enforcement: string } }>('initialize')
-    expect(result.defaultAuthority).toEqual({ sandbox: 'workspace-write', approval: 'ask', enforcement: 'none' })
+    expect(result.defaultAuthority).toEqual({ sandbox: 'workspace-write', approval: 'ask', enforcement: 'none', preset: 'workspace-write' })
   })
 
   it('switches a live session and streams the switch as the durable event', async () => {
@@ -346,7 +346,8 @@ describe('protocol-stdio: the authority control plane', () => {
     await client.waitForIdle(sessionId)
 
     const view = await client.result<{ sandbox: string; approval: string }>('session/authority', { sessionId, sandbox: 'read-only', approval: 'never' })
-    expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none' })
+    // read-only + never matches no shipped preset: the derived value is `custom`.
+    expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none', preset: 'custom' })
 
     // Two stamps: the mode the session opened under, then the switch.
     const stamp = await client.waitFor(() => client.frames('sandbox/mode').at(1), 'the switch frame')
@@ -368,5 +369,25 @@ describe('protocol-stdio: the authority control plane', () => {
     await client.waitForIdle(sessionId)
     const reply = await client.call('session/authority', { sessionId, sandbox: 'unfenced' })
     expect(reply.error?.code).toBe(-32602)
+  })
+
+  it('switches both knobs through one preset, recording the intent durably', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+
+    const view = await client.result<{ sandbox: string; approval: string; preset?: string }>('session/authority', {
+      sessionId,
+      preset: 'danger-full-access',
+    })
+    expect(view).toMatchObject({ sandbox: 'danger-full-access', approval: 'never', preset: 'danger-full-access' })
+    // The log-only intent event streamed like any other durable event.
+    const intent = await client.waitFor(() => client.frames('authority/preset').at(0), 'the preset intent frame')
+    expect(intent.event.data).toEqual({ name: 'danger-full-access' })
+
+    // A preset combined with a knob, and an unknown name, are both refused.
+    expect((await client.call('session/authority', { sessionId, preset: 'workspace-write', sandbox: 'read-only' })).error?.code).toBe(-32602)
+    expect((await client.call('session/authority', { sessionId, preset: 'nope' })).error?.code).toBe(-32602)
   })
 })

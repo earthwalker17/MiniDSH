@@ -12,6 +12,8 @@ import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
 import { dirname, resolve } from 'node:path'
+import { presetTable } from '../core/presets/index.ts'
+import type { AuthorityPresetsConfig } from '../capabilities/authority-presets/index.ts'
 import { compose, defaultDialect } from './compose.ts'
 import { applyLayers, loadCompositionFile, toPatches, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
@@ -28,7 +30,7 @@ interface ParsedArgs {
   readonly patchFiles: string[]
 }
 
-const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask'])
+const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset'])
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
@@ -83,6 +85,8 @@ function renderEvent(event: EventEnvelope): string | undefined {
     }
     case 'approval/policy':
       return `  [approvals: ${(event.data as { policy: string }).policy}]`
+    case 'authority/preset':
+      return `  [preset: ${(event.data as { name: string }).name}]`
     case 'approval/asked': {
       const data = event.data as { id: string; toolName: string; reason?: string }
       return `  ? ${data.id} ${data.toolName}${data.reason ? `: ${data.reason}` : ''}`
@@ -123,6 +127,11 @@ async function runCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${configLayers}\n`)
     return 2
   }
+  const preset = presetFlag(args, authority, configLayers)
+  if (typeof preset === 'object') {
+    process.stderr.write(`${preset.error}\n`)
+    return 2
+  }
 
   try {
     const result = await runTask(
@@ -130,6 +139,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         task,
         cwd,
         model,
+        ...(preset === undefined ? {} : { preset }),
         sessionsRoot: sessionsDir(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
@@ -197,6 +207,36 @@ async function loadConfigLayers(patchFiles: readonly string[]): Promise<NamedLay
     return layers
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/**
+ * `--preset`: exclusive with `--sandbox`/`--ask`, and validated pre-boot
+ * against the EFFECTIVE presets row (a disk layer may have reconfigured the
+ * table) — a typo boots nothing and litters no session file. Returns the
+ * validated name, an error string, or undefined when the flag is absent.
+ */
+function presetFlag(
+  args: ParsedArgs,
+  authority: { sandbox?: SandboxMode; approvalPolicy?: ApprovalPolicy },
+  configLayers: readonly NamedLayer[],
+): string | { error: string } | undefined {
+  const raw = args.flags.get('preset')
+  if (raw === undefined) return undefined
+  if (typeof raw !== 'string' || raw.trim().length === 0) return { error: '--preset expects a preset name' }
+  if (authority.sandbox !== undefined || authority.approvalPolicy !== undefined) {
+    return { error: '--preset replaces --sandbox/--ask; give one or the other' }
+  }
+  try {
+    const base = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
+    const effective = applyLayers(base, [...configLayers], () => {})
+    const row = effective.rows.find((entry) => entry.id === 'authority-presets')
+    if (!row || row.disabled === true) return { error: 'a preset needs the authority-presets row, which this composition disables' }
+    const table = presetTable((row.config as AuthorityPresetsConfig | undefined)?.presets)
+    if (!table.has(raw)) return { error: `unknown preset "${raw}" (known: ${[...table.keys()].join(', ')})` }
+    return raw
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
   }
 }
 
@@ -269,6 +309,15 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     process.stderr.write(`${configLayers}\n`)
     return 2
   }
+  const preset = presetFlag(args, authority, configLayers)
+  if (typeof preset === 'object') {
+    process.stderr.write(`${preset.error}\n`)
+    return 2
+  }
+  if (preset !== undefined && !headless) {
+    process.stderr.write('--preset works with --headless; in the interactive terminal use /preset\n')
+    return 2
+  }
 
   if (!headless) {
     try {
@@ -301,6 +350,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     agentDefaults: settings.agent,
     configLayers,
     logger: stderrLogger,
+    ...(preset === undefined ? {} : { preset }),
     ...modelFlags(args),
     ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
     approve,
@@ -363,6 +413,7 @@ const AUTHORITY_SENSITIVE = new Set([
   'sandbox',
   'approval',
   'approval-headless',
+  'authority-presets',
   'invariants',
   'session-invariant',
   'authority-invariant',
@@ -500,6 +551,10 @@ function renderAudit(events: readonly EventEnvelope[], write: (line: string) => 
       case 'approval/policy':
         write(`${at(event.seq)}  approvals   ${String(data.policy)} (${String(data.reason)})`)
         break
+      case 'authority/preset':
+        // The intent; the knob events that follow are the truth a reader folds.
+        write(`${at(event.seq)}  preset      ${String(data.name)}`)
+        break
       case 'approval/asked': {
         const covered = data.callId ? calls.get(String(data.callId)) : undefined
         write(`${at(event.seq)}  asked       ${String(data.id)} ${String(data.toolName)}${data.reason ? `: ${data.reason}` : ''}`)
@@ -586,10 +641,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     default:
       process.stdout.write(
         'MiniDSH — usage:\n' +
-          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--approve] [--json]\n' +
+          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--preset name] [--approve] [--json]\n' +
           '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--approve]\n' +
-          '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
-          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n' +
+          '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--approve] [--json]\n' +
+          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--approve] [--json]\n' +
           '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--approve]\n' +
           '  minidsh config [--json]\n' +
           '  minidsh sessions list\n' +

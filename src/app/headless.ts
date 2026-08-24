@@ -11,6 +11,7 @@ import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
 import { SANDBOX, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
 import { messageText } from '../core/llm/message.ts'
+import { PRESETS } from '../core/presets/index.ts'
 import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { compose, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
@@ -52,6 +53,8 @@ export interface TaskOptions extends BootOptions {
   readonly provider?: string
   readonly reasoningEffort?: string
   readonly maxSteps?: number
+  /** Authority preset applied as a durable switch (validated by the service; exclusive with sandbox/approvalPolicy at the CLI). */
+  readonly preset?: string
 }
 
 /** Continuing a stored session: `resumeTask` keeps its id, `forkTask` branches it. */
@@ -65,6 +68,8 @@ export interface ContinueOptions extends BootOptions {
   readonly model?: string
   readonly reasoningEffort?: string
   readonly maxSteps?: number
+  /** Authority preset applied as a durable switch on the continued session. */
+  readonly preset?: string
 }
 
 export interface TaskResult {
@@ -125,6 +130,14 @@ export function applyAuthority(root: Context, handle: AgentHandle, options: Boot
   if (options.approvalPolicy !== undefined) root.get(APPROVAL).setPolicy(handle.agent.session, options.approvalPolicy)
 }
 
+/** A preset is the same durable act through the one selector; `applyAuthority` stays preset-ignorant. */
+function applyPreset(root: Context, handle: AgentHandle, name: string | undefined): void {
+  if (name === undefined) return
+  const presets = root.tryGet(PRESETS)
+  if (!presets) throw new Error('a preset needs the authority-presets row, which this composition removes')
+  presets.apply(handle.agent.session, name)
+}
+
 /** Feed the task (if any), wait for quiescence, flush, fold the outcome; always disposes the handle. */
 async function drive(handle: AgentHandle, task: string | undefined): Promise<TaskResult> {
   try {
@@ -160,6 +173,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
     }
     const handle = await root.get(AGENTS).create(root, { cwd: options.cwd, agentOptions })
     applyAuthority(root, handle, options)
+    applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()
@@ -185,6 +199,7 @@ export async function resumeTask(options: ContinueOptions, onEvent?: EventListen
   try {
     const handle = await root.get(AGENTS).resume(root, asSessionId(options.id), continueArgs(options))
     applyAuthority(root, handle, options)
+    applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()
@@ -196,6 +211,7 @@ export async function forkTask(options: ContinueOptions, onEvent?: EventListener
   try {
     const handle = await root.get(AGENTS).fork(root, asSessionId(options.id), options.boundary, continueArgs(options))
     applyAuthority(root, handle, options)
+    applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()

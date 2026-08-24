@@ -14,6 +14,7 @@ import { asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
+import { PRESETS } from '../../core/presets/index.ts'
 import { effectiveSandboxMode, isSandboxMode, SANDBOX, SANDBOX_MODES } from '../../core/sandbox/index.ts'
 import { SESSIONS, matches, type EventEnvelope, type Session } from '../../core/session/index.ts'
 import {
@@ -155,7 +156,18 @@ export class ProtocolServer {
 
   private defaultAuthority(): AuthorityView {
     const sandbox = this.ctx.get(SANDBOX)
-    return { sandbox: sandbox.defaultMode, approval: this.ctx.get(APPROVAL).defaultPolicy, enforcement: sandbox.enforcementFor(sandbox.defaultMode) }
+    return this.withPreset({
+      sandbox: sandbox.defaultMode,
+      approval: this.ctx.get(APPROVAL).defaultPolicy,
+      enforcement: sandbox.enforcementFor(sandbox.defaultMode),
+    })
+  }
+
+  /** Derived, per request, via tryGet — a composition without presets simply omits the field. */
+  private withPreset(view: AuthorityView): AuthorityView {
+    const presets = this.ctx.tryGet(PRESETS)
+    if (!presets) return view
+    return { ...view, preset: presets.selectFor({ sandbox: view.sandbox, approval: view.approval }) }
   }
 
   /**
@@ -173,6 +185,21 @@ export class ProtocolServer {
     if (params.approval !== undefined && !isApprovalPolicy(params.approval)) {
       throw new RpcFailure(INVALID_PARAMS, `session/authority: "approval" must be one of ${APPROVAL_POLICIES.join(' | ')}`)
     }
+    if (params.preset !== undefined) {
+      if (typeof params.preset !== 'string' || params.preset.length === 0) {
+        throw new RpcFailure(INVALID_PARAMS, 'session/authority: "preset" must be a preset name')
+      }
+      if (params.sandbox !== undefined || params.approval !== undefined) {
+        throw new RpcFailure(INVALID_PARAMS, 'session/authority: "preset" replaces "sandbox"/"approval"; give one or the other')
+      }
+      const presets = this.ctx.tryGet(PRESETS)
+      if (!presets) throw new RpcFailure(INVALID_PARAMS, 'this composition has no authority-presets capability')
+      try {
+        presets.apply(agent.session, params.preset)
+      } catch (error) {
+        throw new RpcFailure(INVALID_PARAMS, error instanceof Error ? error.message : String(error))
+      }
+    }
     const sandbox = this.ctx.get(SANDBOX)
     const approval = this.ctx.get(APPROVAL)
     if (params.sandbox !== undefined) sandbox.setMode(agent.session, params.sandbox)
@@ -180,7 +207,7 @@ export class ProtocolServer {
     // Read through the pure fold, never through `resolve` — resolving is the
     // audit act of an effect boundary, and looking is not an effect.
     const mode = effectiveSandboxMode(agent.session.events) ?? sandbox.defaultMode
-    return { sandbox: mode, approval: approval.policyFor(agent.session), enforcement: sandbox.enforcementFor(mode) }
+    return this.withPreset({ sandbox: mode, approval: approval.policyFor(agent.session), enforcement: sandbox.enforcementFor(mode) })
   }
 
   private async prompt(params: Record<string, unknown>): Promise<PromptResult> {

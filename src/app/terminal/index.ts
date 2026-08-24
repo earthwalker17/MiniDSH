@@ -146,7 +146,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       await exit(0)
       return
     }
-    if (line.startsWith('/sandbox') || line.startsWith('/ask')) {
+    if (line.startsWith('/sandbox') || line.startsWith('/ask') || line.startsWith('/preset')) {
       await switchAuthority(line)
       return
     }
@@ -180,14 +180,17 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       return
     }
     if (!value) {
-      out.write(command === '/ask' ? 'usage: /ask <ask|never>\n' : 'usage: /sandbox <read-only|workspace-write|danger-full-access>\n')
+      const usage =
+        command === '/ask' ? 'usage: /ask <ask|never>\n' : command === '/preset' ? 'usage: /preset <name>\n' : 'usage: /sandbox <read-only|workspace-write|danger-full-access>\n'
+      out.write(usage)
       prompt()
       return
     }
-    const params = command === '/ask' ? { sessionId, approval: value } : { sessionId, sandbox: value }
+    const params = command === '/ask' ? { sessionId, approval: value } : command === '/preset' ? { sessionId, preset: value } : { sessionId, sandbox: value }
     try {
       const view = await client.request<AuthorityView>('session/authority', params)
-      out.write(`sandbox: ${view.sandbox} (shell confinement: ${view.enforcement}) · approvals: ${view.approval}\n`)
+      const preset = view.preset === undefined ? '' : ` · preset: ${view.preset}`
+      out.write(`sandbox: ${view.sandbox} (shell confinement: ${view.enforcement}) · approvals: ${view.approval}${preset}\n`)
     } catch (error) {
       printError(error)
     }
