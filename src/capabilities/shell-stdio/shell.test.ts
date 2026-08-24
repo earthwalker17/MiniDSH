@@ -18,9 +18,27 @@ let dir: string | undefined
 afterEach(async () => {
   await proc?.dispose()
   proc = undefined
-  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  if (dir) await removeWithRetry(dir)
   dir = undefined
 })
+
+/**
+ * MSYS bash releases its cwd handle ~100ms AFTER its kill has been reaped, and
+ * `rmSync`'s own `maxRetries` retries without ever sleeping (measured: it
+ * exhausts 10x50ms inside ~10ms) — so the teardown needs a retry loop with
+ * real awaits between attempts.
+ */
+async function removeWithRetry(target: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(target, { recursive: true, force: true })
+      return
+    } catch (error) {
+      if (attempt >= 40) throw error
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+}
 
 /** This provider confines nothing, so the tests run under the one unconfined mode. */
 const unconfined = (root: string): SandboxExecutionPolicy => ({ mode: 'danger-full-access', workspaceRoot: root })
