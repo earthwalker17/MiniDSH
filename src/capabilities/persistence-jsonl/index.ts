@@ -9,8 +9,17 @@
  * `.torn` sidecar, never silently destroyed; deeper corruption (a mid-file
  * parse error or seq gap) marks the stored session `damaged` on read and
  * refuses attach.
+ *
+ * Single-writer per stored session is this provider's guarantee: publication
+ * takes a `<file>.lock` write lease held until disposal, so a second process
+ * resuming the same id is refused before it appends a byte (interleaved
+ * appends from two processes would collide seqs and truncate the log as
+ * damaged on the next read). Provably-dead same-host holders are reclaimed;
+ * anything else names the holder and asks for manual cleanup.
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { PERSISTENCE, type Persistence, type StoredSession } from '../../core/persistence/index.ts'
@@ -19,6 +28,7 @@ import {
   SESSION_DISPOSED,
   SESSION_EVENT,
   SESSION_FLUSH,
+  SESSION_FORMAT_VERSION,
   type EventEnvelope,
   type Session,
   type SessionHeader,
@@ -26,6 +36,13 @@ import {
 
 interface HeaderLine extends SessionHeader {
   readonly kind: 'session'
+}
+
+/** The write lease a published session holds on its stored log. */
+interface LeaseHolder {
+  readonly pid: number
+  readonly host: string
+  readonly acquiredAt: number
 }
 
 export interface PersistenceConfig {
@@ -74,7 +91,8 @@ function scanSessionFile(file: string): ScanResult | undefined {
         const parsed = JSON.parse(line) as Partial<HeaderLine>
         // Shape-check the discriminator the writer stamps: a stray .jsonl whose
         // first line is some other JSON must read as "not a session", not crash.
-        if (parsed.kind !== 'session' || typeof parsed.id !== 'string' || typeof parsed.createdAt !== 'number') return undefined
+        if (parsed.kind !== 'session' || typeof parsed.id !== 'string' || typeof parsed.createdAt !== 'number' || typeof parsed.version !== 'number')
+          return undefined
         header = parsed as SessionHeader
       } catch {
         return undefined
@@ -101,6 +119,41 @@ function scanSessionFile(file: string): ScanResult | undefined {
   }
   if (!header) return undefined
   return { header, events, validBytes, tail }
+}
+
+/**
+ * A stored log written by a NEWER format is refused loudly (a throw, never
+ * `damaged`): silently resuming it under this version would rewrite its header
+ * to the current constant and discard whatever the newer format meant.
+ */
+function refuseFutureVersion(header: SessionHeader): void {
+  if (header.version > SESSION_FORMAT_VERSION) {
+    throw new Error(
+      `session ${header.id}: stored log has format version ${header.version}, but this MiniDSH reads at most ${SESSION_FORMAT_VERSION}`,
+    )
+  }
+}
+
+/** Parses a lock file's holder; `undefined` for a missing or malformed one. */
+function readLeaseHolder(lock: string): LeaseHolder | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(lock, 'utf8')) as Partial<LeaseHolder>
+    if (typeof parsed.pid !== 'number' || typeof parsed.host !== 'string') return undefined
+    return parsed as LeaseHolder
+  } catch {
+    return undefined
+  }
+}
+
+/** Dead means provably dead: same host AND the signal-0 probe reports ESRCH. */
+function holderIsDead(holder: LeaseHolder): boolean {
+  if (holder.host !== hostname()) return false
+  try {
+    process.kill(holder.pid, 0)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH'
+  }
 }
 
 /** Stored session headers (line 1 of each `*.jsonl`), newest first; unreadable files skipped. */
@@ -131,6 +184,8 @@ class JsonlArchive implements Persistence {
   private readonly files = new WeakMap<Session, string>()
   /** A write failure is remembered and rethrown at the next flush checkpoint. */
   private readonly failures = new WeakMap<Session, unknown>()
+  /** Lock-file path per session holding the write lease. */
+  private readonly leases = new WeakMap<Session, string>()
   constructor(root: string) {
     this.root = root
     mkdirSync(root, { recursive: true })
@@ -144,11 +199,71 @@ class JsonlArchive implements Persistence {
   onPublished(session: Session): void {
     const file = this.fileFor(session.id)
     try {
+      // The lease guards the whole published lifetime, snapshot and attach
+      // alike: a second process must not be able to attach to a file a live
+      // session is still appending to. Reads never lock.
+      this.acquireLease(session, file)
+    } catch (error) {
+      this.failures.set(session, error)
+      return
+    }
+    try {
       if (session.origin === 'resumed') this.attach(session, file)
       else this.snapshot(session, file)
       this.files.set(session, file)
     } catch (error) {
+      this.releaseLease(session)
       this.failures.set(session, error)
+    }
+  }
+
+  /**
+   * The per-session write lease: exclusive-create of `<file>.lock`. A holder
+   * is stale only when its pid is provably dead on THIS host (`ESRCH`; an
+   * `EPERM` probe means alive-but-inaccessible, and another host cannot be
+   * probed at all) — everything else refuses and names the holder, so pid
+   * reuse or a foreign host degrade to a manual `rm` of the lock file, never
+   * to two writers. The steal renames first (exactly one contender wins the
+   * rename; the loser's unlink hits the renamed name, not a fresh lock) and
+   * retries the exclusive create once.
+   */
+  private acquireLease(session: Session, file: string): void {
+    const lock = `${file}.lock`
+    const payload = JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: Date.now() } satisfies LeaseHolder)
+    const tryCreate = (): boolean => {
+      try {
+        writeFileSync(lock, payload, { flag: 'wx' })
+        this.leases.set(session, lock)
+        return true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+        throw error
+      }
+    }
+    if (tryCreate()) return
+    const holder = readLeaseHolder(lock)
+    if (holder && holderIsDead(holder)) {
+      const stale = `${lock}.stale-${randomUUID()}`
+      try {
+        renameSync(lock, stale)
+        unlinkSync(stale)
+      } catch {
+        // Another contender renamed first, or the holder just released.
+      }
+      if (tryCreate()) return
+    }
+    const who = holder ? `pid ${holder.pid} on ${holder.host}` : 'an unreadable holder'
+    throw new Error(`session ${session.id}: the stored log is locked by ${who}; if that process is gone, remove ${lock}`)
+  }
+
+  private releaseLease(session: Session): void {
+    const lock = this.leases.get(session)
+    if (!lock) return
+    this.leases.delete(session)
+    try {
+      unlinkSync(lock)
+    } catch {
+      // Already gone (e.g. stolen after this process was wrongly probed dead).
     }
   }
 
@@ -173,6 +288,7 @@ class JsonlArchive implements Persistence {
       this.snapshot(session, file)
       return
     }
+    refuseFutureVersion(scan.header)
     if (scan.tail === 'invalid') throw new Error(`session ${session.id}: stored log is damaged; refusing to attach`)
     if (scan.header.id !== session.id || scan.header.createdAt !== session.header.createdAt) {
       throw new Error(`session ${session.id}: stored header does not match the resumed session; refusing to attach`)
@@ -212,6 +328,9 @@ class JsonlArchive implements Persistence {
 
   /** A session disposed before any fact was recorded (e.g. never prompted) leaves no file behind. */
   onDisposed(session: Session): void {
+    // The lease outlives even a quarantined session (the stored prefix stays
+    // guarded while the un-persisted session lives) — released here, always.
+    this.releaseLease(session)
     const file = this.files.get(session)
     this.files.delete(session)
     if (!file || session.events.length > 0) return
@@ -240,6 +359,7 @@ class JsonlArchive implements Persistence {
   load(id: string): StoredSession | undefined {
     const scan = scanSessionFile(this.fileFor(id))
     if (!scan) return undefined
+    refuseFutureVersion(scan.header)
     return { header: scan.header, events: scan.events, ...(scan.tail === 'invalid' ? { damaged: true as const } : {}) }
   }
 

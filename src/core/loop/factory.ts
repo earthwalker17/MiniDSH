@@ -69,6 +69,18 @@ class LoopFactory implements AgentFactory {
       // Session publication follows agent publication: a session/created listener
       // can already resolve the owning agent by id.
       sessions.publish(session)
+      // Publication effects run in a contained emit, so a persistence provider's
+      // refusal (a held write lease, a damaged or mismatched stored log) cannot
+      // throw through it. For a RESUME that refusal must reach the caller BEFORE
+      // any paid work, not at the first turn-end flush — so surface it here,
+      // inside the transaction, where it rolls the creation back unannounced.
+      if (session.origin === 'resumed') {
+        try {
+          await sessions.flush(session)
+        } catch (error) {
+          throw error instanceof AggregateError && error.errors.length === 1 ? error.errors[0] : error
+        }
+      }
       // Whichever dies first — the loop plugin that owns the scope, or the creator — disposes the whole agent.
       lifetime.releases.push(this.ctx.effect(() => () => dispose(), `agent-lifetime(${session.id})`))
       lifetime.releases.push(owner.effect(() => () => dispose(), `agent(${session.id})`))
