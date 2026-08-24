@@ -17,6 +17,7 @@ import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { toolsPlugin } from '../core/tools/index.ts'
 import { approvalHeadlessPlugin } from '../capabilities/approval-headless/index.ts'
 import { contextRuntimePlugin } from '../capabilities/context-runtime/index.ts'
+import { credentialsLocalPlugin } from '../capabilities/credentials-local/index.ts'
 import { deepseekPlugin } from '../capabilities/llm-deepseek/index.ts'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
 import { fsObservationPolicyPlugin } from '../capabilities/fs-observation-policy/index.ts'
@@ -70,6 +71,8 @@ export function mount(root: Context, rows: readonly Row[]): void {
 export interface ComposeOptions {
   readonly sessionsRoot: string
   readonly dialect: ShellDialect
+  /** Secret-store path for `credentials-local`; omitted = env-only resolution. */
+  readonly credentialsPath?: string
   readonly approve?: boolean
   readonly invariants?: boolean
   /** Deployment default for sessions that have recorded no mode of their own. */
@@ -94,6 +97,7 @@ export function compose(options: ComposeOptions): Row[] {
   if (withInvariants) rows.push(defineRow('invariants', invariantsPlugin, {}))
   rows.push(defineRow('session', sessionPlugin))
   if (withInvariants) rows.push(defineRow('session-invariant', sessionInvariantPlugin))
+  rows.push(defineRow('credentials', credentialsLocalPlugin, options.credentialsPath === undefined ? {} : { path: options.credentialsPath }))
   rows.push(defineRow('llm', llmPlugin))
   rows.push(defineRow('llm-deepseek', deepseekPlugin, {}))
   rows.push(defineRow('llm-retry', retryPlugin, {}))

@@ -18,7 +18,10 @@ const MODELS: readonly ModelInfo[] = [
 ]
 
 export interface DeepSeekAdapterOptions {
-  readonly apiKeyEnv: string
+  /** The credential's NAME, for error messages; never the value. */
+  readonly apiKeyRef: string
+  /** Called per request, so a rotated key takes effect without a reload. */
+  readonly resolveKey: () => string | undefined
   readonly baseURL: string
   readonly defaultMaxTokens: number
 }
@@ -40,9 +43,9 @@ export class DeepSeekAdapter implements LlmAdapter {
   }
 
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
-    const apiKey = process.env[this.options.apiKeyEnv]
+    const apiKey = this.options.resolveKey()
     if (!apiKey || apiKey.trim().length === 0) {
-      throw new LlmError('MISSING_CREDENTIAL', `DeepSeek API key not set (expected environment variable ${this.options.apiKeyEnv})`)
+      throw new LlmError('MISSING_CREDENTIAL', `DeepSeek API key not set (expected credential ${this.options.apiKeyRef})`)
     }
     const wire = {
       model: request.model,

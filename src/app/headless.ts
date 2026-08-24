@@ -27,6 +27,8 @@ export interface BootOptions {
   readonly sandbox?: SandboxMode
   readonly approvalPolicy?: ApprovalPolicy
   readonly sessionsRoot: string
+  /** Secret-store path for the credentials row; omitted = env-only (hermetic tests). */
+  readonly credentialsPath?: string
   readonly dialect?: ShellDialect
   readonly patches?: readonly Patch[]
   readonly logger?: Logger
@@ -75,6 +77,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     compose({
       sessionsRoot: options.sessionsRoot,
       dialect: options.dialect ?? defaultDialect(),
+      ...(options.credentialsPath === undefined ? {} : { credentialsPath: options.credentialsPath }),
       ...(options.approve === undefined ? {} : { approve: options.approve }),
       ...(options.invariants === undefined ? {} : { invariants: options.invariants }),
       ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),

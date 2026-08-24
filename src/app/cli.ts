@@ -13,7 +13,7 @@ import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../cor
 import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
 import { compose, defaultAgentOptions, defaultDialect } from './compose.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
-import { sessionsDir } from './home.ts'
+import { credentialsPath, sessionsDir } from './home.ts'
 import { startProtocolHost } from './serve.ts'
 import { runTerminal } from './terminal/index.ts'
 
@@ -120,6 +120,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         cwd,
         model,
         sessionsRoot: sessionsDir(),
+        credentialsPath: credentialsPath(),
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
         approve: args.flags.get('approve') === true,
@@ -216,6 +217,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
       return await runTerminal({
         cwd: process.cwd(),
         sessionsRoot: sessionsDir(),
+        credentialsPath: credentialsPath(),
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
         ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
@@ -235,6 +237,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     id,
     task,
     sessionsRoot: sessionsDir(),
+    credentialsPath: credentialsPath(),
     ...modelFlags(args),
     ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
     approve,
@@ -262,6 +265,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
     return await runTerminal({
       cwd,
       sessionsRoot: sessionsDir(),
+      credentialsPath: credentialsPath(),
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
       ...modelFlags(args),
@@ -303,6 +307,7 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
     const host = await startProtocolHost({
       cwd,
       sessionsRoot: sessionsDir(),
+      credentialsPath: credentialsPath(),
       approve: args.flags.get('approve') === true,
       ...authority,
       logger: stderrLogger,
