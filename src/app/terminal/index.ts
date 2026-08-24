@@ -149,8 +149,17 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       await exit(0)
       return
     }
-    if (line.startsWith('/sandbox') || line.startsWith('/ask') || line.startsWith('/preset')) {
+    // Exact token, never a prefix: `/presets …` once reached switchAuthority
+    // as an unrecognized command and fell through to the SANDBOX setter,
+    // durably widening the wrong knob with no error.
+    const command = line.split(/\s+/, 1)[0]
+    if (command === '/sandbox' || command === '/ask' || command === '/preset') {
       await switchAuthority(line)
+      return
+    }
+    if (command?.startsWith('/')) {
+      out.write(`unknown command ${command}\n`)
+      prompt()
       return
     }
     if (line === '/cancel') {

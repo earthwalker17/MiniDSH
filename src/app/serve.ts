@@ -42,7 +42,15 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
   // disables it is refused here instead of serving a dead socket.
   let protocolDisabled = false
   for (const patch of [...(options.patches ?? []), ...(options.configLayers ?? []).flatMap((layer) => layer.patches)]) {
-    if (!('insert' in patch) && patch.id === 'protocol' && patch.disabled !== undefined) protocolDisabled = patch.disabled
+    if ('insert' in patch || patch.id !== 'protocol') continue
+    if (patch.disabled !== undefined) protocolDisabled = patch.disabled
+    // A config patch REPLACES a row's whole config, which here would discard
+    // the live streams and callbacks this surface just built — the plugin
+    // would silently fall back to process stdio and the client would hang.
+    // Symmetrical with the disable refusal below.
+    if (patch.config !== undefined) {
+      throw new Error('the composition may not replace the config of row "protocol": it carries this surface\'s live streams')
+    }
   }
   if (protocolDisabled) throw new Error('the composition disables row "protocol"; a protocol host cannot run without its surface')
   const root = await bootComposition({

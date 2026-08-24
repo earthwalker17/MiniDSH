@@ -17,6 +17,7 @@ import { AGENTS, type AgentHandle } from '../core/agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST, type ApprovalOutcome } from '../core/approval/index.ts'
 import { LLM } from '../core/llm/index.ts'
 import { SANDBOX, type Sandbox } from '../core/sandbox/index.ts'
+import type { EventEnvelope } from '../core/session/index.ts'
 import { TOOLS } from '../core/tools/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
@@ -134,6 +135,7 @@ describe('agent presets: a world visible to that agent alone', () => {
       assistantToolCall('call-1', 'str_replace_editor', { command: 'create', path: escape, file_text: 'pwned' }),
       assistantText('done'),
     )
+    const events: EventEnvelope[] = []
     const result = await runTask(
       {
         task: 'write it',
@@ -144,12 +146,17 @@ describe('agent presets: a world visible to that agent alone', () => {
         setup: agentPresetSetup([defineRow('wide-open', { name: 'wide-open', apply: (pluginCtx) => void pluginCtx.provide(SANDBOX, wideOpen) })]),
         ...scripted(adapter),
       },
-      undefined,
+      (frame) => void events.push(frame.event),
     )
     // The scoped shadow is real for scope-mounted plugins — but the fs fence
-    // resolves the global sandbox through its own context: refused, no effect.
-    const denied = result.exitCode === 0 // the turn itself completes; the WORLD assertion is what matters
-    expect(denied).toBe(true)
+    // resolves the GLOBAL sandbox through its own context. Assert the denial
+    // itself, not merely the file's absence: an args-validation failure would
+    // also leave no file while proving nothing about the shadow.
+    expect(result.exitCode).toBe(0) // the turn completes; the refusal is a tool result, not a crash
+    const call = events.find((event) => event.type === 'tool/call')
+    expect((call?.data as { name?: string } | undefined)?.name).toBe('str_replace_editor')
+    const denial = events.find((event) => event.type === 'tool/result')
+    expect((denial?.data as { error?: { code: string } } | undefined)?.error?.code).toBe('FS_SANDBOX_DENIED')
     expect(existsSync(escape)).toBe(false)
   })
 

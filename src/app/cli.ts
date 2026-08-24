@@ -271,8 +271,10 @@ function presetFlag(
   try {
     const base = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
     const effective = applyLayers(base, [...configLayers], () => {})
-    const row = effective.rows.find((entry) => entry.id === 'authority-presets')
-    if (!row || row.disabled === true) return { error: 'a preset needs the authority-presets row, which this composition disables' }
+    // Match the CAPABILITY, not the built-in row id: a composition may supply
+    // it under any id, and the runtime resolves PRESETS by service key.
+    const row = effective.rows.find((entry) => entry.plugin.name === 'authority-presets' && entry.disabled !== true)
+    if (!row) return { error: 'this composition has no enabled authority-presets row' }
     const table = presetTable((row.config as AuthorityPresetsConfig | undefined)?.presets)
     if (!table.has(raw)) return { error: `unknown preset "${raw}" (known: ${[...table.keys()].join(', ')})` }
     return raw
@@ -433,6 +435,18 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${loaded}\n`)
     return 2
   }
+  // Same guard the interactive resume/fork path uses: swallowing --preset here
+  // (where a sibling command refuses it loudly) would silently drop an
+  // authority request AND skip the --preset/--sandbox exclusivity check.
+  const preset = presetFlag(args, authority, loaded.layers)
+  if (typeof preset === 'object') {
+    process.stderr.write(`${preset.error}\n`)
+    return 2
+  }
+  if (preset !== undefined) {
+    process.stderr.write('--preset works with --headless; in the interactive terminal use /preset\n')
+    return 2
+  }
   const agentSetup = await agentPresetFlag(args, loaded)
   if (typeof agentSetup === 'object') {
     process.stderr.write(`${agentSetup.error}\n`)
@@ -463,7 +477,7 @@ const stderrLogger: Logger = {
   error: (message) => process.stderr.write(`error: ${message}\n`),
 }
 
-/** Rows a config layer can widen authority or blind the runtime through — flagged loudly, never silently. */
+/** Built-in rows a config layer can widen authority or blind the runtime through. */
 const AUTHORITY_SENSITIVE = new Set([
   'sandbox',
   'approval',
@@ -474,6 +488,26 @@ const AUTHORITY_SENSITIVE = new Set([
   'authority-invariant',
   'agent-invariant',
   'loop-invariant',
+])
+
+/**
+ * The same check by CAPABILITY, because a layer's `insert` picks its own row
+ * id: an inserted `approval-headless {approve: true}` answers every escalation
+ * for the whole deployment, and keying on id alone would print it as an
+ * ordinary row. Configuration may do this — it is the deployment — but never
+ * silently.
+ */
+const AUTHORITY_SENSITIVE_PLUGINS = new Set([
+  'core-sandbox',
+  'core-approval',
+  'approval-headless',
+  'authority-presets',
+  'core-invariants',
+  'core-session-invariant',
+  'core-authority-invariant',
+  'core-agent-invariant',
+  'core-agent-loop-invariant',
+  'composition-record',
 ])
 
 /**
@@ -514,7 +548,10 @@ async function configCommand(args: ParsedArgs): Promise<number> {
         ...(row.disabled === true ? { disabled: true } : {}),
         layer: touched(row.id),
       }))
-      process.stdout.write(`${JSON.stringify({ hash: effective.descriptor.hash, layers: effective.descriptor.layers, agentDefaults: settings.agent, rows }, null, 2)}\n`)
+      const agentPresets = [...loaded.agentPresets].map(([name, spec]) => ({ name, rows: spec.rows.map((row) => ({ id: row.id, plugin: row.plugin })) }))
+      process.stdout.write(
+        `${JSON.stringify({ hash: effective.descriptor.hash, layers: effective.descriptor.layers, agentDefaults: settings.agent, rows, agentPresets }, null, 2)}\n`,
+      )
       return 0
     }
     process.stdout.write(`composition ${effective.descriptor.hash} (layers: ${effective.descriptor.layers.join(' → ')})\n`)
@@ -522,10 +559,20 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     const warnings: string[] = []
     for (const row of effective.rows) {
       const layer = touched(row.id)
-      const sensitive = AUTHORITY_SENSITIVE.has(row.id) && layer !== 'built-in'
+      const sensitive = layer !== 'built-in' && (AUTHORITY_SENSITIVE.has(row.id) || AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin.name))
       const marks = [row.disabled === true ? 'disabled' : undefined, sensitive ? '!' : undefined].filter((mark) => mark !== undefined)
       process.stdout.write(`  ${row.id.padEnd(22)} ${row.plugin.name.padEnd(28)} ${layer}${marks.length > 0 ? `  [${marks.join(' ')}]` : ''}\n`)
-      if (sensitive) warnings.push(`row "${row.id}" is authority-sensitive and was ${row.disabled === true ? 'DISABLED' : 'modified'} by layer "${layer}"`)
+      if (sensitive) {
+        const verb = row.disabled === true ? 'DISABLED' : layer === touched(row.id) && AUTHORITY_SENSITIVE.has(row.id) ? 'modified' : 'added'
+        warnings.push(`layer "${layer}" ${verb} authority-sensitive row "${row.id}" (${row.plugin.name})`)
+      }
+    }
+    // Agent presets are composition too: they mount plugins into an agent's world.
+    if (loaded.agentPresets.size > 0) {
+      process.stdout.write(`\nagent presets:\n`)
+      for (const [name, spec] of loaded.agentPresets) {
+        process.stdout.write(`  ${name.padEnd(22)} ${spec.rows.map((row) => `${row.id}(${row.plugin})`).join(', ')}\n`)
+      }
     }
     for (const warning of warnings) process.stderr.write(`warn: ${warning}\n`)
     return 0
@@ -535,10 +582,18 @@ async function configCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
-/** Mounts the persistence provider on a bare root and hands its Definition to `use`. */
-async function withPersistence<T>(use: (persistence: Persistence) => T): Promise<T> {
+/**
+ * Mounts the persistence provider on a bare root and hands its Definition to
+ * `use`. The row comes from the EFFECTIVE composition, so `sessions list/show`
+ * read exactly where `run`/`resume` write — a layer that repoints the store
+ * must not split the CLI's read path from its write path.
+ */
+async function withPersistence<T>(layers: readonly NamedLayer[], use: (persistence: Persistence) => T): Promise<T> {
+  const base = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
+  const effective = applyLayers(base, layers, (message) => stderrLogger.warn(message))
+  const row = effective.rows.find((entry) => entry.plugin.name === 'persistence-jsonl' && entry.disabled !== true)
   const root = createRoot({ logger: stderrLogger })
-  root.plugin(persistenceJsonlPlugin, { root: sessionsDir() })
+  root.plugin(row ? row.plugin : persistenceJsonlPlugin, row ? row.config : { root: sessionsDir() })
   await root.settle()
   try {
     return use(root.get(PERSISTENCE))
@@ -635,8 +690,13 @@ function renderAudit(events: readonly EventEnvelope[], write: (line: string) => 
 
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
+  const loaded = await loadConfigLayers(args.patchFiles)
+  if (typeof loaded === 'string') {
+    process.stderr.write(`${loaded}\n`)
+    return 2
+  }
   if (sub === 'list') {
-    return withPersistence((persistence) => {
+    return withPersistence(loaded.layers, (persistence) => {
       for (const header of persistence.list()) {
         process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\n`)
       }
@@ -649,7 +709,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
       process.stderr.write('usage: minidsh sessions show <id> [--json|--audit]\n')
       return 2
     }
-    return withPersistence((persistence) => {
+    return withPersistence(loaded.layers, (persistence) => {
       const stored = persistence.load(id)
       if (!stored) {
         process.stderr.write(`no session "${id}"\n`)

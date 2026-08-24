@@ -17,8 +17,7 @@
  * damaged on the next read). Provably-dead same-host holders are reclaimed;
  * anything else names the holder and asks for manual cleanup.
  */
-import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { Context, Plugin } from '../../kernel/index.ts'
@@ -186,6 +185,8 @@ class JsonlArchive implements Persistence {
   private readonly failures = new WeakMap<Session, unknown>()
   /** Lock-file path per session holding the write lease. */
   private readonly leases = new WeakMap<Session, string>()
+  /** Every lock this archive holds → the exact payload it wrote (ownership proof). */
+  private readonly held = new Map<string, string>()
   constructor(root: string) {
     this.root = root
     mkdirSync(root, { recursive: true })
@@ -223,9 +224,15 @@ class JsonlArchive implements Persistence {
    * `EPERM` probe means alive-but-inaccessible, and another host cannot be
    * probed at all) — everything else refuses and names the holder, so pid
    * reuse or a foreign host degrade to a manual `rm` of the lock file, never
-   * to two writers. The steal renames first (exactly one contender wins the
-   * rename; the loser's unlink hits the renamed name, not a fresh lock) and
-   * retries the exclusive create once.
+   * to two writers.
+   *
+   * Reclaiming a stale lock is the one TWO-step in this protocol (remove, then
+   * create), so it runs under its own exclusive-create mutex: without it two
+   * reclaimers racing the same dead holder can both remove and both create,
+   * and BOTH would believe they hold the lease. A process that dies inside the
+   * steal leaves the mutex behind, which blocks further *reclaims* (never a
+   * fresh acquisition) and is named in the refusal — the same manual-cleanup
+   * edge the lease already documents.
    */
   private acquireLease(session: Session, file: string): void {
     const lock = `${file}.lock`
@@ -234,6 +241,7 @@ class JsonlArchive implements Persistence {
       try {
         writeFileSync(lock, payload, { flag: 'wx' })
         this.leases.set(session, lock)
+        this.held.set(lock, payload)
         return true
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
@@ -243,28 +251,66 @@ class JsonlArchive implements Persistence {
     if (tryCreate()) return
     const holder = readLeaseHolder(lock)
     if (holder && holderIsDead(holder)) {
-      const stale = `${lock}.stale-${randomUUID()}`
+      const steal = `${lock}.steal`
+      let mutex = false
       try {
-        renameSync(lock, stale)
-        unlinkSync(stale)
+        writeFileSync(steal, payload, { flag: 'wx' })
+        mutex = true
       } catch {
-        // Another contender renamed first, or the holder just released.
+        // Another reclaimer holds the steal mutex; fall through and refuse.
       }
-      if (tryCreate()) return
+      if (mutex) {
+        try {
+          // Re-probe under the mutex: the winner of a previous race may have
+          // already replaced this lock with a live one.
+          const current = readLeaseHolder(lock)
+          if (!current || holderIsDead(current)) {
+            try {
+              unlinkSync(lock)
+            } catch {
+              // The holder released between the probe and here.
+            }
+            if (tryCreate()) return
+          }
+        } finally {
+          try {
+            unlinkSync(steal)
+          } catch {
+            // Nothing to clean up.
+          }
+        }
+      }
     }
     const who = holder ? `pid ${holder.pid} on ${holder.host}` : 'an unreadable holder'
     throw new Error(`session ${session.id}: the stored log is locked by ${who}; if that process is gone, remove ${lock}`)
   }
 
+  /** Removes only a lock this archive still owns — never one another process has since taken. */
   private releaseLease(session: Session): void {
     const lock = this.leases.get(session)
     if (!lock) return
     this.leases.delete(session)
+    this.releaseLock(lock)
+  }
+
+  private releaseLock(lock: string): void {
+    const payload = this.held.get(lock)
+    this.held.delete(lock)
     try {
+      // Identity, not just the path: if an operator's manual cleanup (or a
+      // wrong staleness verdict) let another process take this lock, removing
+      // it here would hand a THIRD process the same log.
+      if (payload !== undefined && readFileSync(lock, 'utf8') !== payload) return
       unlinkSync(lock)
     } catch {
       // Already gone (e.g. stolen after this process was wrongly probed dead).
     }
+  }
+
+  /** Unloading the provider must not strand the leases it holds. */
+  releaseAllLeases(): void {
+    // Deleting the current entry mid-iteration is well-defined for a Map.
+    for (const lock of this.held.keys()) this.releaseLock(lock)
   }
 
   /** The fresh/fork path: one whole-file write of the header plus every event so far. */
@@ -293,8 +339,19 @@ class JsonlArchive implements Persistence {
     if (scan.header.id !== session.id || scan.header.createdAt !== session.header.createdAt) {
       throw new Error(`session ${session.id}: stored header does not match the resumed session; refusing to attach`)
     }
-    if (scan.events.length > session.events.length) {
-      throw new Error(`session ${session.id}: stored log is longer than the resumed session; refusing to attach`)
+    // The file is read (agents.resume → persistence.load) BEFORE the lease is
+    // taken at publication, and the lock is free in that gap — so compare
+    // against the seed this session actually resumed from, not the log it has
+    // already grown (end-seed, a composition stamp, repair closers). Comparing
+    // against the grown length would tolerate a foreign writer's appends and
+    // then silently skip that many of this session's own events.
+    if (scan.events.length > session.liveStart) {
+      throw new Error(`session ${session.id}: the stored log grew past what this session resumed from; refusing to attach`)
+    }
+    const lastStored = scan.events.at(-1)
+    const mine = lastStored ? session.events[lastStored.seq] : undefined
+    if (lastStored && (!mine || mine.type !== lastStored.type || mine.time !== lastStored.time)) {
+      throw new Error(`session ${session.id}: the stored log changed since it was loaded; refusing to attach`)
     }
     if (scan.tail === 'torn-line') {
       // Preserve the crash artifact in a sidecar rather than destroying bytes;
@@ -374,6 +431,9 @@ export const persistenceJsonlPlugin: Plugin<PersistenceConfig> = {
   apply(ctx: Context, config) {
     const archive = new JsonlArchive(config.root)
     ctx.provide(PERSISTENCE, archive)
+    // Unloading this row must not strand the locks it holds: the listeners
+    // below (including the one that releases per session) die with it.
+    ctx.effect(() => () => archive.releaseAllLeases(), 'persistence-leases')
     ctx.on(SESSION_CREATED, (session) => archive.onPublished(session))
     ctx.on(SESSION_EVENT, (session, event) => archive.onEvent(session, event))
     ctx.on(SESSION_FLUSH, (session) => archive.onFlush(session))

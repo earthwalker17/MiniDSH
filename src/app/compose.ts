@@ -122,15 +122,25 @@ export const COMPOSITION = serviceKey<Composition>('app-composition')
  * The spine: rows whose removal under live agents tears a half-live world
  * (their services vanish while captured references keep acting). `loop` alone
  * would cascade cleanly, but removing the driver under live agents is never
- * what an operator meant. This is the runtime half of "what a layer must not
- * override".
+ * what an operator meant. `persistence` is here for a sharper reason: its
+ * per-session state and write leases die with the plugin instance, so swapping
+ * it under a live session silently stops durable writes while `flush()` — now
+ * a dispatch with no listeners — keeps reporting success. This is the runtime
+ * half of "what a layer must not override".
  */
-const SPINE = new Set(['session', 'llm', 'tools', 'prompt', 'agent', 'loop'])
+const SPINE = new Set(['session', 'llm', 'tools', 'prompt', 'agent', 'loop', 'persistence'])
 
 class MountedComposition implements Composition {
   private readonly root: Context
   private readonly list: Row[]
   private readonly handles = new Map<string, PluginHandle>()
+  /**
+   * Row changes are serialized. Each mutator spans awaits, and two overlapping
+   * calls for one id would both mount a fresh instance: the loser's `provide`
+   * throws SERVICE_DUPLICATE while its live twin keeps its registrations, and
+   * the handle map ends up naming the wrong one.
+   */
+  private queue: Promise<unknown> = Promise.resolve()
   constructor(root: Context, rows: readonly Row[]) {
     this.root = root
     this.list = rows.map((row) => ({ ...row }))
@@ -151,7 +161,26 @@ class MountedComposition implements Composition {
     throw new Error(`cannot ${verb} spine row "${id}" while agents are live: ${live.map((agent) => agent.id).join(', ')}`)
   }
 
-  async insert(row: Row): Promise<void> {
+  /** One row change at a time; a failed change never blocks the next. */
+  private serialize<T>(body: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(body, body)
+    this.queue = run.catch(() => undefined)
+    return run
+  }
+
+  insert(row: Row): Promise<void> {
+    return this.serialize(() => this.insertNow(row))
+  }
+
+  remove(id: string): Promise<void> {
+    return this.serialize(() => this.removeNow(id))
+  }
+
+  reconfigure(id: string, config: unknown): Promise<void> {
+    return this.serialize(() => this.reconfigureNow(id, config))
+  }
+
+  private async insertNow(row: Row): Promise<void> {
     if (this.list.some((existing) => existing.id === row.id)) throw new Error(`composition already has a row "${row.id}"`)
     const copy = { ...row }
     this.list.push(copy)
@@ -168,7 +197,7 @@ class MountedComposition implements Composition {
     }
   }
 
-  async remove(id: string): Promise<void> {
+  private async removeNow(id: string): Promise<void> {
     this.guardSpine(id, 'remove')
     const index = this.list.findIndex((row) => row.id === id)
     if (index < 0) throw new Error(`no composition row "${id}"`)
@@ -178,7 +207,7 @@ class MountedComposition implements Composition {
     await handle?.dispose()
   }
 
-  async reconfigure(id: string, config: unknown): Promise<void> {
+  private async reconfigureNow(id: string, config: unknown): Promise<void> {
     this.guardSpine(id, 'reconfigure')
     const row = this.list.find((entry) => entry.id === id)
     if (!row) throw new Error(`no composition row "${id}"`)
