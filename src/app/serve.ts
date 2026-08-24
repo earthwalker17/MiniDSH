@@ -29,7 +29,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
   })
   const protocolConfig: ProtocolConfig = {
     cwd: options.cwd,
-    defaultAgentOptions: defaultAgentOptions(),
+    defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
     onClose: () => resolveClosed(),
     ...(options.input === undefined ? {} : { input: options.input }),
     ...(options.output === undefined ? {} : { output: options.output }),

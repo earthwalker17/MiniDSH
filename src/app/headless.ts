@@ -31,6 +31,8 @@ export interface BootOptions {
   readonly credentialsPath?: string
   readonly dialect?: ShellDialect
   readonly patches?: readonly Patch[]
+  /** Resolved agent defaults (settings layer); falls back to the pure built-ins. */
+  readonly agentDefaults?: AgentOptions
   readonly logger?: Logger
   /** Runs after settle, before the agent is created (tests register a scripted adapter here). */
   readonly prepare?: (root: Context) => void | Promise<void>
@@ -132,11 +134,14 @@ async function drive(handle: AgentHandle, task: string | undefined): Promise<Tas
 export async function runTask(options: TaskOptions, onEvent?: EventListener): Promise<TaskResult> {
   const root = await bootComposition(options, onEvent)
   try {
+    const defaults = options.agentDefaults ?? defaultAgentOptions()
+    const effort = options.reasoningEffort ?? defaults.reasoningEffort
+    const maxSteps = options.maxSteps ?? defaults.maxSteps
     const agentOptions: AgentOptions = {
-      provider: options.provider ?? defaultAgentOptions().provider,
+      provider: options.provider ?? defaults.provider,
       model: options.model,
-      ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
-      ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
+      ...(effort === undefined ? {} : { reasoningEffort: effort }),
+      ...(maxSteps === undefined ? {} : { maxSteps }),
     }
     const handle = await root.get(AGENTS).create(root, { cwd: options.cwd, agentOptions })
     applyAuthority(root, handle, options)
@@ -154,8 +159,9 @@ function continueArgs(options: ContinueOptions): { agentOptions: Partial<AgentOp
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
       ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     },
-    // Used only when the stored log recorded no request at all.
-    defaults: defaultAgentOptions(),
+    // The defaults tier: the stored log's folded request/header beats these,
+    // so a settings-layer model can never rewrite what a session recorded.
+    defaults: options.agentDefaults ?? defaultAgentOptions(),
   }
 }
 

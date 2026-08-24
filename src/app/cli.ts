@@ -11,9 +11,10 @@ import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
-import { compose, defaultAgentOptions, defaultDialect } from './compose.ts'
+import { compose, defaultDialect } from './compose.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
-import { credentialsPath, sessionsDir } from './home.ts'
+import { credentialsPath, sessionsDir, settingsPath } from './home.ts'
+import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
 import { runTerminal } from './terminal/index.ts'
 
@@ -97,7 +98,6 @@ async function runCommand(args: ParsedArgs): Promise<number> {
   }
   const json = args.flags.get('json') === true
   const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
-  const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : defaultAgentOptions().model
   const effort = typeof args.flags.get('effort') === 'string' ? (args.flags.get('effort') as string) : undefined
   const maxStepsRaw = args.flags.get('max-steps')
   const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
@@ -106,6 +106,12 @@ async function runCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${authority}\n`)
     return 2
   }
+  const settings = loadSettings()
+  if (typeof settings === 'string') {
+    process.stderr.write(`${settings}\n`)
+    return 2
+  }
+  const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : settings.agent.model
 
   if (args.flags.get('dump-config') === true) {
     const rows = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect() })
@@ -121,6 +127,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         model,
         sessionsRoot: sessionsDir(),
         credentialsPath: credentialsPath(),
+        agentDefaults: settings.agent,
         ...(effort === undefined ? {} : { reasoningEffort: effort }),
         ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
         approve: args.flags.get('approve') === true,
@@ -150,6 +157,15 @@ function finishTask(result: TaskResult, json: boolean): number {
   if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
   process.stderr.write(`session: ${result.sessionId}\n`)
   return result.exitCode
+}
+
+/** Settings resolve once per command; a malformed file is a usage-class failure (exit 2), never silently ignored. */
+function loadSettings(): ResolvedSettings | string {
+  try {
+    return resolveSettings({ path: settingsPath() })
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
 }
 
 /** `--sandbox` / `--ask`: an explicit authority for this run, validated before anything boots. */
@@ -211,6 +227,11 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     process.stderr.write(`${authority}\n`)
     return 2
   }
+  const settings = loadSettings()
+  if (typeof settings === 'string') {
+    process.stderr.write(`${settings}\n`)
+    return 2
+  }
 
   if (!headless) {
     try {
@@ -218,6 +239,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         cwd: process.cwd(),
         sessionsRoot: sessionsDir(),
         credentialsPath: credentialsPath(),
+        agentDefaults: settings.agent,
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
         ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
@@ -238,6 +260,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     task,
     sessionsRoot: sessionsDir(),
     credentialsPath: credentialsPath(),
+    agentDefaults: settings.agent,
     ...modelFlags(args),
     ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
     approve,
@@ -261,11 +284,17 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${authority}\n`)
     return 2
   }
+  const settings = loadSettings()
+  if (typeof settings === 'string') {
+    process.stderr.write(`${settings}\n`)
+    return 2
+  }
   try {
     return await runTerminal({
       cwd,
       sessionsRoot: sessionsDir(),
       credentialsPath: credentialsPath(),
+      agentDefaults: settings.agent,
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
       ...modelFlags(args),
@@ -303,11 +332,17 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${authority}\n`)
     return 2
   }
+  const settings = loadSettings()
+  if (typeof settings === 'string') {
+    process.stderr.write(`${settings}\n`)
+    return 2
+  }
   try {
     const host = await startProtocolHost({
       cwd,
       sessionsRoot: sessionsDir(),
       credentialsPath: credentialsPath(),
+      agentDefaults: settings.agent,
       approve: args.flags.get('approve') === true,
       ...authority,
       logger: stderrLogger,

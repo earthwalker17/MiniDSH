@@ -85,9 +85,13 @@ export function defaultDialect(): ShellDialect {
   return process.platform === 'win32' ? 'pwsh' : 'bash'
 }
 
-/** The one place the default provider/model live; every surface shares them. */
+/**
+ * The built-in provider/model, pure and env-free: the environment and the
+ * settings file layer over this in `app/settings.ts`, once, at process entry —
+ * not ambiently at every call site.
+ */
 export function defaultAgentOptions(): AgentOptions {
-  return { provider: 'deepseek', model: process.env.MINIDSH_MODEL ?? 'deepseek-v4-flash' }
+  return { provider: 'deepseek', model: 'deepseek-v4-flash' }
 }
 
 /** The default MiniDSH composition. DeepSeek is the provider; the model is chosen per run. */
