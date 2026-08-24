@@ -11,6 +11,7 @@
  */
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
+import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import type { SessionEventFrame } from '../../core/session/index.ts'
@@ -33,6 +34,8 @@ export interface TerminalOptions extends BootOptions {
   readonly model?: string
   readonly reasoningEffort?: string
   readonly maxSteps?: number
+  /** Per-agent world for every agent this surface creates or attaches (built from a named agent preset). */
+  readonly agentSetup?: (agentCtx: Context) => void | Promise<void>
   /** Injected for tests; defaults to process stdin/stdout. */
   readonly io?: { readonly input: NodeJS.ReadableStream; readonly output: NodeJS.WritableStream }
 }
@@ -230,7 +233,11 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
 
     if (attaching) {
       const agents = host.root.get(AGENTS)
-      const continueOptions = { agentOptions: overrides, defaults: init.defaultAgentOptions }
+      const continueOptions = {
+        agentOptions: overrides,
+        defaults: init.defaultAgentOptions,
+        ...(options.agentSetup === undefined ? {} : { setup: options.agentSetup }),
+      }
       const handle =
         options.resumeId !== undefined
           ? await agents.resume(host.root, asSessionId(options.resumeId), continueOptions)

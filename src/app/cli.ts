@@ -14,8 +14,9 @@ import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/
 import { dirname, resolve } from 'node:path'
 import { presetTable } from '../core/presets/index.ts'
 import type { AuthorityPresetsConfig } from '../capabilities/authority-presets/index.ts'
-import { compose, defaultDialect } from './compose.ts'
-import { applyLayers, loadCompositionFile, toPatches, type NamedLayer } from './config.ts'
+import type { Context } from '../kernel/index.ts'
+import { compose, defaultDialect, type Row } from './compose.ts'
+import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { compositionPath, credentialsPath, resolveHome, sessionsDir, settingsPath } from './home.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
@@ -30,7 +31,7 @@ interface ParsedArgs {
   readonly patchFiles: string[]
 }
 
-const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset'])
+const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset', 'agent-preset'])
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
@@ -122,14 +123,20 @@ async function runCommand(args: ParsedArgs): Promise<number> {
     return 2
   }
   const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : settings.agent.model
-  const configLayers = await loadConfigLayers(args.patchFiles)
-  if (typeof configLayers === 'string') {
-    process.stderr.write(`${configLayers}\n`)
+  const loaded = await loadConfigLayers(args.patchFiles)
+  if (typeof loaded === 'string') {
+    process.stderr.write(`${loaded}\n`)
     return 2
   }
+  const configLayers = loaded.layers
   const preset = presetFlag(args, authority, configLayers)
   if (typeof preset === 'object') {
     process.stderr.write(`${preset.error}\n`)
+    return 2
+  }
+  const agentSetup = await agentPresetFlag(args, loaded)
+  if (typeof agentSetup === 'object') {
+    process.stderr.write(`${agentSetup.error}\n`)
     return 2
   }
 
@@ -140,6 +147,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         cwd,
         model,
         ...(preset === undefined ? {} : { preset }),
+        ...(agentSetup === undefined ? {} : { setup: agentSetup }),
         sessionsRoot: sessionsDir(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
@@ -187,26 +195,59 @@ function loadSettings(): ResolvedSettings | string {
   }
 }
 
+interface LoadedConfig {
+  readonly layers: NamedLayer[]
+  /** Named agent presets merged across files, later files winning per name; rows resolve against their source file's directory. */
+  readonly agentPresets: Map<string, { rows: readonly DiskRow[]; baseDir: string }>
+}
+
 /**
  * The disk layers, in fixed order: home composition.json, then each `--patch`
  * file. A missing home file is absent; a missing or malformed `--patch` file
  * is a usage error — someone asked for it by name.
  */
-async function loadConfigLayers(patchFiles: readonly string[]): Promise<NamedLayer[] | string> {
+async function loadConfigLayers(patchFiles: readonly string[]): Promise<LoadedConfig | string> {
   try {
     const layers: NamedLayer[] = []
+    const agentPresets: LoadedConfig['agentPresets'] = new Map()
+    const collect = (file: { agentPresets?: Record<string, readonly DiskRow[]> | undefined }, baseDir: string): void => {
+      for (const [name, rows] of Object.entries(file.agentPresets ?? {})) agentPresets.set(name, { rows, baseDir })
+    }
     const home = loadCompositionFile(compositionPath())
-    if (home) layers.push({ name: 'home', patches: await toPatches(home, resolveHome()) })
+    if (home) {
+      layers.push({ name: 'home', patches: await toPatches(home, resolveHome()) })
+      collect(home, resolveHome())
+    }
     for (const raw of patchFiles) {
       if (raw.trim().length === 0) return '--patch expects a file path'
       const path = resolve(raw)
       const file = loadCompositionFile(path)
       if (!file) return `--patch file not found or unreadable: ${raw}`
       layers.push({ name: `patch:${raw}`, patches: await toPatches(file, dirname(path)) })
+      collect(file, dirname(path))
     }
-    return layers
+    return { layers, agentPresets }
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/** `--agent-preset`: a named per-agent row list from the config files, resolved to a setup for the agent scope. */
+async function agentPresetFlag(args: ParsedArgs, loaded: LoadedConfig): Promise<((agentCtx: Context) => void) | { error: string } | undefined> {
+  const raw = args.flags.get('agent-preset')
+  if (raw === undefined) return undefined
+  if (typeof raw !== 'string' || raw.trim().length === 0) return { error: '--agent-preset expects a preset name' }
+  const spec = loaded.agentPresets.get(raw)
+  if (!spec) {
+    const known = [...loaded.agentPresets.keys()]
+    return { error: `unknown agent preset "${raw}"${known.length > 0 ? ` (known: ${known.join(', ')})` : ' (no agentPresets configured)'}` }
+  }
+  try {
+    const rows: Row[] = []
+    for (const row of spec.rows) rows.push(await toRow(row, spec.baseDir))
+    return agentPresetSetup(rows)
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
   }
 }
 
@@ -304,11 +345,12 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     process.stderr.write(`${settings}\n`)
     return 2
   }
-  const configLayers = await loadConfigLayers(args.patchFiles)
-  if (typeof configLayers === 'string') {
-    process.stderr.write(`${configLayers}\n`)
+  const loaded = await loadConfigLayers(args.patchFiles)
+  if (typeof loaded === 'string') {
+    process.stderr.write(`${loaded}\n`)
     return 2
   }
+  const configLayers = loaded.layers
   const preset = presetFlag(args, authority, configLayers)
   if (typeof preset === 'object') {
     process.stderr.write(`${preset.error}\n`)
@@ -316,6 +358,11 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   }
   if (preset !== undefined && !headless) {
     process.stderr.write('--preset works with --headless; in the interactive terminal use /preset\n')
+    return 2
+  }
+  const agentSetup = await agentPresetFlag(args, loaded)
+  if (typeof agentSetup === 'object') {
+    process.stderr.write(`${agentSetup.error}\n`)
     return 2
   }
 
@@ -327,6 +374,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
         configLayers,
+        ...(agentSetup === undefined ? {} : { agentSetup }),
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
         ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
@@ -351,6 +399,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     configLayers,
     logger: stderrLogger,
     ...(preset === undefined ? {} : { preset }),
+    ...(agentSetup === undefined ? {} : { setup: agentSetup }),
     ...modelFlags(args),
     ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
     approve,
@@ -379,9 +428,14 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${settings}\n`)
     return 2
   }
-  const configLayers = await loadConfigLayers(args.patchFiles)
-  if (typeof configLayers === 'string') {
-    process.stderr.write(`${configLayers}\n`)
+  const loaded = await loadConfigLayers(args.patchFiles)
+  if (typeof loaded === 'string') {
+    process.stderr.write(`${loaded}\n`)
+    return 2
+  }
+  const agentSetup = await agentPresetFlag(args, loaded)
+  if (typeof agentSetup === 'object') {
+    process.stderr.write(`${agentSetup.error}\n`)
     return 2
   }
   try {
@@ -390,7 +444,8 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
       sessionsRoot: sessionsDir(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
-      configLayers,
+      configLayers: loaded.layers,
+      ...(agentSetup === undefined ? {} : { agentSetup }),
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
       ...modelFlags(args),
@@ -437,11 +492,12 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${settings}\n`)
     return 2
   }
-  const configLayers = await loadConfigLayers(args.patchFiles)
-  if (typeof configLayers === 'string') {
-    process.stderr.write(`${configLayers}\n`)
+  const loaded = await loadConfigLayers(args.patchFiles)
+  if (typeof loaded === 'string') {
+    process.stderr.write(`${loaded}\n`)
     return 2
   }
+  const configLayers = loaded.layers
   try {
     const base = compose({
       sessionsRoot: sessionsDir(),
@@ -504,9 +560,9 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
     process.stderr.write(`${settings}\n`)
     return 2
   }
-  const configLayers = await loadConfigLayers(args.patchFiles)
-  if (typeof configLayers === 'string') {
-    process.stderr.write(`${configLayers}\n`)
+  const loaded = await loadConfigLayers(args.patchFiles)
+  if (typeof loaded === 'string') {
+    process.stderr.write(`${loaded}\n`)
     return 2
   }
   try {
@@ -515,7 +571,7 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
       sessionsRoot: sessionsDir(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
-      configLayers,
+      configLayers: loaded.layers,
       approve: args.flags.get('approve') === true,
       ...authority,
       logger: stderrLogger,
@@ -641,10 +697,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     default:
       process.stdout.write(
         'MiniDSH — usage:\n' +
-          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--preset name] [--approve] [--json]\n' +
-          '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--approve]\n' +
-          '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--approve] [--json]\n' +
-          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--approve] [--json]\n' +
+          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
+          '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
+          '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
+          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
           '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--approve]\n' +
           '  minidsh config [--json]\n' +
           '  minidsh sessions list\n' +

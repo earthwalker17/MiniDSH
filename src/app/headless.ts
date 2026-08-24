@@ -14,7 +14,7 @@ import { messageText } from '../core/llm/message.ts'
 import { PRESETS } from '../core/presets/index.ts'
 import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
-import { compose, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
+import { compose, COMPOSITION, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
 import { applyLayers, type NamedLayer } from './config.ts'
 import { compositionRecordPlugin } from '../capabilities/composition-record/index.ts'
 import type { ShellDialect } from '../capabilities/shell-stdio/index.ts'
@@ -55,6 +55,8 @@ export interface TaskOptions extends BootOptions {
   readonly maxSteps?: number
   /** Authority preset applied as a durable switch (validated by the service; exclusive with sandbox/approvalPolicy at the CLI). */
   readonly preset?: string
+  /** Per-agent world: runs on the agent scope during creation (the factory's scoped settle is the fail-loud gate). */
+  readonly setup?: (agentCtx: Context) => void | Promise<void>
 }
 
 /** Continuing a stored session: `resumeTask` keeps its id, `forkTask` branches it. */
@@ -70,6 +72,8 @@ export interface ContinueOptions extends BootOptions {
   readonly maxSteps?: number
   /** Authority preset applied as a durable switch on the continued session. */
   readonly preset?: string
+  /** Per-agent world for the continued lifecycle. */
+  readonly setup?: (agentCtx: Context) => void | Promise<void>
 }
 
 export interface TaskResult {
@@ -108,7 +112,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
   // descriptor of the effective rows, and no layer can silently remove the
   // record of what the layers did.
   const rows = [...effective.rows, defineRow('composition-record', compositionRecordPlugin, { descriptor: effective.descriptor })]
-  mount(root, rows)
+  root.provide(COMPOSITION, mount(root, rows))
   const report = await root.settle()
   if (report.pending.length > 0 || report.failed.length > 0) {
     await root.dispose()
@@ -171,7 +175,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
       ...(effort === undefined ? {} : { reasoningEffort: effort }),
       ...(maxSteps === undefined ? {} : { maxSteps }),
     }
-    const handle = await root.get(AGENTS).create(root, { cwd: options.cwd, agentOptions })
+    const handle = await root.get(AGENTS).create(root, { cwd: options.cwd, agentOptions, ...(options.setup === undefined ? {} : { setup: options.setup }) })
     applyAuthority(root, handle, options)
     applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)
@@ -180,7 +184,11 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
   }
 }
 
-function continueArgs(options: ContinueOptions): { agentOptions: Partial<AgentOptions>; defaults: AgentOptions } {
+function continueArgs(options: ContinueOptions): {
+  agentOptions: Partial<AgentOptions>
+  defaults: AgentOptions
+  setup?: (agentCtx: Context) => void | Promise<void>
+} {
   return {
     agentOptions: {
       ...(options.provider === undefined ? {} : { provider: options.provider }),
@@ -191,6 +199,7 @@ function continueArgs(options: ContinueOptions): { agentOptions: Partial<AgentOp
     // The defaults tier: the stored log's folded request/header beats these,
     // so a settings-layer model can never rewrite what a session recorded.
     defaults: options.agentDefaults ?? defaultAgentOptions(),
+    ...(options.setup === undefined ? {} : { setup: options.setup }),
   }
 }
 

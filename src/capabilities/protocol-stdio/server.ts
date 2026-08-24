@@ -35,6 +35,8 @@ export interface ProtocolServerConfig {
   readonly cwd: string
   readonly defaultAgentOptions: AgentOptions
   readonly serverVersion: string
+  /** Applied to every agent this surface creates or resumes. */
+  readonly setup?: (agentCtx: Context) => void | Promise<void>
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
 }
@@ -247,9 +249,10 @@ export class ProtocolServer {
     }
     const agents = this.ctx.get(AGENTS)
     const options = mergeAgentOptions(this.config.defaultAgentOptions, params.agentOptions, 'session/prompt')
+    const setup = this.config.setup === undefined ? {} : { setup: this.config.setup }
     if (requested === undefined) {
       const cwd = typeof params.cwd === 'string' ? params.cwd : this.config.cwd
-      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full })
+      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...setup })
       this.owned.set(handle.agent.id, handle)
       return handle.agent
     }
@@ -258,7 +261,7 @@ export class ProtocolServer {
     let inflight = this.resuming.get(requested)
     if (!inflight) {
       inflight = agents
-        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.config.defaultAgentOptions })
+        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.config.defaultAgentOptions, ...setup })
         .then((handle) => {
           this.owned.set(handle.agent.id, handle)
           return handle.agent

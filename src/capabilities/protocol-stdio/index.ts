@@ -10,7 +10,7 @@
  * key would pend the plugin forever in persistence-less compositions) — cold
  * reads use a call-time optional lookup.
  */
-import type { Plugin } from '../../kernel/index.ts'
+import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENTS, AGENT_STATUS, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
@@ -30,6 +30,8 @@ export interface ProtocolConfig {
   readonly cwd?: string
   readonly defaultAgentOptions: AgentOptions
   readonly serverVersion?: string
+  /** Per-agent world for every agent this surface creates or resumes (the app builds it from a named preset). */
+  readonly setup?: (agentCtx: Context) => void | Promise<void>
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
   readonly onClose?: () => void
 }
@@ -47,6 +49,7 @@ export const protocolStdioPlugin: Plugin<ProtocolConfig> = {
         cwd: config.cwd ?? process.cwd(),
         defaultAgentOptions: config.defaultAgentOptions,
         serverVersion: config.serverVersion ?? '0.1.0',
+        ...(config.setup === undefined ? {} : { setup: config.setup }),
         ...(config.onClose === undefined ? {} : { onClose: config.onClose }),
       },
       (frame) => transport.send(frame),

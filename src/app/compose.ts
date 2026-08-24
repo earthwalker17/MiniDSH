@@ -3,9 +3,9 @@
  * algorithm shared by boot and `--dump-config`, and the mount step. This is the
  * only place the default provider/model surface is chosen.
  */
-import type { Context, Plugin } from '../kernel/index.ts'
+import { serviceKey, type Context, type Plugin, type PluginHandle } from '../kernel/index.ts'
 import { agentInvariantPlugin } from '../core/agent/invariant.ts'
-import { agentPlugin, type AgentOptions } from '../core/agent/index.ts'
+import { AGENTS, agentPlugin, type AgentOptions } from '../core/agent/index.ts'
 import { approvalPlugin, type ApprovalPolicy } from '../core/approval/index.ts'
 import { invariantsPlugin } from '../core/invariants/index.ts'
 import { llmPlugin } from '../core/llm/index.ts'
@@ -99,12 +99,104 @@ export function applyPatches(rows: readonly Row[], patches: readonly Patch[], wa
   return result
 }
 
-/** Mounts each enabled row on the context. Activation order is dependency-driven. */
-export function mount(root: Context, rows: readonly Row[]): void {
-  for (const row of rows) {
-    if (row.disabled) continue
-    root.plugin(row.plugin, row.config)
+/**
+ * The mounted composition: row-id → live plugin instance, and the
+ * application-level way to change rows against a live root. Reconfigure is
+ * dispose-then-remount — the kernel reloads dependents on provider change,
+ * not on config change, so a fresh instance IS the config-change mechanism.
+ */
+export interface Composition {
+  rows(): readonly Row[]
+  /** Mounts a new row (duplicate ids refused) and waits for it to settle. */
+  insert(row: Row): Promise<void>
+  /** Disposes a row's instance; the kernel cascade parks dependents as pending. */
+  remove(id: string): Promise<void>
+  /** Dispose → remount with the new config → settled (a bad config fails the call, not a silent dead row). */
+  reconfigure(id: string, config: unknown): Promise<void>
+}
+
+/** Provided on the root by the app boot; app-layer only — no core or capability may consume it. */
+export const COMPOSITION = serviceKey<Composition>('app-composition')
+
+/**
+ * The spine: rows whose removal under live agents tears a half-live world
+ * (their services vanish while captured references keep acting). `loop` alone
+ * would cascade cleanly, but removing the driver under live agents is never
+ * what an operator meant. This is the runtime half of "what a layer must not
+ * override".
+ */
+const SPINE = new Set(['session', 'llm', 'tools', 'prompt', 'agent', 'loop'])
+
+class MountedComposition implements Composition {
+  private readonly root: Context
+  private readonly list: Row[]
+  private readonly handles = new Map<string, PluginHandle>()
+  constructor(root: Context, rows: readonly Row[]) {
+    this.root = root
+    this.list = rows.map((row) => ({ ...row }))
+    for (const row of this.list) {
+      if (row.disabled) continue
+      this.handles.set(row.id, root.plugin(row.plugin, row.config))
+    }
   }
+
+  rows(): readonly Row[] {
+    return this.list
+  }
+
+  private guardSpine(id: string, verb: string): void {
+    if (!SPINE.has(id)) return
+    const live = this.root.tryGet(AGENTS)?.list() ?? []
+    if (live.length === 0) return
+    throw new Error(`cannot ${verb} spine row "${id}" while agents are live: ${live.map((agent) => agent.id).join(', ')}`)
+  }
+
+  async insert(row: Row): Promise<void> {
+    if (this.list.some((existing) => existing.id === row.id)) throw new Error(`composition already has a row "${row.id}"`)
+    const copy = { ...row }
+    this.list.push(copy)
+    if (copy.disabled) return
+    const handle = this.root.plugin(copy.plugin, copy.config)
+    this.handles.set(copy.id, handle)
+    try {
+      await handle.settled()
+    } catch (error) {
+      this.list.splice(this.list.indexOf(copy), 1)
+      this.handles.delete(copy.id)
+      await handle.dispose()
+      throw error
+    }
+  }
+
+  async remove(id: string): Promise<void> {
+    this.guardSpine(id, 'remove')
+    const index = this.list.findIndex((row) => row.id === id)
+    if (index < 0) throw new Error(`no composition row "${id}"`)
+    const handle = this.handles.get(id)
+    this.list.splice(index, 1)
+    this.handles.delete(id)
+    await handle?.dispose()
+  }
+
+  async reconfigure(id: string, config: unknown): Promise<void> {
+    this.guardSpine(id, 'reconfigure')
+    const row = this.list.find((entry) => entry.id === id)
+    if (!row) throw new Error(`no composition row "${id}"`)
+    // Dispose FIRST: the old instance's provide unwinds on its inertia chain,
+    // and an early remount would hit SERVICE_DUPLICATE.
+    await this.handles.get(id)?.dispose()
+    this.handles.delete(id)
+    row.config = config
+    if (row.disabled) return
+    const handle = this.root.plugin(row.plugin, row.config)
+    this.handles.set(id, handle)
+    await handle.settled()
+  }
+}
+
+/** Mounts each enabled row on the context. Activation order is dependency-driven. */
+export function mount(root: Context, rows: readonly Row[]): Composition {
+  return new MountedComposition(root, rows)
 }
 
 export interface ComposeOptions {

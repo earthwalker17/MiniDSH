@@ -6,7 +6,9 @@ import { PassThrough } from 'node:stream'
 import { createInterface } from 'node:readline'
 import { z } from 'zod'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Context, Logger } from '../../kernel/index.ts'
+import { serviceKey, type Context, type Logger } from '../../kernel/index.ts'
+import { AGENTS } from '../../core/agent/index.ts'
+import { asSessionId } from '../../core/ids.ts'
 import { LLM, LlmError } from '../../core/llm/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
@@ -105,7 +107,7 @@ class TestClient {
 
 async function startHost(
   adapter: ScriptedAdapter,
-  extra?: { sessionsRoot?: string; prepare?: (root: Context) => void; approve?: boolean },
+  extra?: { sessionsRoot?: string; prepare?: (root: Context) => void; approve?: boolean; agentSetup?: (agentCtx: Context) => void },
 ): Promise<{ host: ProtocolHostHandle; client: TestClient; sessionsRoot: string }> {
   const client = new TestClient()
   const sessionsRoot = extra?.sessionsRoot ?? tempDir('minidsh-proto-sessions-')
@@ -114,6 +116,7 @@ async function startHost(
     sessionsRoot,
     logger: silent,
     ...(extra?.approve === undefined ? {} : { approve: extra.approve }),
+    ...(extra?.agentSetup === undefined ? {} : { agentSetup: extra.agentSetup }),
     patches: [{ id: 'llm-deepseek', disabled: true }],
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
@@ -369,6 +372,20 @@ describe('protocol-stdio: the authority control plane', () => {
     await client.waitForIdle(sessionId)
     const reply = await client.call('session/authority', { sessionId, sandbox: 'unfenced' })
     expect(reply.error?.code).toBe(-32602)
+  })
+
+  it('applies the configured per-agent setup to every agent the surface creates', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const marker = serviceKey<number>('proto-preset-marker')
+    const { host, client } = await startHost(adapter, {
+      agentSetup: (agentCtx) => void agentCtx.provide(marker, 7),
+    })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const agent = host.root.get(AGENTS).get(asSessionId(sessionId))!
+    // Scoped to that agent's world; never visible on the root.
+    expect(agent.ctx.tryGet(marker)).toBe(7)
+    expect(host.root.tryGet(marker)).toBeUndefined()
   })
 
   it('switches both knobs through one preset, recording the intent durably', async () => {

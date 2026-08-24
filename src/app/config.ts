@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
-import type { Plugin } from '../kernel/index.ts'
+import type { Context, Plugin } from '../kernel/index.ts'
 import { snapshotJson } from '../core/json.ts'
 import type { CompositionApplied } from '../capabilities/composition-record/index.ts'
 import { applyPatches, builtinPlugins, type Patch, type Row } from './compose.ts'
@@ -119,6 +119,23 @@ export async function toRow(row: DiskRow, baseDir: string): Promise<Row> {
     plugin: await resolvePluginRef(row.plugin, baseDir),
     ...(row.config === undefined ? {} : { config: row.config }),
     ...(row.disabled === undefined ? {} : { disabled: row.disabled }),
+  }
+}
+
+/**
+ * Per-agent world from a named preset: mounts the rows on the agent scope
+ * during creation. Registrations and services live and die with that agent
+ * (the scope contract); the factory's scoped fail-loud settle is the gate for
+ * unmet dependencies. Host-plane rows do not belong here — a service provided
+ * in the scope shadows only for scope-mounted plugins, so a preset
+ * structurally cannot widen enforcement (asserted by test).
+ */
+export function agentPresetSetup(rows: readonly Row[]): (agentCtx: Context) => void {
+  return (agentCtx) => {
+    for (const row of rows) {
+      if (row.disabled) continue
+      agentCtx.plugin(row.plugin, row.config)
+    }
   }
 }
 
