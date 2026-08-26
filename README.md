@@ -22,11 +22,13 @@ pnpm install
 pnpm check                                  # typecheck + lint + dependency gate + tests
 pnpm minidsh run "fix the failing test" --cwd path/to/workspace --approve
 pnpm minidsh run "summarize this repo" --json   # one JSON line per session event on stdout
-pnpm minidsh chat --cwd path/to/workspace       # interactive terminal (y/N approvals, /sandbox, /exit)
+pnpm minidsh chat --cwd path/to/workspace       # interactive terminal (y/N approvals, /sandbox, /compact, /exit)
 pnpm minidsh sessions show <session-id> --audit  # what this session was allowed to do, and when
 ```
 
 Session logs live under `%USERPROFILE%\.minidsh\sessions` (override with `MINIDSH_HOME`). The default model is `deepseek-v4-flash`; pass `--model deepseek-v4-pro` or set `MINIDSH_MODEL`.
+
+**Context.** A long session compacts itself: when the projected request nears the model's window, the oldest history is replaced by a summary and the shadowed events stay in the log — nothing is rewritten, and `sessions show` still reads the whole thing. The terminal shows pressure as `[ctx 34% · 12.4k/32k]` and `/compact` forces it early. Command output too large to show inline is saved under `.minidsh/spill/` and the model is told where to read it. An `AGENTS.md` (or `CLAUDE.md`) in the workspace is entered as context, from the project root down to the working directory — instructions to the model only; a repository can never change what the harness is allowed to do.
 
 **Authority.** Runs default to `--sandbox workspace-write`: file modifications are fenced to the working directory in process, and reads are unrestricted. No host can confine shell commands yet, so the shell refuses to run under a confined mode and the model must ask for a one-shot escalation, which a person approves (`--approve` grants them in a headless run, `--sandbox danger-full-access` drops confinement for the whole session). Every mode, policy, request and decision is a durable event you can read back with `sessions show --audit`.
 
