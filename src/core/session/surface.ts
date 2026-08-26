@@ -36,6 +36,18 @@ export function foldRequestHeader(events: readonly EventEnvelope[]): RequestHead
 }
 
 /**
+ * The current surface node list folded from a raw event stream — the same rule
+ * a live `Session` maintains incrementally, for readers that hold only events
+ * (a protocol client, the metering fold, a stored log). Structural validation
+ * already happened at append, so this only applies.
+ */
+export function foldSurfaceSeqs(events: readonly EventEnvelope[]): readonly number[] {
+  const surface = new Surface()
+  for (const event of events) surface.apply(event)
+  return surface.seqs()
+}
+
+/**
  * Ordered list of surface-event seqs with replace support. `append` pushes;
  * `replace` collapses a contiguous run of current nodes into the new node.
  * Message derivation folds `nodes` through `deriveEventMessage`.

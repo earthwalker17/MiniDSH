@@ -6,6 +6,7 @@
  * controller owns interaction.
  */
 import { messageText, restoreMessage } from '../../core/llm/message.ts'
+import { formatTokens, meterSession } from '../../core/metering/index.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
 
 function preview(text: string, max = 80): string {
@@ -15,13 +16,45 @@ function preview(text: string, max = 80): string {
 
 type LoggedMessage = Parameters<typeof restoreMessage>[0]
 
-/** Folds live session events into raw terminal writes (may be partial lines). */
+/**
+ * Folds live session events into raw terminal writes (may be partial lines).
+ *
+ * It also keeps the events it has seen so it can run the shared metering fold
+ * (`core/metering`) — the client computes context pressure from the same
+ * durable facts the runtime does, rather than being told a number. `seed` takes
+ * the attach snapshot so a resumed session meters its whole history.
+ */
 export class TerminalRenderer {
   private streaming = false
   private thinking = false
+  private readonly seen: EventEnvelope[] = []
+  /** Learned from the `initialize` catalog, which the client reads after construction. */
+  private contextWindow = 0
+
+  useContextWindow(tokens: number): void {
+    this.contextWindow = tokens
+  }
+
+  /** Records history rendered by `renderHistory`, which never passes through `onEvent`. */
+  seed(events: readonly EventEnvelope[]): void {
+    this.seen.push(...events)
+  }
+
+  /** `[ctx 34% · 12.4k/128k]`, or '' when no window is known. */
+  private contextLine(): string {
+    if (this.contextWindow <= 0) return ''
+    const metrics = meterSession(this.seen, this.contextWindow)
+    if (metrics.projectedTokens === 0) return ''
+    const percent = Math.round(metrics.ratio * 100)
+    return `[ctx ${percent}% · ${formatTokens(metrics.projectedTokens)}/${formatTokens(this.contextWindow)}]\n`
+  }
 
   onEvent(event: EventEnvelope): string {
+    this.seen.push(event)
     switch (event.type) {
+      // The step is priced here, so this is where the number can change.
+      case 'assistant/message':
+        return this.contextLine()
       case 'assistant/chunk': {
         const chunk = (event.data as { chunk: { type: string; text?: string } }).chunk
         if (chunk.type === 'text-delta') {

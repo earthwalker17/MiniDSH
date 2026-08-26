@@ -107,6 +107,28 @@ describe('terminal render (pure)', () => {
     ]
     expect(renderHistory(events)).toBe('you> fix the bug\n→ shell {"command":"ls"}\ndone, fixed\n')
   })
+
+  it('shows context pressure only once a window is known, metering the seeded snapshot too', () => {
+    const logged = (value: unknown): unknown => JSON.parse(JSON.stringify(value))
+    const priced = (seq: number, inputTokens: number): EventEnvelope => ({
+      type: 'assistant/message',
+      seq,
+      time: 1,
+      data: { turn: 1, step: 1, message: logged(createAssistantMessage([{ type: 'text', text: 'ok' }], 'p', 'm')), usage: { inputTokens, outputTokens: 0 } },
+      surfaceOp: { op: 'append' },
+    })
+
+    // No window from the catalog (an adapter that never advertised one): silent.
+    const blind = new TerminalRenderer()
+    expect(blind.onEvent(priced(0, 4000))).toBe('')
+
+    const renderer = new TerminalRenderer()
+    renderer.useContextWindow(10_000)
+    // The attach snapshot never passes through onEvent, so it must be seeded
+    // or a resumed session would meter only what it saw since attaching.
+    renderer.seed([priced(0, 4000)])
+    expect(renderer.onEvent(priced(1, 8000))).toBe('[ctx 80% · 8k/10k]\n')
+  })
 })
 
 describe('terminal surface (scripted end-to-end over the loopback pair)', () => {

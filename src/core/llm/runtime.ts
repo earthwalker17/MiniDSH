@@ -1,10 +1,20 @@
 import { type Context, type Disposer, type Plugin, serviceKey, waterfallEvent } from '../../kernel/index.ts'
 import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from './types.ts'
 
+/**
+ * A model as the catalog advertises it: the adapter's own facts plus the
+ * context window. The window travels with the catalog because a surface that
+ * must meter context (§ `core/metering`) has no other way to learn it — and
+ * because it is a model fact, not a runtime one.
+ */
+export interface ModelCatalogEntry extends ModelInfo {
+  readonly contextWindow: number
+}
+
 /** One registered provider and the models it advertises. */
 export interface ProviderInfo {
   readonly id: string
-  readonly models: readonly ModelInfo[]
+  readonly models: readonly ModelCatalogEntry[]
 }
 
 /** The adapter registry and provider-neutral stream service. */
@@ -48,7 +58,12 @@ class LlmRuntime implements Llm {
   }
 
   providers(): ProviderInfo[] {
-    return [...this.adapters.values()].map((adapter) => ({ id: adapter.provider, models: adapter.listModels() }))
+    return [...this.adapters.values()].map((adapter) => ({
+      id: adapter.provider,
+      // Enriched here rather than widening `LlmAdapter.listModels`: one adapter
+      // method stays the source of the window, and no adapter has to repeat it.
+      models: adapter.listModels().map((model) => ({ ...model, contextWindow: adapter.resolveModel(model.id).contextWindow })),
+    }))
   }
 
   resolveModel(provider: string, model: string): ResolvedModel {

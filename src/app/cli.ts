@@ -6,6 +6,7 @@
  */
 import { createRoot, type Logger } from '../kernel/index.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
+import { formatTokens, meterSession } from '../core/metering/index.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
@@ -724,6 +725,16 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         if (stored.damaged) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, damaged: true })}\n`)
       } else {
         process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        // What this session cost and how full its context got. The window is
+        // not known off-line (it is a live adapter fact), so the ratio is
+        // omitted and only the measured numbers are printed.
+        const metrics = meterSession(stored.events, 0)
+        if (metrics.sessionInput + metrics.sessionOutput + metrics.sessionCacheRead > 0) {
+          process.stdout.write(
+            `usage: ${formatTokens(metrics.sessionInput)} in · ${formatTokens(metrics.sessionCacheRead)} cached · ` +
+              `${formatTokens(metrics.sessionOutput)} out · context now ~${formatTokens(metrics.projectedTokens)}\n`,
+          )
+        }
         for (const event of stored.events) {
           const line = renderEvent(event)
           process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line.trim()}` : ''}\n`)

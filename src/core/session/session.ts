@@ -84,6 +84,15 @@ export class Session {
     return this.firstLiveSeq
   }
 
+  /**
+   * The seqs of the live surface nodes, in model order — what `deriveMessages`
+   * folds. A compaction provider needs the node identities to name a replace
+   * range; everyone else should use `deriveMessages()`.
+   */
+  surfaceSeqs(): readonly number[] {
+    return this.surface.seqs()
+  }
+
   private seedOne(raw: EventEnvelope, index: number): void {
     if (raw.seq !== index) throw new Error(`seed event ${index} has seq ${raw.seq}`)
     const event = this.freezeEnvelope(raw)

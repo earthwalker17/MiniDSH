@@ -14,6 +14,7 @@ import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
+import { formatTokens } from '../../core/metering/index.ts'
 import type { SessionEventFrame } from '../../core/session/index.ts'
 import type { AuthorityView, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
@@ -238,7 +239,12 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const init = await client.request<InitializeResult>('initialize')
     const provider = overrides.provider ?? init.defaultAgentOptions.provider
     const model = overrides.model ?? init.defaultAgentOptions.model
-    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model} (/exit quits, Ctrl+C cancels)\n`)
+    // The catalog carries the window, so the client meters context from the
+    // same durable facts the runtime does instead of being told a number.
+    const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
+    if (contextWindow) renderer.useContextWindow(contextWindow)
+    const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
+    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/exit quits, Ctrl+C cancels)\n`)
 
     if (attaching) {
       const agents = host.root.get(AGENTS)
@@ -259,6 +265,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       // backlog replays whatever streamed while we attached (a resumed session
       // may have woken on its restored inbox already).
       const history = await client.request<EventsResult>('session/events', { sessionId })
+      // The snapshot is rendered by `renderHistory`, not `onEvent`, so the
+      // metering fold must be told about it explicitly or a resumed session
+      // would meter only what it saw since attaching.
+      renderer.seed(history.events)
       const transcript = renderHistory(history.events)
       if (transcript) out.write(transcript)
       out.write(options.resumeId !== undefined ? `resumed ${sessionId}\n` : `forked ${options.forkId} → ${sessionId}\n`)
