@@ -25,6 +25,14 @@ export function compositionPath(): string {
   return join(resolveHome(), 'composition.json')
 }
 
+/**
+ * The user's global instruction file. Model-facing CONTEXT only — it can no
+ * more change this harness's authority than a repository's AGENTS.md can.
+ */
+export function globalInstructionsPath(): string {
+  return join(resolveHome(), 'AGENTS.md')
+}
+
 /** User settings layer (agent defaults). Never authority, never composition. */
 export function settingsPath(): string {
   return join(resolveHome(), 'settings.json')

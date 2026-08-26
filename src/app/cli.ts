@@ -19,7 +19,7 @@ import type { Context } from '../kernel/index.ts'
 import { compose, defaultDialect, type Row } from './compose.ts'
 import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
-import { compositionPath, credentialsPath, resolveHome, sessionsDir, spillDir, settingsPath } from './home.ts'
+import { compositionPath, credentialsPath, globalInstructionsPath, resolveHome, sessionsDir, spillDir, settingsPath } from './home.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
 import { runTerminal } from './terminal/index.ts'
@@ -151,6 +151,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(agentSetup === undefined ? {} : { setup: agentSetup }),
         sessionsRoot: sessionsDir(),
         spillRoot: spillDir(),
+        globalInstructionsPath: globalInstructionsPath(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
         configLayers,
@@ -376,6 +377,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         cwd: process.cwd(),
         sessionsRoot: sessionsDir(),
         spillRoot: spillDir(),
+        globalInstructionsPath: globalInstructionsPath(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
         configLayers,
@@ -400,6 +402,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     task,
     sessionsRoot: sessionsDir(),
     spillRoot: spillDir(),
+    globalInstructionsPath: globalInstructionsPath(),
     credentialsPath: credentialsPath(),
     agentDefaults: settings.agent,
     configLayers,
@@ -461,6 +464,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
       cwd,
       sessionsRoot: sessionsDir(),
       spillRoot: spillDir(),
+      globalInstructionsPath: globalInstructionsPath(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
       configLayers: loaded.layers,
@@ -541,6 +545,7 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     const base = compose({
       sessionsRoot: sessionsDir(),
       spillRoot: spillDir(),
+      globalInstructionsPath: globalInstructionsPath(),
       dialect: defaultDialect(),
       credentialsPath: credentialsPath(),
       ...authority,
@@ -631,6 +636,7 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
       cwd,
       sessionsRoot: sessionsDir(),
       spillRoot: spillDir(),
+      globalInstructionsPath: globalInstructionsPath(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
       configLayers: loaded.layers,

@@ -27,6 +27,7 @@ import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.
 import { retryPlugin } from '../capabilities/llm-retry/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
 import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
+import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructions/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { toolShellPlugin } from '../capabilities/tool-shell/index.ts'
 
@@ -68,6 +69,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       toolEditorPlugin,
       toolShellPlugin,
       contextRuntimePlugin,
+      workspaceInstructionsPlugin,
       agentPlugin,
       agentInvariantPlugin,
       loopPlugin,
@@ -236,6 +238,8 @@ export interface ComposeOptions {
   readonly sessionsRoot: string
   /** Where oversized tool output is saved; omitted mounts no store, and tools then say what they dropped. */
   readonly spillRoot?: string
+  /** The user's global AGENTS.md; omitted reads only the workspace's own files. */
+  readonly globalInstructionsPath?: string
   readonly dialect: ShellDialect
   /** Secret-store path for `credentials-local`; omitted = env-only resolution. */
   readonly credentialsPath?: string
@@ -285,6 +289,14 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))
+  // `maxBytes` is the deployment's prompt-budget choice, made here rather than
+  // defaulted inside the capability.
+  rows.push(
+    defineRow('workspace-instructions', workspaceInstructionsPlugin, {
+      maxBytes: 32_000,
+      ...(options.globalInstructionsPath === undefined ? {} : { globalPath: options.globalInstructionsPath }),
+    }),
+  )
   rows.push(defineRow('compaction', compactionBasicPlugin, {}))
   rows.push(defineRow('agent', agentPlugin))
   if (withInvariants) rows.push(defineRow('agent-invariant', agentInvariantPlugin))
