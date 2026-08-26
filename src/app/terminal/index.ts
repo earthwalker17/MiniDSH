@@ -16,7 +16,7 @@ import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import type { SessionEventFrame } from '../../core/session/index.ts'
-import type { AuthorityView, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
+import type { AuthorityView, CompactResult, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
@@ -158,13 +158,19 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       await switchAuthority(line)
       return
     }
+    if (command === '/compact') {
+      await compactNow()
+      return
+    }
+    // Before the catch-all, not after it: `/cancel` sat below the unknown-command
+    // branch and could never run.
+    if (command === '/cancel') {
+      if (sessionId !== undefined && status === 'running') await client.request('session/cancel', { sessionId }).catch(printError)
+      return
+    }
     if (command?.startsWith('/')) {
       out.write(`unknown command ${command}\n`)
       prompt()
-      return
-    }
-    if (line === '/cancel') {
-      if (sessionId !== undefined && status === 'running') await client.request('session/cancel', { sessionId }).catch(printError)
       return
     }
     try {
@@ -178,6 +184,32 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       printError(error)
       if (status === 'idle') prompt()
     }
+  }
+
+  /**
+   * Compaction is a human command over the wire, not a model-facing tool. The
+   * summary it produces arrives as a durable event like everything else, so the
+   * renderer reports the result twice over: once here, once from the log.
+   */
+  async function compactNow(): Promise<void> {
+    if (sessionId === undefined) {
+      out.write('no session yet - send a prompt first\n')
+      prompt()
+      return
+    }
+    try {
+      const result = await client.request<CompactResult>('session/compact', { sessionId })
+      if (result.kind === 'compacted') {
+        out.write(`compacted ${result.shadowedNodes} messages (~${formatTokens(result.beforeTokens)} → ~${formatTokens(result.afterTokens)})\n`)
+      } else if (result.kind === 'scheduled') {
+        out.write('the turn is still running; compaction will run before its next step\n')
+      } else {
+        out.write('nothing worth compacting yet\n')
+      }
+    } catch (error) {
+      printError(error)
+    }
+    if (status === 'idle') prompt()
   }
 
   /**
@@ -244,7 +276,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
     if (contextWindow) renderer.useContextWindow(contextWindow)
     const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
-    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/exit quits, Ctrl+C cancels)\n`)
+    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/compact shrinks context, /exit quits, Ctrl+C cancels)\n`)
 
     if (attaching) {
       const agents = host.root.get(AGENTS)

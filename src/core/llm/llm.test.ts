@@ -155,6 +155,30 @@ describe('LlmRuntime', () => {
     await expect(collect(llm.stream(request()))).rejects.toThrowError(/without a finish/)
   })
 
+  /**
+   * A cancellation landing between the request being built and the adapter
+   * being entered is invisible to an adapter that only listens for the `abort`
+   * event: on an already-aborted signal it never fires. Found live — a turn
+   * hung forever at `llm.stream`, and the whole agent with it.
+   */
+  it('finishes a request whose signal was already aborted, without entering the adapter', async () => {
+    const { root, llm } = await harness()
+    const adapter = new ScriptedAdapter().script(
+      (call) =>
+        new Promise<StreamChunk[]>((_resolve, reject) => {
+          call.signal?.addEventListener('abort', () => reject(new LlmError('ABORTED', 'aborted')))
+        }),
+    )
+    llm.registerAdapter(root, adapter)
+    const controller = new AbortController()
+    controller.abort()
+
+    const chunks = await collect(llm.stream(request({ signal: controller.signal })))
+    expect(chunks).toEqual([{ type: 'finish', reason: { kind: 'aborted', failure: { message: 'request aborted before the provider was called', code: 'ABORTED' } } }])
+    // The adapter was never called, so it had nothing to hang on.
+    expect(adapter.calls).toHaveLength(0)
+  })
+
   it('resolves adapter-owned model facts', async () => {
     const { root, llm } = await harness()
     llm.registerAdapter(root, new ScriptedAdapter())

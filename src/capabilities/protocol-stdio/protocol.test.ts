@@ -208,6 +208,24 @@ describe('protocol-stdio: steering and cancel', () => {
     const turnEnd = client.frames('turn/end').at(-1)!
     expect((turnEnd.event.data.reason as { kind: string }).kind).toBe('cancelled')
   })
+
+  /**
+   * Compaction reaches the wire as a HUMAN command — it is deliberately not a
+   * model-facing tool. The result is honest about doing nothing: a short
+   * session has no useful span to summarise, and says so rather than
+   * fabricating one.
+   */
+  it('session/compact answers over the wire and reports when there is nothing to do', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('done'))
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+
+    const result = await client.result<{ kind: string }>('session/compact', { sessionId })
+    expect(result.kind).toBe('nothing-to-do')
+    // No summary was invented, so no surface event was written.
+    expect(client.frames('compaction/applied')).toHaveLength(0)
+  })
 })
 
 describe('protocol-stdio: approvals are the durable frames', () => {

@@ -233,6 +233,40 @@ describe('Session: relational invariant', () => {
     ).toThrowError(/no pending tool\/call/)
   })
 
+  /**
+   * An ARRIVING user message belongs to a turn: it is input, and input is what
+   * a turn is made of. A message that REPLACES a range is not input at all —
+   * it is a rewrite of the model-visible surface, and rewriting between turns
+   * is exactly when a human asks for it (`/compact` on an idle session).
+   */
+  it('refuses an arriving user message outside a turn but allows a surface rewrite', async () => {
+    const { sessions } = await harness(true)
+    const session = sessions.create({ cwd: '/w' })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    const a = session.append(USER_MESSAGE, { message: createUserMessage('first') }, { surfaceOp: { op: 'append' } })
+    const b = session.append(
+      ASSISTANT_MESSAGE,
+      { turn: 1, step: 1, message: createAssistantMessage([{ type: 'text', text: 'reply' }], 'p', 'm') },
+      { surfaceOp: { op: 'append' } },
+    )
+    session.append(STEP_END, { turn: 1, step: 1 })
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+
+    // Between turns: an arrival is refused.
+    expect(() => session.append(USER_MESSAGE, { message: createUserMessage('late') }, { surfaceOp: { op: 'append' } })).toThrowError(
+      /user\/message outside a turn/,
+    )
+    // …and a rewrite is not.
+    const summary = session.append(
+      USER_MESSAGE,
+      { message: createUserMessage('summary') },
+      { surfaceOp: { op: 'replace', start: a.seq, end: b.seq }, sourceEventSeqs: [a.seq, b.seq] },
+    )
+    expect(session.surfaceSeqs()).toEqual([summary.seq])
+    expect(session.events[a.seq]).toBeDefined()
+  })
+
   it('rejects an invariant-violating event before it is committed, leaving the log intact', async () => {
     const { sessions } = await harness(true)
     const session = sessions.create({ cwd: '/w' })

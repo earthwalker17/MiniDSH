@@ -10,6 +10,7 @@
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_DECIDED, APPROVAL_POLICIES, isApprovalPolicy, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
+import { COMPACTION } from '../../core/compaction/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
@@ -24,6 +25,7 @@ import {
   RpcFailure,
   type ApprovalAnswerResult,
   type AuthorityView,
+  type CompactResult,
   type EventsResult,
   type InitializeResult,
   type PromptResult,
@@ -136,6 +138,8 @@ export class ProtocolServer {
         return this.events(record)
       case 'session/cancel':
         return this.cancel(record)
+      case 'session/compact':
+        return this.compact(record)
       case 'approval/answer':
         return this.approvalAnswer(record)
       case 'session/authority':
@@ -291,6 +295,20 @@ export class ProtocolServer {
     if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
     agent.cancel({ kind: 'user' })
     return {}
+  }
+
+  /**
+   * Compaction is a HUMAN command, never a model-facing tool — the model does
+   * not get to decide what it forgets. Read through `tryGet` so a composition
+   * without the row answers honestly instead of failing the method.
+   */
+  private async compact(params: Record<string, unknown>): Promise<CompactResult> {
+    const sessionId = requireString(params, 'sessionId', 'session/compact')
+    const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
+    if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
+    const compaction = this.ctx.tryGet(COMPACTION)
+    if (!compaction) throw new RpcFailure(INTERNAL_ERROR, 'this host has no compaction capability mounted')
+    return compaction.compactNow(agent)
   }
 
   private approvalAnswer(params: Record<string, unknown>): ApprovalAnswerResult {

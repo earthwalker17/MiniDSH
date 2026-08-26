@@ -112,6 +112,16 @@ export interface CancelParams {
   readonly sessionId: string
 }
 
+export interface CompactParams {
+  readonly sessionId: string
+}
+
+/** `scheduled`: the agent was mid-turn, so compaction runs at its next step boundary. */
+export type CompactResult =
+  | { readonly kind: 'compacted'; readonly shadowedNodes: number; readonly beforeTokens: number; readonly afterTokens: number }
+  | { readonly kind: 'scheduled' }
+  | { readonly kind: 'nothing-to-do' }
+
 
 export interface ApprovalAnswerParams {
   readonly sessionId: string

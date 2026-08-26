@@ -6,6 +6,7 @@
  * controller owns interaction.
  */
 import { messageText, restoreMessage } from '../../core/llm/message.ts'
+import { lastCompactionBudget } from '../../core/compaction/index.ts'
 import { formatTokens, meterSession } from '../../core/metering/index.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
 
@@ -40,13 +41,21 @@ export class TerminalRenderer {
     this.seen.push(...events)
   }
 
-  /** `[ctx 34% · 12.4k/128k]`, or '' when no window is known. */
+  /**
+   * `[ctx 34% · 12.4k/128k]`, or '' when no budget is known.
+   *
+   * The recorded budget wins over the catalog's window: a deployment may cap
+   * context below what the model advertises, and a surface showing a different
+   * denominator than the runtime compacts against would be reporting a number
+   * nothing acts on.
+   */
   private contextLine(): string {
-    if (this.contextWindow <= 0) return ''
-    const metrics = meterSession(this.seen, this.contextWindow)
+    const budget = lastCompactionBudget(this.seen) ?? this.contextWindow
+    if (budget <= 0) return ''
+    const metrics = meterSession(this.seen, budget)
     if (metrics.projectedTokens === 0) return ''
     const percent = Math.round(metrics.ratio * 100)
-    return `[ctx ${percent}% · ${formatTokens(metrics.projectedTokens)}/${formatTokens(this.contextWindow)}]\n`
+    return `[ctx ${percent}% · ${formatTokens(metrics.projectedTokens)}/${formatTokens(budget)}]\n`
   }
 
   onEvent(event: EventEnvelope): string {
@@ -55,6 +64,10 @@ export class TerminalRenderer {
       // The step is priced here, so this is where the number can change.
       case 'assistant/message':
         return this.contextLine()
+      case 'compaction/applied': {
+        const data = event.data as { trigger: string; shadowedSeqs: readonly number[]; beforeTokens: number; afterTokens: number }
+        return `[compacted ${data.shadowedSeqs.length} messages · ${data.trigger} · ~${formatTokens(data.beforeTokens)} → ~${formatTokens(data.afterTokens)}]\n`
+      }
       case 'assistant/chunk': {
         const chunk = (event.data as { chunk: { type: string; text?: string } }).chunk
         if (chunk.type === 'text-delta') {

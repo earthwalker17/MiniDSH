@@ -85,6 +85,16 @@ class LlmRuntime implements Llm {
       yield { type: 'finish', reason: { kind: 'error', failure: { message: `no adapter for provider "${request.provider}"`, code: 'NO_ADAPTER' } } }
       return
     }
+    // A cancellation that lands BEFORE the adapter starts is invisible to it:
+    // `addEventListener('abort')` on an already-aborted signal never fires, so
+    // an adapter that waits on the event alone would hang the agent forever.
+    // The seam already normalizes every other adapter failure into a terminal
+    // finish; normalizing this one keeps cancellation a property of the
+    // contract rather than of each adapter's diligence.
+    if (request.signal?.aborted) {
+      yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'request aborted before the provider was called', code: 'ABORTED' } } }
+      return
+    }
     try {
       for await (const chunk of adapter.stream(request)) yield chunk
     } catch (error) {

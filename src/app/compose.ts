@@ -17,6 +17,7 @@ import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { toolsPlugin } from '../core/tools/index.ts'
 import { approvalHeadlessPlugin } from '../capabilities/approval-headless/index.ts'
 import { authorityPresetsPlugin } from '../capabilities/authority-presets/index.ts'
+import { compactionBasicPlugin } from '../capabilities/compaction-basic/index.ts'
 import { contextRuntimePlugin } from '../capabilities/context-runtime/index.ts'
 import { credentialsLocalPlugin } from '../capabilities/credentials-local/index.ts'
 import { deepseekPlugin } from '../capabilities/llm-deepseek/index.ts'
@@ -58,6 +59,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       sandboxPlugin,
       authorityInvariantPlugin,
       authorityPresetsPlugin,
+      compactionBasicPlugin,
       fsLocalPlugin,
       fsObservationPolicyPlugin,
       shellStdioPlugin,
@@ -278,6 +280,7 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))
+  rows.push(defineRow('compaction', compactionBasicPlugin, {}))
   rows.push(defineRow('agent', agentPlugin))
   if (withInvariants) rows.push(defineRow('agent-invariant', agentInvariantPlugin))
   rows.push(defineRow('loop', loopPlugin))

@@ -67,7 +67,11 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     return
   }
   if (matches(event, USER_MESSAGE)) {
-    if (trace.openTurn === undefined) fail('user/message outside a turn')
+    // An ARRIVING message belongs to a turn: it is input, and input is what a
+    // turn is made of. A message that REPLACES a range is not input at all —
+    // it is a rewrite of the model-visible surface (a compaction checkpoint),
+    // and rewriting between turns is exactly when a human asks for it.
+    if (trace.openTurn === undefined && event.surfaceOp?.op !== 'replace') fail('user/message outside a turn')
     return
   }
   if (STEP_SCOPED.has(event.type)) {
