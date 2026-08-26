@@ -197,6 +197,41 @@ describe('entering the conversation', () => {
     await resumed.dispose()
   })
 
+  /**
+   * The guard folds the LIVE surface, not the log. Shadowed events stay in the
+   * log forever, so a log-based guard would keep the house rules suppressed at
+   * exactly the moment a session got long enough to forget them.
+   */
+  it('re-enters the instructions when a compaction has shadowed them', async () => {
+    const workspace = workspaceWithRoot()
+    writeFileSync(join(workspace, 'AGENTS.md'), 'house style', 'utf8')
+    const mounted = await mount({ maxBytes: 32_000 })
+    const agent = await mounted.create(workspace)
+    mounted.adapter.script(assistantText('one'), assistantText('two'))
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    expect(entered(agent)).toHaveLength(1)
+
+    // A compaction shadows everything so far, including the instructions.
+    const nodes = agent.session.surfaceSeqs()
+    agent.session.append(
+      USER_MESSAGE,
+      { message: createUserMessage('summary of the work so far') },
+      { surfaceOp: { op: 'replace', start: nodes[0]!, end: nodes.at(-1)! }, sourceEventSeqs: [...nodes] },
+    )
+
+    agent.followup(createUserMessage('carry on'))
+    await agent.whenIdle()
+    // Entered twice in the log; exactly one copy is live, which is what the
+    // model actually sees.
+    expect(entered(agent)).toHaveLength(2)
+    const live = new Set(agent.session.surfaceSeqs())
+    const liveInstructions = agent.session.events.filter(
+      (event) => live.has(event.seq) && matches(event, USER_MESSAGE) && restoreMessage(event.data.message).source.kind === 'plugin',
+    )
+    expect(liveInstructions).toHaveLength(1)
+  })
+
   it('never revives a turn that had nothing to say', async () => {
     const workspace = workspaceWithRoot()
     writeFileSync(join(workspace, 'AGENTS.md'), 'house style', 'utf8')

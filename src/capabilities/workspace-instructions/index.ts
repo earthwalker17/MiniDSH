@@ -104,7 +104,15 @@ export function renderInstructions(sources: readonly Source[], maxBytes: number)
   return `${PREAMBLE}\n\n${kept.join('\n\n')}`
 }
 
-/** Already entered, as a LIVE surface node — a shadowed copy is no longer context. */
+/**
+ * Already entered, as a LIVE surface node.
+ *
+ * The liveness is the whole point. Shadowed events stay in the log forever, so
+ * a guard that folded the log would keep suppressing instructions a compaction
+ * had already removed from the model's view — the house rules would quietly
+ * stop applying at exactly the moment the session got long enough to forget
+ * them. Folding the surface re-enters them instead.
+ */
 function alreadyEntered(agent: Agent): boolean {
   const session = agent.session
   for (const seq of session.surfaceSeqs()) {
