@@ -11,6 +11,15 @@ export function sessionsDir(): string {
   return join(resolveHome(), 'sessions')
 }
 
+/**
+ * Oversized tool output, saved per session. Beside the logs rather than in the
+ * OS temp directory: a durable `tool/result` naming a path is a lie once a
+ * reboot deletes it.
+ */
+export function spillDir(): string {
+  return join(resolveHome(), 'spill')
+}
+
 /** Declarative composition layer: patch rows + named agent presets. */
 export function compositionPath(): string {
   return join(resolveHome(), 'composition.json')

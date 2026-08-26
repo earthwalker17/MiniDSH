@@ -30,6 +30,8 @@ export interface BootOptions {
   readonly sandbox?: SandboxMode
   readonly approvalPolicy?: ApprovalPolicy
   readonly sessionsRoot: string
+  /** Store for oversized tool output; omitted mounts no store (hermetic tests). */
+  readonly spillRoot?: string
   /** Secret-store path for the credentials row; omitted = env-only (hermetic tests). */
   readonly credentialsPath?: string
   readonly dialect?: ShellDialect
@@ -95,6 +97,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     ...compose({
       sessionsRoot: options.sessionsRoot,
       dialect: options.dialect ?? defaultDialect(),
+      ...(options.spillRoot === undefined ? {} : { spillRoot: options.spillRoot }),
       ...(options.credentialsPath === undefined ? {} : { credentialsPath: options.credentialsPath }),
       ...(options.approve === undefined ? {} : { approve: options.approve }),
       ...(options.invariants === undefined ? {} : { invariants: options.invariants }),

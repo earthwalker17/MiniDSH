@@ -26,6 +26,7 @@ import { fsObservationPolicyPlugin } from '../capabilities/fs-observation-policy
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { retryPlugin } from '../capabilities/llm-retry/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
+import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { toolShellPlugin } from '../capabilities/tool-shell/index.ts'
 
@@ -63,6 +64,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       fsLocalPlugin,
       fsObservationPolicyPlugin,
       shellStdioPlugin,
+      spillLocalPlugin,
       toolEditorPlugin,
       toolShellPlugin,
       contextRuntimePlugin,
@@ -232,6 +234,8 @@ export function mount(root: Context, rows: readonly Row[]): Composition {
 
 export interface ComposeOptions {
   readonly sessionsRoot: string
+  /** Where oversized tool output is saved; omitted mounts no store, and tools then say what they dropped. */
+  readonly spillRoot?: string
   readonly dialect: ShellDialect
   /** Secret-store path for `credentials-local`; omitted = env-only resolution. */
   readonly credentialsPath?: string
@@ -277,6 +281,7 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('fs', fsLocalPlugin))
   rows.push(defineRow('fs-observation-policy', fsObservationPolicyPlugin))
   rows.push(defineRow('shell', shellStdioPlugin, { dialect: options.dialect }))
+  if (options.spillRoot !== undefined) rows.push(defineRow('spill', spillLocalPlugin, { root: options.spillRoot }))
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))

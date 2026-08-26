@@ -12,7 +12,8 @@ import { ShellProcess, type ShellDialect } from './process.ts'
 export interface ShellStdioConfig {
   readonly dialect: ShellDialect
   readonly shellPath?: string
-  readonly maxOutputChars?: number
+  /** In-memory capture bound per command. What the MODEL sees is the tool's business, not the executor's. */
+  readonly maxCaptureChars?: number
 }
 
 class ShellStdioProvider implements Shell {
@@ -40,7 +41,7 @@ class ShellStdioProvider implements Shell {
     const process = new ShellProcess(this.dialect, agent.session.header.cwd, {
       enforcementFor: (mode) => this.enforcementFor(mode),
       ...(this.config.shellPath === undefined ? {} : { shellPath: this.config.shellPath }),
-      ...(this.config.maxOutputChars === undefined ? {} : { maxOutputChars: this.config.maxOutputChars }),
+      ...(this.config.maxCaptureChars === undefined ? {} : { maxCaptureChars: this.config.maxCaptureChars }),
     })
     this.sessions.set(agent, process)
     // The shell dies with the agent's scope.

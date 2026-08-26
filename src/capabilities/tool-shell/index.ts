@@ -15,10 +15,15 @@ import type { Agent } from '../../core/agent/types.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { isWider, SANDBOX, SANDBOX_MODES, SandboxError, type Sandbox, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL } from '../../core/shell/index.ts'
+import { excerptWithSpill, excerptWithoutSpill, SPILL } from '../../core/spill/index.ts'
 import { defineTool, TOOLS, type ToolCallView, type ToolContext } from '../../core/tools/index.ts'
 
 export interface ShellToolConfig {
   readonly timeoutMs?: number
+  /** How much of a command's output the MODEL sees inline; the rest spills. */
+  readonly maxOutputChars?: number
+  /** Kept from the end, because a command's last lines are how it ended. */
+  readonly tailChars?: number
 }
 
 const CONFINEMENT_GUIDANCE = `* Commands run under this session's sandbox policy. A command that cannot be confined on this host is REFUSED and the result says so.
@@ -28,14 +33,14 @@ const CONFINEMENT_GUIDANCE = `* Commands run under this session's sandbox policy
 const BASH_DESCRIPTION = `Run a command in a persistent bash shell.
 * State (working directory, environment) persists across calls.
 * Combine multiple steps with && or ; in one call.
-* Avoid commands that never terminate; long output is truncated.
+* Avoid commands that never terminate. Output too long to show inline is saved to a file and the result tells you where.
 ${CONFINEMENT_GUIDANCE}`
 
 const PWSH_DESCRIPTION = `Run a command in a persistent PowerShell (pwsh) shell.
 * State (working directory, environment) persists across calls.
 * Use native Windows paths (C:\\...) and $env:NAME variables; this is PowerShell, not bash.
 * Combine multiple steps with ; in one call.
-* Avoid commands that never terminate; long output is truncated.
+* Avoid commands that never terminate. Output too long to show inline is saved to a file and the result tells you where.
 ${CONFINEMENT_GUIDANCE}`
 
 const InputSchema = z
@@ -60,11 +65,14 @@ export const toolShellPlugin: Plugin<ShellToolConfig | undefined> = {
   name: 'tool-shell',
   inject: [TOOLS, SHELL, SANDBOX, APPROVAL],
   apply(ctx, config) {
-    ctx.get(TOOLS).register(ctx, buildShellTool(ctx, config?.timeoutMs ?? 120_000))
+    ctx.get(TOOLS).register(
+      ctx,
+      buildShellTool(ctx, config?.timeoutMs ?? 120_000, { headChars: config?.maxOutputChars ?? 16_000, tailChars: config?.tailChars ?? 2_000 }),
+    )
   },
 }
 
-function buildShellTool(ctx: Context, timeoutMs: number) {
+function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: number; tailChars: number }) {
   const shell = ctx.get(SHELL)
   const sandbox = ctx.get(SANDBOX)
   const approval = ctx.get(APPROVAL)
@@ -91,7 +99,11 @@ function buildShellTool(ctx: Context, timeoutMs: number) {
       try {
         const result = await shellSession.exec({ command: args.command, policy, timeoutMs, signal: exec.signal })
         const notice = result.timedOut ? `\n[timed out after ${timeoutMs}ms; the shell was reset]` : ''
-        return { output: result.output + notice, exitCode: result.exitCode ?? null }
+        // The tool owns what the model sees. A command's stdout exists nowhere
+        // once the process exits, so output too large to show inline is SAVED
+        // and located rather than thrown away — through a store the composition
+        // may or may not have mounted, hence `tryGet`.
+        return { output: bound(ctx, exec, result.output + notice, excerpt), exitCode: result.exitCode ?? null }
       } catch (error) {
         if (error instanceof SandboxError && error.code === 'SANDBOX_UNAVAILABLE') {
           // A reported fact, not a failure: the command never ran, and the model
@@ -102,6 +114,20 @@ function buildShellTool(ctx: Context, timeoutMs: number) {
       }
     },
   })
+}
+
+/** Full output when it fits; otherwise a head/tail excerpt plus wherever the rest went. */
+function bound(ctx: Context, exec: ToolContext, text: string, options: { headChars: number; tailChars: number }): string {
+  if ([...text].length <= options.headChars + options.tailChars) return text
+  const spill = ctx.tryGet(SPILL)
+  const sessionId = exec.agent?.session.id
+  if (!spill || !sessionId) return excerptWithoutSpill(text, options)
+  try {
+    return excerptWithSpill(text, spill.save({ sessionId, callId: exec.callId, label: 'shell', text }), options)
+  } catch {
+    // A store that cannot write must not fail the command that succeeded.
+    return excerptWithoutSpill(text, options)
+  }
 }
 
 interface Escalation {

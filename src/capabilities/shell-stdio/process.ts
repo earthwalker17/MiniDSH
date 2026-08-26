@@ -48,18 +48,18 @@ export class ShellProcess implements ShellSession {
   private readonly dialect: ShellDialect
   private readonly cwd: string
   private readonly shellPath: string | undefined
-  private readonly maxOutputChars: number
+  private readonly maxCaptureChars: number
   private readonly enforcementFor: (mode: SandboxMode) => SandboxEnforcement
 
   constructor(
     dialect: ShellDialect,
     cwd: string,
-    options: { shellPath?: string; maxOutputChars?: number; enforcementFor?: (mode: SandboxMode) => SandboxEnforcement } = {},
+    options: { shellPath?: string; maxCaptureChars?: number; enforcementFor?: (mode: SandboxMode) => SandboxEnforcement } = {},
   ) {
     this.dialect = dialect
     this.cwd = cwd
     this.shellPath = options.shellPath
-    this.maxOutputChars = options.maxOutputChars ?? 16_000
+    this.maxCaptureChars = options.maxCaptureChars ?? 512_000
     // A piped child shell confines nothing on its own; a provider that wraps the
     // spawn in an OS sandbox supplies a truthful probe here instead.
     this.enforcementFor = options.enforcementFor ?? (() => 'none')
@@ -141,8 +141,12 @@ export class ShellProcess implements ShellSession {
 
   private finalize(raw: string, extra: { exitCode?: number; timedOut: boolean; reset: boolean }, sandbox: ShellRunResult['sandbox']): ShellRunResult {
     const trimmed = raw.replace(/^\n+/, '').replace(/\n+$/, '')
-    const truncated = trimmed.length > this.maxOutputChars
-    const output = truncated ? `${trimmed.slice(0, this.maxOutputChars)}\n[output truncated at ${this.maxOutputChars} characters]` : trimmed
+    // A MEMORY bound, not a context bound. What the model should see is the
+    // tool's decision, and it cannot make it from output the executor already
+    // threw away — so everything captured is returned, and `truncated` reports
+    // only that the process outran this buffer.
+    const truncated = trimmed.length > this.maxCaptureChars
+    const output = truncated ? `${trimmed.slice(0, this.maxCaptureChars)}\n[output stopped at ${this.maxCaptureChars} captured characters]` : trimmed
     return {
       output,
       timedOut: extra.timedOut,

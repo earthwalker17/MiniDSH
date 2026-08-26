@@ -19,7 +19,7 @@ import type { Context } from '../kernel/index.ts'
 import { compose, defaultDialect, type Row } from './compose.ts'
 import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
-import { compositionPath, credentialsPath, resolveHome, sessionsDir, settingsPath } from './home.ts'
+import { compositionPath, credentialsPath, resolveHome, sessionsDir, spillDir, settingsPath } from './home.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
 import { runTerminal } from './terminal/index.ts'
@@ -150,6 +150,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(preset === undefined ? {} : { preset }),
         ...(agentSetup === undefined ? {} : { setup: agentSetup }),
         sessionsRoot: sessionsDir(),
+        spillRoot: spillDir(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
         configLayers,
@@ -270,7 +271,7 @@ function presetFlag(
     return { error: '--preset replaces --sandbox/--ask; give one or the other' }
   }
   try {
-    const base = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
+    const base = compose({ sessionsRoot: sessionsDir(), spillRoot: spillDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
     const effective = applyLayers(base, [...configLayers], () => {})
     // Match the CAPABILITY, not the built-in row id: a composition may supply
     // it under any id, and the runtime resolves PRESETS by service key.
@@ -374,6 +375,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
       return await runTerminal({
         cwd: process.cwd(),
         sessionsRoot: sessionsDir(),
+        spillRoot: spillDir(),
         credentialsPath: credentialsPath(),
         agentDefaults: settings.agent,
         configLayers,
@@ -397,6 +399,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     id,
     task,
     sessionsRoot: sessionsDir(),
+    spillRoot: spillDir(),
     credentialsPath: credentialsPath(),
     agentDefaults: settings.agent,
     configLayers,
@@ -457,6 +460,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
     return await runTerminal({
       cwd,
       sessionsRoot: sessionsDir(),
+      spillRoot: spillDir(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
       configLayers: loaded.layers,
@@ -536,6 +540,7 @@ async function configCommand(args: ParsedArgs): Promise<number> {
   try {
     const base = compose({
       sessionsRoot: sessionsDir(),
+      spillRoot: spillDir(),
       dialect: defaultDialect(),
       credentialsPath: credentialsPath(),
       ...authority,
@@ -590,7 +595,7 @@ async function configCommand(args: ParsedArgs): Promise<number> {
  * must not split the CLI's read path from its write path.
  */
 async function withPersistence<T>(layers: readonly NamedLayer[], use: (persistence: Persistence) => T): Promise<T> {
-  const base = compose({ sessionsRoot: sessionsDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
+  const base = compose({ sessionsRoot: sessionsDir(), spillRoot: spillDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
   const effective = applyLayers(base, layers, (message) => stderrLogger.warn(message))
   const row = effective.rows.find((entry) => entry.plugin.name === 'persistence-jsonl' && entry.disabled !== true)
   const root = createRoot({ logger: stderrLogger })
@@ -625,6 +630,7 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
     const host = await startProtocolHost({
       cwd,
       sessionsRoot: sessionsDir(),
+      spillRoot: spillDir(),
       credentialsPath: credentialsPath(),
       agentDefaults: settings.agent,
       configLayers: loaded.layers,
