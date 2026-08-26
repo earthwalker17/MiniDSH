@@ -33,14 +33,14 @@ const CONFINEMENT_GUIDANCE = `* Commands run under this session's sandbox policy
 const BASH_DESCRIPTION = `Run a command in a persistent bash shell.
 * State (working directory, environment) persists across calls.
 * Combine multiple steps with && or ; in one call.
-* Avoid commands that never terminate. Output too long to show inline is saved to a file and the result tells you where.
+* Avoid commands that never terminate. Output too long to show inline is shortened to its head and tail; the result says how much was omitted and, when it was saved, the file to read it from.
 ${CONFINEMENT_GUIDANCE}`
 
 const PWSH_DESCRIPTION = `Run a command in a persistent PowerShell (pwsh) shell.
 * State (working directory, environment) persists across calls.
 * Use native Windows paths (C:\\...) and $env:NAME variables; this is PowerShell, not bash.
 * Combine multiple steps with ; in one call.
-* Avoid commands that never terminate. Output too long to show inline is saved to a file and the result tells you where.
+* Avoid commands that never terminate. Output too long to show inline is shortened to its head and tail; the result says how much was omitted and, when it was saved, the file to read it from.
 ${CONFINEMENT_GUIDANCE}`
 
 const InputSchema = z
@@ -118,7 +118,9 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
 
 /** Full output when it fits; otherwise a head/tail excerpt plus wherever the rest went. */
 function bound(ctx: Context, exec: ToolContext, text: string, options: { headChars: number; tailChars: number }): string {
-  if ([...text].length <= options.headChars + options.tailChars) return text
+  // `length` counts UTF-16 units and is therefore never LESS than the code-point
+  // count, so this settles the common case without materializing the string.
+  if (text.length <= options.headChars + options.tailChars) return text
   const spill = ctx.tryGet(SPILL)
   const sessionId = exec.agent?.session.id
   if (!spill || !sessionId) return excerptWithoutSpill(text, options)

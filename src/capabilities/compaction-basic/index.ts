@@ -22,6 +22,8 @@ import type { Context, Plugin } from '../../kernel/index.ts'
 import {
   AGENT_PRE_STEP,
   AGENT_REQUEST_ERROR,
+  AGENT_TURN_STOPPING,
+  AGENTS,
   type Agent,
   type RequestErrorAction,
 } from '../../core/agent/index.ts'
@@ -38,7 +40,7 @@ import {
 import { LLM, runAuxCall, type Llm } from '../../core/llm/index.ts'
 import { createPluginMessage } from '../../core/llm/message.ts'
 import type { LlmRequest, Message } from '../../core/llm/types.ts'
-import { meterSession } from '../../core/metering/index.ts'
+import { estimateMessage, meterSession } from '../../core/metering/index.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
 import { deriveEventMessage, USER_MESSAGE } from '../../core/session/index.ts'
 
@@ -60,6 +62,13 @@ export interface CompactionBasicConfig {
   readonly auto?: boolean
   /** How many times one step may answer a provider overflow by compacting. */
   readonly maxOverflowRetries?: number
+  /**
+   * Consecutive failed summary calls before the AUTOMATIC triggers give up on a
+   * session. Each attempt replays a whole shadowed span, so a persistently
+   * failing summariser is an expensive request at every step boundary, forever.
+   * `/compact` is a human asking again and is never disabled.
+   */
+  readonly maxSummaryFailures?: number
 }
 
 const PLUGIN = 'compaction-basic'
@@ -94,7 +103,7 @@ ${summary}`
 
 class BasicCompaction implements Compaction {
   private readonly ctx: Context
-  private readonly config: Required<Pick<CompactionBasicConfig, 'thresholdRatio' | 'retainRatio' | 'maxTokens' | 'auto' | 'maxOverflowRetries'>> & {
+  private readonly config: Required<Pick<CompactionBasicConfig, 'thresholdRatio' | 'retainRatio' | 'maxTokens' | 'auto' | 'maxOverflowRetries' | 'maxSummaryFailures'>> & {
     budgetTokens?: number
   }
   /** One compaction per agent at a time: pressure and `/compact` must not interleave. */
@@ -102,6 +111,8 @@ class BasicCompaction implements Compaction {
   /** Set by `/compact` on a busy agent; consumed by the next pre-step. */
   private readonly requested = new WeakSet<Agent>()
   private readonly overflows = new WeakMap<Agent, { key: string; count: number }>()
+  /** Consecutive summary failures per agent; reset by any success. */
+  private readonly failures = new WeakMap<Agent, number>()
 
   constructor(ctx: Context, config: CompactionBasicConfig | undefined) {
     this.ctx = ctx
@@ -111,6 +122,7 @@ class BasicCompaction implements Compaction {
       maxTokens: config?.maxTokens ?? 8192,
       auto: config?.auto ?? true,
       maxOverflowRetries: config?.maxOverflowRetries ?? 1,
+      maxSummaryFailures: config?.maxSummaryFailures ?? 2,
       ...(config?.budgetTokens === undefined ? {} : { budgetTokens: config.budgetTokens }),
     }
   }
@@ -148,28 +160,39 @@ class BasicCompaction implements Compaction {
     return this.requested.has(agent)
   }
 
-  auto(): boolean {
-    return this.config.auto
+  /** Automatic triggers run only while this session's summariser is still working. */
+  autoUsable(agent: Agent): boolean {
+    return this.config.auto && (this.failures.get(agent) ?? 0) < this.config.maxSummaryFailures
   }
 
   /** Bookkeeping so one step cannot answer overflow with compaction forever. */
   overflowAllowed(agent: Agent, turn: number, step: number): boolean {
     const key = `${turn}:${step}`
     const state = this.overflows.get(agent)
-    const count = state && state.key === key ? state.count : 0
-    if (count >= this.config.maxOverflowRetries) return false
-    this.overflows.set(agent, { key, count: count + 1 })
-    return true
+    return (state && state.key === key ? state.count : 0) < this.config.maxOverflowRetries
+  }
+
+  /**
+   * Spent on the RECOVERY, not the attempt. A summary call that itself failed
+   * bought nothing, and burning the one allowed retry for it would leave the
+   * step to die on the overflow it could have recovered from.
+   */
+  overflowSpent(agent: Agent, turn: number, step: number): void {
+    const key = `${turn}:${step}`
+    const state = this.overflows.get(agent)
+    this.overflows.set(agent, { key, count: (state && state.key === key ? state.count : 0) + 1 })
   }
 
   async run(agent: Agent, trigger: CompactionTrigger, signal?: AbortSignal): Promise<CompactionOutcome> {
     if (this.running.has(agent)) return { kind: 'nothing-to-do' }
     this.running.add(agent)
+    // Cleared BEFORE the attempt, so `compact` can re-arm it when the exit race
+    // discards an otherwise-good compaction.
+    this.requested.delete(agent)
     try {
       return await this.compact(agent, trigger, signal)
     } finally {
       this.running.delete(agent)
-      this.requested.delete(agent)
     }
   }
 
@@ -181,37 +204,54 @@ class BasicCompaction implements Compaction {
     const session = agent.session
     const budget = this.budgetFor(agent)
     if (budget <= 0) return { kind: 'nothing-to-do' }
-    const before = meterSession(session.events, budget).projectedTokens
+    const projected = meterSession(session.events, budget).projectedTokens
     const plan = planCompaction(session.events, session.surfaceSeqs(), { budgetTokens: budget, retainRatio: this.config.retainRatio })
     if (!plan) return { kind: 'nothing-to-do' }
 
     const statusBefore = agent.status
     const summary = await this.summarise(llm, prompt, agent, plan, signal)
-    if (summary === undefined) return { kind: 'nothing-to-do' }
+    if (summary === undefined) {
+      this.failures.set(agent, (this.failures.get(agent) ?? 0) + 1)
+      return { kind: 'nothing-to-do' }
+    }
+    this.failures.delete(agent)
 
     // ---- no `await` past this line, or the checks mean nothing -------------
-    if (agent.status !== statusBefore) return { kind: 'nothing-to-do' }
+    if (agent.status !== statusBefore) {
+      // The EXIT race: a turn started during the summary, so this replace can no
+      // longer land safely. The work is paid for either way — remember the
+      // request so the next step boundary honours it instead of dropping it.
+      this.requested.add(agent)
+      return { kind: 'nothing-to-do' }
+    }
     if (signal?.aborted) return { kind: 'nothing-to-do' }
+    // An agent disposed during the summary has already detached its session:
+    // appending here would write three records — including the paid aux call —
+    // into a log nothing is listening to any more.
+    if (this.ctx.tryGet(AGENTS)?.get(agent.id) !== agent) return { kind: 'nothing-to-do' }
     const live = session.surfaceSeqs()
     if (!planIsLive(plan, live)) return { kind: 'nothing-to-do' }
 
     const message = createPluginMessage(PLUGIN, frame(summary.text), 'summary')
+    // Both surface numbers are ESTIMATOR units and include the summary node the
+    // replace is about to insert. The projection stays separate: it is what the
+    // threshold compared, it is usually provider-priced, and subtracting an
+    // estimate from it would not be a quantity — nor would it be a saving, since
+    // the summary itself is not free.
+    const surfaceTokensBefore = plan.surfaceTokens
+    const surfaceTokensAfter = plan.surfaceTokens - plan.shadowedTokens + estimateMessage(message)
     session.append(COMPACTION_APPLIED, {
       trigger,
       budgetTokens: budget,
-      beforeTokens: before,
-      afterTokens: Math.max(0, before - plan.shadowedTokens),
+      projectedTokens: projected,
+      surfaceTokensBefore,
+      surfaceTokensAfter,
       shadowedSeqs: [...plan.shadowedSeqs],
       retainedNodes: plan.retainedNodes,
       auxCallSeq: summary.seq,
     })
     session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'replace', start: plan.start, end: plan.end }, sourceEventSeqs: [...plan.shadowedSeqs] })
-    return {
-      kind: 'compacted',
-      shadowedNodes: plan.shadowedSeqs.length,
-      beforeTokens: before,
-      afterTokens: Math.max(0, before - plan.shadowedTokens),
-    }
+    return { kind: 'compacted', shadowedNodes: plan.shadowedSeqs.length, surfaceTokensBefore, surfaceTokensAfter }
   }
 
   /**
@@ -283,9 +323,23 @@ export const compactionBasicPlugin: Plugin<CompactionBasicConfig | undefined> = 
       async (context, next) => {
         const decision = await next()
         if (decision.kind !== 'enter') return decision
-        const wanted = engine.wasRequested(context.agent) || (engine.auto() && engine.underPressure(context.agent))
-        if (wanted) await engine.run(context.agent, engine.wasRequested(context.agent) ? 'explicit' : 'pressure', context.signal)
+        const explicit = engine.wasRequested(context.agent)
+        const wanted = explicit || (engine.autoUsable(context.agent) && engine.underPressure(context.agent))
+        if (wanted) await engine.run(context.agent, explicit ? 'explicit' : 'pressure', context.signal)
         return decision
+      },
+      { global: true },
+    )
+
+    /**
+     * A `/compact` that arrived during the LAST step of a turn has no later
+     * step boundary to run at, and the terminal has already told the user it
+     * would. Honour it here, while the turn is still open.
+     */
+    ctx.on(
+      AGENT_TURN_STOPPING,
+      async (context) => {
+        if (engine.wasRequested(context.agent)) await engine.run(context.agent, 'explicit', context.signal)
       },
       { global: true },
     )
@@ -295,11 +349,13 @@ export const compactionBasicPlugin: Plugin<CompactionBasicConfig | undefined> = 
       AGENT_REQUEST_ERROR,
       async (context, next): Promise<RequestErrorAction> => {
         const prior = await next()
-        if (prior || !engine.auto()) return prior
+        if (prior || !engine.autoUsable(context.agent)) return prior
         if (context.failure.code !== 'CONTEXT_WINDOW_EXCEEDED') return prior
         if (!engine.overflowAllowed(context.agent, context.turn, context.step)) return prior
         const outcome = await engine.run(context.agent, 'context-overflow', context.signal)
-        return outcome.kind === 'compacted' ? { kind: 'retry' } : prior
+        if (outcome.kind !== 'compacted') return prior
+        engine.overflowSpent(context.agent, context.turn, context.step)
+        return { kind: 'retry' }
       },
       { global: true },
     )

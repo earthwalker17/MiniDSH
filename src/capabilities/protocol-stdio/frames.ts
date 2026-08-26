@@ -118,7 +118,7 @@ export interface CompactParams {
 
 /** `scheduled`: the agent was mid-turn, so compaction runs at its next step boundary. */
 export type CompactResult =
-  | { readonly kind: 'compacted'; readonly shadowedNodes: number; readonly beforeTokens: number; readonly afterTokens: number }
+  | { readonly kind: 'compacted'; readonly shadowedNodes: number; readonly surfaceTokensBefore: number; readonly surfaceTokensAfter: number }
   | { readonly kind: 'scheduled' }
   | { readonly kind: 'nothing-to-do' }
 

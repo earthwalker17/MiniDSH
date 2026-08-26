@@ -73,13 +73,12 @@ async function setup(options: { withSpill?: boolean; maxOutputChars?: number } =
 }
 
 describe('the spill store', () => {
-  it('keeps a path inside it apart from one outside it', async () => {
+  it('writes the whole text under its own root and reports the path and size', async () => {
     const fixture = await setup()
-    const spill = harness!.root.get(SPILL)
-    const ref = spill.save({ sessionId: fixture.sessionId, callId: 'c1', label: 'shell', text: 'hello' })
+    const ref = harness!.root.get(SPILL).save({ sessionId: fixture.sessionId, callId: 'c1', label: 'shell', text: 'hello' })
     expect(readFileSync(ref.path, 'utf8')).toBe('hello')
-    expect(spill.contains(ref.path)).toBe(true)
-    expect(spill.contains(join(fixture.workspace, 'anything.txt'))).toBe(false)
+    expect(ref.bytes).toBe(5)
+    expect(ref.path.startsWith(fixture.spillRoot)).toBe(true)
   })
 
   it('never lets a session id or label escape its directory', async () => {

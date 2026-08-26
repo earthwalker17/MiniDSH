@@ -25,6 +25,7 @@ import {
   type Sessions,
   type Session,
 } from '../session/index.ts'
+import { LLM_AUX_CALL } from '../llm/aux-call.ts'
 import { estimateMessage, estimateTokens, formatTokens, meterSession } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -136,6 +137,33 @@ describe('metering a session', () => {
     // The projection is about the LAST request, not the sum of every one.
     expect(metrics.reportedPrompt).toBe(220)
     await root.dispose()
+  })
+
+  /**
+   * A compaction summary replays a whole shadowed span — usually the single
+   * largest request a session makes. Leaving it out of the cost line would
+   * under-report exactly the spending S5 introduced.
+   */
+  it('counts an out-of-loop call towards the session cost but never towards the next request', async () => {
+    const { session } = await newSession()
+    textTurn(session, 1, 'hello', 'hi', { inputTokens: 100, outputTokens: 20 })
+    const before = meterSession(session.events, 10_000)
+
+    session.append(LLM_AUX_CALL, {
+      purpose: 'compaction',
+      provider: 'p',
+      model: 'm',
+      usage: { inputTokens: 4000, outputTokens: 300, cacheReadTokens: 500 },
+      outcome: { kind: 'text', text: 'a summary' },
+    })
+
+    const after = meterSession(session.events, 10_000)
+    expect(after.sessionInput).toBe(before.sessionInput + 4000)
+    expect(after.sessionOutput).toBe(before.sessionOutput + 300)
+    expect(after.sessionCacheRead).toBe(before.sessionCacheRead + 500)
+    // It is not the loop's prompt: the projection must not move.
+    expect(after.projectedTokens).toBe(before.projectedTokens)
+    expect(after.reportedPrompt).toBe(before.reportedPrompt)
   })
 
   it('stops trusting the priced prefix once a replace shadows part of it, and re-estimates smaller', async () => {

@@ -36,11 +36,6 @@ export interface SpillRequest {
 
 export interface Spill {
   save(request: SpillRequest): SpillRef
-  /**
-   * True when an absolute path is inside the store. A tool reading a spill
-   * file must not spill the read: that regresses forever, one file per look.
-   */
-  contains(absolutePath: string): boolean
 }
 
 export const SPILL = serviceKey<Spill>('spill')
@@ -56,9 +51,12 @@ export interface ExcerptOptions {
  * hides exactly the error a model is usually looking for.
  */
 export function excerptWithSpill(text: string, ref: SpillRef, options: ExcerptOptions): string {
-  const head = [...text].slice(0, options.headChars).join('')
-  const tail = options.tailChars > 0 ? [...text].slice(-options.tailChars).join('') : ''
-  const total = [...text].length
+  // Spread ONCE. A shell capture runs to half a megabyte, and each spread is a
+  // fresh array of that many one-character strings.
+  const chars = [...text]
+  const head = chars.slice(0, options.headChars).join('')
+  const tail = options.tailChars > 0 ? chars.slice(-options.tailChars).join('') : ''
+  const total = chars.length
   const omitted = Math.max(0, total - options.headChars - options.tailChars)
   const notice =
     `\n[${omitted.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} characters omitted. ` +
@@ -68,10 +66,11 @@ export function excerptWithSpill(text: string, ref: SpillRef, options: ExcerptOp
 
 /** The same shape when no store is mounted: bounded, and honest that the rest is gone. */
 export function excerptWithoutSpill(text: string, options: ExcerptOptions): string {
-  const total = [...text].length
+  const chars = [...text]
+  const total = chars.length
   const omitted = Math.max(0, total - options.headChars - options.tailChars)
   if (omitted <= 0) return text
-  const head = [...text].slice(0, options.headChars).join('')
-  const tail = options.tailChars > 0 ? [...text].slice(-options.tailChars).join('') : ''
+  const head = chars.slice(0, options.headChars).join('')
+  const tail = options.tailChars > 0 ? chars.slice(-options.tailChars).join('') : ''
   return `${head}\n[${omitted.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} characters omitted and not retained. Re-run with a narrower command to see them.]\n${tail}`
 }

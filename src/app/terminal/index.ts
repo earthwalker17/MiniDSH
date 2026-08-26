@@ -200,7 +200,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     try {
       const result = await client.request<CompactResult>('session/compact', { sessionId })
       if (result.kind === 'compacted') {
-        out.write(`compacted ${result.shadowedNodes} messages (~${formatTokens(result.beforeTokens)} → ~${formatTokens(result.afterTokens)})\n`)
+        out.write(`compacted ${result.shadowedNodes} messages (~${formatTokens(result.surfaceTokensBefore)} → ~${formatTokens(result.surfaceTokensAfter)})\n`)
       } else if (result.kind === 'scheduled') {
         out.write('the turn is still running; compaction will run before its next step\n')
       } else {

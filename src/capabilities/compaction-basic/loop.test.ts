@@ -216,6 +216,44 @@ describe('compaction through the real loop', () => {
     expect(loopCalls[4]!.messages.length).toBeLessThan(loopCalls[3]!.messages.length)
   })
 
+  /**
+   * Each summary attempt replays a whole shadowed span — roughly a full-budget
+   * request. A summariser that keeps failing would buy one at EVERY step
+   * boundary, forever, with no backoff and no user-facing signal.
+   */
+  it('gives up on the automatic triggers after repeated summary failures', async () => {
+    const test = await harness({ budgetTokens: 1200, retainRatio: 0.2, thresholdRatio: 0.5, maxSummaryFailures: 2 })
+    const { agent } = await test.create()
+    arm(test, { failSummary: true })
+    await grow(agent, 8)
+
+    expect(appliedRecords(agent)).toHaveLength(0)
+    const attempts = agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type)
+    expect(attempts).toHaveLength(2)
+    expect(attempts.every((event) => (event.data as AuxCallRecord).outcome.kind === 'error')).toBe(true)
+    // Every turn still completed: a failing summariser must never fail the work.
+    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
+    expect(ends.every((event) => (event.data as { reason: { kind: string } }).reason.kind === 'completed')).toBe(true)
+  })
+
+  /**
+   * `/compact` during the LAST step of a turn has no later step boundary to run
+   * at, and the terminal has already promised the user it would run.
+   */
+  it('honours a deferred compaction at the end of the turn it was asked during', async () => {
+    const test = await harness({ budgetTokens: 1_000_000, retainRatio: 0.2, thresholdRatio: 0.99 })
+    const { agent } = await test.create()
+    arm(test)
+    await grow(agent, 6)
+
+    agent.followup(createUserMessage('one last thing'))
+    expect((await test.root.get(COMPACTION).compactNow(agent)).kind).toBe('scheduled')
+    await agent.whenIdle()
+
+    expect(appliedRecords(agent)).toHaveLength(1)
+    expect(agent.status).toBe('idle')
+  })
+
   it('defers an explicit compaction on a running agent to its next step boundary', async () => {
     const test = await harness({ budgetTokens: 1_000_000, retainRatio: 0.2, thresholdRatio: 0.99 })
     const { agent } = await test.create()

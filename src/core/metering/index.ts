@@ -14,6 +14,7 @@
  */
 import type { ContentBlock, Message, TokenUsage } from '../llm/types.ts'
 import { deriveEventMessage, foldRequestHeader, foldSurfaceSeqs } from '../session/surface.ts'
+import { LLM_AUX_CALL, type AuxCallRecord } from '../llm/aux-call.ts'
 import { ASSISTANT_MESSAGE, matches, type EventEnvelope, type RequestHeader } from '../session/types.ts'
 
 /** The estimator's whole model of a tokenizer. Wrong in the small, stable in the large. */
@@ -53,7 +54,7 @@ export function estimateMessage(message: Message): number {
 }
 
 /** The non-conversation half of a request: the system prompt and the tool schemas. */
-export function estimateHeader(header: RequestHeader | undefined): number {
+function estimateHeader(header: RequestHeader | undefined): number {
   if (!header) return 0
   return estimateTokens(header.system) + estimateTokens(JSON.stringify(header.tools))
 }
@@ -62,7 +63,11 @@ export interface ContextMetrics {
   /** Prompt tokens the provider billed for the last successful request (uncached + cache reads). */
   readonly reportedPrompt: number
   readonly reportedOutput: number
-  /** Cumulative across the whole log, for a session-level cost line. */
+  /**
+   * Cumulative across the whole log, for a session-level cost line — INCLUDING
+   * out-of-loop calls, because a compaction summary replays a whole shadowed
+   * span and is usually the largest single request a session makes.
+   */
   readonly sessionInput: number
   readonly sessionOutput: number
   readonly sessionCacheRead: number
@@ -95,6 +100,18 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
 
   for (const event of events) {
     if (event.surfaceOp?.op === 'replace' && event.seq > lastUsageSeq) replacedSinceUsage = true
+    // An out-of-loop call costs real money and is billed to this session, but it
+    // is NOT the loop's prompt: it counts towards the totals and never towards
+    // the projection of what the next request will cost.
+    if (event.type === LLM_AUX_CALL.type) {
+      const auxUsage = (event.data as AuxCallRecord).usage
+      if (auxUsage) {
+        sessionInput += auxUsage.inputTokens
+        sessionOutput += auxUsage.outputTokens
+        sessionCacheRead += auxUsage.cacheReadTokens ?? 0
+      }
+      continue
+    }
     if (!matches(event, ASSISTANT_MESSAGE)) continue
     const usage = event.data.usage
     if (!usage) continue
@@ -111,8 +128,11 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
   const reportedPrompt = lastUsage ? lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0) : 0
   const reportedOutput = lastUsage?.outputTokens ?? 0
 
-  // Addressed by seq, never by array index: a caller may hold a slice that
-  // does not start at zero, and a surface node names a seq.
+  // Addressed by seq, never by array index: a seeded or repaired log can hold
+  // events this fold must look up by name rather than by position. It takes a
+  // WHOLE log from seq 0 — `foldSurfaceSeqs` would reject a replace whose start
+  // node fell outside a partial slice, which is the correct refusal but not a
+  // shape any caller should hand it.
   const bySeq = new Map(events.map((event) => [event.seq, event]))
   const surfaceSeqs = foldSurfaceSeqs(events)
   const priced = lastUsage !== undefined && !replacedSinceUsage

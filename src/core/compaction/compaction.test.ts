@@ -26,7 +26,7 @@ import {
   type RequestHeader,
   type Session,
 } from '../session/index.ts'
-import { lastCompactionBudget, planCompaction, planIsLive, COMPACTION_APPLIED } from './index.ts'
+import { planCompaction, planIsLive } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const header: RequestHeader = { provider: 'p', model: 'm', system: 'sys', tools: [] }
@@ -141,19 +141,46 @@ describe('planIsLive', () => {
   })
 })
 
-describe('lastCompactionBudget', () => {
-  it('reports the budget the runtime actually used, so a surface cannot show a different one', async () => {
+describe('the pairing rule in both directions', () => {
+  /**
+   * A turn made of tool steps ends `…assistant(tool-calls), tool/result` — the
+   * shape `agent/pre-step` sees at EVERY step boundary of a tool-heavy turn.
+   * Walking the cut forward from inside that run reaches the end of the surface,
+   * which used to decline the compaction outright: automatic compaction silently
+   * did nothing exactly when it was most needed.
+   */
+  it('compacts a turn whose tail is all tool results, instead of declining', async () => {
     const session = await newSession()
-    expect(lastCompactionBudget(session.events)).toBeUndefined()
-    session.append(COMPACTION_APPLIED, {
-      trigger: 'pressure',
-      budgetTokens: 16_000,
-      beforeTokens: 14_000,
-      afterTokens: 3_000,
-      shadowedSeqs: [],
-      retainedNodes: 2,
-      auxCallSeq: 0,
-    })
-    expect(lastCompactionBudget(session.events)).toBe(16_000)
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage(`do a lot of work ${'x'.repeat(600)}`) }, { surfaceOp: { op: 'append' } })
+    session.append(REQUEST_HEADER, { turn: 1, step: 1, header, reason: 'initial' })
+    session.append(STEP_END, { turn: 1, step: 1 })
+    for (let step = 2; step <= 8; step++) {
+      session.append(STEP_START, { turn: 1, step })
+      const id = asCallId(`c${step}`)
+      session.append(
+        ASSISTANT_MESSAGE,
+        { turn: 1, step, message: createAssistantMessage([{ type: 'tool-call', id, name: 'bash', arguments: '{}' }], 'p', 'm') },
+        { surfaceOp: { op: 'append' } },
+      )
+      const call = session.append(TOOL_CALL, { turn: 1, step, callId: `c${step}`, name: 'bash', arguments: '{}' })
+      session.append(
+        TOOL_RESULT,
+        { turn: 1, step, callId: `c${step}`, message: createToolResultMessage(id, [{ type: 'text', text: 'o'.repeat(16_000) }], false) },
+        { surfaceOp: { op: 'append' }, sourceEventSeqs: [call.seq] },
+      )
+      session.append(STEP_END, { turn: 1, step })
+    }
+
+    const seqs = session.surfaceSeqs()
+    expect(session.events[seqs.at(-1)!]!.type).toBe('tool/result')
+    // A budget the tail alone overruns: forward has nowhere to go.
+    const plan = planCompaction(session.events, seqs, { budgetTokens: 20_000, retainRatio: 0.2 })
+    expect(plan).toBeDefined()
+    expect(plan!.retainedNodes).toBeGreaterThan(0)
+    // The retained run begins at the assistant that owns the results after it.
+    const tailStart = session.events[seqs[plan!.shadowedSeqs.length]!]!
+    expect(tailStart.type).toBe('assistant/message')
   })
 })

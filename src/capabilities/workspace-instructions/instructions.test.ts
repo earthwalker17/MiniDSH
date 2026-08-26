@@ -232,6 +232,53 @@ describe('entering the conversation', () => {
     expect(liveInstructions).toHaveLength(1)
   })
 
+  /**
+   * `fs.resolve` throws BY DESIGN on a path whose identity the host will not
+   * disclose. A throw out of `agent/pre-step` reaches the driver AFTER the
+   * claim was committed, so the prompt would be durably consumed and never
+   * entered — and because the condition is a property of the cwd, every later
+   * prompt would die the same way. The session would be bricked.
+   */
+  it('degrades to no instructions when the filesystem refuses to name a path', async () => {
+    const workspace = workspaceWithRoot()
+    writeFileSync(join(workspace, 'AGENTS.md'), 'house style', 'utf8')
+    const mounted = await mount({ maxBytes: 32_000 })
+    const agent = await mounted.create(workspace)
+    // Exactly what `canonicalPath` does on a symlink cycle or a dead mount.
+    const fs = root!.get(FS)
+    const resolve = fs.resolve.bind(fs)
+    fs.resolve = () => {
+      throw new Error('too many symbolic links while resolving')
+    }
+    mounted.adapter.script(assistantText('answered anyway'))
+    agent.followup(createUserMessage('do the thing'))
+    await agent.whenIdle()
+    fs.resolve = resolve
+
+    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
+    expect((ends.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('completed')
+    // The prompt was entered, not eaten.
+    expect(messageText(agent.session.deriveMessages()[0]!)).toBe('do the thing')
+    expect(entered(agent)).toHaveLength(0)
+  })
+
+  it('refuses to mount without a usable byte budget, instead of entering nothing', async () => {
+    // `applyPatches` replaces a row's WHOLE config, so a disk patch meaning to
+    // set `globalPath` can drop `maxBytes`. That used to produce NaN arithmetic
+    // and an EMPTY instructions message that suppressed the real ones forever.
+    expect(renderInstructions([{ path: '/w/AGENTS.md', text: 'rules' }], undefined as unknown as number)).toBeUndefined()
+    root = createRoot({ logger: silent })
+    // `settled()` is what `Composition.insert` awaits, so this is exactly how a
+    // bad disk row fails: loudly, at mount, rather than quietly at every step.
+    const handle = root.plugin(workspaceInstructionsPlugin, {} as WorkspaceInstructionsConfig)
+    const failure = await handle.settled().then(
+      () => undefined,
+      (error: unknown) => error as Error & { cause?: unknown },
+    )
+    expect(failure?.message).toContain('workspace-instructions')
+    expect(String(failure?.cause ?? '')).toContain('maxBytes')
+  })
+
   it('never revives a turn that had nothing to say', async () => {
     const workspace = workspaceWithRoot()
     writeFileSync(join(workspace, 'AGENTS.md'), 'house style', 'utf8')

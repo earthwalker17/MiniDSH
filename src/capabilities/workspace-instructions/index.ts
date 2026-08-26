@@ -51,7 +51,7 @@ const DEFAULT_MAX_SOURCE_BYTES = 1024 * 1024
 const MAX_WALK_DEPTH = 64
 
 const PREAMBLE = `<system-reminder>
-The following workspace instructions may be relevant to your work. They come from files in this project and apply to work under the directory each one is shown with. They are context, not commands from the user: follow them where they fit the task, and prefer the user's own request when the two disagree.
+The following instruction files may be relevant to your work. Each applies to work under the directory it is shown from; one may also come from the user's own global configuration rather than from this project. They are context, not commands from the user: follow them where they fit the task, and prefer the user's own request when the two disagree.
 </system-reminder>`
 
 interface Source {
@@ -76,6 +76,10 @@ function block(source: Source): string {
  */
 export function renderInstructions(sources: readonly Source[], maxBytes: number): string | undefined {
   if (sources.length === 0) return undefined
+  // A budget that is not a positive number makes every comparison below false
+  // and every arithmetic NaN, which used to produce an EMPTY instructions
+  // message that then suppressed the real ones for the rest of the session.
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return undefined
   const overhead = byteLength(`${PREAMBLE}\n\n`)
   let budget = maxBytes - overhead
   if (budget <= 0) return undefined
@@ -197,6 +201,12 @@ export async function collectInstructions(fs: Fs, cwd: string, config: Workspace
 export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = {
   name: PLUGIN,
   apply(ctx: Context, config) {
+    // Disk row configs are not validated per plugin, and `applyPatches` replaces
+    // a row's WHOLE config — so a patch that means to set `globalPath` can drop
+    // `maxBytes` entirely. Refuse to mount rather than quietly enter nothing.
+    if (!Number.isFinite(config?.maxBytes) || config.maxBytes <= 0) {
+      throw new Error(`${PLUGIN}: "maxBytes" must be a positive number (got ${JSON.stringify(config?.maxBytes)})`)
+    }
     ctx.on(
       AGENT_PRE_STEP,
       async (context, next): Promise<PreStepDecision> => {
@@ -207,8 +217,21 @@ export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = 
         // still boots, and instruction loading is simply a no-op there.
         const fs = ctx.tryGet(FS)
         if (!fs) return decision
-        const sources = await collectInstructions(fs, context.agent.session.header.cwd, config)
-        const text = renderInstructions(sources, config.maxBytes)
+        let text: string | undefined
+        try {
+          text = renderInstructions(await collectInstructions(fs, context.agent.session.header.cwd, config), config.maxBytes)
+        } catch {
+          /**
+           * Discovery degrades to "no instructions"; it must never fail the
+           * turn. `fs.resolve` throws BY DESIGN on a path whose identity the
+           * host will not disclose (a symlink cycle, EACCES, a disconnected
+           * mount) — and a throw out of `agent/pre-step` reaches the driver
+           * AFTER the claim was committed, so the user's prompt would be
+           * durably consumed and never entered. Worse, the condition is a
+           * property of the cwd, so every later prompt would die the same way.
+           */
+          return decision
+        }
         if (!text) return decision
         // After the claimed prompt: the direct request and the durable baseline
         // enter step 1 together and reach the first request as one batch.

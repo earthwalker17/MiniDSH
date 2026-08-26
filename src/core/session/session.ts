@@ -90,7 +90,10 @@ export class Session {
    * range; everyone else should use `deriveMessages()`.
    */
   surfaceSeqs(): readonly number[] {
-    return this.surface.seqs()
+    // A COPY, like `deriveMessages`. Compaction reads this inside a window that
+    // must see one consistent surface, and a caller holding the live array
+    // across an await would silently watch it change underneath.
+    return [...this.surface.seqs()]
   }
 
   private seedOne(raw: EventEnvelope, index: number): void {

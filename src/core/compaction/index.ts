@@ -35,9 +35,18 @@ export type CompactionTrigger = 'pressure' | 'context-overflow' | 'explicit'
 export const COMPACTION_APPLIED = eventKind<{
   readonly trigger: CompactionTrigger
   readonly budgetTokens: number
-  /** The projection that justified compacting, in the meter's units. */
-  readonly beforeTokens: number
-  readonly afterTokens: number
+  /**
+   * What the meter projected for the next request, and therefore what the
+   * threshold compared against. Provider-priced when the meter had usage to
+   * price it with — so it is NOT comparable with the two surface numbers below,
+   * which are estimator units. Three fields rather than a before/after pair
+   * because a subtraction across those two units is not a quantity.
+   */
+  readonly projectedTokens: number
+  /** Estimated size of the whole surface before the replace. */
+  readonly surfaceTokensBefore: number
+  /** Estimated size of the surface after it: what was retained, plus the summary. */
+  readonly surfaceTokensAfter: number
   readonly shadowedSeqs: readonly number[]
   readonly retainedNodes: number
   /** The `llm/aux-call` record that produced the summary. */
@@ -45,7 +54,7 @@ export const COMPACTION_APPLIED = eventKind<{
 }>('compaction/applied')
 
 export type CompactionOutcome =
-  | { readonly kind: 'compacted'; readonly shadowedNodes: number; readonly beforeTokens: number; readonly afterTokens: number }
+  | { readonly kind: 'compacted'; readonly shadowedNodes: number; readonly surfaceTokensBefore: number; readonly surfaceTokensAfter: number }
   /** The agent is mid-turn: compaction will run at its next step boundary. */
   | { readonly kind: 'scheduled' }
   /** Nothing worth summarising, or the surface moved under the plan. */
@@ -121,14 +130,26 @@ export function planCompaction(events: readonly EventEnvelope[], surfaceSeqs: re
   }
 
   /**
-   * The one pairing rule, and it is sufficient in both directions. A
-   * `tool/result` at the head of the retained tail has its `tool/call` in an
-   * assistant message about to be shadowed, so the result is shadowed too.
-   * Once the head is not a tool result, every result belonging to the last
-   * shadowed assistant message is already inside the shadowed run — results
-   * always follow their call — so the other direction needs no rule of its own.
+   * The pairing rule: the retained tail must never BEGIN with a `tool/result`,
+   * whose `tool/call` would then sit in an assistant message about to be
+   * shadowed. Once the head is not a tool result, every result belonging to the
+   * last shadowed assistant message is already inside the shadowed run, because
+   * results always follow their call.
+   *
+   * Two directions, and both are needed. Moving the cut FORWARD shadows the
+   * offending results and frees more, so it is tried first — but a turn made of
+   * tool steps ends `…assistant(tool-calls), tool/result`, and walking forward
+   * from inside that run reaches the end of the surface, which used to decline
+   * the compaction outright. That is the shape `agent/pre-step` sees at every
+   * step boundary of a tool-heavy turn, so declining there meant automatic
+   * compaction silently doing nothing exactly when it was most needed. When
+   * forward runs out, move BACKWARD instead: the tail then starts at the
+   * assistant message that owns those results, and both are retained.
    */
-  while (cut < surfaceSeqs.length && isToolResult(bySeq.get(surfaceSeqs[cut]!))) cut += 1
+  let forward = cut
+  while (forward < surfaceSeqs.length && isToolResult(bySeq.get(surfaceSeqs[forward]!))) forward += 1
+  if (forward < surfaceSeqs.length) cut = forward
+  else while (cut > 0 && isToolResult(bySeq.get(surfaceSeqs[cut]!))) cut -= 1
 
   if (cut < minShadowed) return undefined
   // Always leave the model something after the summary.
@@ -155,13 +176,4 @@ export function planIsLive(plan: CompactionPlan, surfaceSeqs: readonly number[])
   if (start < 0) return false
   if (start + plan.shadowedSeqs.length > surfaceSeqs.length) return false
   return plan.shadowedSeqs.every((seq, index) => surfaceSeqs[start + index] === seq)
-}
-
-/** The last recorded budget, so a surface can show the ratio the runtime actually used. */
-export function lastCompactionBudget(events: readonly EventEnvelope[]): number | undefined {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]!
-    if (matches(event, COMPACTION_APPLIED)) return event.data.budgetTokens
-  }
-  return undefined
 }

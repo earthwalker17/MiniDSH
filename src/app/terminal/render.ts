@@ -6,7 +6,6 @@
  * controller owns interaction.
  */
 import { messageText, restoreMessage } from '../../core/llm/message.ts'
-import { lastCompactionBudget } from '../../core/compaction/index.ts'
 import { formatTokens, meterSession } from '../../core/metering/index.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
 
@@ -38,19 +37,21 @@ export class TerminalRenderer {
 
   /** Records history rendered by `renderHistory`, which never passes through `onEvent`. */
   seed(events: readonly EventEnvelope[]): void {
-    this.seen.push(...events)
+    for (const event of events) if (event.type !== 'assistant/chunk') this.seen.push(event)
   }
 
   /**
-   * `[ctx 34% · 12.4k/128k]`, or '' when no budget is known.
+   * `[ctx 34% · 12.4k/128k]`, or '' when no window is known.
    *
-   * The recorded budget wins over the catalog's window: a deployment may cap
-   * context below what the model advertises, and a surface showing a different
-   * denominator than the runtime compacts against would be reporting a number
-   * nothing acts on.
+   * The denominator is the MODEL's window, which is a fact this client can
+   * know. A deployment may compact earlier than that — `budgetTokens` is
+   * policy the wire does not carry — so this line answers "how full is the
+   * window", and the `[compacted …]` line answers "and the runtime acted".
+   * Claiming to show the runtime's own budget would be claiming to know
+   * something the client cannot see.
    */
   private contextLine(): string {
-    const budget = lastCompactionBudget(this.seen) ?? this.contextWindow
+    const budget = this.contextWindow
     if (budget <= 0) return ''
     const metrics = meterSession(this.seen, budget)
     if (metrics.projectedTokens === 0) return ''
@@ -59,7 +60,10 @@ export class TerminalRenderer {
   }
 
   onEvent(event: EventEnvelope): string {
-    this.seen.push(event)
+    // Chunks are the bulk of a long session by two orders of magnitude and the
+    // meter never reads one: keeping them would make every rendered line an
+    // O(all chunks) fold and retain the whole stream in the client.
+    if (event.type !== 'assistant/chunk') this.seen.push(event)
     switch (event.type) {
       // The step is priced here, so this is where the number can change.
       case 'assistant/message':
