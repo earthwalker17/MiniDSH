@@ -82,6 +82,65 @@ describe('review regressions: cancellation', () => {
     const turnEnd = agent.session.events.at(-1)!
     expect((turnEnd.data as { reason: { kind: string } }).reason.kind).toBe('cancelled')
   })
+
+  /**
+   * S5 design verification. A recovery listener may legally change the log —
+   * this is exactly what a compaction answering `CONTEXT_WINDOW_EXCEEDED`
+   * does. Before the driver built its request per ATTEMPT rather than per step,
+   * the retry re-sent the frozen message list and the turn died on
+   * "request messages diverge from deriveMessages()".
+   */
+  it('re-derives the request for a retried attempt, so a recovery that shadowed history is reflected', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const { AGENT_REQUEST_ERROR } = await import('../agent/index.ts')
+    const { USER_MESSAGE } = await import('../session/index.ts')
+    const { createPluginMessage } = await import('../llm/message.ts')
+
+    // Turn 1 succeeds, leaving two surface nodes to shadow.
+    harness.adapter.script(assistantText('first answer'))
+    agent.followup(createUserMessage('hello'))
+    await agent.whenIdle()
+    const shadowed = agent.session.surfaceSeqs().slice(0, 2)
+
+    // Turn 2's first attempt overflows; the listener compacts, then retries.
+    harness.adapter.script(
+      () => {
+        throw new LlmError('CONTEXT_WINDOW_EXCEEDED', 'context size has been exceeded')
+      },
+      assistantText('second answer'),
+    )
+    let compacted = false
+    agent.ctx.on(AGENT_REQUEST_ERROR, async (context, next) => {
+      const prior = await next()
+      if (prior || compacted || context.failure.code !== 'CONTEXT_WINDOW_EXCEEDED') return prior
+      compacted = true
+      agent.session.append(
+        USER_MESSAGE,
+        { message: createPluginMessage('test-compactor', 'summary of the earlier exchange', 'summary') },
+        { surfaceOp: { op: 'replace', start: shadowed[0]!, end: shadowed[1]! }, sourceEventSeqs: [...shadowed] },
+      )
+      return { kind: 'retry' }
+    })
+    agent.followup(createUserMessage('again'))
+    await agent.whenIdle()
+
+    expect(compacted).toBe(true)
+    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
+    expect(ends.map((event) => (event.data as { reason: { kind: string } }).reason.kind)).toEqual(['completed', 'completed'])
+
+    // The retried attempt was sent the COMPACTED history, not the frozen one:
+    // three messages went out, two came back after the replace shadowed a pair.
+    const [, overflowed, retried] = harness.adapter.calls
+    expect(overflowed!.messages).toHaveLength(3)
+    expect(retried!.messages).toHaveLength(2)
+    expect(retried!.messages[0]!.source).toMatchObject({ kind: 'plugin', plugin: 'test-compactor', form: 'summary' })
+    // And the log kept everything it shadowed: the nodes are gone from the
+    // surface, not from history.
+    for (const seq of shadowed) expect(agent.session.events[seq]).toBeDefined()
+    expect(agent.session.surfaceSeqs()).not.toContain(shadowed[0])
+    expect(agent.session.surfaceSeqs()).not.toContain(shadowed[1])
+  })
 })
 
 describe('review regressions: seeded sessions', () => {

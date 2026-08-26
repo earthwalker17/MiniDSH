@@ -3,60 +3,119 @@
  * session's `assistant/chunk` events (grouped by turn/step), so recording is
  * free: run the real agent once, harvest its JSONL, replay it keylessly.
  * `assertConsumed()` fails if any recorded step was not replayed.
+ *
+ * There are TWO scripts, because there are two kinds of call. Loop steps come
+ * from `assistant/chunk`; out-of-loop calls (a compaction summary) come from
+ * the `llm/aux-call` records their caller wrote, and are told apart by the
+ * request's `purpose` — a loop-built request never carries one. Both cursors
+ * are asserted, so a compacted log replays its compaction at the same point,
+ * with the same summary, or the oracle fails.
  */
 import type { Context, Disposer } from '../kernel/index.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
+import { foldAuxCalls, type AuxCallRecord } from '../core/llm/aux-call.ts'
 import { matches, ASSISTANT_CHUNK, type EventEnvelope } from '../core/session/index.ts'
 
 /**
- * Groups recorded `assistant/chunk` payloads into one chunk list per (turn,
- * step), in order. A step that was retried carries several attempts; only the
- * last attempt is what the agent acted on, so it alone is replayed (logs
- * written before `attempt` existed count as a single attempt).
+ * How a retried step replays.
+ *
+ * `every` (the default) replays each recorded attempt, failures included, so a
+ * recovery the log describes actually happens again. This is the faithful
+ * oracle, and it is required whenever recovery CHANGED THE LOG — a compaction
+ * answering `CONTEXT_WINDOW_EXCEEDED` writes a surface replace, and eliding the
+ * failure would leave the replayed session with a history the recording never
+ * had. The cost is that the replaying composition must carry the same recovery
+ * capabilities; every real one does.
+ *
+ * `acted-on` replays only the attempt whose result the agent used, so a log can
+ * replay under a composition with no recovery listeners at all.
  */
-export function deriveReplayScript(events: readonly EventEnvelope[]): StreamChunk[][] {
-  const groups = new Map<string, { attempt: number; chunks: StreamChunk[] }>()
+export type ReplayAttempts = 'every' | 'acted-on'
+
+/**
+ * Groups recorded `assistant/chunk` payloads into chunk lists per (turn, step),
+ * in order. Logs written before `attempt` existed count as a single attempt.
+ */
+export function deriveReplayScript(events: readonly EventEnvelope[], attempts: ReplayAttempts = 'every'): StreamChunk[][] {
+  const groups = new Map<string, { attempt: number; chunks: StreamChunk[] }[]>()
   const order: string[] = []
   for (const event of events) {
     if (!matches(event, ASSISTANT_CHUNK)) continue
     const key = `${event.data.turn}:${event.data.step}`
-    let group = groups.get(key)
+    let list = groups.get(key)
+    if (!list) {
+      list = []
+      groups.set(key, list)
+      order.push(key)
+    }
+    const open = list.at(-1)
     let attempt = event.data.attempt as number | undefined
     if (attempt === undefined) {
-      // Logs recorded before `attempt` existed: exactly one finish ends an attempt,
-      // so a chunk arriving after a finish belongs to the next attempt.
-      attempt = !group ? 1 : group.chunks.at(-1)?.type === 'finish' ? group.attempt + 1 : group.attempt
+      // Exactly one finish ends an attempt, so a chunk arriving after a finish
+      // belongs to the next one.
+      attempt = !open ? 1 : open.chunks.at(-1)?.type === 'finish' ? open.attempt + 1 : open.attempt
     }
-    if (!group) {
-      group = { attempt, chunks: [] }
-      groups.set(key, group)
-      order.push(key)
-    } else if (attempt > group.attempt) {
-      group.attempt = attempt
-      group.chunks = []
-    } else if (attempt < group.attempt) {
-      continue
-    }
-    group.chunks.push(event.data.chunk as unknown as StreamChunk)
+    if (!open || attempt > open.attempt) list.push({ attempt, chunks: [event.data.chunk as unknown as StreamChunk] })
+    else if (attempt === open.attempt) open.chunks.push(event.data.chunk as unknown as StreamChunk)
+    // A lower attempt after a higher one cannot happen; ignore it rather than reorder.
   }
-  // A group with no terminal finish is a crash artifact: the runtime always
-  // normalizes to a terminal finish, so its absence means the process died
-  // mid-stream and the agent never acted on the group. In a resumed log the
-  // artifact sits MID-log (completed turns follow it), so every finish-less
-  // group is dropped — replaying one would silently desynchronize the script.
-  return order.map((key) => groups.get(key)!.chunks).filter((chunks) => chunks.some((chunk) => chunk.type === 'finish'))
+  const script: StreamChunk[][] = []
+  for (const key of order) {
+    const list = groups.get(key)!
+    const chosen = attempts === 'every' ? list : list.slice(-1)
+    for (const entry of chosen) {
+      // A group with no terminal finish is a crash artifact: the runtime always
+      // normalizes to a terminal finish, so its absence means the process died
+      // mid-stream and the agent never acted on it. In a resumed log the
+      // artifact sits MID-log (completed turns follow it), so every finish-less
+      // group is dropped — replaying one would silently desynchronize the script.
+      if (entry.chunks.some((chunk) => chunk.type === 'finish')) script.push(entry.chunks)
+    }
+  }
+  return script
+}
+
+/**
+ * Rebuilds a recorded auxiliary call as a chunk stream. Only the finished text
+ * and usage were recorded — that is what the call's consumer read, so it is
+ * exactly what a replay owes it.
+ */
+export function auxCallChunks(record: AuxCallRecord): StreamChunk[] {
+  if (record.outcome.kind === 'error') {
+    return [{ type: 'finish', reason: { kind: 'error', failure: record.outcome.failure } }]
+  }
+  const text = record.outcome.text
+  const chunks: StreamChunk[] = [{ type: 'block-start', index: 0, blockType: 'text' }]
+  if (text.length > 0) chunks.push({ type: 'text-delta', index: 0, text })
+  chunks.push({ type: 'block-end', index: 0, block: { type: 'text', text } })
+  if (record.usage) chunks.push({ type: 'usage', usage: record.usage })
+  chunks.push({ type: 'finish', reason: { kind: 'stop' } })
+  return chunks
 }
 
 class ReplayAdapter implements LlmAdapter {
   readonly provider: string
   private readonly script: StreamChunk[][]
+  private readonly auxScript: StreamChunk[][]
+  private readonly contextWindow: number
   private cursor = 0
-  constructor(provider: string, script: StreamChunk[][]) {
+  private auxCursor = 0
+  constructor(provider: string, script: StreamChunk[][], auxScript: StreamChunk[][], contextWindow: number) {
     this.provider = provider
     this.script = script
+    this.auxScript = auxScript
+    this.contextWindow = contextWindow
   }
 
-  async *stream(_request: LlmRequest): AsyncIterable<StreamChunk> {
+  async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
+    // `purpose` is the whole discriminator: the loop never sets one.
+    if (request.purpose !== undefined) {
+      const group = this.auxScript[this.auxCursor]
+      if (!group) throw new Error(`llm-replay: no recorded "${request.purpose}" call ${this.auxCursor} to replay`)
+      this.auxCursor += 1
+      for (const chunk of group) yield chunk
+      return
+    }
     const group = this.script[this.cursor]
     if (!group) throw new Error(`llm-replay: no recorded step ${this.cursor} to replay`)
     this.cursor += 1
@@ -64,7 +123,7 @@ class ReplayAdapter implements LlmAdapter {
   }
 
   resolveModel(_model: string): ResolvedModel {
-    return { contextWindow: 1_000_000, defaultMaxTokens: 8192, reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'high' } }
+    return { contextWindow: this.contextWindow, defaultMaxTokens: 8192, reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'high' } }
   }
 
   listModels(): readonly ModelInfo[] {
@@ -78,25 +137,46 @@ class ReplayAdapter implements LlmAdapter {
   total(): number {
     return this.script.length
   }
+
+  auxConsumed(): number {
+    return this.auxCursor
+  }
+
+  auxTotal(): number {
+    return this.auxScript.length
+  }
 }
 
 export interface ReplayHandle {
   dispose: Disposer
   assertConsumed(): void
   readonly steps: number
+  /** Recorded out-of-loop calls (compaction summaries) available to replay. */
+  readonly auxCalls: number
 }
 
 /** Registers a replay adapter derived from `events` on `owner.llm`. */
-export function installLlmReplay(owner: Context, options: { events: readonly EventEnvelope[]; provider?: string }): ReplayHandle {
-  const script = deriveReplayScript(options.events)
-  const adapter = new ReplayAdapter(options.provider ?? 'deepseek', script)
+export function installLlmReplay(
+  owner: Context,
+  options: { events: readonly EventEnvelope[]; provider?: string; contextWindow?: number; attempts?: ReplayAttempts },
+): ReplayHandle {
+  const script = deriveReplayScript(options.events, options.attempts)
+  const auxScript = foldAuxCalls(options.events).map(auxCallChunks)
+  // The window is a live adapter fact the log does not carry. A replay that
+  // needs compaction to trigger where it did should pin an absolute budget on
+  // the compaction row rather than hope two adapters agree about a window.
+  const adapter = new ReplayAdapter(options.provider ?? 'deepseek', script, auxScript, options.contextWindow ?? 1_000_000)
   const dispose = owner.get(LLM).registerAdapter(owner, adapter)
   return {
     dispose,
     steps: script.length,
+    auxCalls: auxScript.length,
     assertConsumed() {
       if (adapter.consumed() !== adapter.total()) {
         throw new Error(`llm-replay: replayed ${adapter.consumed()} of ${adapter.total()} recorded steps`)
+      }
+      if (adapter.auxConsumed() !== adapter.auxTotal()) {
+        throw new Error(`llm-replay: replayed ${adapter.auxConsumed()} of ${adapter.auxTotal()} recorded out-of-loop calls`)
       }
     },
   }

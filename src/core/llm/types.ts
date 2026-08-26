@@ -48,6 +48,14 @@ export interface LlmRequest {
   readonly temperature?: number
   readonly signal?: AbortSignal
   readonly sessionId?: SessionId
+  /**
+   * Why this call is being made, when it is NOT a loop step — `'compaction'`,
+   * a verification pass, a title. Routing and replay metadata only: it is
+   * never serialized to a provider and never enters `request/header`, because
+   * the model cannot see it. A loop-built request never carries one, which is
+   * what lets a listener tell the two apart (`core/llm/aux-call.ts`).
+   */
+  readonly purpose?: string
 }
 
 /** Disjoint token counts: billed input = inputTokens + cacheReadTokens; reasoningTokens ⊆ outputTokens. */

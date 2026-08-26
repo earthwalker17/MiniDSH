@@ -311,24 +311,35 @@ export class ReactLoopAgent implements Agent {
       this.session.append(REQUEST_HEADER, { turn, step, header, reason: !folded ? 'initial' : resume ? 'resume' : 'change' })
     }
 
-    const messages = this.session.deriveMessages()
-    const request: LlmRequest = Object.freeze({
-      provider: config.provider,
-      model: config.model,
-      system: assembled.system,
-      messages: Object.freeze(messages),
-      tools: assembled.tools,
-      ...(config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens }),
-      ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
-      ...(config.temperature === undefined ? {} : { temperature: config.temperature }),
-      signal,
-      sessionId: this.id,
-    })
-    markLoopRequest(request, this.session)
+    /**
+     * Built per ATTEMPT, not per step. The header, the system prompt and the
+     * tools are fixed for the step, but `messages` is a projection of the log,
+     * and a recovery listener may legally have changed the log between
+     * attempts — a compaction answering `CONTEXT_WINDOW_EXCEEDED` does exactly
+     * that. Re-deriving keeps "model-visible ⟺ logged" true for every attempt;
+     * when nothing changed, the second attempt rebuilds an identical request.
+     */
+    const buildRequest = (): LlmRequest => {
+      const request: LlmRequest = Object.freeze({
+        provider: config.provider,
+        model: config.model,
+        system: assembled.system,
+        messages: Object.freeze(this.session.deriveMessages()),
+        tools: assembled.tools,
+        ...(config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens }),
+        ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }),
+        ...(config.temperature === undefined ? {} : { temperature: config.temperature }),
+        signal,
+        sessionId: this.id,
+      })
+      markLoopRequest(request, this.session)
+      return request
+    }
 
     let attempt = 0
     for (;;) {
       attempt += 1
+      const request = buildRequest()
       const assembler = new BlockAssembler()
       for await (const chunk of deps.llm.stream(request)) {
         this.session.append(ASSISTANT_CHUNK, { turn, step, attempt, chunk: chunk as unknown as JsonValue })

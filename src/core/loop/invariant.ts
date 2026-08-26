@@ -17,7 +17,15 @@ function canonHeader(header: RequestHeader): string {
   })
 }
 
-/** Every model-visible field of the request outside `messages`; adding one to LlmRequest means adding it here and to RequestHeader. */
+/**
+ * Every MODEL-VISIBLE field of the request outside `messages`; adding one to
+ * `LlmRequest` means adding it here and to `RequestHeader`.
+ *
+ * The qualifier is load-bearing. `signal`, `sessionId` and `purpose` are on the
+ * request and belong in neither: the provider never sees them, so a header that
+ * carried them would claim the model saw something it did not — and the canon
+ * comparison would fail on a difference the model cannot observe.
+ */
 function requestAsHeader(request: LlmRequest): string {
   return JSON.stringify({
     provider: request.provider,

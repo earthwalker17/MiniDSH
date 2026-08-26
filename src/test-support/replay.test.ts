@@ -63,6 +63,27 @@ describe('llm-replay', () => {
     await replayWithoutRetry(events)
   })
 
+  it('replays the failure too by default, so a recovery that changed the log happens again', async () => {
+    const events = await recordRetried()
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    // The default mode replays every recorded attempt, so the composition must
+    // be able to recover — exactly as the recording's composition could. This
+    // is what an overflow-triggered compaction depends on: elide the failure
+    // and the replayed session never compacts, so its history diverges.
+    const replay = installLlmReplay(harness.root, { events, provider: 'replay' })
+    expect(replay.steps).toBe(3)
+    harness.root.get(TOOLS).register(harness.root, echo)
+    const handle = await harness.root.get(AGENTS).create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    const { AGENT_REQUEST_ERROR } = await import('../core/agent/index.ts')
+    handle.agent.ctx.on(AGENT_REQUEST_ERROR, async (_context, next) => (await next()) ?? { kind: 'retry' })
+    handle.agent.followup(createUserMessage('run it'))
+    await handle.agent.whenIdle()
+    replay.assertConsumed()
+    expect(messageText(handle.agent.session.deriveMessages().at(-1)!)).toBe('recorded answer')
+    await handle.dispose()
+  })
+
   it('replays a log recorded before `attempt` existed, treating each finish as the attempt boundary', async () => {
     const legacy = (await recordRetried()).map((event) => {
       if (event.type !== 'assistant/chunk') return event
@@ -126,11 +147,14 @@ async function recordRetried(): Promise<Recorded> {
   return agent.session.events.map((event) => ({ ...event }))
 }
 
-/** No retry policy here: the failed attempt must not be replayed at all. */
+/**
+ * No retry policy here, so the composition cannot recover: `acted-on` is the
+ * mode that lets such a log replay at all, and the failed attempt is elided.
+ */
 async function replayWithoutRetry(events: Recorded): Promise<void> {
   const harness = await coreHarness()
   harnesses.push(harness)
-  const replay = installLlmReplay(harness.root, { events, provider: 'replay' })
+  const replay = installLlmReplay(harness.root, { events, provider: 'replay', attempts: 'acted-on' })
   harness.root.get(TOOLS).register(harness.root, echo)
   const handle = await harness.root.get(AGENTS).create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
   handle.agent.followup(createUserMessage('run it'))

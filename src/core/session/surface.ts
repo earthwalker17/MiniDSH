@@ -101,6 +101,12 @@ export class Surface {
     }
     const start = this.nodes.indexOf(op.start)
     const end = this.nodes.indexOf(op.end)
+    // Not merely a re-check of `validate`. A reader folding a stream it did not
+    // append — a protocol client, a stored log — reaches `apply` directly, and
+    // `splice(-1, …)` would silently destroy the LAST node instead of failing.
+    // A surface that quietly reports the wrong history is worse than one that
+    // refuses to report at all.
+    if (start < 0 || end < start) throw new Error(`replace range [${op.start}, ${op.end}] is not a current contiguous surface run`)
     this.nodes.splice(start, end - start + 1, event.seq)
     this.generation++
   }
