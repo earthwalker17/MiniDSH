@@ -95,6 +95,39 @@ describe('headless runner (real composition, scripted model)', () => {
     }
   })
 
+  it('refuses a row config outside the plugin contract at boot, naming the row and the key', async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const adapter = new ScriptedAdapter().script(assistantText('never'))
+    // A typo'd authority mode used to settle green and then reject every write
+    // as an INVARIANT error; a stale key (the S5 rename) used to be silently
+    // ignored and take the default.
+    await expect(
+      runTask({ task: 'x', cwd, model: 'scripted-model', sessionsRoot, logger: silent, ...scripted(adapter), patches: [{ id: 'sandbox', config: { mode: 'full' } }] }),
+    ).rejects.toThrowError(/failed: \[core-sandbox: plugin "core-sandbox": invalid config: .*mode/s)
+    await expect(
+      runTask({ task: 'x', cwd, model: 'scripted-model', sessionsRoot, logger: silent, ...scripted(adapter), patches: [{ id: 'shell', config: { dialect: 'bash', maxOutputChars: 1 } }] }),
+    ).rejects.toThrowError(/shell-stdio.*invalid config.*maxOutputChars/s)
+  })
+
+  it('a rejected reconfigure keeps the last good instance running', async () => {
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const { bootComposition } = await import('./headless.ts')
+    const { COMPOSITION } = await import('./compose.ts')
+    const { TOOLS } = await import('../core/tools/index.ts')
+    const root = await bootComposition({ sessionsRoot, logger: silent, ...scripted(new ScriptedAdapter()) })
+    try {
+      const composition = root.get(COMPOSITION)
+      await expect(composition.reconfigure('tool-editor', { maxOutputChars: 'lots' })).rejects.toThrowError(/cannot reconfigure row "tool-editor": invalid config/)
+      // The old instance was never disposed: the editor is still registered.
+      expect(root.get(TOOLS).get('str_replace_editor')).toBeDefined()
+      await composition.reconfigure('tool-editor', { maxOutputChars: 500 })
+      expect(root.get(TOOLS).get('str_replace_editor')).toBeDefined()
+    } finally {
+      await root.dispose()
+    }
+  })
+
   it('fails loud when a required provider cannot settle', async () => {
     const cwd = tempDir('minidsh-cwd-')
     const sessionsRoot = tempDir('minidsh-sessions-')

@@ -19,12 +19,20 @@ import { excerptWithSpill, excerptWithoutSpill, SPILL } from '../../core/spill/i
 import { defineTool, TOOLS, type ToolCallView, type ToolContext } from '../../core/tools/index.ts'
 
 export interface ShellToolConfig {
-  readonly timeoutMs?: number
+  readonly timeoutMs?: number | undefined
   /** How much of a command's output the MODEL sees inline; the rest spills. */
-  readonly maxOutputChars?: number
+  readonly maxOutputChars?: number | undefined
   /** Kept from the end, because a command's last lines are how it ended. */
-  readonly tailChars?: number
+  readonly tailChars?: number | undefined
 }
+
+const configSchema = z
+  .strictObject({
+    timeoutMs: z.number().positive().optional(),
+    maxOutputChars: z.number().int().positive().optional(),
+    tailChars: z.number().int().nonnegative().optional(),
+  })
+  .optional()
 
 const CONFINEMENT_GUIDANCE = `* Commands run under this session's sandbox policy. A command that cannot be confined on this host is REFUSED and the result says so.
 * To run a refused command anyway, retry THE SAME command once with sandbox_permissions (the narrowest wider mode that suffices) and justification (why it is required). The user is asked to approve, and a grant covers that one call only.
@@ -64,6 +72,7 @@ type Input = z.infer<typeof InputSchema>
 export const toolShellPlugin: Plugin<ShellToolConfig | undefined> = {
   name: 'tool-shell',
   inject: [TOOLS, SHELL, SANDBOX, APPROVAL],
+  config: configSchema,
   apply(ctx, config) {
     ctx.get(TOOLS).register(
       ctx,

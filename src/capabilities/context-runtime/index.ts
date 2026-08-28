@@ -4,6 +4,7 @@
  * the cached system-prompt prefix every step and belongs in an `agent/pre-step`
  * message instead.
  */
+import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import { SANDBOX, SANDBOX_MODE, type SandboxMode } from '../../core/sandbox/index.ts'
@@ -12,8 +13,10 @@ import { SHELL } from '../../core/shell/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 
 export interface ContextRuntimeConfig {
-  readonly persona?: string
+  readonly persona?: string | undefined
 }
+
+const configSchema = z.strictObject({ persona: z.string().optional() }).optional()
 
 const DEFAULT_PERSONA = `You are MiniDSH, a focused local software-engineering agent.
 Work directly in the user's workspace using the provided tools. Prefer small, verified steps:
@@ -52,6 +55,7 @@ function authorityLines(ctx: Context, agent: Agent | undefined): string[] {
 export const contextRuntimePlugin: Plugin<ContextRuntimeConfig | undefined> = {
   name: 'context-runtime',
   inject: [PROMPT],
+  config: configSchema,
   apply(ctx, config) {
     const prompt = ctx.get(PROMPT)
     prompt.section(ctx, { name: 'persona', order: -50, text: config?.persona ?? DEFAULT_PERSONA })

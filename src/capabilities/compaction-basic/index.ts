@@ -18,6 +18,7 @@
  * and the agent's status in a window with no `await` in it — nothing else can
  * run between the check and the append.
  */
+import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import {
   AGENT_PRE_STEP,
@@ -46,30 +47,42 @@ import { deriveEventMessage, USER_MESSAGE } from '../../core/session/index.ts'
 
 export interface CompactionBasicConfig {
   /** Compact when the projected request reaches this fraction of the budget. */
-  readonly thresholdRatio?: number
+  readonly thresholdRatio?: number | undefined
   /** Fraction of the budget kept as recent history. */
-  readonly retainRatio?: number
+  readonly retainRatio?: number | undefined
   /**
    * An absolute context budget, overriding the model's advertised window.
    * A deployment knob (spend, latency) AND the only way to exercise
    * compaction deterministically: an adapter's window is a live fact the log
    * does not carry, so a replay cannot depend on two adapters agreeing.
    */
-  readonly budgetTokens?: number
+  readonly budgetTokens?: number | undefined
   /** Generation cap for the summary itself. */
-  readonly maxTokens?: number
+  readonly maxTokens?: number | undefined
   /** Automatic pressure and overflow triggers; `/compact` works either way. */
-  readonly auto?: boolean
+  readonly auto?: boolean | undefined
   /** How many times one step may answer a provider overflow by compacting. */
-  readonly maxOverflowRetries?: number
+  readonly maxOverflowRetries?: number | undefined
   /**
    * Consecutive failed summary calls before the AUTOMATIC triggers give up on a
    * session. Each attempt replays a whole shadowed span, so a persistently
    * failing summariser is an expensive request at every step boundary, forever.
    * `/compact` is a human asking again and is never disabled.
    */
-  readonly maxSummaryFailures?: number
+  readonly maxSummaryFailures?: number | undefined
 }
+
+const configSchema = z
+  .strictObject({
+    thresholdRatio: z.number().positive().max(1).optional(),
+    retainRatio: z.number().nonnegative().max(1).optional(),
+    budgetTokens: z.number().int().positive().optional(),
+    maxTokens: z.number().int().positive().optional(),
+    auto: z.boolean().optional(),
+    maxOverflowRetries: z.number().int().nonnegative().optional(),
+    maxSummaryFailures: z.number().int().nonnegative().optional(),
+  })
+  .optional()
 
 const PLUGIN = 'compaction-basic'
 const PURPOSE = 'compaction'
@@ -103,8 +116,14 @@ ${summary}`
 
 class BasicCompaction implements Compaction {
   private readonly ctx: Context
-  private readonly config: Required<Pick<CompactionBasicConfig, 'thresholdRatio' | 'retainRatio' | 'maxTokens' | 'auto' | 'maxOverflowRetries' | 'maxSummaryFailures'>> & {
-    budgetTokens?: number
+  private readonly config: {
+    readonly thresholdRatio: number
+    readonly retainRatio: number
+    readonly maxTokens: number
+    readonly auto: boolean
+    readonly maxOverflowRetries: number
+    readonly maxSummaryFailures: number
+    readonly budgetTokens?: number
   }
   /** One compaction per agent at a time: pressure and `/compact` must not interleave. */
   private readonly running = new WeakSet<Agent>()
@@ -316,6 +335,7 @@ class BasicCompaction implements Compaction {
 export const compactionBasicPlugin: Plugin<CompactionBasicConfig | undefined> = {
   name: 'compaction-basic',
   inject: [LLM, PROMPT],
+  config: configSchema,
   apply(ctx, config) {
     const engine = new BasicCompaction(ctx, config)
     ctx.provide(COMPACTION, engine)

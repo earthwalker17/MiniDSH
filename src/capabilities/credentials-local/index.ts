@@ -9,13 +9,16 @@
  * layer value falls through to the next layer.
  */
 import { readFileSync } from 'node:fs'
+import { z } from 'zod'
 import type { Logger, Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, type CredentialRef, type Credentials } from '../../core/credentials/index.ts'
 
 export interface CredentialsLocalConfig {
   /** JSON store path; omitted = environment-only resolution (hermetic tests). */
-  readonly path?: string
+  readonly path?: string | undefined
 }
+
+const configSchema = z.strictObject({ path: z.string().min(1).optional() }).optional()
 
 /** Blank is absent: a value that is empty after trimming never resolves. */
 function present(value: string | undefined): string | undefined {
@@ -62,6 +65,7 @@ class LocalCredentials implements Credentials {
 
 export const credentialsLocalPlugin: Plugin<CredentialsLocalConfig | undefined> = {
   name: 'credentials-local',
+  config: configSchema,
   apply(ctx, config) {
     ctx.provide(CREDENTIALS, new LocalCredentials(config?.path, ctx.logger))
   },

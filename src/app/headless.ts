@@ -123,7 +123,8 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
   if (report.pending.length > 0 || report.failed.length > 0) {
     await root.dispose()
     const pending = report.pending.map((entry) => `${entry.name} (needs ${entry.missing.join(', ') || 'nothing'})`).join('; ')
-    const failed = report.failed.map((entry) => entry.name).join('; ')
+    // The failure's own words, so a bad row config reads as what it is.
+    const failed = report.failed.map((entry) => `${entry.name}: ${entry.error instanceof Error ? entry.error.message : String(entry.error)}`).join('; ')
     throw new Error(`composition did not settle — pending: [${pending}] failed: [${failed}]`)
   }
   await options.prepare?.(root)

@@ -7,8 +7,9 @@
  * pre-commit; `apply` itself validates too, so the refusal stands even in a
  * composition that runs without invariants.
  */
+import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
-import { APPROVAL, type Approval } from '../../core/approval/index.ts'
+import { APPROVAL, APPROVAL_POLICIES, type Approval } from '../../core/approval/index.ts'
 import { INVARIANTS } from '../../core/invariants/index.ts'
 import {
   AUTHORITY_PRESET,
@@ -19,13 +20,24 @@ import {
   type AuthorityPresetSpec,
   type AuthorityState,
 } from '../../core/presets/index.ts'
-import { effectiveSandboxMode, SANDBOX, type Sandbox } from '../../core/sandbox/index.ts'
+import { effectiveSandboxMode, SANDBOX, SANDBOX_MODES, type Sandbox } from '../../core/sandbox/index.ts'
 import { matches, SESSION_EVENT, type EventEnvelope, type Session } from '../../core/session/index.ts'
 
 export interface AuthorityPresetsConfig {
   /** Replaces the shipped table wholesale when given (`custom` stays reserved). */
-  readonly presets?: Readonly<Record<string, AuthorityPresetSpec>>
+  readonly presets?: Readonly<Record<string, AuthorityPresetSpec>> | undefined
 }
+
+const configSchema = z
+  .strictObject({
+    presets: z
+      .record(
+        z.string().min(1),
+        z.strictObject({ sandbox: z.enum(SANDBOX_MODES), approval: z.enum(APPROVAL_POLICIES), description: z.string().optional() }),
+      )
+      .optional(),
+  })
+  .optional()
 
 class PresetService implements AuthorityPresets {
   private readonly table: ReadonlyMap<string, AuthorityPresetSpec>
@@ -69,6 +81,7 @@ class PresetService implements AuthorityPresets {
 export const authorityPresetsPlugin: Plugin<AuthorityPresetsConfig | undefined> = {
   name: 'authority-presets',
   inject: [SANDBOX, APPROVAL],
+  config: configSchema,
   apply(ctx, config) {
     const table = presetTable(config?.presets)
     ctx.provide(PRESETS, new PresetService(table, ctx.get(SANDBOX), ctx.get(APPROVAL)))

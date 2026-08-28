@@ -8,13 +8,23 @@
  * that an answerer registered later (even with `prepend`) cannot reopen the
  * gate. Like the sandbox mode, a switch IS its event.
  */
+import { z } from 'zod'
 import { serviceKey, waterfallEvent, type Plugin } from '../../kernel/index.ts'
 import { AGENT_CREATED } from '../agent/index.ts'
 import type { Agent } from '../agent/types.ts'
 import type { CallId } from '../ids.ts'
 import type { Session } from '../session/index.ts'
 import type { EventEnvelope } from '../session/types.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, effectiveApprovalPolicy, isApprovalOutcome, type ApprovalOutcome, type ApprovalPolicy } from './events.ts'
+import {
+  APPROVAL_ASKED,
+  APPROVAL_DECIDED,
+  APPROVAL_POLICIES,
+  APPROVAL_POLICY,
+  effectiveApprovalPolicy,
+  isApprovalOutcome,
+  type ApprovalOutcome,
+  type ApprovalPolicy,
+} from './events.ts'
 
 export * from './events.ts'
 
@@ -139,12 +149,15 @@ function settleOrCancel(answer: Promise<ApprovalOutcome>, signal: AbortSignal | 
 
 export interface ApprovalConfig {
   /** Deployment default for sessions with no recorded policy (default `ask`). */
-  readonly policy?: ApprovalPolicy
+  readonly policy?: ApprovalPolicy | undefined
 }
+
+const configSchema = z.strictObject({ policy: z.enum(APPROVAL_POLICIES).optional() }).optional()
 
 /** Provides `ctx.approval`. */
 export const approvalPlugin: Plugin<ApprovalConfig | undefined> = {
   name: 'core-approval',
+  config: configSchema,
   apply(ctx, config) {
     const service = new ApprovalService(config?.policy ?? 'ask')
     ctx.provide(APPROVAL, service)

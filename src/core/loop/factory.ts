@@ -62,7 +62,7 @@ class LoopFactory implements AgentFactory {
       const report = await scope.settle((plugin) => plugin.scope === agent)
       if (report.pending.length > 0 || report.failed.length > 0) {
         const pending = report.pending.map((entry) => `${entry.name} (needs ${entry.missing.join(', ') || 'nothing'})`).join('; ')
-        const failed = report.failed.map((entry) => entry.name).join('; ')
+        const failed = report.failed.map((entry) => `${entry.name}: ${entry.error instanceof Error ? entry.error.message : String(entry.error)}`).join('; ')
         throw new Error(`agent ${session.id}: setup did not settle — pending: [${pending}] failed: [${failed}]`, { cause: report.failed[0]?.error })
       }
       lifetime.detach = agents.register(agent)

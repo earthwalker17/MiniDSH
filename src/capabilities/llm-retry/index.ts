@@ -3,15 +3,24 @@
  * (each opens a fresh step); only the retryable code set is retried, with
  * exponential backoff honoring a provider `retryAfterMs`.
  */
+import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
 import { AGENT_REQUEST_ERROR, type Agent, type RequestErrorAction } from '../../core/agent/index.ts'
 import { RETRYABLE_CODES, type LlmErrorCode } from '../../core/llm/index.ts'
 
 export interface RetryConfig {
-  readonly maxRetries?: number
-  readonly initialDelayMs?: number
-  readonly maxDelayMs?: number
+  readonly maxRetries?: number | undefined
+  readonly initialDelayMs?: number | undefined
+  readonly maxDelayMs?: number | undefined
 }
+
+const configSchema = z
+  .strictObject({
+    maxRetries: z.number().int().nonnegative().optional(),
+    initialDelayMs: z.number().nonnegative().optional(),
+    maxDelayMs: z.number().nonnegative().optional(),
+  })
+  .optional()
 
 interface Attempt {
   key: string
@@ -20,6 +29,7 @@ interface Attempt {
 
 export const retryPlugin: Plugin<RetryConfig | undefined> = {
   name: 'llm-retry',
+  config: configSchema,
   apply(ctx, config) {
     const maxRetries = config?.maxRetries ?? 3
     const initialDelayMs = config?.initialDelayMs ?? 500

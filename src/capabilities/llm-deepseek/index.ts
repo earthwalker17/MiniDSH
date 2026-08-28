@@ -3,6 +3,7 @@
  * OpenAI-compatible chat API. The API key is a reference (an env-var name)
  * resolved per request — never stored in configuration.
  */
+import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, credentialRef } from '../../core/credentials/index.ts'
 import { LLM } from '../../core/llm/index.ts'
@@ -10,16 +11,25 @@ import { DeepSeekAdapter, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS } from './adapter
 
 export interface DeepSeekConfig {
   /** Credential reference (env-var name) for the API key (default `DEEPSEEK_API_KEY`). */
-  readonly apiKeyEnv?: string
+  readonly apiKeyEnv?: string | undefined
   /** Endpoint base; falls back to `$DEEPSEEK_BASE_URL`, then the public API. */
-  readonly baseURL?: string
+  readonly baseURL?: string | undefined
   /** Per-request output cap when the request does not set one (default 8192). */
-  readonly defaultMaxTokens?: number
+  readonly defaultMaxTokens?: number | undefined
 }
+
+const configSchema = z
+  .strictObject({
+    apiKeyEnv: z.string().min(1).optional(),
+    baseURL: z.string().url().optional(),
+    defaultMaxTokens: z.number().int().positive().optional(),
+  })
+  .optional()
 
 export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
   name: 'llm-deepseek',
   inject: [LLM, CREDENTIALS],
+  config: configSchema,
   apply(ctx, config) {
     // Validated at apply, so a bad reference fails the row loudly at settle
     // instead of surfacing as a missing key on the first paid request.

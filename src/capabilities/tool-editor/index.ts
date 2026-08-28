@@ -31,8 +31,10 @@ type Input = z.infer<typeof InputSchema>
 const OutputSchema = z.object({ text: z.string() })
 
 export interface EditorConfig {
-  readonly maxOutputChars?: number
+  readonly maxOutputChars?: number | undefined
 }
+
+const configSchema = z.strictObject({ maxOutputChars: z.number().int().positive().optional() }).optional()
 
 const TRUNCATED = '\n<response clipped><NOTE>To save context only part of this file has been shown. Use `grep -n` to find line ranges, then view a specific range.</NOTE>'
 
@@ -57,6 +59,7 @@ function editIntent(ctx: Context, target: FsTarget, actor: FsActor): FsObservati
 export const toolEditorPlugin: Plugin<EditorConfig | undefined> = {
   name: 'tool-editor',
   inject: [TOOLS, FS],
+  config: configSchema,
   apply(ctx, config) {
     const maxOutputChars = config?.maxOutputChars ?? 16_000
     ctx.get(TOOLS).register(ctx, buildEditor(ctx, maxOutputChars))

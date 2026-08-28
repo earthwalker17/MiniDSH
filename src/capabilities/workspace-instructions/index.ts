@@ -20,6 +20,7 @@
  * truncated.
  */
 import { dirname, join } from 'node:path'
+import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENT_PRE_STEP, type Agent, type PreStepDecision } from '../../core/agent/index.ts'
 import { FS, type Fs } from '../../core/fs/index.ts'
@@ -33,14 +34,27 @@ export interface WorkspaceInstructionsConfig {
    */
   readonly maxBytes: number
   /** The user's global instructions file, resolved by the app (nothing below `app/` may read the home). */
-  readonly globalPath?: string
+  readonly globalPath?: string | undefined
   /** Per-directory candidates, in precedence order within a directory. */
-  readonly candidates?: readonly string[]
+  readonly candidates?: readonly string[] | undefined
   /** Directory names that mark a project root while walking upward. */
-  readonly projectRootMarkers?: readonly string[]
+  readonly projectRootMarkers?: readonly string[] | undefined
   /** A single file larger than this is ignored rather than allowed to eat the budget. */
-  readonly maxSourceBytes?: number
+  readonly maxSourceBytes?: number | undefined
 }
+
+/**
+ * `maxBytes` is required and positive by contract: a patch that meant to set
+ * `globalPath` replaces the whole row config, and a missing budget must refuse
+ * to mount rather than quietly enter nothing.
+ */
+const configSchema = z.strictObject({
+  maxBytes: z.number().positive(),
+  globalPath: z.string().min(1).optional(),
+  candidates: z.array(z.string().min(1)).optional(),
+  projectRootMarkers: z.array(z.string().min(1)).optional(),
+  maxSourceBytes: z.number().int().positive().optional(),
+})
 
 const PLUGIN = 'workspace-instructions'
 const FORM = 'workspace-instructions'
@@ -200,13 +214,8 @@ export async function collectInstructions(fs: Fs, cwd: string, config: Workspace
  */
 export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = {
   name: PLUGIN,
+  config: configSchema,
   apply(ctx: Context, config) {
-    // Disk row configs are not validated per plugin, and `applyPatches` replaces
-    // a row's WHOLE config — so a patch that means to set `globalPath` can drop
-    // `maxBytes` entirely. Refuse to mount rather than quietly enter nothing.
-    if (!Number.isFinite(config?.maxBytes) || config.maxBytes <= 0) {
-      throw new Error(`${PLUGIN}: "maxBytes" must be a positive number (got ${JSON.stringify(config?.maxBytes)})`)
-    }
     ctx.on(
       AGENT_PRE_STEP,
       async (context, next): Promise<PreStepDecision> => {

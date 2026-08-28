@@ -13,6 +13,7 @@
  * session. Only the mode is switchable, and a switch IS its durable event —
  * nothing mutates the mode out of band.
  */
+import { z } from 'zod'
 import { serviceKey, type Context, type Plugin } from '../../kernel/index.ts'
 import { AGENT_CREATED, AGENTS } from '../agent/index.ts'
 import { createPluginMessage } from '../llm/message.ts'
@@ -147,10 +148,12 @@ export const SANDBOX = serviceKey<Sandbox>('sandbox')
 
 export interface SandboxConfig {
   /** Deployment default for sessions with no recorded mode (default `workspace-write`). */
-  readonly mode?: SandboxMode
+  readonly mode?: SandboxMode | undefined
   /** Root for agent-less calls, which have no session cwd (default `process.cwd()`). */
-  readonly workspaceRoot?: string
+  readonly workspaceRoot?: string | undefined
 }
+
+const configSchema = z.strictObject({ mode: z.enum(SANDBOX_MODES).optional(), workspaceRoot: z.string().min(1).optional() }).optional()
 
 class SandboxService implements Sandbox {
   readonly defaultMode: SandboxMode
@@ -235,6 +238,7 @@ class SandboxService implements Sandbox {
 /** Provides `ctx.sandbox`. Like `core/approval`, the Definition ships its own driver. */
 export const sandboxPlugin: Plugin<SandboxConfig | undefined> = {
   name: 'core-sandbox',
+  config: configSchema,
   apply(ctx, config) {
     const service = new SandboxService(ctx, config ?? {})
     ctx.provide(SANDBOX, service)

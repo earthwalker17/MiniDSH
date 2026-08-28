@@ -7,6 +7,7 @@
  * can omit them. The always-on structural checks (session immutability, seq
  * contiguity, surface validity) live in the owning module, not here.
  */
+import { z } from 'zod'
 import { KernelError, serviceKey, type Context, type Disposer, type Plugin, type ServiceKey } from '../../kernel/index.ts'
 
 export type InvariantFailure = (message: string) => never
@@ -34,12 +35,20 @@ export const INVARIANTS = serviceKey<Invariants>('invariants')
 
 export interface InvariantsConfig {
   /** Master switch (default true). */
-  readonly enabled?: boolean
+  readonly enabled?: boolean | undefined
   /** If non-empty, only these package names are active. */
-  readonly allow?: readonly string[]
+  readonly allow?: readonly string[] | undefined
   /** These package names are never active. */
-  readonly block?: readonly string[]
+  readonly block?: readonly string[] | undefined
 }
+
+const configSchema = z
+  .strictObject({
+    enabled: z.boolean().optional(),
+    allow: z.array(z.string()).optional(),
+    block: z.array(z.string()).optional(),
+  })
+  .optional()
 
 class InvariantRegistry implements Invariants {
   private readonly reserved = new Set<string>()
@@ -85,6 +94,7 @@ class InvariantRegistry implements Invariants {
 /** Provides `ctx.invariants`. Omit from shipped compositions; mount in tests and E2E. */
 export const invariantsPlugin: Plugin<InvariantsConfig | undefined> = {
   name: 'core-invariants',
+  config: configSchema,
   apply(ctx, config) {
     ctx.provide(INVARIANTS, new InvariantRegistry(config ?? {}))
   },

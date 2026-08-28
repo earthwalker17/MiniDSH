@@ -243,12 +243,15 @@ class ToolRegistry implements Tools {
 
 export interface ToolsConfig {
   /** Budget for a tool that declares none (default 60s). Non-positive means no deadline at all. */
-  readonly defaultTimeoutMs?: number
+  readonly defaultTimeoutMs?: number | undefined
 }
+
+const configSchema = z.strictObject({ defaultTimeoutMs: z.number().optional() }).optional()
 
 /** The tool registry plugin: provides `ctx.tools`. */
 export const toolsPlugin: Plugin<ToolsConfig | undefined> = {
   name: 'core-tools',
+  config: configSchema,
   apply(ctx, config) {
     ctx.provide(TOOLS, new ToolRegistry(ctx, config ?? {}))
   },

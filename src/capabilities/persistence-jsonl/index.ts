@@ -25,6 +25,7 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, truncateSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
+import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { PERSISTENCE, type Persistence, type StoredSession } from '../../core/persistence/index.ts'
 import {
@@ -52,6 +53,8 @@ interface LeaseHolder {
 export interface PersistenceConfig {
   readonly root: string
 }
+
+const configSchema = z.strictObject({ root: z.string().min(1) })
 
 interface ScanResult {
   readonly header: SessionHeader
@@ -500,6 +503,7 @@ class JsonlArchive implements Persistence {
 /** Provides `ctx.persistence` and writes every published session to `<root>/<id>.jsonl`. */
 export const persistenceJsonlPlugin: Plugin<PersistenceConfig> = {
   name: 'persistence-jsonl',
+  config: configSchema,
   apply(ctx: Context, config) {
     const archive = new JsonlArchive(config.root)
     ctx.provide(PERSISTENCE, archive)

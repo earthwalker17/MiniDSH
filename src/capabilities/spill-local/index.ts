@@ -13,6 +13,7 @@
  */
 import { mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
 import { SPILL, type Spill, type SpillRef, type SpillRequest } from '../../core/spill/index.ts'
 
@@ -20,6 +21,8 @@ export interface SpillLocalConfig {
   /** Store root; per-session subdirectories are created beneath it. */
   readonly root: string
 }
+
+const configSchema = z.strictObject({ root: z.string().min(1) })
 
 /**
  * Anything that could escape the directory, hide the file, or surprise a shell.
@@ -52,6 +55,7 @@ class LocalSpill implements Spill {
 /** Provides `ctx.spill`. Without this row, tools bound their output and say the rest is gone. */
 export const spillLocalPlugin: Plugin<SpillLocalConfig> = {
   name: 'spill-local',
+  config: configSchema,
   apply(ctx, config) {
     ctx.provide(SPILL, new LocalSpill(config.root))
   },

@@ -18,7 +18,7 @@ import type { Session } from '../session/session.ts'
 export interface AuthorityPresetSpec {
   readonly sandbox: SandboxMode
   readonly approval: ApprovalPolicy
-  readonly description?: string
+  readonly description?: string | undefined
 }
 
 export interface AuthorityState {

@@ -3,6 +3,7 @@
  * agent, created on first use and disposed with the agent's scope. Commands
  * are serialized and framed by a per-session marker.
  */
+import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 import type { SandboxEnforcement, SandboxMode } from '../../core/sandbox/index.ts'
@@ -11,10 +12,16 @@ import { ShellProcess, type ShellDialect } from './process.ts'
 
 export interface ShellStdioConfig {
   readonly dialect: ShellDialect
-  readonly shellPath?: string
+  readonly shellPath?: string | undefined
   /** In-memory capture bound per command. What the MODEL sees is the tool's business, not the executor's. */
-  readonly maxCaptureChars?: number
+  readonly maxCaptureChars?: number | undefined
 }
+
+const configSchema = z.strictObject({
+  dialect: z.enum(['bash', 'pwsh']),
+  shellPath: z.string().min(1).optional(),
+  maxCaptureChars: z.number().int().positive().optional(),
+})
 
 class ShellStdioProvider implements Shell {
   readonly dialect: ShellDialect
@@ -53,6 +60,7 @@ class ShellStdioProvider implements Shell {
 /** Provides `ctx.shell`. Pick the dialect at composition time (pwsh on win32, bash elsewhere). */
 export const shellStdioPlugin: Plugin<ShellStdioConfig> = {
   name: 'shell-stdio',
+  config: configSchema,
   apply(ctx, config) {
     ctx.provide(SHELL, new ShellStdioProvider(config))
   },
