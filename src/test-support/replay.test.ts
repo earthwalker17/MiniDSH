@@ -125,6 +125,35 @@ describe('llm-replay', () => {
   })
 })
 
+describe('llm-replay: out-of-loop calls', () => {
+  it('refuses to serve a call recorded for one purpose to a request made for another', async () => {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const { LLM } = await import('../core/llm/index.ts')
+    const recorded: Recorded = [
+      {
+        type: 'llm/aux-call',
+        seq: 0,
+        time: 0,
+        data: { purpose: 'compaction', provider: 'replay', model: 'replay', outcome: { kind: 'text', text: 'a summary' } },
+      },
+    ]
+    installLlmReplay(harness.root, { events: recorded, provider: 'replay' })
+    const llm = harness.root.get(LLM)
+    const consume = async (purpose: string): Promise<import('../core/llm/index.ts').StreamChunk[]> => {
+      const out: import('../core/llm/index.ts').StreamChunk[] = []
+      for await (const chunk of llm.stream({ provider: 'replay', model: 'replay', messages: [], purpose })) out.push(chunk)
+      return out
+    }
+    // The seam normalizes the adapter's refusal into a terminal error finish.
+    const refused = await consume('verification')
+    expect(refused).toHaveLength(1)
+    expect(refused[0]).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { message: expect.stringMatching(/recorded as "compaction" but the request asks for "verification"/) as string } } })
+    // The record is still there for the request it was made for.
+    expect((await consume('compaction')).map((chunk) => chunk.type)).toContain('text-delta')
+  })
+})
+
 type Recorded = readonly import('../core/session/index.ts').EventEnvelope[]
 
 /** Records a run whose first step fails once (retryable) and is retried. */

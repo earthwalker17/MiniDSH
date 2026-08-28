@@ -90,6 +90,17 @@ export const END_SEED = eventKind<Record<string, never>>('session/end-seed')
 /** The three surface event type strings, hardcoded because the session owns them. */
 export const SURFACE_TYPES: ReadonlySet<string> = new Set([USER_MESSAGE.type, ASSISTANT_MESSAGE.type, TOOL_RESULT.type])
 
+/**
+ * The log has three tiers. SURFACE events project into model history; every
+ * other event is a log-only FACT the runtime folds (headers, stamps, records,
+ * inbox splices) — except TRACE events, which are recorded for streaming
+ * fidelity and replay and are never folded by anything at runtime. A trace
+ * kind is the bulk of a long session by two orders of magnitude, so runtime
+ * folds read `Session.facts`, the log without its trace, while persistence,
+ * replay and the wire keep the whole `events`.
+ */
+export const TRACE_TYPES: ReadonlySet<string> = new Set([ASSISTANT_CHUNK.type])
+
 export interface SessionHeader {
   readonly version: number
   readonly id: SessionId

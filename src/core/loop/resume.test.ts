@@ -301,3 +301,61 @@ describe('agents.fork', () => {
     await child.dispose()
   })
 })
+
+describe('crash repair closes the committed surface, not just the logged calls', () => {
+  /**
+   * The driver commits the assistant message with ALL its tool-call blocks and
+   * then logs each tool/call only when that call's turn comes. A crash during
+   * call 1 of 3 therefore leaves calls 2 and 3 with no call event at all, and a
+   * repair that answered only logged calls resumed a history in which an
+   * assistant message carried three tool calls and one result — a shape every
+   * OpenAI-compatible wire refuses on every later request.
+   */
+  it('answers every tool-call block of the interrupted step and cancels an undecided approval', async () => {
+    const { harness: h } = await persistedHarness()
+    const { ASSISTANT_MESSAGE, USER_MESSAGE } = await import('../session/index.ts')
+    const { APPROVAL_ASKED } = await import('../approval/events.ts')
+    const { createAssistantMessage } = await import('../llm/message.ts')
+    const { serializeMessages } = await import('../../capabilities/llm-deepseek/serialize.ts')
+    const { asCallId } = await import('../ids.ts')
+    const sessions = h.root.get(SESSIONS)
+    const session = sessions.create({ cwd: process.cwd(), id: asSessionId('multi') })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('do three things') }, { surfaceOp: { op: 'append' } })
+    const calls = ['c1', 'c2', 'c3'].map((id) => ({ type: 'tool-call' as const, id: asCallId(id), name: 'bash', arguments: '{}' }))
+    session.append(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage(calls, 'scripted', 'scripted-model') }, { surfaceOp: { op: 'append' } })
+    session.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' })
+    // The person was still deciding on c1's escalation when the process died.
+    session.append(APPROVAL_ASKED, { id: 'approval-5', toolName: 'bash', callId: 'c1' })
+    void sessions.detach(session)
+
+    h.adapter.script(assistantText('recovered'))
+    const resumed = await h.root.get(AGENTS).resume(h.root, asSessionId('multi'), { agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    const describeCloser = (event: EventEnvelope): string => {
+      const data = event.data as { callId?: string; id?: string; outcome?: string; error?: { code: string } }
+      return [event.type, data.callId ?? data.id ?? '', data.error?.code ?? data.outcome ?? ''].filter((part) => part !== '').join(' ')
+    }
+    expect(resumed.agent.session.events.slice(6).map(describeCloser)).toEqual([
+      'approval/decided approval-5 cancelled',
+      'tool/result c1 TOOL_OUTCOME_UNKNOWN',
+      'tool/result c2 TOOL_NOT_STARTED',
+      'tool/result c3 TOOL_NOT_STARTED',
+      'step/end',
+      'turn/end',
+      'session/end-seed',
+    ])
+
+    // What the wire would see: every tool_call has its tool message, in order.
+    const wire = serializeMessages(undefined, resumed.agent.session.deriveMessages())
+    const assistant = wire.find((message) => message.role === 'assistant')!
+    expect(assistant.tool_calls!.map((call) => call.id)).toEqual(['c1', 'c2', 'c3'])
+    expect(wire.filter((message) => message.role === 'tool').map((message) => message.tool_call_id)).toEqual(['c1', 'c2', 'c3'])
+
+    // And the session runs on from a balanced log.
+    resumed.agent.followup(createUserMessage('go on'))
+    await resumed.agent.whenIdle()
+    expect((resumed.agent.session.events.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('completed')
+    await resumed.dispose()
+  })
+})

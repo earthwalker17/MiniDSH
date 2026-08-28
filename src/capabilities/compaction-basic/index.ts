@@ -153,7 +153,7 @@ class BasicCompaction implements Compaction {
   underPressure(agent: Agent): boolean {
     const budget = this.budgetFor(agent)
     if (budget <= 0) return false
-    return meterSession(agent.session.events, budget).ratio >= this.config.thresholdRatio
+    return meterSession(agent.session.facts, budget).ratio >= this.config.thresholdRatio
   }
 
   wasRequested(agent: Agent): boolean {
@@ -204,8 +204,8 @@ class BasicCompaction implements Compaction {
     const session = agent.session
     const budget = this.budgetFor(agent)
     if (budget <= 0) return { kind: 'nothing-to-do' }
-    const projected = meterSession(session.events, budget).projectedTokens
-    const plan = planCompaction(session.events, session.surfaceSeqs(), { budgetTokens: budget, retainRatio: this.config.retainRatio })
+    const projected = meterSession(session.facts, budget).projectedTokens
+    const plan = planCompaction(session.facts, session.surfaceSeqs(), { budgetTokens: budget, retainRatio: this.config.retainRatio })
     if (!plan) return { kind: 'nothing-to-do' }
 
     const statusBefore = agent.status
@@ -234,12 +234,21 @@ class BasicCompaction implements Compaction {
 
     const message = createPluginMessage(PLUGIN, frame(summary.text), 'summary')
     // Both surface numbers are ESTIMATOR units and include the summary node the
-    // replace is about to insert. The projection stays separate: it is what the
-    // threshold compared, it is usually provider-priced, and subtracting an
-    // estimate from it would not be a quantity — nor would it be a saving, since
-    // the summary itself is not free.
-    const surfaceTokensBefore = plan.surfaceTokens
-    const surfaceTokensAfter = plan.surfaceTokens - plan.shadowedTokens + estimateMessage(message)
+    // replace is about to insert. They are measured from the LIVE surface here,
+    // not from the plan: on the explicit path an idle agent may have completed a
+    // whole turn during the summary await, and the plan still being live only
+    // says its shadowed head is intact, not that the tail did not grow. The
+    // projection stays separate: it is what the threshold compared, it is
+    // usually provider-priced, and subtracting an estimate from it would not be
+    // a quantity — nor would it be a saving, since the summary itself is not free.
+    const cost = (seq: number): number => {
+      const node = session.events[seq]
+      const derived = node ? deriveEventMessage(node) : null
+      return derived ? estimateMessage(derived) : 0
+    }
+    const surfaceTokensBefore = live.reduce((sum, seq) => sum + cost(seq), 0)
+    const shadowedTokens = plan.shadowedSeqs.reduce((sum, seq) => sum + cost(seq), 0)
+    const surfaceTokensAfter = surfaceTokensBefore - shadowedTokens + estimateMessage(message)
     session.append(COMPACTION_APPLIED, {
       trigger,
       budgetTokens: budget,
@@ -247,7 +256,7 @@ class BasicCompaction implements Compaction {
       surfaceTokensBefore,
       surfaceTokensAfter,
       shadowedSeqs: [...plan.shadowedSeqs],
-      retainedNodes: plan.retainedNodes,
+      retainedNodes: live.length - plan.shadowedSeqs.length,
       auxCallSeq: summary.seq,
     })
     session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'replace', start: plan.start, end: plan.end }, sourceEventSeqs: [...plan.shadowedSeqs] })
@@ -268,10 +277,10 @@ class BasicCompaction implements Compaction {
     signal?: AbortSignal,
   ): Promise<{ text: string; seq: number } | undefined> {
     const session = agent.session
-    const bySeq = new Map(session.events.map((event) => [event.seq, event]))
     const messages: Message[] = []
     for (const seq of plan.shadowedSeqs) {
-      const node = bySeq.get(seq)
+      // Indexed, never scanned: a seq in hand is an O(1) read of the log.
+      const node = session.events[seq]
       const message = node ? deriveEventMessage(node) : null
       if (message) messages.push(message)
     }

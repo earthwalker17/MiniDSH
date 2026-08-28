@@ -93,14 +93,20 @@ export function auxCallChunks(record: AuxCallRecord): StreamChunk[] {
   return chunks
 }
 
+/** A recorded out-of-loop call: its purpose travels with its chunks, so a replay can refuse to serve one purpose's record to another's request. */
+interface AuxGroup {
+  readonly purpose: string
+  readonly chunks: StreamChunk[]
+}
+
 class ReplayAdapter implements LlmAdapter {
   readonly provider: string
   private readonly script: StreamChunk[][]
-  private readonly auxScript: StreamChunk[][]
+  private readonly auxScript: AuxGroup[]
   private readonly contextWindow: number
   private cursor = 0
   private auxCursor = 0
-  constructor(provider: string, script: StreamChunk[][], auxScript: StreamChunk[][], contextWindow: number) {
+  constructor(provider: string, script: StreamChunk[][], auxScript: AuxGroup[], contextWindow: number) {
     this.provider = provider
     this.script = script
     this.auxScript = auxScript
@@ -112,8 +118,14 @@ class ReplayAdapter implements LlmAdapter {
     if (request.purpose !== undefined) {
       const group = this.auxScript[this.auxCursor]
       if (!group) throw new Error(`llm-replay: no recorded "${request.purpose}" call ${this.auxCursor} to replay`)
+      // Log order is the cursor, but the purpose must agree: once a session
+      // records more than one kind of out-of-loop call, a drift in ordering
+      // would otherwise hand a compaction summary to a verifier's request.
+      if (group.purpose !== request.purpose) {
+        throw new Error(`llm-replay: out-of-loop call ${this.auxCursor} was recorded as "${group.purpose}" but the request asks for "${request.purpose}"`)
+      }
       this.auxCursor += 1
-      for (const chunk of group) yield chunk
+      for (const chunk of group.chunks) yield chunk
       return
     }
     const group = this.script[this.cursor]
@@ -161,7 +173,7 @@ export function installLlmReplay(
   options: { events: readonly EventEnvelope[]; provider?: string; contextWindow?: number; attempts?: ReplayAttempts },
 ): ReplayHandle {
   const script = deriveReplayScript(options.events, options.attempts)
-  const auxScript = foldAuxCalls(options.events).map(auxCallChunks)
+  const auxScript = foldAuxCalls(options.events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) }))
   // The window is a live adapter fact the log does not carry. A replay that
   // needs compaction to trigger where it did should pin an absolute budget on
   // the compaction row rather than hope two adapters agree about a window.

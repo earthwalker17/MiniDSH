@@ -212,7 +212,7 @@ export class ProtocolServer {
     if (params.approval !== undefined) approval.setPolicy(agent.session, params.approval)
     // Read through the pure fold, never through `resolve` — resolving is the
     // audit act of an effect boundary, and looking is not an effect.
-    const mode = effectiveSandboxMode(agent.session.events) ?? sandbox.defaultMode
+    const mode = effectiveSandboxMode(agent.session.facts) ?? sandbox.defaultMode
     return this.withPreset({ sandbox: mode, approval: approval.policyFor(agent.session), enforcement: sandbox.enforcementFor(mode) })
   }
 

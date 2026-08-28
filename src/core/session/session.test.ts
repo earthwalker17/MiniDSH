@@ -325,3 +325,28 @@ describe('Session: relational invariant', () => {
     session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
   })
 })
+
+describe('the three tiers', () => {
+  it('keeps the trace tier out of facts while preserving seqs, so folds never walk a chunk', async () => {
+    const { sessions } = await harness()
+    const { ASSISTANT_CHUNK } = await import('./types.ts')
+    const session = sessions.create({ cwd: '/w', id: asSessionId('tiers') })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('hi') }, { surfaceOp: { op: 'append' } })
+    session.append(REQUEST_HEADER, { turn: 1, step: 1, header, reason: 'initial' })
+    for (let i = 0; i < 50; i++) session.append(ASSISTANT_CHUNK, { turn: 1, step: 1, attempt: 1, chunk: { type: 'text-delta', index: 0, text: 'x' } })
+    session.append(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([{ type: 'text', text: 'x'.repeat(50) }], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+    session.append(STEP_END, { turn: 1, step: 1 })
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+    expect(session.events).toHaveLength(57)
+    expect(session.facts).toHaveLength(7)
+    expect(session.facts.some((event) => event.type === 'assistant/chunk')).toBe(false)
+    expect(session.facts.map((event) => event.seq)).toEqual([0, 1, 2, 3, 54, 55, 56])
+    expect(foldRequestHeader(session.facts)).toEqual(foldRequestHeader(session.events))
+    // A seeded session classifies its seed the same way.
+    const reseeded = new Session(session.header, { prepare: () => () => {}, flush: async () => {} }, session.events)
+    expect(reseeded.facts.map((event) => event.seq)).toEqual([0, 1, 2, 3, 54, 55, 56, 57])
+    expect(reseeded.events.at(-1)!.type).toBe('session/end-seed')
+  })
+})

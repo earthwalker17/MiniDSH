@@ -45,7 +45,7 @@ export const compositionRecordPlugin: Plugin<CompositionRecordConfig> = {
   name: 'composition-record',
   apply(ctx, config) {
     ctx.on(AGENT_CREATED, (agent) => {
-      if (lastComposition(agent.session.events)?.hash === config.descriptor.hash) return
+      if (lastComposition(agent.session.facts)?.hash === config.descriptor.hash) return
       agent.session.append(COMPOSITION_APPLIED, config.descriptor)
     })
   },

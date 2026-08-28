@@ -52,7 +52,7 @@ class PresetService implements AuthorityPresets {
   selectForSession(session: Session): string {
     // Reading is not an effect: fold + defaults, never `resolve()`.
     return this.selectFor({
-      sandbox: effectiveSandboxMode(session.events) ?? this.sandbox.defaultMode,
+      sandbox: effectiveSandboxMode(session.facts) ?? this.sandbox.defaultMode,
       approval: this.approval.policyFor(session),
     })
   }

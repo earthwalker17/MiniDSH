@@ -157,7 +157,7 @@ async function drive(handle: AgentHandle, task: string | undefined): Promise<Tas
       await handle.agent.whenIdle()
     }
     await handle.agent.session.flush()
-    const events = handle.agent.session.events
+    const events = handle.agent.session.facts
     return {
       exitCode: foldReason(events) === 'completed' ? 0 : 1,
       sessionId: asSessionId(handle.agent.id),

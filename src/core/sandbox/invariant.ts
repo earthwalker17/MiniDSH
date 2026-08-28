@@ -72,8 +72,8 @@ const installAuthorityInvariant: InvariantInstaller = (ctx, fail) => {
     let trace = traces.get(session)
     if (!trace) {
       trace = freshTrace()
-      // Fold any prior (seed) events so a resumed session keeps its pairing.
-      for (const prior of session.events) {
+      // Fold any prior (seed) facts so a resumed session keeps its pairing.
+      for (const prior of session.facts) {
         if (prior.seq >= event.seq) break
         validate(trace, prior, fail)
       }

@@ -15,7 +15,7 @@
 import type { ContentBlock, Message, TokenUsage } from '../llm/types.ts'
 import { deriveEventMessage, foldRequestHeader, foldSurfaceSeqs } from '../session/surface.ts'
 import { LLM_AUX_CALL, type AuxCallRecord } from '../llm/aux-call.ts'
-import { ASSISTANT_MESSAGE, matches, type EventEnvelope, type RequestHeader } from '../session/types.ts'
+import { ASSISTANT_MESSAGE, matches, REQUEST_HEADER, type EventEnvelope, type RequestHeader } from '../session/types.ts'
 
 /** The estimator's whole model of a tokenizer. Wrong in the small, stable in the large. */
 const CHARS_PER_TOKEN = 4
@@ -81,14 +81,17 @@ export interface ContextMetrics {
 }
 
 /**
- * Meters a session from its raw events.
+ * Meters a session from its events — `Session.facts` for a live session (the
+ * fold never reads a chunk), the whole stored log off-line.
  *
  * The projection prefers what the provider actually charged: the last priced
  * request plus an estimate of every surface node appended since. That holds
- * only while the surface has grown by appends — a `replace` (compaction) makes
- * the priced prefix describe history that is no longer sent, so the whole
- * surface is re-estimated instead. Estimating low right after a compaction is
- * the safe direction: it cannot make compaction re-trigger on its own output.
+ * only while the surface has grown by appends under the same header — a
+ * `replace` (compaction) makes the priced prefix describe history that is no
+ * longer sent, and a `request/header` after the priced call means the prompt
+ * or tools changed under it — so the whole surface is re-estimated instead.
+ * Estimating low right after a compaction is the safe direction: it cannot
+ * make compaction re-trigger on its own output.
  */
 export function meterSession(events: readonly EventEnvelope[], budgetTokens: number): ContextMetrics {
   let sessionInput = 0
@@ -97,9 +100,13 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
   let lastUsage: TokenUsage | undefined
   let lastUsageSeq = -1
   let replacedSinceUsage = false
+  let headerSinceUsage = false
 
   for (const event of events) {
     if (event.surfaceOp?.op === 'replace' && event.seq > lastUsageSeq) replacedSinceUsage = true
+    // A header written after the priced call means the NEXT request's system
+    // prompt, tools or route are not what was priced: the anchor is stale.
+    if (event.type === REQUEST_HEADER.type && event.seq > lastUsageSeq) headerSinceUsage = true
     // An out-of-loop call costs real money and is billed to this session, but it
     // is NOT the loop's prompt: it counts towards the totals and never towards
     // the projection of what the next request will cost.
@@ -121,6 +128,7 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
     lastUsage = usage
     lastUsageSeq = event.seq
     replacedSinceUsage = false
+    headerSinceUsage = false
   }
 
   // `inputTokens` is cache-EXCLUSIVE by the vocabulary's own contract, so the
@@ -135,7 +143,7 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
   // shape any caller should hand it.
   const bySeq = new Map(events.map((event) => [event.seq, event]))
   const surfaceSeqs = foldSurfaceSeqs(events)
-  const priced = lastUsage !== undefined && !replacedSinceUsage
+  const priced = lastUsage !== undefined && !replacedSinceUsage && !headerSinceUsage
   let projectedTokens: number
   if (priced) {
     let delta = 0

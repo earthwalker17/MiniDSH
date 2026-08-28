@@ -16,7 +16,7 @@ import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import type { SessionEventFrame } from '../../core/session/index.ts'
-import type { AuthorityView, CompactResult, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
+import type { ApprovalAnswerResult, AuthorityView, CompactResult, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
@@ -139,7 +139,14 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       pendingApproval = undefined
       const answer = line.toLowerCase()
       const outcome = answer === 'y' || answer === 'yes' ? 'allowed-once' : 'rejected'
-      await client.request('approval/answer', { sessionId, id: approval.id, outcome }).catch(printError)
+      try {
+        const result = await client.request<ApprovalAnswerResult>('approval/answer', { sessionId, id: approval.id, outcome })
+        // Settled elsewhere before the answer landed: say so rather than let a
+        // y/N vanish into a prompt nothing was waiting on.
+        if (result.outcome === 'not-pending') out.write(`that approval (${approval.id}) is no longer pending\n`)
+      } catch (error) {
+        printError(error)
+      }
       return
     }
     if (line.length === 0) {

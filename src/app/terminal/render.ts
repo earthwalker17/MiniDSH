@@ -7,7 +7,7 @@
  */
 import { messageText, restoreMessage } from '../../core/llm/message.ts'
 import { formatTokens, meterSession } from '../../core/metering/index.ts'
-import type { EventEnvelope } from '../../core/session/index.ts'
+import { TRACE_TYPES, type EventEnvelope } from '../../core/session/index.ts'
 
 function preview(text: string, max = 80): string {
   const oneLine = text.replace(/\s+/g, ' ').trim()
@@ -37,7 +37,7 @@ export class TerminalRenderer {
 
   /** Records history rendered by `renderHistory`, which never passes through `onEvent`. */
   seed(events: readonly EventEnvelope[]): void {
-    for (const event of events) if (event.type !== 'assistant/chunk') this.seen.push(event)
+    for (const event of events) if (!TRACE_TYPES.has(event.type)) this.seen.push(event)
   }
 
   /**
@@ -60,10 +60,11 @@ export class TerminalRenderer {
   }
 
   onEvent(event: EventEnvelope): string {
-    // Chunks are the bulk of a long session by two orders of magnitude and the
-    // meter never reads one: keeping them would make every rendered line an
-    // O(all chunks) fold and retain the whole stream in the client.
-    if (event.type !== 'assistant/chunk') this.seen.push(event)
+    // The trace tier is the bulk of a long session by two orders of magnitude
+    // and the meter never reads it: keeping it would make every rendered line
+    // an O(all chunks) fold and retain the whole stream in the client. The same
+    // classification the runtime's own folds use (`Session.facts`).
+    if (!TRACE_TYPES.has(event.type)) this.seen.push(event)
     switch (event.type) {
       // The step is priced here, so this is where the number can change.
       case 'assistant/message':

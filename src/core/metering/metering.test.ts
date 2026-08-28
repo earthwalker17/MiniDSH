@@ -81,6 +81,26 @@ describe('the token estimator', () => {
   })
 })
 
+describe('the usage anchor', () => {
+  it('is dropped when a request/header lands after the priced call, so a changed prompt or route is re-estimated', async () => {
+    const { root, session } = await newSession()
+    textTurn(session, 1, 'hello', 'world', { inputTokens: 400, outputTokens: 20 })
+    expect(meterSession(session.events, 1000).priced).toBe(true)
+
+    // The next step changes the header (a role switch, a new tool set) before it is priced.
+    const grown = 'a much longer system prompt '.repeat(20)
+    session.append(TURN_START, { turn: 2 })
+    session.append(STEP_START, { turn: 2, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('again') }, { surfaceOp: { op: 'append' } })
+    session.append(REQUEST_HEADER, { turn: 2, step: 1, header: { ...header, system: grown }, reason: 'change' })
+    const metrics = meterSession(session.events, 1000)
+    expect(metrics.priced).toBe(false)
+    // Whole-surface estimate: the new header's size is in the projection.
+    expect(metrics.projectedTokens).toBeGreaterThan(estimateTokens(grown))
+    await root.dispose()
+  })
+})
+
 describe('metering a session', () => {
   it('reports nothing measurable for a session that has not called the model', async () => {
     const { root, session } = await newSession()

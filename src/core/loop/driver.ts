@@ -28,6 +28,7 @@ import { PROMPT, type AssembledPrompt, type Prompt } from '../prompt/index.ts'
 import {
   ASSISTANT_CHUNK,
   ASSISTANT_MESSAGE,
+  matches,
   REQUEST_HEADER,
   STEP_END,
   STEP_START,
@@ -91,16 +92,13 @@ export class ReactLoopAgent implements Agent {
     this._ctx = ctx
     this.deps = { llm: ctx.get(LLM), tools: ctx.get(TOOLS), prompt: ctx.get(PROMPT) }
     // A seeded (forked/resumed) session already contains turns; numbering must continue, not restart.
-    for (const event of this.session.events) {
-      if (event.type === TURN_START.type) {
-        const turn = (event.data as { turn: number }).turn
-        if (turn > this.turnCount) this.turnCount = turn
-      }
+    for (const event of this.session.facts) {
+      if (matches(event, TURN_START) && event.data.turn > this.turnCount) this.turnCount = event.data.turn
     }
     this.firstLiveTurn = this.turnCount + 1
     // A resumed (or forked) log may carry pending input; restore it silently —
     // the records already in the log are its durable trace.
-    this.inbox.restore(foldInbox(this.session.events))
+    this.inbox.restore(foldInbox(this.session.facts))
   }
 
   /** Post-publication: run restored waking work without new input (the factory calls this). */

@@ -180,13 +180,13 @@ class SandboxService implements Sandbox {
     const session = request.session
     const workspaceRoot = this.rootFor(session)
     if (request.mode !== undefined) return { mode: request.mode, workspaceRoot }
-    const mode = (session ? effectiveSandboxMode(session.events) : undefined) ?? this.defaultMode
+    const mode = (session ? effectiveSandboxMode(session.facts) : undefined) ?? this.defaultMode
     if (session) this.record(session, mode)
     return { mode, workspaceRoot }
   }
 
   setMode(session: Session, mode: SandboxMode): SandboxMode {
-    const recorded = lastSandboxStamp(session.events)
+    const recorded = lastSandboxStamp(session.facts)
     // Compare against what actually governed the session, not only against what
     // was recorded: a session that has not acted yet is under the default, and
     // "switching" to it is not a switch.
@@ -212,7 +212,7 @@ class SandboxService implements Sandbox {
   /** Log-only-when-changed, exactly like `request/header`. */
   private record(session: Session, mode: SandboxMode): void {
     const enforcement = this.enforcementFor(mode)
-    const last = lastSandboxStamp(session.events)
+    const last = lastSandboxStamp(session.facts)
     if (last && last.mode === mode && last.enforcement === enforcement) return
     // Same mode, different enforcement: the session was picked up on another host.
     const reason: SandboxReason = !last ? 'initial' : last.mode === mode ? 'resume' : 'change'

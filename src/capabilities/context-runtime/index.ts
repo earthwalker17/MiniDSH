@@ -29,7 +29,7 @@ confirm your work. When the task is complete, stop and give a short summary of w
 function authorityLines(ctx: Context, agent: Agent | undefined): string[] {
   const sandbox = ctx.tryGet(SANDBOX)
   if (!sandbox) return []
-  const first = agent?.session.events.find((event) => matches(event, SANDBOX_MODE))
+  const first = agent?.session.facts.find((event) => matches(event, SANDBOX_MODE))
   const mode: SandboxMode = first ? first.data.mode : sandbox.defaultMode
   const effect =
     mode === 'read-only'

@@ -5,6 +5,7 @@ import { deriveEventMessage, foldRequestHeader, Surface } from './surface.ts'
 import {
   END_SEED,
   SESSION_FORMAT_VERSION,
+  TRACE_TYPES,
   type EventEnvelope,
   type EventKind,
   type RequestHeader,
@@ -45,6 +46,8 @@ export class Session {
   /** Live-only provenance of this lifecycle; never persisted (see `SessionOrigin`). */
   readonly origin: SessionOrigin
   private readonly log: EventEnvelope[] = []
+  /** The log minus its trace tier, in order: what every runtime fold walks. */
+  private readonly factLog: EventEnvelope[] = []
   private readonly surface = new Surface()
   private readonly host: SessionHost
   private readonly firstLiveSeq: number
@@ -79,6 +82,16 @@ export class Session {
     return this.log
   }
 
+  /**
+   * The facts: every event that is not a trace (`TRACE_TYPES`), in log order,
+   * seqs preserved. A fold that never reads a chunk — and no runtime fold does —
+   * walks this instead of `events`, which a long session fills with chunks by
+   * two orders of magnitude. Index `events[seq]` when a seq is already in hand.
+   */
+  get facts(): readonly EventEnvelope[] {
+    return this.factLog
+  }
+
   /** Seq at which this lifecycle's own writes begin (after any seed). */
   get liveStart(): number {
     return this.firstLiveSeq
@@ -101,6 +114,7 @@ export class Session {
     const event = this.freezeEnvelope(raw)
     this.surface.validate(event)
     this.log.push(event)
+    if (!TRACE_TYPES.has(event.type)) this.factLog.push(event)
     this.surface.apply(event)
   }
 
@@ -141,6 +155,7 @@ export class Session {
     this.surface.validate(event)
     const deliver = live ? this.host.prepare(this, event) : undefined
     this.log.push(event)
+    if (!TRACE_TYPES.has(event.type)) this.factLog.push(event)
     this.surface.apply(event)
     deliver?.()
     return event
@@ -162,7 +177,7 @@ export class Session {
   }
 
   foldRequestHeader(): RequestHeader | undefined {
-    return foldRequestHeader(this.log)
+    return foldRequestHeader(this.factLog)
   }
 
   flush(): Promise<void> {

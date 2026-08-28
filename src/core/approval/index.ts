@@ -12,23 +12,10 @@ import { serviceKey, waterfallEvent, type Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
 import type { CallId } from '../ids.ts'
 import type { Session } from '../session/index.ts'
-import { eventKind, matches, type EventEnvelope } from '../session/types.ts'
+import type { EventEnvelope } from '../session/types.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, effectiveApprovalPolicy, isApprovalOutcome, type ApprovalOutcome, type ApprovalPolicy } from './events.ts'
 
-export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
-const VALID_OUTCOMES: ReadonlySet<string> = new Set<ApprovalOutcome>(['allowed-once', 'rejected', 'cancelled', 'unavailable'])
-
-/** The closed outcome vocabulary, declared once — the seam and its invariant share it. */
-export function isApprovalOutcome(value: unknown): value is ApprovalOutcome {
-  return typeof value === 'string' && VALID_OUTCOMES.has(value)
-}
-
-/** `ask` consults the answerer chain; `never` refuses every request without asking anyone. */
-export type ApprovalPolicy = 'ask' | 'never'
-export const APPROVAL_POLICIES: readonly ApprovalPolicy[] = ['ask', 'never']
-
-export function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
-  return value === 'ask' || value === 'never'
-}
+export * from './events.ts'
 
 export interface ApprovalRequest {
   readonly agent: Agent
@@ -61,19 +48,6 @@ export const APPROVAL = serviceKey<Approval>('approval')
 /** Answerer chain; first non-delegating listener wins. Default thunk returns `unavailable`. */
 export const APPROVAL_REQUEST = waterfallEvent<[prompt: ApprovalPrompt], Promise<ApprovalOutcome>>('approval/request')
 
-export const APPROVAL_ASKED = eventKind<{ id: string; toolName: string; callId?: string; reason?: string }>('approval/asked')
-export const APPROVAL_DECIDED = eventKind<{ id: string; outcome: ApprovalOutcome }>('approval/decided')
-/** Log-only, like `sandbox/mode`: the LAST such event is the session policy. */
-export const APPROVAL_POLICY = eventKind<{ policy: ApprovalPolicy; reason: 'initial' | 'change' }>('approval/policy')
-
-export function effectiveApprovalPolicy(events: readonly EventEnvelope[]): ApprovalPolicy | undefined {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]!
-    if (matches(event, APPROVAL_POLICY)) return event.data.policy
-  }
-  return undefined
-}
-
 class ApprovalService implements Approval {
   readonly defaultPolicy: ApprovalPolicy
   constructor(defaultPolicy: ApprovalPolicy) {
@@ -81,11 +55,11 @@ class ApprovalService implements Approval {
   }
 
   policyFor(session: Session | undefined): ApprovalPolicy {
-    return (session ? effectiveApprovalPolicy(session.events) : undefined) ?? this.defaultPolicy
+    return (session ? effectiveApprovalPolicy(session.facts) : undefined) ?? this.defaultPolicy
   }
 
   setPolicy(session: Session, policy: ApprovalPolicy): ApprovalPolicy {
-    const previous = effectiveApprovalPolicy(session.events)
+    const previous = effectiveApprovalPolicy(session.facts)
     if (previous === policy) return policy
     session.append(APPROVAL_POLICY, { policy, reason: previous === undefined ? 'initial' : 'change' })
     return policy
