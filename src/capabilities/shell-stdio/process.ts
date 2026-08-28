@@ -109,6 +109,9 @@ export class ShellProcess implements ShellSession {
     const enforcement = this.confine(request.policy)
     const sandbox = { mode: request.policy.mode, enforcement }
     if (this.disposed) return { output: '', timedOut: false, truncated: false, reset: false, sandbox }
+    // An already-cancelled call dispatches nothing: the poll loop would kill
+    // the child a tick later, but by then the command had been written.
+    if (request.signal?.aborted) return { output: '', timedOut: false, truncated: false, reset: false, sandbox }
     const child = this.ensureChild()
     this.buffer = ''
     const marker = `${this.markerBase}${++this.commandSeq}`

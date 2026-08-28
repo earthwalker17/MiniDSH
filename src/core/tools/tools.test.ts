@@ -145,4 +145,20 @@ describe('tool execution pipeline', () => {
     expect(result.isError).toBe(true)
     expect(result.error?.info?.code).toBe('DENIED')
   })
+
+  it('consults guards BEFORE asking for consent, so a call a guard refuses never interrupts a person', async () => {
+    const { tools, agent, signal } = await setup()
+    tools.register(harness!.root, upper)
+    harness!.root.on(TOOLS_PRE_EXECUTE, async () => ({ kind: 'ask' as const }))
+    let asked = 0
+    harness!.root.on(APPROVAL_REQUEST, async () => {
+      asked += 1
+      return 'allowed-once' as const
+    })
+    tools.guard(harness!.root, () => 'guarded off')
+    const result = await tools.execute(call('upper', { text: 'x' }, agent, signal))
+    expect(result.error?.info?.code).toBe('DENIED')
+    expect(asked).toBe(0)
+    expect(agent.session.events.some((event) => event.type === 'approval/asked')).toBe(false)
+  })
 })

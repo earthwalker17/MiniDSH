@@ -14,7 +14,7 @@
  * nothing mutates the mode out of band.
  */
 import { serviceKey, type Context, type Plugin } from '../../kernel/index.ts'
-import { AGENTS } from '../agent/index.ts'
+import { AGENT_CREATED, AGENTS } from '../agent/index.ts'
 import { createPluginMessage } from '../llm/message.ts'
 import { eventKind, matches, type EventEnvelope, type Session } from '../session/index.ts'
 import { SHELL } from '../shell/index.ts'
@@ -122,11 +122,19 @@ export function effectiveSandboxMode(events: readonly EventEnvelope[]): SandboxM
 export interface Sandbox {
   /**
    * Resolves the policy for one call AND records it when it differs from the
-   * last recorded stamp — resolving is the audit act, so every effect is
-   * preceded by a recorded stamp without eagerly stamping a session that never
-   * acts. An escalation (`request.mode`) is never recorded.
+   * last recorded stamp (a session picked up on a host that enforces
+   * differently logs `resume`). The OPENING stamp is written at agent creation
+   * (`open`), so the audit reads what a session started under before its
+   * first effect; this is the safety net for a session created outside the
+   * registry. An escalation (`request.mode`) is never recorded.
    */
   resolve(request: SandboxPolicyRequest): SandboxExecutionPolicy
+  /**
+   * Records the mode a session opens under, iff nothing is recorded yet —
+   * the deployment default for a fresh session, nothing new for a resumed one
+   * whose log already says. Called at `agent/created`, before publication.
+   */
+  open(session: Session): void
   /** The durable switch. Appends `sandbox/mode` iff the recorded stamp changes. */
   setMode(session: Session, mode: SandboxMode): SandboxMode
   /** What the mounted execution world can enforce for a mode on this host. */
@@ -185,6 +193,10 @@ class SandboxService implements Sandbox {
     return { mode, workspaceRoot }
   }
 
+  open(session: Session): void {
+    this.record(session, effectiveSandboxMode(session.facts) ?? this.defaultMode)
+  }
+
   setMode(session: Session, mode: SandboxMode): SandboxMode {
     const recorded = lastSandboxStamp(session.facts)
     // Compare against what actually governed the session, not only against what
@@ -224,7 +236,11 @@ class SandboxService implements Sandbox {
 export const sandboxPlugin: Plugin<SandboxConfig | undefined> = {
   name: 'core-sandbox',
   apply(ctx, config) {
-    ctx.provide(SANDBOX, new SandboxService(ctx, config ?? {}))
+    const service = new SandboxService(ctx, config ?? {})
+    ctx.provide(SANDBOX, service)
+    // The opening stamp is the creator's act, written before publication: the
+    // same discipline as the approval policy and the composition record.
+    ctx.on(AGENT_CREATED, (agent) => service.open(agent.session))
   },
 }
 

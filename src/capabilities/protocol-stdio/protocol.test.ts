@@ -374,8 +374,11 @@ describe('protocol-stdio: the authority control plane', () => {
     const stamp = await client.waitFor(() => client.frames('sandbox/mode').at(1), 'the switch frame')
     expect(client.frames('sandbox/mode').at(0)!.event.data).toEqual({ mode: 'workspace-write', enforcement: 'none', reason: 'initial' })
     expect(stamp.event.data).toEqual({ mode: 'read-only', enforcement: 'none', reason: 'change' })
-    const policy = client.frames('approval/policy').at(-1)!
-    expect(policy.event.data).toEqual({ policy: 'never', reason: 'initial' })
+    // The policy opened as `ask` at creation; the switch is a change.
+    expect(client.frames('approval/policy').map((frame) => frame.event.data)).toEqual([
+      { policy: 'ask', reason: 'initial' },
+      { policy: 'never', reason: 'change' },
+    ])
 
     // Reading takes no arguments and changes nothing.
     const again = await client.result<{ sandbox: string }>('session/authority', { sessionId })

@@ -152,6 +152,49 @@ describe('escalation', () => {
     expect(consulted).toBe(false)
   })
 
+  /**
+   * The registry deadline used to keep ticking while a person deliberated over
+   * this body's escalation consent; with the default 120 s executor budget a
+   * 135 s deliberation ended as TOOL_TIMEOUT, and the grant then landed on a
+   * call the model had already been told was over. The executor owns the whole
+   * deadline now, so consent takes as long as consent takes.
+   */
+  it.skipIf(!shellAvailable)('lets consent outlast the registry default budget: the shell tool owns its own deadline', async () => {
+    workdir = mkdtempSync(join(tmpdir(), 'minidsh-shelltool-'))
+    harness = await coreHarness({ tools: { defaultTimeoutMs: 30 } })
+    harness.root.plugin(shellStdioPlugin, { dialect })
+    harness.root.plugin(toolShellPlugin, {})
+    await harness.root.settle()
+    const { agent } = await harness.create({ cwd: workdir })
+    harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => {
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      return 'allowed-once'
+    })
+    const result = await harness.root
+      .get(TOOLS)
+      .execute(toolCall('call-slow', toolName, JSON.stringify({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'run it' }), agent, new AbortController().signal))
+    expect(result.error?.info?.code).toBeUndefined()
+    expect(result.content.map((block) => (block.type === 'text' ? block.text : '')).join('')).toContain('ran')
+  })
+
+  it.skipIf(!shellAvailable)('an already-cancelled call dispatches nothing to the persistent shell', async () => {
+    workdir = mkdtempSync(join(tmpdir(), 'minidsh-shelltool-'))
+    const { ShellProcess } = await import('../shell-stdio/process.ts')
+    const shell = new ShellProcess(dialect, workdir)
+    try {
+      const controller = new AbortController()
+      controller.abort()
+      const started = Date.now()
+      const result = await shell.exec({ command: echoCmd, policy: { mode: 'danger-full-access', workspaceRoot: workdir }, signal: controller.signal })
+      expect(result.output).toBe('')
+      expect(result.reset).toBe(false)
+      // Nothing was spawned, so nothing had to be killed: this returns at once.
+      expect(Date.now() - started).toBeLessThan(500)
+    } finally {
+      await shell.dispose()
+    }
+  })
+
   it.skipIf(!shellAvailable)('runs the command once when granted, and never records it as a session switch', async () => {
     const { agent, run } = await setup()
     harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')

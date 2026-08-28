@@ -344,6 +344,9 @@ describe('crash repair closes the committed surface, not just the logged calls',
       'step/end',
       'turn/end',
       'session/end-seed',
+      // A log from before opening records existed gets them at pickup.
+      'approval/policy',
+      'sandbox/mode',
     ])
 
     // What the wire would see: every tool_call has its tool message, in order.

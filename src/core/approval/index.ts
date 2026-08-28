@@ -9,6 +9,7 @@
  * gate. Like the sandbox mode, a switch IS its event.
  */
 import { serviceKey, waterfallEvent, type Plugin } from '../../kernel/index.ts'
+import { AGENT_CREATED } from '../agent/index.ts'
 import type { Agent } from '../agent/types.ts'
 import type { CallId } from '../ids.ts'
 import type { Session } from '../session/index.ts'
@@ -38,6 +39,12 @@ export interface Approval {
   request(request: ApprovalRequest): Promise<ApprovalOutcome>
   /** The durable switch. Appends `approval/policy` iff the policy actually changes. */
   setPolicy(session: Session, policy: ApprovalPolicy): ApprovalPolicy
+  /**
+   * Records the policy a session opens under, iff nothing is recorded yet — so
+   * every decision is preceded by the policy that governed it, and the audit
+   * reads what the session started under. Called at `agent/created`.
+   */
+  open(session: Session): void
   /** The policy governing a session: its last recorded one, else the deployment default. */
   policyFor(session: Session | undefined): ApprovalPolicy
   readonly defaultPolicy: ApprovalPolicy
@@ -58,15 +65,25 @@ class ApprovalService implements Approval {
     return (session ? effectiveApprovalPolicy(session.facts) : undefined) ?? this.defaultPolicy
   }
 
+  open(session: Session): void {
+    if (effectiveApprovalPolicy(session.facts) !== undefined) return
+    session.append(APPROVAL_POLICY, { policy: this.defaultPolicy, reason: 'initial' })
+  }
+
   setPolicy(session: Session, policy: ApprovalPolicy): ApprovalPolicy {
+    // Record what the session started under BEFORE the change, exactly as the
+    // sandbox does: the audit then reads "started X, then changed to Y".
+    this.open(session)
     const previous = effectiveApprovalPolicy(session.facts)
     if (previous === policy) return policy
-    session.append(APPROVAL_POLICY, { policy, reason: previous === undefined ? 'initial' : 'change' })
+    session.append(APPROVAL_POLICY, { policy, reason: 'change' })
     return policy
   }
 
   async request(request: ApprovalRequest): Promise<ApprovalOutcome> {
     const session = request.agent.session
+    // A decision is preceded by the policy that governs it, always.
+    this.open(session)
     // The id is the asked event's own seq: unique within the session for its whole
     // lifetime (across resume and fork), with no in-memory counter to reset.
     const id = `approval-${session.seq}`
@@ -129,7 +146,10 @@ export interface ApprovalConfig {
 export const approvalPlugin: Plugin<ApprovalConfig | undefined> = {
   name: 'core-approval',
   apply(ctx, config) {
-    ctx.provide(APPROVAL, new ApprovalService(config?.policy ?? 'ask'))
+    const service = new ApprovalService(config?.policy ?? 'ask')
+    ctx.provide(APPROVAL, service)
+    // The opening record is the creator's act, written before publication.
+    ctx.on(AGENT_CREATED, (agent) => service.open(agent.session))
   },
 }
 

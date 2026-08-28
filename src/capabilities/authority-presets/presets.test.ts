@@ -71,7 +71,8 @@ describe('applying a preset in a real composition', () => {
     const intentAt = kinds.indexOf('authority/preset')
     expect(intentAt).toBeGreaterThanOrEqual(0)
     // The knob events follow the intent; their content is the setters' truth.
-    expect(kinds.slice(intentAt)).toEqual(['authority/preset', 'sandbox/mode', 'sandbox/mode', 'inbox/spliced', 'approval/policy'])
+    // (The opening stamps were written at creation, so each knob logs one change.)
+    expect(kinds.slice(intentAt)).toEqual(['authority/preset', 'sandbox/mode', 'inbox/spliced', 'approval/policy'])
     expect(presets.selectForSession(session)).toBe('danger-full-access')
     expect(root!.get(SANDBOX).resolve({ session }).mode).toBe('danger-full-access')
 

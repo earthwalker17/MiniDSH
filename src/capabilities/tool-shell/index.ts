@@ -82,10 +82,12 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
     description: shell.dialect === 'pwsh' ? PWSH_DESCRIPTION : BASH_DESCRIPTION,
     input: InputSchema,
     output: z.object({ output: z.string(), exitCode: z.number().nullable() }),
-    // The executor owns the useful deadline: it kills the child and returns the
-    // partial output. The registry budget is only the backstop for a body that
-    // never comes back at all, so it sits deliberately above the executor's.
-    timeoutMs: timeoutMs + 15_000,
+    // The executor owns the deadline outright: it kills the child and returns
+    // the partial output. No registry backstop, because the registry clock
+    // would also tick while a person deliberated over this body's escalation
+    // consent — and a grant landing after TOOL_TIMEOUT ran the command on a
+    // call the model had already been told was over.
+    timeoutMs: null,
     presentCall: (args): ToolCallView => ({ card: 'terminal', title: args.command }),
     render: (_args, value) => {
       const suffix = value.exitCode !== null && value.exitCode !== 0 ? `\n[exit code: ${value.exitCode}]` : ''

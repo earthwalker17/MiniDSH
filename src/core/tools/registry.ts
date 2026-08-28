@@ -197,11 +197,20 @@ class ToolRegistry implements Tools {
     return this.post(timed, outcome.candidate, scope)
   }
 
-  /** Runs pre-execute policy, approval, and guards. Returns a denial result, or undefined to proceed. */
+  /**
+   * Runs pre-execute policy, the guards, then approval. Returns a denial
+   * result, or undefined to proceed. Guards come BEFORE the ask: they are
+   * synchronous and consent-independent, so a call they would refuse anyway
+   * must never interrupt a person or spend an allowed-once in the log.
+   */
   private async gate(execution: ToolContext, scope: Context): Promise<ToolResult | undefined> {
     if (execution.signal.aborted) return errorResult('tool call aborted before dispatch', 'AbortError', 'ABORTED_BEFORE_DISPATCH')
     const decision = await scope.waterfall(TOOLS_PRE_EXECUTE, execution, async () => ({ kind: 'allow' }) as PreToolDecision)
     if (decision.kind === 'deny') return errorResult(`denied: ${decision.reason}`, 'Denied', 'DENIED')
+    for (const guard of this.guards.view(execution.agent).values()) {
+      const denial = guard(execution)
+      if (denial !== undefined) return errorResult(`denied: ${denial}`, 'Denied', 'DENIED')
+    }
     if (decision.kind === 'ask') {
       const approval = this.ctx.tryGet(APPROVAL)
       if (!approval || !execution.agent) return errorResult('approval unavailable', 'Denied', 'DENIED')
@@ -213,10 +222,6 @@ class ToolRegistry implements Tools {
         ...(decision.reason === undefined ? {} : { reason: decision.reason }),
       })
       if (outcome !== 'allowed-once') return errorResult(`approval ${outcome}`, 'Denied', outcome === 'cancelled' ? 'ABORTED' : 'DENIED')
-    }
-    for (const guard of this.guards.view(execution.agent).values()) {
-      const denial = guard(execution)
-      if (denial !== undefined) return errorResult(`denied: ${denial}`, 'Denied', 'DENIED')
     }
     return undefined
   }

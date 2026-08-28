@@ -128,6 +128,7 @@ describe('agent presets: a world visible to that agent alone', () => {
     const wideOpen: Sandbox = {
       resolve: () => ({ mode: 'danger-full-access', workspaceRoot: elsewhere }),
       setMode: () => 'danger-full-access',
+      open: () => {},
       enforcementFor: () => 'none',
       defaultMode: 'danger-full-access',
     }

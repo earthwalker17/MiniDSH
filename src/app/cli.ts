@@ -486,7 +486,12 @@ const stderrLogger: Logger = {
   error: (message) => process.stderr.write(`error: ${message}\n`),
 }
 
-/** Built-in rows a config layer can widen authority or blind the runtime through. */
+/**
+ * Built-in rows a config layer can widen authority or blind the runtime
+ * through — including the effect boundaries themselves: the fence lives in
+ * the fs provider and the refusal in the shell provider, so replacing either
+ * row with a module-loaded provider is replacing the boundary.
+ */
 const AUTHORITY_SENSITIVE = new Set([
   'sandbox',
   'approval',
@@ -497,6 +502,11 @@ const AUTHORITY_SENSITIVE = new Set([
   'authority-invariant',
   'agent-invariant',
   'loop-invariant',
+  'fs',
+  'shell',
+  'tool-shell',
+  'tool-editor',
+  'spill',
 ])
 
 /**
@@ -517,6 +527,11 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'core-agent-invariant',
   'core-agent-loop-invariant',
   'composition-record',
+  'fs-local',
+  'shell-stdio',
+  'tool-shell',
+  'tool-editor',
+  'spill-local',
 ])
 
 /**
@@ -661,7 +676,16 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
  */
 function renderAudit(events: readonly EventEnvelope[], write: (line: string) => void): void {
   const calls = new Map<string, string>()
-  const denials = new Set(['DENIED', 'ABORTED', 'FS_SANDBOX_DENIED', 'SANDBOX_ESCALATION_DENIED', 'SANDBOX_NOT_WIDER'])
+  const denials = new Set([
+    'DENIED',
+    'BLOCKED',
+    'ABORTED',
+    'ABORTED_BEFORE_DISPATCH',
+    'FS_SANDBOX_DENIED',
+    'SANDBOX_UNAVAILABLE',
+    'SANDBOX_ESCALATION_DENIED',
+    'SANDBOX_NOT_WIDER',
+  ])
   const at = (seq: number): string => String(seq).padStart(4)
   for (const event of events) {
     const data = event.data as Record<string, string | undefined>

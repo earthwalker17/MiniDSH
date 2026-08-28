@@ -71,19 +71,28 @@ describe('sandbox policy: one stamp, derived roots', () => {
 })
 
 describe('sandbox mode: durable, folded, recorded when it changes', () => {
-  it('records the effective mode the first time a call resolves, and not again', async () => {
+  it('records the opening mode at agent creation, and a resolve records nothing new', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()
     const sandbox = harness.root.get(SANDBOX)
-    expect(stamps(agent.session.events)).toHaveLength(0)
+    // Before any effect: the audit already says what the session started under.
+    expect(stamps(agent.session.events)).toEqual([{ mode: 'workspace-write', enforcement: 'none', reason: 'initial' }])
 
     const first = sandbox.resolve({ session: agent.session })
     expect(first.mode).toBe('workspace-write')
-    expect(stamps(agent.session.events)).toEqual([{ mode: 'workspace-write', enforcement: 'none', reason: 'initial' }])
-
     sandbox.resolve({ session: agent.session })
     sandbox.resolve({ session: agent.session })
     expect(stamps(agent.session.events)).toHaveLength(1)
+  })
+
+  it('a session created outside the registry is still stamped by its first resolve', async () => {
+    harness = await coreHarness()
+    const { SESSIONS } = await import('../session/index.ts')
+    const session = harness.root.get(SESSIONS).create({ cwd: process.cwd() })
+    expect(stamps(session.events)).toHaveLength(0)
+    harness.root.get(SANDBOX).resolve({ session })
+    expect(stamps(session.events)).toEqual([{ mode: 'workspace-write', enforcement: 'none', reason: 'initial' }])
+    await harness.root.get(SESSIONS).detach(session)
   })
 
   it('an approved one-shot escalation is never recorded as a session switch', async () => {
@@ -176,7 +185,7 @@ describe('approval policy: the strict unattended stance', () => {
     expect((decided.data as { id: string; outcome: string })).toEqual({ id: (asked.data as { id: string }).id, outcome: 'rejected' })
   })
 
-  it('folds the last policy event and records a switch only when it changes', async () => {
+  it('opens with the deployment policy at creation, folds the last policy event, and records a switch only when it changes', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()
     const approval = harness.root.get(APPROVAL)
@@ -187,10 +196,25 @@ describe('approval policy: the strict unattended stance', () => {
     approval.setPolicy(agent.session, 'ask')
     const records = agent.session.events.filter((event) => matches(event, APPROVAL_POLICY)).map((event) => event.data)
     expect(records).toEqual([
-      { policy: 'never', reason: 'initial' },
+      { policy: 'ask', reason: 'initial' },
+      { policy: 'never', reason: 'change' },
       { policy: 'ask', reason: 'change' },
     ])
     expect(approval.policyFor(agent.session)).toBe('ask')
+  })
+
+  it('every decision is preceded by the policy that governed it, even for a session created outside the registry', async () => {
+    harness = await coreHarness()
+    const { SESSIONS } = await import('../session/index.ts')
+    const { agent } = await harness.create()
+    // A bare session carries no opening record until the seam acts on it.
+    const bare = harness.root.get(SESSIONS).create({ cwd: process.cwd() })
+    expect(bare.events.some((event) => matches(event, APPROVAL_POLICY))).toBe(false)
+    harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'rejected')
+    await harness.root.get(APPROVAL).request({ agent: { ...agent, session: bare } as typeof agent, toolName: 'x' })
+    const kinds = bare.events.map((event) => event.type)
+    expect(kinds.indexOf('approval/policy')).toBeLessThan(kinds.indexOf('approval/asked'))
+    await harness.root.get(SESSIONS).detach(bare)
   })
 })
 
