@@ -42,3 +42,15 @@ export function settingsPath(): string {
 export function credentialsPath(): string {
   return join(resolveHome(), 'credentials.json')
 }
+
+/** The whole layout as the boot options that carry it — one value, resolved once per command. */
+export interface HomeLayout {
+  readonly sessionsRoot: string
+  readonly spillRoot: string
+  readonly globalInstructionsPath: string
+  readonly credentialsPath: string
+}
+
+export function homeLayout(): HomeLayout {
+  return { sessionsRoot: sessionsDir(), spillRoot: spillDir(), globalInstructionsPath: globalInstructionsPath(), credentialsPath: credentialsPath() }
+}

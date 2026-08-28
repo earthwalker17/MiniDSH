@@ -61,6 +61,8 @@ export interface InitializeResult {
   readonly defaultAgentOptions: AgentOptions
   /** What a session created now would start under, and what this host can enforce. */
   readonly defaultAuthority: AuthorityView
+  /** The directories a session's `cwd` — its sandbox workspace root — may lie under. Host policy, never the client's. */
+  readonly workspaceRoots: readonly string[]
 }
 
 /** The authority a session is under. `enforcement` is a reported fact about THIS host. */
@@ -74,9 +76,11 @@ export interface AuthorityView {
 
 export interface AuthorityParams {
   readonly sessionId: string
-  /** Either may be omitted; omitting both reads the current authority without changing it. */
+  /** Either may be omitted; omitting all three reads the current authority without changing it. */
   readonly sandbox?: SandboxMode
   readonly approval?: ApprovalPolicy
+  /** A named preset over the pair; exclusive with `sandbox`/`approval`. */
+  readonly preset?: string
 }
 
 export type PromptMode = 'followup' | 'steer'
@@ -88,6 +92,12 @@ export interface PromptParams {
   /** `followup` (default) queues a next-turn prompt; `steer` lands at the next step boundary. */
   readonly mode?: PromptMode
   readonly agentOptions?: Partial<AgentOptions>
+  /**
+   * The new session's working directory — and therefore its sandbox workspace
+   * root. It must be an existing directory inside one of the host's
+   * `workspaceRoots` (see `initialize`); anything else is INVALID_PARAMS, because
+   * the wire may choose WHERE inside the host's policy, never the policy.
+   */
   readonly cwd?: string
 }
 

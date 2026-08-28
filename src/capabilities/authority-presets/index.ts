@@ -92,7 +92,8 @@ export const authorityPresetsPlugin: Plugin<AuthorityPresetsConfig | undefined> 
         if (info.name !== SESSION_EVENT.name) return
         const event = info.args[1] as EventEnvelope
         if (!matches(event, AUTHORITY_PRESET)) return
-        const name = (event.data as { name?: unknown }).name
+        // A possibly-forged payload: read it as unknown, never through `matches`.
+        const name = (event.data as Record<string, unknown> | null)?.name
         if (typeof name !== 'string' || !table.has(name)) {
           fail(`authority/preset names an unknown preset ${JSON.stringify(name)}`)
         }

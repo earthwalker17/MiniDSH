@@ -14,7 +14,7 @@ import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENTS, AGENT_STATUS, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
-import { SANDBOX } from '../../core/sandbox/index.ts'
+import { canonicalPath, SANDBOX } from '../../core/sandbox/index.ts'
 import { SESSIONS, SESSION_EVENT } from '../../core/session/index.ts'
 import { ProtocolServer } from './server.ts'
 import { NdjsonTransport } from './transport.ts'
@@ -28,6 +28,8 @@ export interface ProtocolConfig {
   readonly input?: NodeJS.ReadableStream
   readonly output?: NodeJS.WritableStream
   readonly cwd?: string
+  /** Directories a client-chosen session `cwd` must lie under (default: `cwd` alone). Host policy. */
+  readonly workspaceRoots?: readonly string[]
   readonly defaultAgentOptions: AgentOptions
   readonly serverVersion?: string
   /** Per-agent world for every agent this surface creates or resumes (the app builds it from a named preset). */
@@ -43,10 +45,12 @@ export const protocolStdioPlugin: Plugin<ProtocolConfig> = {
     const input = config.input ?? process.stdin
     const output = config.output ?? process.stdout
     const transport = new NdjsonTransport(input, output)
+    const cwd = config.cwd ?? process.cwd()
     const server = new ProtocolServer(
       ctx,
       {
-        cwd: config.cwd ?? process.cwd(),
+        cwd,
+        workspaceRoots: (config.workspaceRoots ?? [cwd]).map((root) => canonicalPath(root)),
         defaultAgentOptions: config.defaultAgentOptions,
         serverVersion: config.serverVersion ?? '0.1.0',
         ...(config.setup === undefined ? {} : { setup: config.setup }),

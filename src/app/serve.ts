@@ -11,6 +11,8 @@ import { bootComposition, type BootOptions } from './headless.ts'
 
 export interface ServeOptions extends BootOptions {
   readonly cwd: string
+  /** Directories a client-chosen session cwd may lie under (default: `cwd`). Host policy, never the wire's. */
+  readonly workspaceRoots?: readonly string[]
   readonly input?: NodeJS.ReadableStream
   readonly output?: NodeJS.WritableStream
   /** Per-agent world for every agent the protocol surface creates or resumes (built from a named agent preset). */
@@ -31,6 +33,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
   })
   const protocolConfig: ProtocolConfig = {
     cwd: options.cwd,
+    workspaceRoots: options.workspaceRoots ?? [options.cwd],
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
     onClose: () => resolveClosed(),
     ...(options.agentSetup === undefined ? {} : { setup: options.agentSetup }),

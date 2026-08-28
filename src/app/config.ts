@@ -163,10 +163,16 @@ export function applyLayers(base: readonly Row[], layers: readonly NamedLayer[],
   for (const row of base) provenance.set(row.id, BASE_LAYER)
   let rows = base.map((row) => ({ ...row }))
   for (const layer of layers) {
-    const before = new Set(rows.map((row) => row.id))
+    const before = new Map(rows.map((row) => [row.id, row]))
     rows = applyPatches(rows, layer.patches, (message) => warn(`${layer.name}: ${message}`))
     for (const patch of layer.patches) {
-      if (!('insert' in patch) && before.has(patch.id)) provenance.set(patch.id, layer.name)
+      if ('insert' in patch) continue
+      const target = before.get(patch.id)
+      if (!target) continue
+      // A touch is a CHANGE: a patch that restates the row as it already was
+      // (`disabled: false` on an enabled row) is not something to flag.
+      const changed = (patch.config !== undefined && patch.config !== target.config) || (patch.disabled !== undefined && patch.disabled !== (target.disabled ?? false))
+      if (changed) provenance.set(patch.id, layer.name)
     }
     for (const row of rows) {
       if (!before.has(row.id)) provenance.set(row.id, layer.name)

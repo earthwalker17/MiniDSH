@@ -13,9 +13,10 @@ import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
-import type { SessionEventFrame } from '../../core/session/index.ts'
+import { matches, type SessionEventFrame } from '../../core/session/index.ts'
 import type { ApprovalAnswerResult, AuthorityView, CompactResult, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
@@ -88,11 +89,11 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     if (frame.event.seq < liveFromSeq) return // already in the rendered snapshot
     const text = renderer.onEvent(frame.event)
     if (text) out.write(text)
-    if (frame.event.type === 'approval/asked') {
-      askApproval(frame.event.data as { id: string; toolName: string; reason?: string })
-    } else if (frame.event.type === 'approval/decided') {
+    if (matches(frame.event, APPROVAL_ASKED)) {
+      askApproval(frame.event.data)
+    } else if (matches(frame.event, APPROVAL_DECIDED)) {
       // Settled elsewhere (cancelled turn, another answerer): stop asking.
-      if (pendingApproval?.id === (frame.event.data as { id: string }).id) pendingApproval = undefined
+      if (pendingApproval?.id === frame.event.data.id) pendingApproval = undefined
     }
   }
 
@@ -315,12 +316,8 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       // A prompt already pending in the snapshot (asked, never decided) still needs an answer.
       const asked = new Map<string, { id: string; toolName: string; reason?: string }>()
       for (const event of history.events) {
-        if (event.type === 'approval/asked') {
-          const data = event.data as { id: string; toolName: string; reason?: string }
-          asked.set(data.id, data)
-        } else if (event.type === 'approval/decided') {
-          asked.delete((event.data as { id: string }).id)
-        }
+        if (matches(event, APPROVAL_ASKED)) asked.set(event.data.id, event.data)
+        else if (matches(event, APPROVAL_DECIDED)) asked.delete(event.data.id)
       }
       for (const data of asked.values()) askApproval(data)
       attached = true

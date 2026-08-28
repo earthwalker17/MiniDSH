@@ -3,12 +3,15 @@
  * only `ctx.agents`/`ctx.sessions` via the runner, and exits 0 iff the turn
  * completed. `--json` streams raw session events to stdout; `sessions show`
  * reads the log only.
+ *
+ * Every command boots through ONE preamble (`prepareBoot`): flags, settings,
+ * the disk layers, the preset and agent-preset flags — so `config`, `--preset`
+ * validation and `sessions` compose the exact rows a boot would mount, not an
+ * approximation of them.
  */
 import { createRoot, type Logger } from '../kernel/index.ts'
-import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
-import type { EventEnvelope } from '../core/session/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
@@ -19,7 +22,8 @@ import type { Context } from '../kernel/index.ts'
 import { compose, defaultDialect, type Row } from './compose.ts'
 import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
-import { compositionPath, credentialsPath, globalInstructionsPath, resolveHome, sessionsDir, spillDir, settingsPath } from './home.ts'
+import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
+import { auditLines, describeEvent } from './present.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
 import { runTerminal } from './terminal/index.ts'
@@ -53,140 +57,100 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   return { command, positional, flags, patchFiles }
 }
 
-function preview(text: string, max = 80): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim()
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
+const stderrLogger: Logger = {
+  warn: (message) => process.stderr.write(`warn: ${message}\n`),
+  error: (message) => process.stderr.write(`error: ${message}\n`),
 }
 
-/** Human-readable progress line for one session event, or undefined to skip. */
-function renderEvent(event: EventEnvelope): string | undefined {
-  switch (event.type) {
-    case 'user/message': {
-      const message = restoreMessage((event.data as { message: Parameters<typeof restoreMessage>[0] }).message)
-      return message.source.kind === 'user' ? undefined : `  · context (${message.source.kind})`
-    }
-    case 'tool/call': {
-      const data = event.data as { name: string; arguments: string }
-      return `  → ${data.name} ${preview(data.arguments)}`
-    }
-    case 'tool/result': {
-      const data = event.data as { error?: { code: string } }
-      return data.error ? `    ✗ ${data.error.code}` : '    ✓'
-    }
-    case 'assistant/message': {
-      const text = messageText(restoreMessage((event.data as { message: Parameters<typeof restoreMessage>[0] }).message))
-      return text.length > 0 ? `  ${preview(text, 120)}` : undefined
-    }
-    case 'turn/end': {
-      const data = event.data as { reason: { kind: string } }
-      return `  [turn ${data.reason.kind}]`
-    }
-    case 'sandbox/mode': {
-      const data = event.data as { mode: string; enforcement: string; reason: string }
-      return `  [sandbox ${data.reason}: ${data.mode}, shell confinement ${data.enforcement}]`
-    }
-    case 'approval/policy':
-      return `  [approvals: ${(event.data as { policy: string }).policy}]`
-    case 'authority/preset':
-      return `  [preset: ${(event.data as { name: string }).name}]`
-    case 'approval/asked': {
-      const data = event.data as { id: string; toolName: string; reason?: string }
-      return `  ? ${data.id} ${data.toolName}${data.reason ? `: ${data.reason}` : ''}`
-    }
-    case 'approval/decided': {
-      const data = event.data as { id: string; outcome: string }
-      return `  ! ${data.id} ${data.outcome}`
-    }
-    default:
-      return undefined
-  }
+function usage(line: string): number {
+  process.stderr.write(`${line}\n`)
+  return 2
 }
 
-async function runCommand(args: ParsedArgs): Promise<number> {
-  const task = args.positional.join(' ').trim()
-  if (task.length === 0) {
-    process.stderr.write('usage: minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--approve] [--json]\n')
-    return 2
-  }
-  const json = args.flags.get('json') === true
-  const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
-  const effort = typeof args.flags.get('effort') === 'string' ? (args.flags.get('effort') as string) : undefined
-  const maxStepsRaw = args.flags.get('max-steps')
-  const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
+// ---- the one boot preamble --------------------------------------------------
+
+interface AuthorityFlags {
+  readonly sandbox?: SandboxMode
+  readonly approvalPolicy?: ApprovalPolicy
+}
+
+interface LoadedConfig {
+  readonly layers: NamedLayer[]
+  /** Named agent presets merged across files, later files winning per name; rows resolve against their source file's directory. */
+  readonly agentPresets: Map<string, { rows: readonly DiskRow[]; baseDir: string }>
+}
+
+/** Everything a command needs to boot, resolved once and the same way for every command. */
+interface BootPlan {
+  readonly home: HomeLayout
+  readonly settings: ResolvedSettings
+  readonly loaded: LoadedConfig
+  readonly authority: AuthorityFlags
+  /** `--preset`, validated against the effective presets row (headless commands only). */
+  readonly preset?: string
+  /** `--agent-preset`, resolved to a setup for the agent scope. */
+  readonly agentSetup?: (agentCtx: Context) => void
+}
+
+/** How a command treats `--preset`: applied as a durable switch, refused in favour of `/preset`, or not a flag at all. */
+type PresetUse = 'headless' | 'interactive' | 'none'
+
+/** The boot options every app entry shares, from one plan. */
+function bootFields(plan: BootPlan): {
+  sessionsRoot: string
+  spillRoot: string
+  globalInstructionsPath: string
+  credentialsPath: string
+  agentDefaults: ResolvedSettings['agent']
+  configLayers: NamedLayer[]
+  logger: Logger
+  sandbox?: SandboxMode
+  approvalPolicy?: ApprovalPolicy
+} {
+  return { ...plan.home, agentDefaults: plan.settings.agent, configLayers: plan.loaded.layers, logger: stderrLogger, ...plan.authority }
+}
+
+/** The rows a boot would mount from the built-ins alone — the base every layered view starts from. */
+function baseRows(home: HomeLayout, authority: AuthorityFlags = {}): Row[] {
+  return compose({ ...home, dialect: defaultDialect(), ...authority })
+}
+
+async function prepareBoot(args: ParsedArgs, presets: PresetUse): Promise<BootPlan | string> {
   const authority = authorityFlags(args)
-  if (typeof authority === 'string') {
-    process.stderr.write(`${authority}\n`)
-    return 2
-  }
+  if (typeof authority === 'string') return authority
   const settings = loadSettings()
-  if (typeof settings === 'string') {
-    process.stderr.write(`${settings}\n`)
-    return 2
-  }
-  const model = typeof args.flags.get('model') === 'string' ? (args.flags.get('model') as string) : settings.agent.model
+  if (typeof settings === 'string') return settings
   const loaded = await loadConfigLayers(args.patchFiles)
-  if (typeof loaded === 'string') {
-    process.stderr.write(`${loaded}\n`)
-    return 2
-  }
-  const configLayers = loaded.layers
-  const preset = presetFlag(args, authority, configLayers)
-  if (typeof preset === 'object') {
-    process.stderr.write(`${preset.error}\n`)
-    return 2
-  }
+  if (typeof loaded === 'string') return loaded
+  const home = homeLayout()
+  const preset = presetFlag(args, authority, home, loaded.layers)
+  if (typeof preset === 'object') return preset.error
+  if (preset !== undefined && presets === 'interactive') return '--preset works with --headless; in the interactive terminal use /preset'
+  if (preset !== undefined && presets === 'none') return `--preset is not a flag of "${args.command}"`
   const agentSetup = await agentPresetFlag(args, loaded)
-  if (typeof agentSetup === 'object') {
-    process.stderr.write(`${agentSetup.error}\n`)
-    return 2
-  }
-
-  try {
-    const result = await runTask(
-      {
-        task,
-        cwd,
-        model,
-        ...(preset === undefined ? {} : { preset }),
-        ...(agentSetup === undefined ? {} : { setup: agentSetup }),
-        sessionsRoot: sessionsDir(),
-        spillRoot: spillDir(),
-        globalInstructionsPath: globalInstructionsPath(),
-        credentialsPath: credentialsPath(),
-        agentDefaults: settings.agent,
-        configLayers,
-        // Warnings (an unknown patch id, a kernel listener error) must reach the
-        // user; the boot's default logger is silent.
-        logger: stderrLogger,
-        ...(effort === undefined ? {} : { reasoningEffort: effort }),
-        ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
-        approve: args.flags.get('approve') === true,
-        ...authority,
-      },
-      eventPrinter(json),
-    )
-    return finishTask(result, json)
-  } catch (error) {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    return 1
+  if (typeof agentSetup === 'object') return agentSetup.error
+  return {
+    home,
+    settings,
+    loaded,
+    authority,
+    ...(preset === undefined ? {} : { preset }),
+    ...(agentSetup === undefined ? {} : { agentSetup }),
   }
 }
 
-function eventPrinter(json: boolean): EventListener {
-  // --json emits the wire frame: one {sessionId, event} per line.
-  return json
-    ? (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`)
-    : (frame) => {
-        const line = renderEvent(frame.event)
-        if (line) process.stderr.write(`${line}\n`)
-      }
-}
-
-function finishTask(result: TaskResult, json: boolean): number {
-  if (!json) process.stdout.write(`${result.text}\n`)
-  if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
-  process.stderr.write(`session: ${result.sessionId}\n`)
-  return result.exitCode
+/** `--sandbox` / `--ask`: an explicit authority for this run, validated before anything boots. */
+function authorityFlags(args: ParsedArgs): AuthorityFlags | string {
+  const sandbox = args.flags.get('sandbox')
+  const ask = args.flags.get('ask')
+  if (sandbox !== undefined && !isSandboxMode(sandbox)) {
+    return `--sandbox expects ${SANDBOX_MODES.join(' | ')}, got "${String(sandbox)}"`
+  }
+  if (ask !== undefined && !isApprovalPolicy(ask)) return `--ask expects ${APPROVAL_POLICIES.join(' | ')}, got "${String(ask)}"`
+  return {
+    ...(isSandboxMode(sandbox) ? { sandbox } : {}),
+    ...(isApprovalPolicy(ask) ? { approvalPolicy: ask } : {}),
+  }
 }
 
 /** Settings resolve once per command; a malformed file is a usage-class failure (exit 2), never silently ignored. */
@@ -196,12 +160,6 @@ function loadSettings(): ResolvedSettings | string {
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
-}
-
-interface LoadedConfig {
-  readonly layers: NamedLayer[]
-  /** Named agent presets merged across files, later files winning per name; rows resolve against their source file's directory. */
-  readonly agentPresets: Map<string, { rows: readonly DiskRow[]; baseDir: string }>
 }
 
 /**
@@ -258,13 +216,9 @@ async function agentPresetFlag(args: ParsedArgs, loaded: LoadedConfig): Promise<
  * `--preset`: exclusive with `--sandbox`/`--ask`, and validated pre-boot
  * against the EFFECTIVE presets row (a disk layer may have reconfigured the
  * table) — a typo boots nothing and litters no session file. Returns the
- * validated name, an error string, or undefined when the flag is absent.
+ * validated name, an error, or undefined when the flag is absent.
  */
-function presetFlag(
-  args: ParsedArgs,
-  authority: { sandbox?: SandboxMode; approvalPolicy?: ApprovalPolicy },
-  configLayers: readonly NamedLayer[],
-): string | { error: string } | undefined {
+function presetFlag(args: ParsedArgs, authority: AuthorityFlags, home: HomeLayout, configLayers: readonly NamedLayer[]): string | { error: string } | undefined {
   const raw = args.flags.get('preset')
   if (raw === undefined) return undefined
   if (typeof raw !== 'string' || raw.trim().length === 0) return { error: '--preset expects a preset name' }
@@ -272,8 +226,7 @@ function presetFlag(
     return { error: '--preset replaces --sandbox/--ask; give one or the other' }
   }
   try {
-    const base = compose({ sessionsRoot: sessionsDir(), spillRoot: spillDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
-    const effective = applyLayers(base, [...configLayers], () => {})
+    const effective = applyLayers(baseRows(home, authority), [...configLayers], () => {})
     // Match the CAPABILITY, not the built-in row id: a composition may supply
     // it under any id, and the runtime resolves PRESETS by service key.
     const row = effective.rows.find((entry) => entry.plugin.name === 'authority-presets' && entry.disabled !== true)
@@ -283,20 +236,6 @@ function presetFlag(
     return raw
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }
-  }
-}
-
-/** `--sandbox` / `--ask`: an explicit authority for this run, validated before anything boots. */
-function authorityFlags(args: ParsedArgs): { sandbox?: SandboxMode; approvalPolicy?: ApprovalPolicy } | string {
-  const sandbox = args.flags.get('sandbox')
-  const ask = args.flags.get('ask')
-  if (sandbox !== undefined && !isSandboxMode(sandbox)) {
-    return `--sandbox expects ${SANDBOX_MODES.join(' | ')}, got "${String(sandbox)}"`
-  }
-  if (ask !== undefined && !isApprovalPolicy(ask)) return `--ask expects ${APPROVAL_POLICIES.join(' | ')}, got "${String(ask)}"`
-  return {
-    ...(isSandboxMode(sandbox) ? { sandbox } : {}),
-    ...(isApprovalPolicy(ask) ? { approvalPolicy: ask } : {}),
   }
 }
 
@@ -318,6 +257,67 @@ function modelFlags(args: ParsedArgs): CommonModelFlags {
   }
 }
 
+function cwdFlag(args: ParsedArgs): string {
+  const cwd = args.flags.get('cwd')
+  return typeof cwd === 'string' ? cwd : process.cwd()
+}
+
+// ---- rendering ----------------------------------------------------------------
+
+function eventPrinter(json: boolean): EventListener {
+  // --json emits the wire frame: one {sessionId, event} per line.
+  return json
+    ? (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`)
+    : (frame) => {
+        const line = describeEvent(frame.event)
+        if (line) process.stderr.write(`  ${line}\n`)
+      }
+}
+
+function finishTask(result: TaskResult, json: boolean): number {
+  if (!json) process.stdout.write(`${result.text}\n`)
+  if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
+  process.stderr.write(`session: ${result.sessionId}\n`)
+  return result.exitCode
+}
+
+function reportError(error: unknown): number {
+  process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+  return 1
+}
+
+// ---- commands -----------------------------------------------------------------
+
+async function runCommand(args: ParsedArgs): Promise<number> {
+  const task = args.positional.join(' ').trim()
+  if (task.length === 0) {
+    return usage('usage: minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--approve] [--json]')
+  }
+  const plan = await prepareBoot(args, 'headless')
+  if (typeof plan === 'string') return usage(plan)
+  const json = args.flags.get('json') === true
+  const flags = modelFlags(args)
+  try {
+    const result = await runTask(
+      {
+        task,
+        cwd: cwdFlag(args),
+        model: flags.model ?? plan.settings.agent.model,
+        ...(flags.reasoningEffort === undefined ? {} : { reasoningEffort: flags.reasoningEffort }),
+        ...(flags.maxSteps === undefined ? {} : { maxSteps: flags.maxSteps }),
+        ...(plan.preset === undefined ? {} : { preset: plan.preset }),
+        ...(plan.agentSetup === undefined ? {} : { setup: plan.agentSetup }),
+        approve: args.flags.get('approve') === true,
+        ...bootFields(plan),
+      },
+      eventPrinter(json),
+    )
+    return finishTask(result, json)
+  } catch (error) {
+    return reportError(error)
+  }
+}
+
 /**
  * `minidsh resume <id>` / `minidsh fork <id>` — interactive by default;
  * `--headless` (task required) is the scripted one-shot.
@@ -327,72 +327,35 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   const task = args.positional.slice(1).join(' ').trim()
   const headless = args.flags.get('headless') === true
   if (!id || (headless && task.length === 0)) {
-    process.stderr.write(
-      `usage: minidsh ${kind} <id> ["<task>"]${kind === 'fork' ? ' [--at seq]' : ''} [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]\n`,
+    return usage(
+      `usage: minidsh ${kind} <id> ["<task>"]${kind === 'fork' ? ' [--at seq]' : ''} [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]`,
     )
-    return 2
   }
   const atRaw = args.flags.get('at')
   const boundary = typeof atRaw === 'string' ? Number(atRaw) : undefined
   // A typo'd --at must not silently fork at the log head.
   if (atRaw !== undefined && (typeof atRaw !== 'string' || atRaw.trim() === '' || !Number.isInteger(boundary))) {
-    process.stderr.write(`--at expects an integer event seq, got "${String(atRaw)}"\n`)
-    return 2
+    return usage(`--at expects an integer event seq, got "${String(atRaw)}"`)
   }
+  const plan = await prepareBoot(args, headless ? 'headless' : 'interactive')
+  if (typeof plan === 'string') return usage(plan)
   const approve = args.flags.get('approve') === true
-  const authority = authorityFlags(args)
-  if (typeof authority === 'string') {
-    process.stderr.write(`${authority}\n`)
-    return 2
-  }
-  const settings = loadSettings()
-  if (typeof settings === 'string') {
-    process.stderr.write(`${settings}\n`)
-    return 2
-  }
-  const loaded = await loadConfigLayers(args.patchFiles)
-  if (typeof loaded === 'string') {
-    process.stderr.write(`${loaded}\n`)
-    return 2
-  }
-  const configLayers = loaded.layers
-  const preset = presetFlag(args, authority, configLayers)
-  if (typeof preset === 'object') {
-    process.stderr.write(`${preset.error}\n`)
-    return 2
-  }
-  if (preset !== undefined && !headless) {
-    process.stderr.write('--preset works with --headless; in the interactive terminal use /preset\n')
-    return 2
-  }
-  const agentSetup = await agentPresetFlag(args, loaded)
-  if (typeof agentSetup === 'object') {
-    process.stderr.write(`${agentSetup.error}\n`)
-    return 2
-  }
+  const at = kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}
 
   if (!headless) {
     try {
       return await runTerminal({
         cwd: process.cwd(),
-        sessionsRoot: sessionsDir(),
-        spillRoot: spillDir(),
-        globalInstructionsPath: globalInstructionsPath(),
-        credentialsPath: credentialsPath(),
-        agentDefaults: settings.agent,
-        configLayers,
-        ...(agentSetup === undefined ? {} : { agentSetup }),
+        ...bootFields(plan),
+        ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
-        ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
+        ...at,
         ...(task.length > 0 ? { task } : {}),
         ...modelFlags(args),
-        ...authority,
-        logger: stderrLogger,
       })
     } catch (error) {
-      process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-      return 1
+      return reportError(error)
     }
   }
 
@@ -400,90 +363,57 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   const options: ContinueOptions = {
     id,
     task,
-    sessionsRoot: sessionsDir(),
-    spillRoot: spillDir(),
-    globalInstructionsPath: globalInstructionsPath(),
-    credentialsPath: credentialsPath(),
-    agentDefaults: settings.agent,
-    configLayers,
-    logger: stderrLogger,
-    ...(preset === undefined ? {} : { preset }),
-    ...(agentSetup === undefined ? {} : { setup: agentSetup }),
+    ...bootFields(plan),
+    ...(plan.preset === undefined ? {} : { preset: plan.preset }),
+    ...(plan.agentSetup === undefined ? {} : { setup: plan.agentSetup }),
     ...modelFlags(args),
-    ...(kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}),
+    ...at,
     approve,
-    ...authority,
   }
   try {
     const result = kind === 'resume' ? await resumeTask(options, eventPrinter(json)) : await forkTask(options, eventPrinter(json))
     return finishTask(result, json)
   } catch (error) {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    return 1
+    return reportError(error)
   }
 }
 
 /** `minidsh chat` — a fresh interactive session over the protocol. */
 async function chatCommand(args: ParsedArgs): Promise<number> {
-  const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
   const task = args.positional.join(' ').trim()
-  const authority = authorityFlags(args)
-  if (typeof authority === 'string') {
-    process.stderr.write(`${authority}\n`)
-    return 2
-  }
-  const settings = loadSettings()
-  if (typeof settings === 'string') {
-    process.stderr.write(`${settings}\n`)
-    return 2
-  }
-  const loaded = await loadConfigLayers(args.patchFiles)
-  if (typeof loaded === 'string') {
-    process.stderr.write(`${loaded}\n`)
-    return 2
-  }
-  // Same guard the interactive resume/fork path uses: swallowing --preset here
-  // (where a sibling command refuses it loudly) would silently drop an
-  // authority request AND skip the --preset/--sandbox exclusivity check.
-  const preset = presetFlag(args, authority, loaded.layers)
-  if (typeof preset === 'object') {
-    process.stderr.write(`${preset.error}\n`)
-    return 2
-  }
-  if (preset !== undefined) {
-    process.stderr.write('--preset works with --headless; in the interactive terminal use /preset\n')
-    return 2
-  }
-  const agentSetup = await agentPresetFlag(args, loaded)
-  if (typeof agentSetup === 'object') {
-    process.stderr.write(`${agentSetup.error}\n`)
-    return 2
-  }
+  const plan = await prepareBoot(args, 'interactive')
+  if (typeof plan === 'string') return usage(plan)
   try {
     return await runTerminal({
-      cwd,
-      sessionsRoot: sessionsDir(),
-      spillRoot: spillDir(),
-      globalInstructionsPath: globalInstructionsPath(),
-      credentialsPath: credentialsPath(),
-      agentDefaults: settings.agent,
-      configLayers: loaded.layers,
-      ...(agentSetup === undefined ? {} : { agentSetup }),
+      cwd: cwdFlag(args),
+      ...bootFields(plan),
+      ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
       ...modelFlags(args),
-      ...authority,
-      logger: stderrLogger,
     })
   } catch (error) {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    return 1
+    return reportError(error)
   }
 }
 
-const stderrLogger: Logger = {
-  warn: (message) => process.stderr.write(`warn: ${message}\n`),
-  error: (message) => process.stderr.write(`error: ${message}\n`),
+/** `minidsh serve` — the JSON-RPC protocol on process stdio; stdout carries only frames. */
+async function serveCommand(args: ParsedArgs): Promise<number> {
+  const plan = await prepareBoot(args, 'none')
+  if (typeof plan === 'string') return usage(plan)
+  try {
+    const host = await startProtocolHost({
+      cwd: cwdFlag(args),
+      ...bootFields(plan),
+      ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+      approve: args.flags.get('approve') === true,
+    })
+    await host.closed
+    await host.dispose()
+    return 0
+  } catch (error) {
+    return reportError(error)
+  }
 }
 
 /**
@@ -536,36 +466,14 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
 
 /**
  * `minidsh config` — the EFFECTIVE composition: the same base and layer
- * algorithm a boot uses, with per-row provenance. This is what `--dump-config`
- * never was: the rows that would actually mount, not a pristine default.
+ * algorithm a boot uses, with per-row provenance. The rows that would actually
+ * mount, not a pristine default.
  */
 async function configCommand(args: ParsedArgs): Promise<number> {
-  const authority = authorityFlags(args)
-  if (typeof authority === 'string') {
-    process.stderr.write(`${authority}\n`)
-    return 2
-  }
-  const settings = loadSettings()
-  if (typeof settings === 'string') {
-    process.stderr.write(`${settings}\n`)
-    return 2
-  }
-  const loaded = await loadConfigLayers(args.patchFiles)
-  if (typeof loaded === 'string') {
-    process.stderr.write(`${loaded}\n`)
-    return 2
-  }
-  const configLayers = loaded.layers
+  const plan = await prepareBoot(args, 'none')
+  if (typeof plan === 'string') return usage(plan)
   try {
-    const base = compose({
-      sessionsRoot: sessionsDir(),
-      spillRoot: spillDir(),
-      globalInstructionsPath: globalInstructionsPath(),
-      dialect: defaultDialect(),
-      credentialsPath: credentialsPath(),
-      ...authority,
-    })
-    const effective = applyLayers(base, configLayers, (message) => process.stderr.write(`warn: ${message}\n`))
+    const effective = applyLayers(baseRows(plan.home, plan.authority), plan.loaded.layers, (message) => process.stderr.write(`warn: ${message}\n`))
     const touched = (id: string): string => effective.provenance.get(id) ?? 'built-in'
     if (args.flags.get('json') === true) {
       const rows = effective.rows.map((row) => ({
@@ -574,14 +482,14 @@ async function configCommand(args: ParsedArgs): Promise<number> {
         ...(row.disabled === true ? { disabled: true } : {}),
         layer: touched(row.id),
       }))
-      const agentPresets = [...loaded.agentPresets].map(([name, spec]) => ({ name, rows: spec.rows.map((row) => ({ id: row.id, plugin: row.plugin })) }))
+      const agentPresets = [...plan.loaded.agentPresets].map(([name, spec]) => ({ name, rows: spec.rows.map((row) => ({ id: row.id, plugin: row.plugin })) }))
       process.stdout.write(
-        `${JSON.stringify({ hash: effective.descriptor.hash, layers: effective.descriptor.layers, agentDefaults: settings.agent, rows, agentPresets }, null, 2)}\n`,
+        `${JSON.stringify({ hash: effective.descriptor.hash, layers: effective.descriptor.layers, agentDefaults: plan.settings.agent, rows, agentPresets }, null, 2)}\n`,
       )
       return 0
     }
     process.stdout.write(`composition ${effective.descriptor.hash} (layers: ${effective.descriptor.layers.join(' → ')})\n`)
-    process.stdout.write(`agent defaults: ${settings.agent.provider}/${settings.agent.model}\n\n`)
+    process.stdout.write(`agent defaults: ${plan.settings.agent.provider}/${plan.settings.agent.model}\n\n`)
     const warnings: string[] = []
     for (const row of effective.rows) {
       const layer = touched(row.id)
@@ -589,22 +497,23 @@ async function configCommand(args: ParsedArgs): Promise<number> {
       const marks = [row.disabled === true ? 'disabled' : undefined, sensitive ? '!' : undefined].filter((mark) => mark !== undefined)
       process.stdout.write(`  ${row.id.padEnd(22)} ${row.plugin.name.padEnd(28)} ${layer}${marks.length > 0 ? `  [${marks.join(' ')}]` : ''}\n`)
       if (sensitive) {
-        const verb = row.disabled === true ? 'DISABLED' : layer === touched(row.id) && AUTHORITY_SENSITIVE.has(row.id) ? 'modified' : 'added'
+        // A built-in row a layer touched was modified (or disabled); a row the
+        // layer brought in was added.
+        const verb = row.disabled === true ? 'DISABLED' : AUTHORITY_SENSITIVE.has(row.id) ? 'modified' : 'added'
         warnings.push(`layer "${layer}" ${verb} authority-sensitive row "${row.id}" (${row.plugin.name})`)
       }
     }
     // Agent presets are composition too: they mount plugins into an agent's world.
-    if (loaded.agentPresets.size > 0) {
+    if (plan.loaded.agentPresets.size > 0) {
       process.stdout.write(`\nagent presets:\n`)
-      for (const [name, spec] of loaded.agentPresets) {
+      for (const [name, spec] of plan.loaded.agentPresets) {
         process.stdout.write(`  ${name.padEnd(22)} ${spec.rows.map((row) => `${row.id}(${row.plugin})`).join(', ')}\n`)
       }
     }
     for (const warning of warnings) process.stderr.write(`warn: ${warning}\n`)
     return 0
   } catch (error) {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    return 1
+    return reportError(error)
   }
 }
 
@@ -614,12 +523,12 @@ async function configCommand(args: ParsedArgs): Promise<number> {
  * read exactly where `run`/`resume` write — a layer that repoints the store
  * must not split the CLI's read path from its write path.
  */
-async function withPersistence<T>(layers: readonly NamedLayer[], use: (persistence: Persistence) => T): Promise<T> {
-  const base = compose({ sessionsRoot: sessionsDir(), spillRoot: spillDir(), dialect: defaultDialect(), credentialsPath: credentialsPath() })
-  const effective = applyLayers(base, layers, (message) => stderrLogger.warn(message))
+async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence) => T): Promise<T> {
+  const effective = applyLayers(baseRows(plan.home), plan.loaded.layers, (message) => stderrLogger.warn(message))
   const row = effective.rows.find((entry) => entry.plugin.name === 'persistence-jsonl' && entry.disabled !== true)
   const root = createRoot({ logger: stderrLogger })
-  root.plugin(row ? row.plugin : persistenceJsonlPlugin, row ? row.config : { root: sessionsDir() })
+  if (row) root.plugin(row.plugin, row.config)
+  else root.plugin(persistenceJsonlPlugin, { root: plan.home.sessionsRoot })
   await root.settle()
   try {
     return use(root.get(PERSISTENCE))
@@ -628,112 +537,12 @@ async function withPersistence<T>(layers: readonly NamedLayer[], use: (persisten
   }
 }
 
-/** `minidsh serve` — the JSON-RPC protocol on process stdio; stdout carries only frames. */
-async function serveCommand(args: ParsedArgs): Promise<number> {
-  const cwd = typeof args.flags.get('cwd') === 'string' ? (args.flags.get('cwd') as string) : process.cwd()
-  const authority = authorityFlags(args)
-  if (typeof authority === 'string') {
-    process.stderr.write(`${authority}\n`)
-    return 2
-  }
-  const settings = loadSettings()
-  if (typeof settings === 'string') {
-    process.stderr.write(`${settings}\n`)
-    return 2
-  }
-  const loaded = await loadConfigLayers(args.patchFiles)
-  if (typeof loaded === 'string') {
-    process.stderr.write(`${loaded}\n`)
-    return 2
-  }
-  try {
-    const host = await startProtocolHost({
-      cwd,
-      sessionsRoot: sessionsDir(),
-      spillRoot: spillDir(),
-      globalInstructionsPath: globalInstructionsPath(),
-      credentialsPath: credentialsPath(),
-      agentDefaults: settings.agent,
-      configLayers: loaded.layers,
-      approve: args.flags.get('approve') === true,
-      ...authority,
-      logger: stderrLogger,
-    })
-    await host.closed
-    await host.dispose()
-    return 0
-  } catch (error) {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-    return 1
-  }
-}
-
-/**
- * The audit projection: what this session was permitted to do, when, and every
- * time someone was asked. An escalation names only its tool, so the command it
- * covered is joined in from the `tool/call` its `callId` points at - the same
- * join a reader would otherwise do by hand.
- */
-function renderAudit(events: readonly EventEnvelope[], write: (line: string) => void): void {
-  const calls = new Map<string, string>()
-  const denials = new Set([
-    'DENIED',
-    'BLOCKED',
-    'ABORTED',
-    'ABORTED_BEFORE_DISPATCH',
-    'FS_SANDBOX_DENIED',
-    'SANDBOX_UNAVAILABLE',
-    'SANDBOX_ESCALATION_DENIED',
-    'SANDBOX_NOT_WIDER',
-  ])
-  const at = (seq: number): string => String(seq).padStart(4)
-  for (const event of events) {
-    const data = event.data as Record<string, string | undefined>
-    switch (event.type) {
-      case 'tool/call':
-        calls.set(String(data.callId), `${String(data.name)} ${preview(String(data.arguments), 100)}`)
-        break
-      case 'sandbox/mode':
-        write(`${at(event.seq)}  sandbox     ${String(data.mode)} (${String(data.reason)}; shell confinement ${String(data.enforcement)})`)
-        break
-      case 'approval/policy':
-        write(`${at(event.seq)}  approvals   ${String(data.policy)} (${String(data.reason)})`)
-        break
-      case 'authority/preset':
-        // The intent; the knob events that follow are the truth a reader folds.
-        write(`${at(event.seq)}  preset      ${String(data.name)}`)
-        break
-      case 'approval/asked': {
-        const covered = data.callId ? calls.get(String(data.callId)) : undefined
-        write(`${at(event.seq)}  asked       ${String(data.id)} ${String(data.toolName)}${data.reason ? `: ${data.reason}` : ''}`)
-        if (covered) write(`                    for: ${covered}`)
-        break
-      }
-      case 'approval/decided':
-        write(`${at(event.seq)}  decided     ${String(data.id)} ${String(data.outcome)}`)
-        break
-      case 'tool/result': {
-        const error = (event.data as { error?: { code: string } }).error
-        if (error && denials.has(error.code)) {
-          write(`${at(event.seq)}  denied      ${error.code}${data.callId ? ` (${calls.get(String(data.callId)) ?? ''})` : ''}`)
-        }
-        break
-      }
-      default:
-        break
-    }
-  }
-}
-
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
-  const loaded = await loadConfigLayers(args.patchFiles)
-  if (typeof loaded === 'string') {
-    process.stderr.write(`${loaded}\n`)
-    return 2
-  }
+  const plan = await prepareBoot(args, 'none')
+  if (typeof plan === 'string') return usage(plan)
   if (sub === 'list') {
-    return withPersistence(loaded.layers, (persistence) => {
+    return withPersistence(plan, (persistence) => {
       for (const header of persistence.list()) {
         process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\n`)
       }
@@ -742,11 +551,8 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   }
   if (sub === 'show') {
     const id = args.positional[1]
-    if (!id) {
-      process.stderr.write('usage: minidsh sessions show <id> [--json|--audit]\n')
-      return 2
-    }
-    return withPersistence(loaded.layers, (persistence) => {
+    if (!id) return usage('usage: minidsh sessions show <id> [--json|--audit]')
+    return withPersistence(plan, (persistence) => {
       const stored = persistence.load(id)
       if (!stored) {
         process.stderr.write(`no session "${id}"\n`)
@@ -754,7 +560,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
       }
       if (args.flags.get('audit') === true) {
         process.stdout.write(`authority of ${stored.header.id} (cwd ${stored.header.cwd})\n`)
-        renderAudit(stored.events, (line) => process.stdout.write(line + '\n'))
+        for (const line of auditLines(stored.events)) process.stdout.write(`${line}\n`)
       } else if (args.flags.get('json') === true) {
         for (const event of stored.events) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, event })}\n`)
         // Machine readers must see damage too: a trailer object (no `event` field) a frame consumer skips.
@@ -772,16 +578,15 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
           )
         }
         for (const event of stored.events) {
-          const line = renderEvent(event)
-          process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line.trim()}` : ''}\n`)
+          const line = describeEvent(event)
+          process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line}` : ''}\n`)
         }
         if (stored.damaged) process.stderr.write('warning: the stored log is damaged beyond this point\n')
       }
       return 0
     })
   }
-  process.stderr.write('usage: minidsh sessions <list|show>\n')
-  return 2
+  return usage('usage: minidsh sessions <list|show>')
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -808,7 +613,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
           '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
           '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
-          '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--approve]\n' +
+          '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
           '  minidsh config [--json]\n' +
           '  minidsh sessions list\n' +
           '  minidsh sessions show <id> [--json|--audit]\n' +

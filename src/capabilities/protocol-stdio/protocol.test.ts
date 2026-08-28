@@ -353,6 +353,36 @@ describe('protocol-stdio: shutdown', () => {
   })
 })
 
+describe('protocol-stdio: the workspace root is host policy', () => {
+  /**
+   * `session/prompt.cwd` becomes the immutable `SessionHeader.cwd`, which IS the
+   * sandbox workspace root for the session's whole life. It used to be taken
+   * verbatim: any client could make the drive root writable under
+   * workspace-write. A client may now choose WHERE inside the host's roots.
+   */
+  it('refuses a cwd outside the host workspace roots, a non-directory, and a relative path; accepts a subdirectory', async () => {
+    const { mkdirSync, writeFileSync } = await import('node:fs')
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { client } = await startHost(adapter)
+    const init = await client.result<{ workspaceRoots: string[] }>('initialize')
+    expect(init.workspaceRoots).toHaveLength(1)
+    const root = init.workspaceRoots[0]!
+
+    const outside = tempDir('minidsh-proto-outside-')
+    await expect(client.result('session/prompt', { text: 'x', cwd: outside, agentOptions: SCRIPTED })).rejects.toThrow(/must lie inside one of this host's workspace roots/)
+    await expect(client.result('session/prompt', { text: 'x', cwd: join(root, 'missing'), agentOptions: SCRIPTED })).rejects.toThrow(/not an existing directory/)
+    writeFileSync(join(root, 'file.txt'), 'x')
+    await expect(client.result('session/prompt', { text: 'x', cwd: join(root, 'file.txt'), agentOptions: SCRIPTED })).rejects.toThrow(/not an existing directory/)
+    await expect(client.result('session/prompt', { text: 'x', cwd: 'sub', agentOptions: SCRIPTED })).rejects.toThrow(/absolute/)
+
+    mkdirSync(join(root, 'sub'))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', cwd: join(root, 'sub'), agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const { header } = await client.result<{ header: { cwd: string } }>('session/events', { sessionId })
+    expect(header.cwd.toLowerCase()).toBe(join(root, 'sub').toLowerCase())
+  })
+})
+
 describe('protocol-stdio: the authority control plane', () => {
   it('reports what a new session would start under, and what this host can enforce', async () => {
     const { client } = await startHost(new ScriptedAdapter())

@@ -7,6 +7,8 @@
  * own: the durable `approval/asked`/`approval/decided` events streaming over
  * `session.event` ARE the frames.
  */
+import { statSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_DECIDED, APPROVAL_POLICIES, isApprovalPolicy, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
@@ -16,7 +18,7 @@ import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
 import { PRESETS } from '../../core/presets/index.ts'
-import { effectiveSandboxMode, isSandboxMode, SANDBOX, SANDBOX_MODES } from '../../core/sandbox/index.ts'
+import { canonicalPath, effectiveSandboxMode, isInside, isSandboxMode, SANDBOX, SANDBOX_MODES } from '../../core/sandbox/index.ts'
 import { SESSIONS, matches, type EventEnvelope, type Session } from '../../core/session/index.ts'
 import {
   INTERNAL_ERROR,
@@ -35,6 +37,8 @@ import {
 
 export interface ProtocolServerConfig {
   readonly cwd: string
+  /** Canonical directories a client-chosen `cwd` must lie under. */
+  readonly workspaceRoots: readonly string[]
   readonly defaultAgentOptions: AgentOptions
   readonly serverVersion: string
   /** Applied to every agent this surface creates or resumes. */
@@ -157,7 +161,35 @@ export class ProtocolServer {
       providers: this.ctx.get(LLM).providers(),
       defaultAgentOptions: this.config.defaultAgentOptions,
       defaultAuthority: this.defaultAuthority(),
+      workspaceRoots: this.config.workspaceRoots,
     }
+  }
+
+  /**
+   * A client may choose WHERE a session works, inside the host's policy — never
+   * the policy. The cwd becomes the immutable workspace root every fence
+   * derives from, so it must exist and lie under one of the host's roots; the
+   * canonical path (links followed) is what is checked and what is recorded.
+   */
+  private workspaceFor(raw: string): string {
+    if (!isAbsolute(raw)) throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd" must be an absolute path')
+    let canonical: string
+    try {
+      canonical = canonicalPath(raw)
+    } catch (error) {
+      throw new RpcFailure(INVALID_PARAMS, `session/prompt: "cwd" cannot be resolved: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    let directory = false
+    try {
+      directory = statSync(canonical).isDirectory()
+    } catch {
+      directory = false
+    }
+    if (!directory) throw new RpcFailure(INVALID_PARAMS, `session/prompt: "cwd" is not an existing directory: ${raw}`)
+    if (!this.config.workspaceRoots.some((root) => isInside(root, canonical))) {
+      throw new RpcFailure(INVALID_PARAMS, `session/prompt: "cwd" must lie inside one of this host's workspace roots (${this.config.workspaceRoots.join(', ')})`)
+    }
+    return canonical
   }
 
   private defaultAuthority(): AuthorityView {
@@ -255,7 +287,8 @@ export class ProtocolServer {
     const options = mergeAgentOptions(this.config.defaultAgentOptions, params.agentOptions, 'session/prompt')
     const setup = this.config.setup === undefined ? {} : { setup: this.config.setup }
     if (requested === undefined) {
-      const cwd = typeof params.cwd === 'string' ? params.cwd : this.config.cwd
+      if (params.cwd !== undefined && typeof params.cwd !== 'string') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd" must be a string')
+      const cwd = params.cwd === undefined ? this.config.cwd : this.workspaceFor(params.cwd)
       const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...setup })
       this.owned.set(handle.agent.id, handle)
       return handle.agent
