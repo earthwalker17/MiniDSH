@@ -54,7 +54,7 @@ describe('persistence-jsonl: write modes', () => {
     expect(JSON.parse(lines[1]!).type).toBe('turn/start')
   })
 
-  it('writes provenance for a seeded (fork) session as a fresh snapshot', async () => {
+  it('writes provenance for a seeded (fork) session as a fresh snapshot once the branch acts', async () => {
     const { sessions, base } = await mount()
     sessions.create({ cwd: '/w', id: asSessionId('parent') })
     appendTurn(sessions, 'parent', 1)
@@ -62,21 +62,39 @@ describe('persistence-jsonl: write modes', () => {
     const seed = parent.forkSeed()
     const child = sessions.create({ cwd: '/w', id: asSessionId('child'), parentId: parent.id, seed, seedLength: seed.length })
     expect(child.origin).toBe('seeded')
+    // A branch that has not acted is not stored: creating it leaves nothing.
+    expect(existsSync(fileFor(base, 'child'))).toBe(false)
+    appendTurn(sessions, 'child', 2)
     const lines = readFileSync(fileFor(base, 'child'), 'utf8').trim().split('\n')
     expect(JSON.parse(lines[0]!)).toMatchObject({ parentId: 'parent', seedLength: seed.length })
-    // Seed + the end-seed marker are all in the snapshot.
-    expect(lines).toHaveLength(1 + seed.length + 1)
-    expect(JSON.parse(lines.at(-1)!).type).toBe('session/end-seed')
+    // Seed + the end-seed marker + the branch's own turn are all there.
+    expect(lines).toHaveLength(1 + seed.length + 1 + 3)
+    expect(JSON.parse(lines[seed.length + 1]!).type).toBe('session/end-seed')
   })
 
-  it('an unpublished session writes nothing; publication writes everything so far', async () => {
+  it('materializes on the first conversation fact: publication and log-only records write nothing', async () => {
     const { sessions, base } = await mount()
     const session = sessions.create({ cwd: '/w', id: asSessionId('quiet'), publish: false })
     session.append(TURN_START, { turn: 1 })
     expect(existsSync(fileFor(base, 'quiet'))).toBe(false)
     sessions.publish(session)
+    // Published and leased, but nothing has happened yet: no file.
+    expect(existsSync(fileFor(base, 'quiet'))).toBe(false)
+    expect(existsSync(`${fileFor(base, 'quiet')}.lock`)).toBe(true)
+    session.append(USER_MESSAGE, { message: createUserMessage('now') }, { surfaceOp: { op: 'append' } })
     const lines = readFileSync(fileFor(base, 'quiet'), 'utf8').trim().split('\n')
-    expect(lines).toHaveLength(2) // header + the pre-publication event
+    expect(lines.map((line) => JSON.parse(line).type ?? JSON.parse(line).kind)).toEqual(['session', 'turn/start', 'user/message'])
+  })
+
+  it('a session that never records a conversation fact leaves nothing behind, and its lease is released', async () => {
+    const { sessions, base } = await mount()
+    const session = sessions.create({ cwd: '/w', id: asSessionId('abandoned') })
+    session.append(TURN_START, { turn: 1 })
+    session.append(TURN_END, { turn: 1, reason: { kind: 'blocked' } })
+    await sessions.detach(session)
+    expect(existsSync(fileFor(base, 'abandoned'))).toBe(false)
+    expect(existsSync(`${fileFor(base, 'abandoned')}.lock`)).toBe(false)
+    expect(root!.get(PERSISTENCE).list()).toEqual([])
   })
 })
 
@@ -167,6 +185,8 @@ describe('persistence-jsonl: resume attach', () => {
     await sessions.detach(sessions.get(asSessionId('dup'))!)
 
     const clobber = sessions.create({ cwd: '/w', id: asSessionId('dup') }) // fresh, same id, NOT resumed
+    // The refusal happens at materialization — the first conversation fact.
+    clobber.append(USER_MESSAGE, { message: createUserMessage('overwrite?') }, { surfaceOp: { op: 'append' } })
     await expect(clobber.flush()).rejects.toSatisfy((error: unknown) => {
       const first = (error as AggregateError).errors?.[0] as Error
       return /already exists/.test(first?.message ?? '')

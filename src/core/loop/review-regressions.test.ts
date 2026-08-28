@@ -203,6 +203,58 @@ describe('review regressions: seeded sessions', () => {
   })
 })
 
+describe('S5.5 regressions: durability is a checkpoint before every action', () => {
+  /**
+   * A dropped durable write used to surface only at turn-end flush, so every
+   * tool effect in the rest of the turn ran with no durable record. The driver
+   * now checkpoints before each model request and each tool dispatch.
+   */
+  it('ends the turn as DURABILITY_LOST before the next effect once a write is lost, with the surface still balanced', async () => {
+    harness = await coreHarness()
+    const { SESSION_EVENT, SESSION_FLUSH } = await import('../session/index.ts')
+    const ran: string[] = []
+    const tool = defineTool({
+      name: 'effect',
+      description: 'an effect',
+      input: z.object({ n: z.number() }),
+      output: z.object({}),
+      execute: (args) => {
+        ran.push(`effect-${args.n}`)
+        return {}
+      },
+      render: () => [{ type: 'text', text: 'done' }],
+    })
+    harness.root.get(TOOLS).register(harness.root, tool)
+    // A provider that loses the write of the first tool/call record.
+    let lost = false
+    harness.root.on(SESSION_EVENT, (_session, event) => {
+      if (event.type === 'tool/call') lost = true
+    })
+    harness.root.on(SESSION_FLUSH, () => {
+      if (lost) throw new Error('disk gone')
+    })
+    harness.adapter.script(
+      [
+        { type: 'tool-call-delta', index: 0, id: asCallId('c1'), name: 'effect', argumentsDelta: '{"n":1}' },
+        { type: 'tool-call-delta', index: 1, id: asCallId('c2'), name: 'effect', argumentsDelta: '{"n":2}' },
+        { type: 'finish', reason: { kind: 'tool-calls' } },
+      ],
+      assistantText('never sent'),
+    )
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+
+    expect(ran).toEqual([]) // no effect followed the lost write
+    const turnEnd = agent.session.events.findLast((event) => event.type === 'turn/end')!
+    expect((turnEnd.data as { reason: { kind: string; code?: string } }).reason).toMatchObject({ kind: 'error', code: 'DURABILITY_LOST' })
+    // Both calls were answered, so no reader sees an assistant message with dangling tool calls.
+    const results = agent.session.events.filter((event) => event.type === 'tool/result').map((event) => (event.data as { callId: string; error?: { code: string } }))
+    expect(results.map((result) => `${result.callId}:${result.error?.code}`)).toEqual(['c1:DURABILITY_LOST', 'c2:DURABILITY_LOST'])
+    expect(harness.adapter.calls).toHaveLength(1) // and no second request was paid for
+  })
+})
+
 describe('review regressions: driver containment', () => {
   it('contains a rejecting session/flush listener instead of an unhandled rejection', async () => {
     harness = await coreHarness()
@@ -218,7 +270,10 @@ describe('review regressions: driver containment', () => {
     agent.followup(createUserMessage('hi'))
     await expect(agent.whenIdle()).resolves.toBeUndefined()
     expect(agent.status).toBe('idle')
-    expect(errors).toHaveLength(1)
+    // Reported (the checkpoint before the request, then the turn-boundary
+    // flush), never thrown unobserved — and the request was never sent.
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    expect(harness.adapter.calls).toHaveLength(0)
   })
 })
 

@@ -7,7 +7,7 @@ import { persistenceJsonlPlugin } from '../../capabilities/persistence-jsonl/ind
 import { AGENTS } from '../agent/index.ts'
 import { asSessionId } from '../ids.ts'
 import { createUserMessage } from '../llm/message.ts'
-import { SESSIONS, STEP_START, TOOL_CALL, TURN_START, type EventEnvelope } from '../session/index.ts'
+import { SESSIONS, STEP_START, TOOL_CALL, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
 import { assistantText } from '../../test-support/scripted-adapter.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 
@@ -47,6 +47,8 @@ function storeCrashedLog(h: CoreHarness, id: string): void {
   const session = sessions.create({ cwd: process.cwd(), id: asSessionId(id) })
   session.append(TURN_START, { turn: 1 })
   session.append(STEP_START, { turn: 1, step: 1 })
+  // The prompt the turn entered: the conversation fact that materializes the file.
+  session.append(USER_MESSAGE, { message: createUserMessage('go') }, { surfaceOp: { op: 'append' } })
   session.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' })
   void sessions.detach(session)
 }
@@ -313,7 +315,7 @@ describe('crash repair closes the committed surface, not just the logged calls',
    */
   it('answers every tool-call block of the interrupted step and cancels an undecided approval', async () => {
     const { harness: h } = await persistedHarness()
-    const { ASSISTANT_MESSAGE, USER_MESSAGE } = await import('../session/index.ts')
+    const { ASSISTANT_MESSAGE } = await import('../session/index.ts')
     const { APPROVAL_ASKED } = await import('../approval/events.ts')
     const { createAssistantMessage } = await import('../llm/message.ts')
     const { serializeMessages } = await import('../../capabilities/llm-deepseek/serialize.ts')

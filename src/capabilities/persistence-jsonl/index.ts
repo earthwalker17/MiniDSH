@@ -1,23 +1,28 @@
 /**
  * JSONL session persistence. A subscriber (not a driven service): it writes the
  * header as line 1 and one event per line, synchronously inside the
- * `session/event` listener (S1 simplification of DSH's write-behind), and
- * provides the `core/persistence` read Definition. Publication decides the
- * write mode: a `resumed` session ATTACHES to its existing file append-only
- * (the whole-file snapshot is the fresh/fork path and must never run for a
- * resume). A torn final line — the expected crash artifact — is preserved in a
- * `.torn` sidecar, never silently destroyed; deeper corruption (a mid-file
- * parse error or seq gap) marks the stored session `damaged` on read and
- * refuses attach.
+ * `session/event` listener through one file descriptor held per session (S1
+ * simplification of DSH's write-behind), and provides the `core/persistence`
+ * read Definition.
+ *
+ * A session MATERIALIZES on its first conversation fact — its first surface
+ * event — never at publication: a session that opened, recorded its stamps and
+ * was abandoned leaves nothing behind (DSH's rule: a created-but-never-appended
+ * session is absent). Publication decides the write mode: a `resumed` session
+ * ATTACHES to its existing file append-only at publication (the whole-file
+ * snapshot is the fresh/fork path and must never run for a resume). A torn
+ * final line — the expected crash artifact — is preserved in a `.torn`
+ * sidecar, never silently destroyed; deeper corruption (a mid-file parse error
+ * or seq gap) marks the stored session `damaged` on read and refuses attach.
  *
  * Single-writer per stored session is this provider's guarantee: publication
- * takes a `<file>.lock` write lease held until disposal, so a second process
- * resuming the same id is refused before it appends a byte (interleaved
- * appends from two processes would collide seqs and truncate the log as
- * damaged on the next read). Provably-dead same-host holders are reclaimed;
- * anything else names the holder and asks for manual cleanup.
+ * takes a `<file>.lock` write lease held until disposal — materialized or not —
+ * so a second process resuming the same id is refused before it appends a byte
+ * (interleaved appends from two processes would collide seqs and truncate the
+ * log as damaged on the next read). Provably-dead same-host holders are
+ * reclaimed; anything else names the holder and asks for manual cleanup.
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, truncateSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { Context, Plugin } from '../../kernel/index.ts'
@@ -155,6 +160,22 @@ function holderIsDead(holder: LeaseHolder): boolean {
   }
 }
 
+/** The header line is small by construction; a bounded read is all a listing needs. */
+const HEADER_READ_BYTES = 64 * 1024
+
+/** Line 1 of a stored log without reading the log: a bounded prefix read. */
+function readHeaderLine(file: string): string | undefined {
+  const fd = openSync(file, 'r')
+  try {
+    const buffer = Buffer.alloc(HEADER_READ_BYTES)
+    const length = readSync(fd, buffer, 0, buffer.length, 0)
+    const newline = buffer.subarray(0, length).indexOf(0x0a)
+    return newline === -1 ? undefined : buffer.subarray(0, newline).toString('utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /** Stored session headers (line 1 of each `*.jsonl`), newest first; unreadable files skipped. */
 function listStoredHeaders(root: string): SessionHeader[] {
   let names: string[]
@@ -166,7 +187,7 @@ function listStoredHeaders(root: string): SessionHeader[] {
   const headers: SessionHeader[] = []
   for (const name of names) {
     try {
-      const first = readFileSync(join(root, name), 'utf8').split('\n', 1)[0]
+      const first = readHeaderLine(join(root, name))
       if (!first) continue
       const parsed = JSON.parse(first) as Partial<HeaderLine>
       if (parsed.kind !== 'session' || typeof parsed.id !== 'string' || typeof parsed.createdAt !== 'number') continue
@@ -178,10 +199,21 @@ function listStoredHeaders(root: string): SessionHeader[] {
   return headers.toSorted((a, b) => b.createdAt - a.createdAt)
 }
 
+/** A materialized or attached session: the file and the descriptor every append goes through. */
+interface OpenFile {
+  readonly file: string
+  readonly fd: number
+}
+
 class JsonlArchive implements Persistence {
   private readonly root: string
-  private readonly files = new WeakMap<Session, string>()
-  /** A write failure is remembered and rethrown at the next flush checkpoint. */
+  /** Sessions with a file: materialized (first surface event) or attached (resume). */
+  private readonly open = new WeakMap<Session, OpenFile>()
+  /** Every descriptor this archive holds, so unloading the row can close them. */
+  private readonly descriptors = new Set<number>()
+  /** Published, leased, and not yet materialized: waiting for a conversation fact. */
+  private readonly pending = new WeakSet<Session>()
+  /** A write failure is remembered and rethrown at every later flush checkpoint. */
   private readonly failures = new WeakMap<Session, unknown>()
   /** Lock-file path per session holding the write lease. */
   private readonly leases = new WeakMap<Session, string>()
@@ -196,25 +228,51 @@ class JsonlArchive implements Persistence {
     return join(this.root, `${encodeURIComponent(id)}.jsonl`)
   }
 
-  /** Publication decides the write mode; a failed attach leaves no file entry, so later events are dropped and flush throws. */
+  /**
+   * Publication takes the lease and decides the write mode. A resumed session
+   * attaches now; anything else waits, leased, for its first surface event. A
+   * failed lease or attach is remembered: later events are dropped and every
+   * flush throws.
+   */
   onPublished(session: Session): void {
     const file = this.fileFor(session.id)
     try {
-      // The lease guards the whole published lifetime, snapshot and attach
-      // alike: a second process must not be able to attach to a file a live
-      // session is still appending to. Reads never lock.
+      // The lease guards the whole published lifetime, materialized or not: a
+      // second process must not be able to attach to a file a live session is
+      // about to write, or still appending to. Reads never lock.
       this.acquireLease(session, file)
     } catch (error) {
       this.failures.set(session, error)
       return
     }
+    if (session.origin !== 'resumed') {
+      this.pending.add(session)
+      return
+    }
     try {
-      if (session.origin === 'resumed') this.attach(session, file)
-      else this.snapshot(session, file)
-      this.files.set(session, file)
+      this.attach(session, file)
+      this.track(session, file)
     } catch (error) {
       this.releaseLease(session)
       this.failures.set(session, error)
+    }
+  }
+
+  private track(session: Session, file: string): void {
+    const fd = openSync(file, 'a')
+    this.descriptors.add(fd)
+    this.open.set(session, { file, fd })
+  }
+
+  private close(session: Session): void {
+    const opened = this.open.get(session)
+    if (!opened) return
+    this.open.delete(session)
+    this.descriptors.delete(opened.fd)
+    try {
+      closeSync(opened.fd)
+    } catch {
+      // Already closed.
     }
   }
 
@@ -307,8 +365,16 @@ class JsonlArchive implements Persistence {
     }
   }
 
-  /** Unloading the provider must not strand the leases it holds. */
-  releaseAllLeases(): void {
+  /** Unloading the provider must not strand the leases or the descriptors it holds. */
+  unload(): void {
+    for (const fd of this.descriptors) {
+      try {
+        closeSync(fd)
+      } catch {
+        // Already closed.
+      }
+    }
+    this.descriptors.clear()
     // Deleting the current entry mid-iteration is well-defined for a Map.
     for (const lock of this.held.keys()) this.releaseLock(lock)
   }
@@ -356,11 +422,10 @@ class JsonlArchive implements Persistence {
     if (scan.tail === 'torn-line') {
       // Preserve the crash artifact in a sidecar rather than destroying bytes;
       // a delimiter keeps fragments from successive crashes individually
-      // recoverable (a torn fragment never ends in a newline).
+      // recoverable (a torn fragment never ends in a newline). ONE append, so
+      // a failure between sidecar and truncate cannot leave half a record.
       const torn = readFileSync(file).subarray(scan.validBytes)
-      appendFileSync(`${file}.torn`, `# torn ${new Date().toISOString()} (${torn.length} bytes)\n`)
-      appendFileSync(`${file}.torn`, torn)
-      appendFileSync(`${file}.torn`, '\n')
+      appendFileSync(`${file}.torn`, Buffer.concat([Buffer.from(`# torn ${new Date().toISOString()} (${torn.length} bytes)\n`), torn, Buffer.from('\n')]))
       truncateSync(file, scan.validBytes)
     }
     const delta = session.events.slice(scan.events.length)
@@ -370,44 +435,51 @@ class JsonlArchive implements Persistence {
   }
 
   onEvent(session: Session, event: EventEnvelope): void {
-    const file = this.files.get(session)
-    if (!file) return
+    const opened = this.open.get(session)
+    if (opened) {
+      try {
+        writeSync(opened.fd, `${JSON.stringify(event)}\n`)
+      } catch (error) {
+        if (!this.failures.has(session)) this.failures.set(session, error)
+        // Quarantine the file: appending a LATER event after a dropped one would
+        // fabricate a seq gap and poison the stored log permanently. From here
+        // the session is dropped-and-flagged (every flush keeps failing).
+        this.close(session)
+      }
+      return
+    }
+    // Materialize on the first conversation fact: the snapshot carries the
+    // header and everything appended so far (this event included), and every
+    // later event appends through the descriptor.
+    if (!this.pending.has(session) || event.surfaceOp === undefined) return
+    this.pending.delete(session)
+    const file = this.fileFor(session.id)
     try {
-      appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8')
+      this.snapshot(session, file)
+      this.track(session, file)
     } catch (error) {
-      if (!this.failures.has(session)) this.failures.set(session, error)
-      // Quarantine the file: appending a LATER event after a dropped one would
-      // fabricate a seq gap and poison the stored log permanently. From here
-      // the session is dropped-and-flagged (every flush keeps failing).
-      this.files.delete(session)
+      this.failures.set(session, error)
     }
   }
 
-  /** A session disposed before any fact was recorded (e.g. never prompted) leaves no file behind. */
+  /** A session that never recorded a conversation fact was never materialized, so nothing is left behind. */
   onDisposed(session: Session): void {
     // The lease outlives even a quarantined session (the stored prefix stays
     // guarded while the un-persisted session lives) — released here, always.
     this.releaseLease(session)
-    const file = this.files.get(session)
-    this.files.delete(session)
-    if (!file || session.events.length > 0) return
-    try {
-      unlinkSync(file)
-      unlinkSync(`${file}.torn`)
-    } catch {
-      // Already gone or unremovable; a header-only file is harmless.
-    }
+    this.pending.delete(session)
+    this.close(session)
   }
 
-  /** The awaited durability checkpoint: a swallowed write error surfaces here. */
+  /**
+   * The awaited durability checkpoint: a swallowed write error surfaces here,
+   * and keeps surfacing — a failed lease, attach, materialization or append
+   * leaves the session permanently un-persisted, so EVERY flush must fail,
+   * not just the first.
+   */
   onFlush(session: Session): void {
     const failure = this.failures.get(session)
     if (failure === undefined) return
-    // A session with no live file entry (failed publication, or quarantined
-    // after a dropped append) is permanently un-persisted: EVERY flush must
-    // keep failing, not just the first. Only a transient error on a session
-    // still being written is cleared once reported.
-    if (this.files.has(session)) this.failures.delete(session)
     throw new Error(`session ${session.id} could not be persisted: ${failure instanceof Error ? failure.message : String(failure)}`, {
       cause: failure,
     })
@@ -431,9 +503,9 @@ export const persistenceJsonlPlugin: Plugin<PersistenceConfig> = {
   apply(ctx: Context, config) {
     const archive = new JsonlArchive(config.root)
     ctx.provide(PERSISTENCE, archive)
-    // Unloading this row must not strand the locks it holds: the listeners
-    // below (including the one that releases per session) die with it.
-    ctx.effect(() => () => archive.releaseAllLeases(), 'persistence-leases')
+    // Unloading this row must not strand the locks or descriptors it holds: the
+    // listeners below (including the one that releases per session) die with it.
+    ctx.effect(() => () => archive.unload(), 'persistence-unload')
     ctx.on(SESSION_CREATED, (session) => archive.onPublished(session))
     ctx.on(SESSION_EVENT, (session, event) => archive.onEvent(session, event))
     ctx.on(SESSION_FLUSH, (session) => archive.onFlush(session))

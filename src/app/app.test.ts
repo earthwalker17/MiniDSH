@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -56,6 +56,43 @@ describe('headless runner (real composition, scripted model)', () => {
     // The session was persisted as JSONL.
     const files = readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))
     expect(files).toHaveLength(1)
+  })
+
+  /**
+   * A cross-capability claim, tested against the FULL composition: the
+   * composition record, the opening authority stamps and the persistence
+   * provider all act at agent creation, and only their interplay decides
+   * whether an abandoned session litters the home. It used to (the record made
+   * every session "recorded a fact"); materialization on the first conversation
+   * fact is what makes the claim true again.
+   */
+  it('an agent created and disposed without a prompt leaves no session file under the full composition', async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const { bootComposition } = await import('./headless.ts')
+    const { AGENTS } = await import('../core/agent/index.ts')
+    const adapter = new ScriptedAdapter().script(assistantText('hello'))
+    const root = await bootComposition({ sessionsRoot, logger: silent, ...scripted(adapter) })
+    try {
+      const agents = root.get(AGENTS)
+      const abandoned = await agents.create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+      // Stamps were recorded, the log is not empty — and still nothing is stored.
+      expect(abandoned.agent.session.events.map((event) => event.type)).toEqual(['approval/policy', 'sandbox/mode', 'composition/applied'])
+      await abandoned.dispose()
+      expect(readdirSync(sessionsRoot)).toEqual([])
+
+      const { createUserMessage } = await import('../core/llm/message.ts')
+      const used = await agents.create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+      used.agent.followup(createUserMessage('hi'))
+      await used.agent.whenIdle()
+      await used.dispose()
+      const files = readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))
+      expect(files).toHaveLength(1)
+      const lines = readFileSync(join(sessionsRoot, files[0]!), 'utf8').trim().split('\n')
+      expect(lines.slice(1, 4).map((line) => (JSON.parse(line) as { type: string }).type)).toEqual(['approval/policy', 'sandbox/mode', 'composition/applied'])
+    } finally {
+      await root.dispose()
+    }
   })
 
   it('fails loud when a required provider cannot settle', async () => {

@@ -52,6 +52,20 @@ export interface LoopDeps {
 
 const DEFAULT_MAX_STEPS = 24
 
+/**
+ * A durability checkpoint failed: a write the persistence provider remembered
+ * losing. The driver takes no further action — no model request, no tool
+ * effect — on a session whose durable record has already diverged from what
+ * it is about to do.
+ */
+class DurabilityLost extends Error {
+  readonly code = 'DURABILITY_LOST' as const
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    this.name = 'DurabilityLost'
+  }
+}
+
 type StepResult =
   | { kind: 'stop' }
   | { kind: 'continue' }
@@ -280,7 +294,8 @@ export class ReactLoopAgent implements Agent {
       if (signal.aborted) {
         reason = { kind: 'cancelled' }
       } else {
-        reason = { kind: 'error', code: 'LOOP_FAILED', message: error instanceof Error ? error.message : String(error) }
+        const code = error instanceof DurabilityLost ? error.code : 'LOOP_FAILED'
+        reason = { kind: 'error', code, message: error instanceof Error ? error.message : String(error) }
         this.ctx.emit(AGENT_ERROR, this, error)
       }
     } finally {
@@ -338,6 +353,8 @@ export class ReactLoopAgent implements Agent {
     let attempt = 0
     for (;;) {
       attempt += 1
+      // Durable before the next action: a paid request never follows a lost write.
+      await this.checkpoint()
       const request = buildRequest()
       const assembler = new BlockAssembler()
       for await (const chunk of deps.llm.stream(request)) {
@@ -395,14 +412,27 @@ export class ReactLoopAgent implements Agent {
   ): Promise<boolean> {
     const deps = this.deps!
     let concluded = false
+    let lost: DurabilityLost | undefined
     for (let i = 0; i < toolCalls.length; i++) {
       const call = toolCalls[i]!
       const callEvent = this.session.append(TOOL_CALL, { turn, step, callId: call.id, name: call.name, arguments: call.arguments })
-      if (signal.aborted) {
-        const aborted = createToolResultMessage(call.id, [{ type: 'text', text: 'Error: tool call aborted before dispatch' }], true)
+      // Durable before the next effect: the checkpoint sits between the call
+      // record and the dispatch, so a lost write ends the turn with every
+      // remaining call answered and none of them run — the same shape as a
+      // cancellation, and the surface stays balanced for any reader.
+      if (!signal.aborted && !lost) {
+        try {
+          await this.checkpoint()
+        } catch (error) {
+          lost = error as DurabilityLost
+        }
+      }
+      if (signal.aborted || lost) {
+        const why = lost ? { text: 'Error: tool call not dispatched: the session lost durability', name: 'DurabilityLost', code: 'DURABILITY_LOST' } : { text: 'Error: tool call aborted before dispatch', name: 'AbortError', code: 'ABORTED_BEFORE_DISPATCH' }
+        const skipped = createToolResultMessage(call.id, [{ type: 'text', text: why.text }], true)
         this.session.append(
           TOOL_RESULT,
-          { turn, step, callId: call.id, message: aborted, error: { name: 'AbortError', code: 'ABORTED_BEFORE_DISPATCH' } },
+          { turn, step, callId: call.id, message: skipped, error: { name: why.name, code: why.code } },
           { surfaceOp: { op: 'append' }, sourceEventSeqs: [callEvent.seq] },
         )
         continue
@@ -423,7 +453,17 @@ export class ReactLoopAgent implements Agent {
       for (const context of result.additionalContexts ?? []) this.inbox.append(context, 'next-step', false)
       if (result.concludesTurn) concluded = true
     }
+    if (lost) throw lost
     return concluded
+  }
+
+  /** The durability checkpoint: a provider that remembered losing a write says so here, and the turn stops before its next action. */
+  private async checkpoint(): Promise<void> {
+    try {
+      await this.session.flush()
+    } catch (error) {
+      throw new DurabilityLost(error instanceof AggregateError && error.errors.length === 1 ? error.errors[0] : error)
+    }
   }
 
   private buildHeader(config: CallConfig, assembled: AssembledPrompt): RequestHeader {

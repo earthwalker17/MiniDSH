@@ -38,6 +38,26 @@ async function mountWithStore(): Promise<{ resolve: () => string | undefined; st
 }
 
 describe('credentials-local', () => {
+  it('reports a malformed store once instead of silently answering "not set"', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-'))
+    const store = join(dir, 'credentials.json')
+    const warnings: string[] = []
+    root = createRoot({ logger: { warn: (message) => void warnings.push(message), error: () => {} } })
+    root.plugin(credentialsLocalPlugin, { path: store })
+    await root.settle()
+    const credentials = root.get(CREDENTIALS)
+    // Missing is silent: it is the ordinary state of a fresh home.
+    expect(credentials.resolve(REF)).toBeUndefined()
+    expect(warnings).toEqual([])
+    writeFileSync(store, '{"MINIDSH_TEST_SECRET": "s",}') // a trailing comma
+    expect(credentials.resolve(REF)).toBeUndefined()
+    expect(credentials.resolve(REF)).toBeUndefined()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/credentials store .* is not valid JSON/)
+    writeFileSync(store, '{"MINIDSH_TEST_SECRET": "s"}')
+    expect(credentials.resolve(REF)).toBe('s')
+  })
+
   it('resolves env over file, and the file when env is unset or blank', async () => {
     const { resolve, store } = await mountWithStore()
     writeFileSync(store, JSON.stringify({ MINIDSH_TEST_SECRET: 'from-file' }))
