@@ -60,8 +60,13 @@ export interface CreateAgentOptions {
    * mounted plugin cannot activate. Services are read by the plugins mounted
    * here (which declare `inject`) or via `tryGet`; `agentCtx.get` is limited
    * to what the loop itself injects.
+   *
+   * `agent` is the UNPUBLISHED agent (it is also `agentCtx.scope`): its
+   * session is appendable here, which is how a creator seeds durable facts a
+   * fresh session must open with — the slot a delegation seam stamps a child's
+   * authority into before its first effect.
    */
-  readonly setup?: (agentCtx: Context) => void | Promise<void>
+  readonly setup?: (agentCtx: Context, agent: Agent) => void | Promise<void>
 }
 
 export interface AgentFactory {

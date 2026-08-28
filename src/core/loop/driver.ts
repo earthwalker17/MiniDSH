@@ -105,7 +105,7 @@ export class ReactLoopAgent implements Agent {
 
   /** Post-publication: run restored waking work without new input (the factory calls this). */
   wakeIfPending(): void {
-    if (!this.disposed && !this.running && this.inbox.hasWakingPending) void this.run()
+    if (!this.disposed && !this.running && this.inbox.hasWakingPending) this.start()
   }
 
   get ctx(): Context {
@@ -126,7 +126,7 @@ export class ReactLoopAgent implements Agent {
   send(message: Message, target: InboxTarget, wakeup: boolean): void {
     if (this.disposed) return
     this.inbox.append(message, target, wakeup)
-    if (wakeup && !this.running) void this.run()
+    if (wakeup && !this.running) this.start()
   }
 
   followup(message: Message): void {
@@ -157,12 +157,22 @@ export class ReactLoopAgent implements Agent {
   private setStatus(next: AgentStatus): void {
     if (this._status === next) return
     this._status = next
-    this.ctx.emit(AGENT_STATUS, this, next)
+    // Waiters first: an observer rejecting the status emit must not strand a
+    // whenIdle() that was already owed.
     if (next === 'idle') {
       const waiters = this.idleWaiters
       this.idleWaiters = []
       for (const resolve of waiters) resolve()
     }
+    this.ctx.emit(AGENT_STATUS, this, next)
+  }
+
+  /** The driver is fire-and-forget; whatever escapes it is reported, never left as an unhandled rejection. */
+  private start(): void {
+    this.run().catch((error: unknown) => {
+      this.ctx.emit(AGENT_ERROR, this, error)
+      this.ctx.logger.error(`agent ${this.id}: driver failure`, error)
+    })
   }
 
   private async run(): Promise<void> {
@@ -194,7 +204,6 @@ export class ReactLoopAgent implements Agent {
     const signal = this.abort.signal
     this.session.append(TURN_START, { turn })
     let reason: TurnEndReason = { kind: 'completed' }
-    let naturalStop = false
     try {
       let step = 0
       let firstStep = true
@@ -231,7 +240,6 @@ export class ReactLoopAgent implements Agent {
         const entered = decision.messages
         if (firstStep && entered.length === 0) {
           commitClaim()
-          naturalStop = true
           break
         }
         this.session.append(STEP_START, { turn, step })
@@ -259,17 +267,11 @@ export class ReactLoopAgent implements Agent {
           reason = { kind: 'max-tokens' }
           break
         }
-        if (result.kind === 'concluded') {
-          naturalStop = true
-          break
-        }
+        if (result.kind === 'concluded') break
         const owesRequest = result.kind === 'continue'
         if (!owesRequest && !this.inbox.hasStepPending) {
           await this.ctx.serial(AGENT_TURN_STOPPING, { agent: this, turn, signal })
-          if (!this.inbox.hasStepPending) {
-            naturalStop = true
-            break
-          }
+          if (!this.inbox.hasStepPending) break
         }
         if (step >= this.maxSteps) {
           reason = { kind: 'max-steps' }
@@ -284,7 +286,6 @@ export class ReactLoopAgent implements Agent {
         this.ctx.emit(AGENT_ERROR, this, error)
       }
     } finally {
-      void naturalStop
       this.session.append(TURN_END, { turn, reason })
       await this.session.flush()
     }

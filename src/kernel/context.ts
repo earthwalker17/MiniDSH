@@ -2,10 +2,24 @@ import { EventBus, type Disposer, type DispatchInfo, type EffectCleanup, type Lo
 import { KernelError } from './errors.ts'
 import type { AnyEventKey, EventKey, Listener, ServiceKey } from './tokens.ts'
 
+/**
+ * A plugin's config contract, structurally typed so the kernel needs no schema
+ * library: anything with `parse(unknown) → C` (a zod schema qualifies). The
+ * kernel parses a row's config BEFORE `apply` and hands over the parsed value,
+ * so a stale or malformed row fails loud at load, naming the plugin, instead of
+ * silently taking defaults — and a composition can validate a new config
+ * before it disposes the instance it would replace.
+ */
+export interface ConfigSchema<C> {
+  parse(value: unknown): C
+}
+
 /** A plugin: an owned unit of registrations with declared service dependencies. */
 export interface Plugin<C = undefined> {
   readonly name: string
   readonly inject?: readonly ServiceKey<unknown>[]
+  /** Optional config contract; absent means the config is passed through as given. */
+  readonly config?: ConfigSchema<C>
   apply(ctx: Context, config: C): void | Promise<void>
 }
 
@@ -103,7 +117,14 @@ class EffectList {
       if (task) return task
       const index = this.records.indexOf(record)
       if (index >= 0) this.records.splice(index, 1)
-      task = Promise.resolve().then(() => record.dispose())
+      // The synchronous part of a cleanup (a registry delete, a realm delete)
+      // runs NOW, so `off(); register(sameName)` in one tick is legal; only an
+      // asynchronous cleanup is what the returned promise still waits on.
+      try {
+        task = Promise.resolve(record.dispose())
+      } catch (error) {
+        task = Promise.reject(error)
+      }
       return task
     }
   }
@@ -157,6 +178,7 @@ class PluginInstance implements EffectOwner, PluginHandle {
       plugin: this,
       scope: mount.scope,
       inject: allowed,
+      injectFrom: null,
     })
   }
 
@@ -251,7 +273,17 @@ class PluginInstance implements EffectOwner, PluginHandle {
     if (!this.mounted) return
     this.state = 'loading'
     try {
-      await this.plugin.apply(this.ctx, this.config)
+      // The config contract is checked before a single effect is registered, so
+      // a bad row fails as a config failure, not as whatever `apply` tripped over.
+      let config = this.config
+      if (this.plugin.config) {
+        try {
+          config = this.plugin.config.parse(this.config)
+        } catch (error) {
+          throw new KernelError('PLUGIN_CONFIG', `${this.label}: invalid config: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+        }
+      }
+      await this.plugin.apply(this.ctx, config)
       if (!this.mounted) {
         await this.effects.unwindAll(this.root.logger, this.label)
         return
@@ -346,12 +378,16 @@ interface ContextInit {
   plugin: PluginInstance | null
   scope: unknown
   /**
-   * Allowed strict reads; `null` = unrestricted. The root and scopes derived
-   * from it are unrestricted; a scope derived from a plugin context inherits
-   * that plugin's declared set, because reload tracking is keyed on the
-   * declared `inject` and a scope must not widen what its plugin may read.
+   * Allowed strict reads owned by THIS context; `null` = unrestricted. The root
+   * and scopes derived from it are unrestricted. A plugin context starts with
+   * its declared `inject`; a scope derived from a restricted context starts
+   * empty and reads through `injectFrom` as well — so a plugin's own provisions
+   * stay readable from its scopes, while a scope's own provisions widen the
+   * scope alone and never the plugin (reload tracking is keyed on the declared
+   * `inject`, and a scope must not widen what its plugin may read).
    */
   inject: Set<string> | null
+  injectFrom: Context | null
 }
 
 /**
@@ -367,6 +403,7 @@ export class Context {
   readonly root: RootState
   private readonly ownerPlugin: PluginInstance | null
   private readonly inject: Set<string> | null
+  private readonly injectFrom: Context | null
   private readonly ownScope: Scope | null
 
   constructor(init: ContextInit, ownScope: Scope | null = null) {
@@ -377,7 +414,15 @@ export class Context {
     this.ownerPlugin = init.plugin
     this.scope = init.scope
     this.inject = init.inject
+    this.injectFrom = init.injectFrom
     this.ownScope = ownScope
+  }
+
+  /** Strict-read admission: unrestricted, declared/provided here, or admitted by the context this one derives its reads from. */
+  private mayRead(name: string): boolean {
+    if (this.inject === null) return true
+    if (this.inject.has(name)) return true
+    return this.injectFrom?.mayRead(name) ?? false
   }
 
   get logger(): Logger {
@@ -388,7 +433,7 @@ export class Context {
 
   /** Strict read: the key must be injected (or provided by this owner) and active. */
   get<T>(key: ServiceKey<T>): T {
-    if (this.inject && !this.inject.has(key.name)) {
+    if (!this.mayRead(key.name)) {
       throw new KernelError('SERVICE_NOT_INJECTED', `cannot read service "${key.name}" from ${this.owner.label} without inject`)
     }
     const impl = this.realm.lookup(key.name)
@@ -418,10 +463,15 @@ export class Context {
     const provider = this.owner instanceof PluginInstance ? this.owner : null
     const impl: Impl = { key: key.name, value, provider, id: this.root.mintId() }
     this.realm.set(impl)
-    if (this.inject) this.inject.add(key.name)
+    // A provider may read its own key. The widening lasts exactly as long as the
+    // provision does and touches only THIS context's own set: a scope providing
+    // into an agent's world widens that scope, never the plugin it derives from.
+    const widened = this.inject !== null && !this.mayRead(key.name)
+    if (widened) this.inject!.add(key.name)
     const disposer = this.effect(() => {
       return () => {
         this.realm.delete(key.name, impl)
+        if (widened) this.inject!.delete(key.name)
         this.root.notify()
       }
     }, `provide("${key.name}")`)
@@ -431,9 +481,12 @@ export class Context {
 
   // ---- plugins and effects ------------------------------------------------
 
-  /** Mounts a plugin here; it activates once its injected services are active. */
-  plugin(plugin: Plugin<undefined>): PluginHandle
-  plugin<C>(plugin: Plugin<C>, config: C): PluginHandle
+  /**
+   * Mounts a plugin here; it activates once its injected services are active.
+   * The config argument is optional exactly when the plugin's config type
+   * admits `undefined`, and required otherwise.
+   */
+  plugin<C>(plugin: Plugin<C>, ...args: undefined extends C ? [config?: C] : [config: C]): PluginHandle
   plugin<C>(plugin: Plugin<C>, config?: C): PluginHandle {
     const instance = new PluginInstance(this.root, this, plugin as Plugin<unknown>, config)
     this.root.instances.add(instance)
@@ -469,7 +522,10 @@ export class Context {
         owner: scope,
         plugin: this.ownerPlugin,
         scope: options.scope ?? this.scope,
-        inject: this.inject,
+        // An empty own set reading THROUGH this context: the scope sees its
+        // plugin's declared and provided keys, and may widen only itself.
+        inject: this.inject === null ? null : new Set(),
+        injectFrom: this.inject === null ? null : this,
       },
       scope,
     )
@@ -546,7 +602,15 @@ export class Context {
     const run = (index: number): R => {
       if (index >= listeners.length) return inner()
       const fn = listeners[index]!
-      return fn(...plain, () => run(index + 1)) as R
+      // Single-shot: a middleware that called next() twice would run the rest
+      // of the chain — and the inner continuation, a tool body — twice against
+      // one durable record.
+      let called = false
+      return fn(...plain, () => {
+        if (called) throw new KernelError('DISPATCH_REENTERED', `a listener of "${key.name}" called next() more than once`)
+        called = true
+        return run(index + 1)
+      }) as R
     }
     return run(0)
   }
@@ -616,5 +680,5 @@ export function createRoot(options: RootOptions = {}): Context {
   const logger = options.logger ?? consoleLogger
   const root = new RootState(logger)
   const scope = new Scope('root', logger)
-  return new Context({ root, parent: null, realm: new Realm(null), owner: scope, plugin: null, scope: undefined, inject: null })
+  return new Context({ root, parent: null, realm: new Realm(null), owner: scope, plugin: null, scope: undefined, inject: null, injectFrom: null })
 }

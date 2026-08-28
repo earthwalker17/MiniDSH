@@ -7,7 +7,7 @@
  * can omit them. The always-on structural checks (session immutability, seq
  * contiguity, surface validity) live in the owning module, not here.
  */
-import { serviceKey, type Context, type Disposer, type Plugin, type ServiceKey } from '../../kernel/index.ts'
+import { KernelError, serviceKey, type Context, type Disposer, type Plugin, type ServiceKey } from '../../kernel/index.ts'
 
 export type InvariantFailure = (message: string) => never
 
@@ -58,6 +58,11 @@ class InvariantRegistry implements Invariants {
   register(owner: Context, packageName: string, installer: InvariantInstaller): Disposer {
     if (packageName.length === 0 || packageName.trim() !== packageName) {
       throw new Error(`invalid invariant package name ${JSON.stringify(packageName)}`)
+    }
+    // Invariants observe the whole root; one registered from an agent scope
+    // would police every agent and die with one of them. Deployment-global only.
+    if (owner.scope !== undefined) {
+      throw new KernelError('SCOPED_OWNER', `invariant "${packageName}" cannot be registered from a scoped context; invariants are deployment-global`)
     }
     if (this.reserved.has(packageName)) throw new Error(`invariant "${packageName}" is already registered`)
     this.reserved.add(packageName)

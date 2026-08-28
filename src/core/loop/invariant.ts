@@ -41,26 +41,26 @@ function requestAsHeader(request: LlmRequest): string {
 /**
  * Model-visible ⟺ logged. For every loop-built request, the messages must
  * equal `deriveMessages()` and the header must equal the folded `request/header`.
- * Registered with `prepend` so a short-circuiting middleware cannot silence it.
+ *
+ * An OBSERVER, not a listener: observers run in the dispatch preflight, before
+ * any listener is selected, so no middleware — however it is ordered, and
+ * `prepend` is an unshift that puts the LAST registrant first — can run ahead
+ * of it and send a request the check never saw.
  */
 const install: InvariantInstaller = (ctx, fail) => {
-  ctx.on(
-    LLM_STREAM,
-    (request, next) => {
-      const session = loopRequestSession(request)
-      if (session) {
-        if (!Object.isFrozen(request)) fail('loop-built request is not frozen')
-        if (JSON.stringify(request.messages) !== JSON.stringify(session.deriveMessages())) {
-          fail('request messages diverge from deriveMessages()')
-        }
-        const header = session.foldRequestHeader()
-        if (!header) fail('loop-built request has no request/header in the log')
-        else if (canonHeader(header) !== requestAsHeader(request)) fail('request header diverges from the folded request/header')
-      }
-      return next()
-    },
-    { prepend: true, global: true },
-  )
+  ctx.observe((info) => {
+    if (info.name !== LLM_STREAM.name) return
+    const request = info.args[0] as LlmRequest
+    const session = loopRequestSession(request)
+    if (!session) return
+    if (!Object.isFrozen(request)) fail('loop-built request is not frozen')
+    if (JSON.stringify(request.messages) !== JSON.stringify(session.deriveMessages())) {
+      fail('request messages diverge from deriveMessages()')
+    }
+    const header = session.foldRequestHeader()
+    if (!header) fail('loop-built request has no request/header in the log')
+    else if (canonHeader(header) !== requestAsHeader(request)) fail('request header diverges from the folded request/header')
+  })
 }
 
 /** Registers the request-reconstruction invariant. Mount only where invariants run. */

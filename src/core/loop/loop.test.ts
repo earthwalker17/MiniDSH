@@ -109,6 +109,48 @@ describe('agent creation', () => {
     expect(harness.root.get(SESSIONS).list()).toEqual([])
   })
 
+  it('hands setup the unpublished agent, whose session is appendable before publication', async () => {
+    harness = await coreHarness()
+    const { SESSIONS, eventKind } = await import('../session/index.ts')
+    const SEEDED = eventKind<{ from: string }>('test/seeded')
+    const agents = harness.root.get(AGENTS)
+    const sessions = harness.root.get(SESSIONS)
+    let seen: string[] = []
+    const handle = await agents.create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      setup: (agentCtx, agent) => {
+        seen = [String(agentCtx.scope === agent), String(agents.get(agent.id) === undefined), String(sessions.get(agent.id) === undefined)]
+        agent.session.append(SEEDED, { from: 'setup' })
+      },
+    })
+    expect(seen).toEqual(['true', 'true', 'true'])
+    expect(handle.agent.session.events.map((event) => event.type)).toContain('test/seeded')
+    await handle.dispose()
+  })
+
+  it('a per-agent preset that reaches into a deployment-global registry fails its agent setup loudly', async () => {
+    harness = await coreHarness()
+    const { LLM } = await import('../llm/index.ts')
+    const { INVARIANTS } = await import('../invariants/index.ts')
+    const { ScriptedAdapter } = await import('../../test-support/scripted-adapter.ts')
+    const agents = harness.root.get(AGENTS)
+    const create = (name: string, mount: (agentCtx: Parameters<NonNullable<Parameters<typeof agents.create>[1]['setup']>>[0]) => void) =>
+      agents.create(harness!.root, {
+        cwd: process.cwd(),
+        agentOptions: { provider: 'scripted', model: 'scripted-model' },
+        setup: (agentCtx) => void agentCtx.plugin({ name, inject: [LLM, INVARIANTS], apply: (ctx) => mount(ctx) }),
+      })
+    await expect(create('preset-adapter', (ctx) => void ctx.get(LLM).registerAdapter(ctx, new ScriptedAdapter({ provider: 'preset' })))).rejects.toThrowError(
+      /did not settle.*preset-adapter/,
+    )
+    expect(harness.root.get(LLM).hasProvider('preset')).toBe(false)
+    await expect(create('preset-invariant', (ctx) => void ctx.get(INVARIANTS).register(ctx, 'preset-owned', () => {}))).rejects.toThrowError(
+      /did not settle.*preset-invariant/,
+    )
+    expect(agents.list()).toEqual([])
+  })
+
   it('binds the agent lifetime to its owner context, without leaking a record on explicit dispose', async () => {
     harness = await coreHarness()
     const { SESSIONS } = await import('../session/index.ts')

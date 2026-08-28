@@ -57,7 +57,7 @@ class LoopFactory implements AgentFactory {
     const dispose = (): Promise<void> => (lifetime.task ??= run())
 
     try {
-      if (options.setup) await options.setup(scope)
+      if (options.setup) await options.setup(scope, agent)
       // Publication is atomic: what setup mounted is active (or creation fails) before the agent is visible.
       const report = await scope.settle((plugin) => plugin.scope === agent)
       if (report.pending.length > 0 || report.failed.length > 0) {

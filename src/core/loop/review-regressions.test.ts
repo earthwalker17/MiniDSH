@@ -143,6 +143,38 @@ describe('review regressions: cancellation', () => {
   })
 })
 
+describe('S5.5 regressions: the reconstruction invariant cannot be ordered behind', () => {
+  /**
+   * `prepend` is an unshift, so the LAST prepended listener runs first: a
+   * short-circuiting `llm/stream` middleware registered after the invariant used
+   * to send a request the invariant never saw. The invariant is now an observer,
+   * which runs in the dispatch preflight before any listener is selected.
+   */
+  it('trips on a divergent loop request even when a later prepend:true listener short-circuits the stream', async () => {
+    harness = await coreHarness()
+    const { LLM_STREAM } = await import('../llm/index.ts')
+    const { markLoopRequest } = await import('./marker.ts')
+    const { agent } = await harness.create()
+    // Registered AFTER the invariant and prepended: with a listener-based
+    // invariant this ran first and answered the stream itself.
+    let rogue = 0
+    harness.root.on(
+      LLM_STREAM,
+      () => {
+        rogue += 1
+        return harness!.adapter.stream({ provider: 'scripted', model: 'scripted-model', messages: [] })
+      },
+      { prepend: true, global: true },
+    )
+    harness.adapter.script(assistantText('rogue'))
+    // A loop-marked request whose messages are not what the log derives.
+    const request = Object.freeze({ provider: 'scripted', model: 'scripted-model', system: '', tools: [], messages: [createUserMessage('not in the log')] })
+    markLoopRequest(request, agent.session)
+    expect(() => harness!.root.get(LLM).stream(request)).toThrowError(/diverge/)
+    expect(rogue).toBe(0)
+  })
+})
+
 describe('review regressions: seeded sessions', () => {
   it('continues turn numbering over a forked session instead of restarting at 1', async () => {
     harness = await coreHarness()

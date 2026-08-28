@@ -44,6 +44,13 @@ class LlmRuntime implements Llm {
   }
 
   registerAdapter(owner: Context, adapter: LlmAdapter): Disposer {
+    // The adapter registry is deployment-global. A registration from an agent
+    // scope would be visible to every agent while that one lived and would
+    // collide with the next agent mounting the same preset — refused here, so a
+    // preset that reaches for a global registry fails its agent's setup loudly.
+    if (owner.scope !== undefined) {
+      throw new LlmError('SCOPED_OWNER', `an adapter for provider "${adapter.provider}" cannot be registered from a scoped context; adapters are deployment-global`)
+    }
     if (this.adapters.has(adapter.provider)) {
       throw new LlmError('DUPLICATE_ADAPTER', `an adapter for provider "${adapter.provider}" is already registered`)
     }

@@ -118,6 +118,7 @@ export interface LlmAdapter {
 export type LlmErrorCode =
   | 'NO_ADAPTER'
   | 'DUPLICATE_ADAPTER'
+  | 'SCOPED_OWNER'
   | 'UNKNOWN_PROVIDER'
   | 'PROTOCOL_VIOLATION'
   | 'ABORTED'

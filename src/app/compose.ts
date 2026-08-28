@@ -75,8 +75,8 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       loopPlugin,
       loopInvariantPlugin,
       persistenceJsonlPlugin,
-    ] as readonly Plugin<never>[]
-  ).map((plugin) => [plugin.name, plugin as Plugin<unknown>]),
+    ] as readonly Plugin<unknown>[]
+  ).map((plugin) => [plugin.name, plugin]),
 )
 
 export type Patch = { readonly id: string; readonly config?: unknown; readonly disabled?: boolean } | { readonly insert: readonly Row[] }
@@ -217,6 +217,16 @@ class MountedComposition implements Composition {
     this.guardSpine(id, 'reconfigure')
     const row = this.list.find((entry) => entry.id === id)
     if (!row) throw new Error(`no composition row "${id}"`)
+    // Validate BEFORE disposing: a rejected config must leave the last good
+    // instance running, not a dead row (the kernel would refuse the remount
+    // anyway, but by then the old instance is gone).
+    if (row.plugin.config) {
+      try {
+        row.plugin.config.parse(config)
+      } catch (error) {
+        throw new Error(`cannot reconfigure row "${id}": invalid config: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+      }
+    }
     // Dispose FIRST: the old instance's provide unwinds on its inertia chain,
     // and an early remount would hit SERVICE_DUPLICATE.
     await this.handles.get(id)?.dispose()

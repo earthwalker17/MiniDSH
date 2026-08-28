@@ -443,6 +443,80 @@ describe('kernel: events', () => {
   })
 })
 
+describe('kernel: S5.5 hardening', () => {
+  it('parses a plugin config through its declared schema before apply, and fails the row loudly on a bad one', async () => {
+    const logger = testLogger()
+    const root = createRoot({ logger })
+    const applied: unknown[] = []
+    const schema = {
+      parse(value: unknown): { limit: number } {
+        const record = value as { limit?: unknown; stale?: unknown }
+        if (record.stale !== undefined) throw new Error('unknown key "stale"')
+        return { limit: typeof record.limit === 'number' ? record.limit : 10 }
+      },
+    }
+    const plugin: Plugin<{ limit: number }> = {
+      name: 'limited',
+      config: schema,
+      apply: (_ctx, config) => void applied.push(config),
+    }
+    root.plugin(plugin, {} as { limit: number })
+    await root.settle()
+    expect(applied).toEqual([{ limit: 10 }]) // the PARSED value reaches apply
+
+    const bad = root.plugin(plugin, { stale: 1 } as unknown as { limit: number })
+    const report = await root.settle()
+    expect(bad.state).toBe('failed')
+    const failure = report.failed[0]!.error as KernelError
+    expect(failure.code).toBe('PLUGIN_CONFIG')
+    expect(failure.message).toMatch(/plugin "limited": invalid config: unknown key "stale"/)
+    expect(applied).toHaveLength(1)
+  })
+
+  it('a scope providing a service widens its OWN reads only, and only while the provision lasts', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const A = serviceKey<number>('a')
+    root.provide(GREETER, { greet: () => 'root' })
+    let pluginCtx: Context | undefined
+    root.plugin({ name: 'reader', inject: [A], apply: (ctx) => void (pluginCtx = ctx) })
+    root.plugin({ name: 'a-provider', apply: (ctx) => void ctx.provide(A, 1) })
+    await root.settle()
+    expect(() => pluginCtx!.get(GREETER)).toThrowError(/without inject/)
+    const scope = pluginCtx!.child({ scope: { id: 'agent' } })
+    const release = scope.provide(GREETER, { greet: () => 'shadow' })
+    expect(scope.get(GREETER).greet()).toBe('shadow')
+    // The plugin's own strict-read set is untouched by what its scope provided.
+    expect(() => pluginCtx!.get(GREETER)).toThrowError(/without inject/)
+    await release()
+    expect(() => scope.get(GREETER)).toThrowError(/without inject/)
+  })
+
+  it('refuses a middleware that calls next() twice, so the inner continuation runs at most once', () => {
+    const root = createRoot({ logger: testLogger() })
+    const TWICE = waterfallEvent<[input: string], string>('test/twice')
+    let inner = 0
+    root.on(TWICE, (_input, next) => {
+      next()
+      return next()
+    })
+    expect(() =>
+      root.waterfall(TWICE, 'x', () => {
+        inner += 1
+        return 'x'
+      }),
+    ).toThrowError(/called next\(\) more than once/)
+    expect(inner).toBe(1)
+  })
+
+  it('runs the synchronous part of a cleanup eagerly, so off-then-register in one tick is legal', () => {
+    const root = createRoot({ logger: testLogger() })
+    const off = root.provide(COUNTER, { value: 1 })
+    void off()
+    expect(() => root.provide(COUNTER, { value: 2 })).not.toThrow()
+    expect(root.get(COUNTER).value).toBe(2)
+  })
+})
+
 describe('kernel: plugin context shape', () => {
   it('gives a plugin a context whose registrations it owns and whose reads are restricted to inject + own provides', async () => {
     const root = createRoot({ logger: testLogger() })

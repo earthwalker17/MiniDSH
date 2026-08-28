@@ -75,6 +75,16 @@ describe('LlmRuntime', () => {
     expect(() => llm.registerAdapter(root, new ScriptedAdapter())).toThrowError(LlmError)
   })
 
+  it('refuses an adapter registered from a scoped context: the registry is deployment-global', async () => {
+    const { root, llm } = await harness()
+    const scoped = root.child({ scope: { id: 'agent' } })
+    expect(() => llm.registerAdapter(scoped, new ScriptedAdapter())).toThrowError(/deployment-global/)
+    expect(llm.hasProvider('scripted')).toBe(false)
+    // An unscoped child (a label-only owner) is still a legal owner.
+    llm.registerAdapter(root.child({ label: 'owner' }), new ScriptedAdapter())
+    expect(llm.hasProvider('scripted')).toBe(true)
+  })
+
   it('lists registered providers with their advertised models', async () => {
     const { root, llm } = await harness()
     expect(llm.providers()).toEqual([])

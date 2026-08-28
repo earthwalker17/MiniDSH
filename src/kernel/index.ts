@@ -7,7 +7,7 @@
  * store, and a typed event bus whose tokens carry their dispatch mode.
  */
 export { Context, createRoot } from './context.ts'
-export type { Plugin, PluginHandle, PluginState, SettleReport, ListenOptions, RootOptions } from './context.ts'
+export type { ConfigSchema, Plugin, PluginHandle, PluginState, SettleReport, ListenOptions, RootOptions } from './context.ts'
 export type { Disposer, EffectCleanup, DispatchInfo, Logger, Observer } from './bus.ts'
 export { KernelError } from './errors.ts'
 export type { KernelErrorCode } from './errors.ts'
