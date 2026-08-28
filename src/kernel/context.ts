@@ -50,6 +50,8 @@ export interface ListenOptions {
 interface EffectRecord {
   dispose: EffectCleanup
   label: string
+  /** Set by whichever path ran the cleanup first — the disposer or the owner's unwind — so the other never runs it again. */
+  done?: true
 }
 
 /** Anything that can own effects: the root, a scope, or a plugin instance. */
@@ -115,6 +117,8 @@ class EffectList {
     let task: Promise<void> | undefined
     return () => {
       if (task) return task
+      if (record.done) return (task = Promise.resolve())
+      record.done = true
       const index = this.records.indexOf(record)
       if (index >= 0) this.records.splice(index, 1)
       // The synchronous part of a cleanup (a registry delete, a realm delete)
@@ -132,6 +136,8 @@ class EffectList {
   async unwindAll(logger: Logger, owner: string): Promise<void> {
     while (this.records.length > 0) {
       const record = this.records.pop()!
+      if (record.done) continue
+      record.done = true
       try {
         await record.dispose()
       } catch (error) {
@@ -145,6 +151,21 @@ class EffectList {
 }
 
 const INACTIVE = '__inactive__'
+
+/**
+ * One line naming the keys, whatever the schema library: a validator that
+ * reports `issues` (zod's shape) is flattened to `path: message; …`, anything
+ * else keeps its own message.
+ */
+export function describeConfigError(error: unknown): string {
+  const issues = (error as { issues?: unknown } | null)?.issues
+  if (Array.isArray(issues) && issues.length > 0) {
+    return issues
+      .map((issue: { path?: (string | number)[]; message?: string }) => `${(issue.path ?? []).join('.') || '<root>'}: ${issue.message ?? 'invalid'}`)
+      .join('; ')
+  }
+  return error instanceof Error ? error.message : String(error)
+}
 
 class PluginInstance implements EffectOwner, PluginHandle {
   readonly name: string
@@ -280,7 +301,7 @@ class PluginInstance implements EffectOwner, PluginHandle {
         try {
           config = this.plugin.config.parse(this.config)
         } catch (error) {
-          throw new KernelError('PLUGIN_CONFIG', `${this.label}: invalid config: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+          throw new KernelError('PLUGIN_CONFIG', `${this.label}: invalid config: ${describeConfigError(error)}`, { cause: error })
         }
       }
       await this.plugin.apply(this.ctx, config)
@@ -465,8 +486,10 @@ export class Context {
     this.realm.set(impl)
     // A provider may read its own key. The widening lasts exactly as long as the
     // provision does and touches only THIS context's own set: a scope providing
-    // into an agent's world widens that scope, never the plugin it derives from.
-    const widened = this.inject !== null && !this.mayRead(key.name)
+    // into an agent's world widens that scope, never the plugin it derives from —
+    // and it is tracked by the OWN set alone, so a scope shadowing a key its
+    // plugin also provides keeps its read right when the plugin's provision ends.
+    const widened = this.inject !== null && !this.inject.has(key.name)
     if (widened) this.inject!.add(key.name)
     const disposer = this.effect(() => {
       return () => {

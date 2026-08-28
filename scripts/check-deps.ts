@@ -49,7 +49,8 @@ function inLoop(relPath: string): boolean {
 /** `import … from './x'`, `export … from './x'`, `import './x'`, `import('./x')`, and `import('./x').T`. */
 const IMPORTS = [/(?:import|export)[^'"]*?from\s*['"](\.[^'"]+)['"]/g, /import\s+['"](\.[^'"]+)['"]/g, /import\(\s*['"](\.[^'"]+)['"]\s*\)/g]
 
-const PAYLOAD_CAST = /\.data as \{/
+/** Any typed cast of a payload — object literal or named type; `as unknown` is the honest read of a possibly-forged one. */
+const PAYLOAD_CAST = /\.data as (?!unknown\b)/
 
 function main(): void {
   const violations: string[] = []
@@ -82,7 +83,7 @@ function main(): void {
     }
 
     if (importer !== 'test-support' && PAYLOAD_CAST.test(source)) {
-      fail('reads an event payload through `event.data as {…}`; narrow with matches(event, KIND) so a renamed field is a type error')
+      fail('reads an event payload through `event.data as <type>`; narrow with matches(event, KIND) so a renamed field is a type error')
     }
   }
 

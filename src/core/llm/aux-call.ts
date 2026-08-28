@@ -18,7 +18,7 @@
  */
 import { BlockAssembler } from './assembler.ts'
 import type { Llm } from './runtime.ts'
-import { eventKind, type EventEnvelope } from '../session/types.ts'
+import { eventKind, matches, type EventEnvelope } from '../session/types.ts'
 import type { Session } from '../session/session.ts'
 import type { LlmFailure, LlmRequest, TokenUsage } from './types.ts'
 
@@ -110,7 +110,7 @@ export async function runAuxCall(
 export function foldAuxCalls(events: readonly EventEnvelope[]): readonly AuxCallRecord[] {
   const out: AuxCallRecord[] = []
   for (const event of events) {
-    if (event.type === LLM_AUX_CALL.type) out.push(event.data as AuxCallRecord)
+    if (matches(event, LLM_AUX_CALL)) out.push(event.data)
   }
   return out
 }

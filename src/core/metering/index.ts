@@ -14,7 +14,7 @@
  */
 import type { ContentBlock, Message, TokenUsage } from '../llm/types.ts'
 import { deriveEventMessage, foldRequestHeader, foldSurfaceSeqs } from '../session/surface.ts'
-import { LLM_AUX_CALL, type AuxCallRecord } from '../llm/aux-call.ts'
+import { LLM_AUX_CALL } from '../llm/aux-call.ts'
 import { ASSISTANT_MESSAGE, matches, REQUEST_HEADER, type EventEnvelope, type RequestHeader } from '../session/types.ts'
 
 /** The estimator's whole model of a tokenizer. Wrong in the small, stable in the large. */
@@ -110,8 +110,8 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
     // An out-of-loop call costs real money and is billed to this session, but it
     // is NOT the loop's prompt: it counts towards the totals and never towards
     // the projection of what the next request will cost.
-    if (event.type === LLM_AUX_CALL.type) {
-      const auxUsage = (event.data as AuxCallRecord).usage
+    if (matches(event, LLM_AUX_CALL)) {
+      const auxUsage = event.data.usage
       if (auxUsage) {
         sessionInput += auxUsage.inputTokens
         sessionOutput += auxUsage.outputTokens

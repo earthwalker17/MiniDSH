@@ -188,6 +188,7 @@ describe('escalation', () => {
       const result = await shell.exec({ command: echoCmd, policy: { mode: 'danger-full-access', workspaceRoot: workdir }, signal: controller.signal })
       expect(result.output).toBe('')
       expect(result.reset).toBe(false)
+      expect(result.aborted).toBe(true) // "nothing ran", distinguishable from "ran and printed nothing"
       // Nothing was spawned, so nothing had to be killed: this returns at once.
       expect(Date.now() - started).toBeLessThan(500)
     } finally {

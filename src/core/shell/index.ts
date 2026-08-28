@@ -33,6 +33,8 @@ export interface ShellRunResult {
   readonly truncated: boolean
   /** True when the shell was reset (after a timeout); the next call starts fresh. */
   readonly reset: boolean
+  /** True when the command was never dispatched because the call was already cancelled: nothing ran. */
+  readonly aborted?: true
   /** What actually governed this run — a reported fact, not a promise. */
   readonly sandbox: { readonly mode: SandboxMode; readonly enforcement: SandboxEnforcement }
 }

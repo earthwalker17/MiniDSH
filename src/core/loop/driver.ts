@@ -300,7 +300,10 @@ export class ReactLoopAgent implements Agent {
       }
     } finally {
       this.session.append(TURN_END, { turn, reason })
-      await this.session.flush()
+      // A turn that already ended on a lost write reported it once; the
+      // provider keeps refusing every flush, and that is not a second failure.
+      if (reason.kind === 'error' && reason.code === 'DURABILITY_LOST') await this.session.flush().catch(() => undefined)
+      else await this.session.flush()
     }
   }
 

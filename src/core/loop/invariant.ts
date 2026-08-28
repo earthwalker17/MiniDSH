@@ -50,7 +50,13 @@ function requestAsHeader(request: LlmRequest): string {
 const install: InvariantInstaller = (ctx, fail) => {
   ctx.observe((info) => {
     if (info.name !== LLM_STREAM.name) return
-    const request = info.args[0] as LlmRequest
+    const request = info.args[0] as LlmRequest | undefined
+    // An observer sees raw dispatch args: if the dispatch shape ever changes
+    // under this check, it must fail loud rather than pass every request.
+    if (typeof request !== 'object' || request === null || !('messages' in request)) {
+      fail('llm/stream dispatched without a request as its first argument')
+      return
+    }
     const session = loopRequestSession(request)
     if (!session) return
     if (!Object.isFrozen(request)) fail('loop-built request is not frozen')

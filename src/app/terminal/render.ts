@@ -5,6 +5,7 @@
  * from the projection every plain-text surface shares (`app/present.ts`). No
  * terminal state leaks in here — the controller owns interaction.
  */
+import { APPROVAL_ASKED } from '../../core/approval/index.ts'
 import { formatTokens, meterSession } from '../../core/metering/index.ts'
 import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, TRACE_TYPES, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
 import type { StreamChunk } from '../../core/llm/index.ts'
@@ -81,8 +82,10 @@ export class TerminalRenderer {
     // The step is priced here, so this is where the number can change; the
     // text itself already streamed.
     if (matches(event, ASSISTANT_MESSAGE)) return this.contextLine()
-    // A completed turn needs no line; the prompt returning says it.
+    // A completed turn needs no line; the prompt returning says it. An ask is
+    // rendered by the controller's `[y/N]` prompt, so its line would be a twin.
     if (matches(event, TURN_END) && event.data.reason.kind === 'completed') return ''
+    if (matches(event, APPROVAL_ASKED)) return ''
     const line = describeEvent(event)
     return line === undefined ? '' : `${line}\n`
   }

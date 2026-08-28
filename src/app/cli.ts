@@ -9,7 +9,7 @@
  * validation and `sessions` compose the exact rows a boot would mount, not an
  * approximation of them.
  */
-import { createRoot, type Logger } from '../kernel/index.ts'
+import { createRoot, describeConfigError, type Logger } from '../kernel/index.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
@@ -115,18 +115,25 @@ function baseRows(home: HomeLayout, authority: AuthorityFlags = {}): Row[] {
   return compose({ ...home, dialect: defaultDialect(), ...authority })
 }
 
-async function prepareBoot(args: ParsedArgs, presets: PresetUse): Promise<BootPlan | string> {
+/**
+ * `settings: 'optional'` is for commands that only read stored logs: a broken
+ * settings.json must not stand between a user and `sessions show --audit`.
+ */
+async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'required' | 'optional' = 'required'): Promise<BootPlan | string> {
   const authority = authorityFlags(args)
   if (typeof authority === 'string') return authority
-  const settings = loadSettings()
-  if (typeof settings === 'string') return settings
+  const loadedSettings = loadSettings()
+  if (typeof loadedSettings === 'string' && settingsUse === 'required') return loadedSettings
+  if (typeof loadedSettings === 'string') stderrLogger.warn(loadedSettings)
+  const settings = typeof loadedSettings === 'string' ? resolveSettings() : loadedSettings
   const loaded = await loadConfigLayers(args.patchFiles)
   if (typeof loaded === 'string') return loaded
   const home = homeLayout()
+  // A command that cannot apply a preset says so before it looks one up.
+  if (args.flags.get('preset') !== undefined && presets === 'none') return `--preset is not a flag of "${args.command}"`
   const preset = presetFlag(args, authority, home, loaded.layers)
   if (typeof preset === 'object') return preset.error
   if (preset !== undefined && presets === 'interactive') return '--preset works with --headless; in the interactive terminal use /preset'
-  if (preset !== undefined && presets === 'none') return `--preset is not a flag of "${args.command}"`
   const agentSetup = await agentPresetFlag(args, loaded)
   if (typeof agentSetup === 'object') return agentSetup.error
   return {
@@ -257,9 +264,10 @@ function modelFlags(args: ParsedArgs): CommonModelFlags {
   }
 }
 
+/** Absolute, always: the cwd becomes the immutable workspace root of every session it opens. */
 function cwdFlag(args: ParsedArgs): string {
   const cwd = args.flags.get('cwd')
-  return typeof cwd === 'string' ? cwd : process.cwd()
+  return typeof cwd === 'string' ? resolve(cwd) : process.cwd()
 }
 
 // ---- rendering ----------------------------------------------------------------
@@ -476,21 +484,43 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     const effective = applyLayers(baseRows(plan.home, plan.authority), plan.loaded.layers, (message) => process.stderr.write(`warn: ${message}\n`))
     const touched = (id: string): string => effective.provenance.get(id) ?? 'built-in'
     if (args.flags.get('json') === true) {
-      const rows = effective.rows.map((row) => ({
-        id: row.id,
-        plugin: row.plugin.name,
-        ...(row.disabled === true ? { disabled: true } : {}),
-        layer: touched(row.id),
-      }))
+      const rows = effective.rows.map((row) => {
+        let invalidConfig: string | undefined
+        if (row.disabled !== true && row.plugin.config) {
+          try {
+            row.plugin.config.parse(row.config)
+          } catch (error) {
+            invalidConfig = describeConfigError(error)
+          }
+        }
+        return {
+          id: row.id,
+          plugin: row.plugin.name,
+          ...(row.disabled === true ? { disabled: true } : {}),
+          layer: touched(row.id),
+          ...(invalidConfig === undefined ? {} : { invalidConfig }),
+        }
+      })
       const agentPresets = [...plan.loaded.agentPresets].map(([name, spec]) => ({ name, rows: spec.rows.map((row) => ({ id: row.id, plugin: row.plugin })) }))
       process.stdout.write(
         `${JSON.stringify({ hash: effective.descriptor.hash, layers: effective.descriptor.layers, agentDefaults: plan.settings.agent, rows, agentPresets }, null, 2)}\n`,
       )
-      return 0
+      return rows.some((row) => row.invalidConfig !== undefined) ? 1 : 0
     }
     process.stdout.write(`composition ${effective.descriptor.hash} (layers: ${effective.descriptor.layers.join(' → ')})\n`)
     process.stdout.write(`agent defaults: ${plan.settings.agent.provider}/${plan.settings.agent.model}\n\n`)
     const warnings: string[] = []
+    // What a boot would refuse, this command must refuse too: every enabled
+    // row's config is parsed against the plugin's contract, exactly as load does.
+    const invalid: string[] = []
+    for (const row of effective.rows) {
+      if (row.disabled === true || !row.plugin.config) continue
+      try {
+        row.plugin.config.parse(row.config)
+      } catch (error) {
+        invalid.push(`row "${row.id}" (${row.plugin.name}): invalid config: ${describeConfigError(error)}`)
+      }
+    }
     for (const row of effective.rows) {
       const layer = touched(row.id)
       const sensitive = layer !== 'built-in' && (AUTHORITY_SENSITIVE.has(row.id) || AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin.name))
@@ -511,7 +541,8 @@ async function configCommand(args: ParsedArgs): Promise<number> {
       }
     }
     for (const warning of warnings) process.stderr.write(`warn: ${warning}\n`)
-    return 0
+    for (const line of invalid) process.stderr.write(`error: ${line}\n`)
+    return invalid.length > 0 ? 1 : 0
   } catch (error) {
     return reportError(error)
   }
@@ -539,7 +570,7 @@ async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence
 
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
-  const plan = await prepareBoot(args, 'none')
+  const plan = await prepareBoot(args, 'none', 'optional')
   if (typeof plan === 'string') return usage(plan)
   if (sub === 'list') {
     return withPersistence(plan, (persistence) => {

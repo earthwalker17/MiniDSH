@@ -45,7 +45,9 @@ export const protocolStdioPlugin: Plugin<ProtocolConfig> = {
     const input = config.input ?? process.stdin
     const output = config.output ?? process.stdout
     const transport = new NdjsonTransport(input, output)
-    const cwd = config.cwd ?? process.cwd()
+    // The host's own default is held to the identity rule the wire is held to:
+    // canonical, so the immutable header records the same path the roots name.
+    const cwd = canonicalPath(config.cwd ?? process.cwd())
     const server = new ProtocolServer(
       ctx,
       {

@@ -22,6 +22,11 @@ export function preview(text: string, max = 80): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
 }
 
+/** One spelling of what a stamp's enforcement means, for every line that shows one. */
+function confinement(mode: string, enforcement: string): string {
+  return mode === 'danger-full-access' ? 'unconfined' : `shell confinement ${enforcement}`
+}
+
 /** One line for one event, or nothing when the event has no human-facing shape. No indentation, no newline. */
 export function describeEvent(event: EventEnvelope): string | undefined {
   if (matches(event, USER_MESSAGE)) {
@@ -39,7 +44,7 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     const { mode, enforcement, reason } = event.data
     // Authority is visible where it changes: a surface that hides a widened
     // boundary is a surface that lets one happen quietly.
-    return `[sandbox: ${mode} (${reason}; ${mode === 'danger-full-access' ? 'unconfined' : `shell confinement ${enforcement}`})]`
+    return `[sandbox: ${mode} (${reason}; ${confinement(mode, enforcement)})]`
   }
   if (matches(event, APPROVAL_POLICY)) return `[approvals: ${event.data.policy}]`
   if (matches(event, AUTHORITY_PRESET)) return `[preset: ${event.data.name}]`
@@ -96,7 +101,7 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
     if (matches(event, TOOL_CALL)) {
       calls.set(event.data.callId, `${event.data.name} ${preview(event.data.arguments, 100)}`)
     } else if (matches(event, SANDBOX_MODE)) {
-      lines.push(`${at(event.seq)}  sandbox     ${event.data.mode} (${event.data.reason}; shell confinement ${event.data.enforcement})`)
+      lines.push(`${at(event.seq)}  sandbox     ${event.data.mode} (${event.data.reason}; ${confinement(event.data.mode, event.data.enforcement)})`)
     } else if (matches(event, APPROVAL_POLICY)) {
       lines.push(`${at(event.seq)}  approvals   ${event.data.policy} (${event.data.reason})`)
     } else if (matches(event, AUTHORITY_PRESET)) {

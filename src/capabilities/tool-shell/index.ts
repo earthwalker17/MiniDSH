@@ -109,6 +109,8 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
       const shellSession = shell.sessionFor(agent)
       try {
         const result = await shellSession.exec({ command: args.command, policy, timeoutMs, signal: exec.signal })
+        // "Nothing ran" must never read as "ran and printed nothing".
+        if (result.aborted) throw Object.assign(new Error('command not dispatched: the call was cancelled'), { code: 'ABORTED_BEFORE_DISPATCH' })
         const notice = result.timedOut ? `\n[timed out after ${timeoutMs}ms; the shell was reset]` : ''
         // The tool owns what the model sees. A command's stdout exists nowhere
         // once the process exits, so output too large to show inline is SAVED

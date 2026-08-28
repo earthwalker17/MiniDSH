@@ -212,8 +212,8 @@ class JsonlArchive implements Persistence {
   private readonly root: string
   /** Sessions with a file: materialized (first surface event) or attached (resume). */
   private readonly open = new WeakMap<Session, OpenFile>()
-  /** Every descriptor this archive holds, so unloading the row can close them. */
-  private readonly descriptors = new Set<number>()
+  /** The same sessions, iterable, so unloading the row can close every descriptor it holds. */
+  private readonly tracked = new Set<Session>()
   /** Published, leased, and not yet materialized: waiting for a conversation fact. */
   private readonly pending = new WeakSet<Session>()
   /** A write failure is remembered and rethrown at every later flush checkpoint. */
@@ -263,15 +263,16 @@ class JsonlArchive implements Persistence {
 
   private track(session: Session, file: string): void {
     const fd = openSync(file, 'a')
-    this.descriptors.add(fd)
     this.open.set(session, { file, fd })
+    this.tracked.add(session)
   }
 
+  /** A closed descriptor is forgotten with the session: no entry ever names a number the OS may have reused. */
   private close(session: Session): void {
     const opened = this.open.get(session)
+    this.tracked.delete(session)
     if (!opened) return
     this.open.delete(session)
-    this.descriptors.delete(opened.fd)
     try {
       closeSync(opened.fd)
     } catch {
@@ -370,15 +371,8 @@ class JsonlArchive implements Persistence {
 
   /** Unloading the provider must not strand the leases or the descriptors it holds. */
   unload(): void {
-    for (const fd of this.descriptors) {
-      try {
-        closeSync(fd)
-      } catch {
-        // Already closed.
-      }
-    }
-    this.descriptors.clear()
-    // Deleting the current entry mid-iteration is well-defined for a Map.
+    // Deleting the current entry mid-iteration is well-defined for a Set and a Map.
+    for (const session of this.tracked) this.close(session)
     for (const lock of this.held.keys()) this.releaseLock(lock)
   }
 

@@ -270,9 +270,10 @@ describe('review regressions: driver containment', () => {
     agent.followup(createUserMessage('hi'))
     await expect(agent.whenIdle()).resolves.toBeUndefined()
     expect(agent.status).toBe('idle')
-    // Reported (the checkpoint before the request, then the turn-boundary
-    // flush), never thrown unobserved — and the request was never sent.
-    expect(errors.length).toBeGreaterThanOrEqual(1)
+    // Reported exactly once (the checkpoint before the request; the turn-boundary
+    // flush of a turn that already lost durability is not a second failure),
+    // never thrown unobserved — and the request was never sent.
+    expect(errors).toHaveLength(1)
     expect(harness.adapter.calls).toHaveLength(0)
   })
 })

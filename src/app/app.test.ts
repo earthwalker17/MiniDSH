@@ -171,6 +171,51 @@ describe('cli surface', () => {
     expect(retry).toMatchObject({ disabled: true, layer: 'home' })
   })
 
+  it('refuses in `config` what a boot would refuse: a row config outside its plugin contract', async () => {
+    const home = tempDir('minidsh-home-')
+    const previousHome = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    writeFileSync(join(home, 'composition.json'), JSON.stringify({ patches: [{ id: 'sandbox', config: { mode: 'full' } }] }))
+    const out: string[] = []
+    const err: string[] = []
+    const writeOut = process.stdout.write.bind(process.stdout)
+    const writeErr = process.stderr.write.bind(process.stderr)
+    process.stdout.write = ((text: string) => (out.push(text), true)) as typeof process.stdout.write
+    process.stderr.write = ((text: string) => (err.push(text), true)) as typeof process.stderr.write
+    let code: number
+    let jsonCode: number
+    try {
+      code = await main(['config'])
+      jsonCode = await main(['config', '--json'])
+    } finally {
+      process.stdout.write = writeOut
+      process.stderr.write = writeErr
+      if (previousHome === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previousHome
+    }
+    expect(code).toBe(1)
+    expect(err.join('')).toMatch(/error: row "sandbox" \(core-sandbox\): invalid config: mode/)
+    expect(jsonCode).toBe(1)
+    expect(out.join('')).toMatch(/"invalidConfig": "mode/)
+  })
+
+  it('marks provenance only for a patch that changes a row: a byte-identical restatement stays built-in', async () => {
+    const { applyLayers } = await import('./config.ts')
+    const { defineRow } = await import('./compose.ts')
+    const plugin = { name: 'p', apply: () => {} }
+    const base = [defineRow('a', plugin, { x: 1, y: [1, 2] }), defineRow('b', plugin, { x: 2 })]
+    const effective = applyLayers(
+      base,
+      [
+        { name: 'home', patches: [{ id: 'a', config: { y: [1, 2], x: 1 } }, { id: 'b', disabled: false }] },
+        { name: 'patch', patches: [{ id: 'b', config: { x: 3 } }] },
+      ],
+      () => {},
+    )
+    expect(effective.provenance.get('a')).toBe('built-in')
+    expect(effective.provenance.get('b')).toBe('patch')
+  })
+
   it('prints help and returns 0', async () => {
     const write = process.stdout.write.bind(process.stdout)
     process.stdout.write = (() => true) as typeof process.stdout.write

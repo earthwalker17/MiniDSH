@@ -170,8 +170,11 @@ export function applyLayers(base: readonly Row[], layers: readonly NamedLayer[],
       const target = before.get(patch.id)
       if (!target) continue
       // A touch is a CHANGE: a patch that restates the row as it already was
-      // (`disabled: false` on an enabled row) is not something to flag.
-      const changed = (patch.config !== undefined && patch.config !== target.config) || (patch.disabled !== undefined && patch.disabled !== (target.disabled ?? false))
+      // (`disabled: false` on an enabled row, a byte-identical config) is not
+      // something to flag. Configs compare by the same canonical JSON the
+      // composition hash uses; one that cannot snapshot compares by reference.
+      const changed =
+        (patch.config !== undefined && !sameConfig(patch.config, target.config)) || (patch.disabled !== undefined && patch.disabled !== (target.disabled ?? false))
       if (changed) provenance.set(patch.id, layer.name)
     }
     for (const row of rows) {
@@ -184,6 +187,15 @@ export function applyLayers(base: readonly Row[], layers: readonly NamedLayer[],
     seen.add(row.id)
   }
   return { rows, provenance, descriptor: describeComposition(rows, [BASE_LAYER, ...layers.map((layer) => layer.name)]) }
+}
+
+function sameConfig(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  try {
+    return JSON.stringify(canonical(snapshotJson(a ?? null))) === JSON.stringify(canonical(snapshotJson(b ?? null)))
+  } catch {
+    return false
+  }
 }
 
 /** Stable key order, so hashing never depends on object construction order. */

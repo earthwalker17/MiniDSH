@@ -176,6 +176,9 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     await driver.see('approve touchy (careful)? [y/N] ')
     driver.type('y')
     await driver.see('tool went through')
+    // The prompt IS the ask's rendering: no second `? approval-…` line precedes it.
+    expect(driver.text()).not.toContain('? approval-')
+    expect(driver.text()).toContain('! approval-')
     driver.type('/exit')
     expect(await exitCode).toBe(0)
   })
