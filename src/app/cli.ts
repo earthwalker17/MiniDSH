@@ -91,6 +91,8 @@ interface BootPlan {
   readonly preset?: string
   /** `--agent-preset`, resolved to a setup for the agent scope. */
   readonly agentSetup?: (agentCtx: Context) => void
+  /** The name that setup came from, recorded in each session's header. */
+  readonly agentPreset?: string
 }
 
 /** How a command treats `--preset`: applied as a durable switch, refused in favour of `/preset`, or not a flag at all. */
@@ -144,6 +146,7 @@ async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'r
     authority,
     ...(preset === undefined ? {} : { preset }),
     ...(agentSetup === undefined ? {} : { agentSetup }),
+    ...(typeof args.flags.get('agent-preset') === 'string' ? { agentPreset: args.flags.get('agent-preset') as string } : {}),
   }
 }
 
@@ -320,6 +323,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(flags.maxSteps === undefined ? {} : { maxSteps: flags.maxSteps }),
         ...(plan.preset === undefined ? {} : { preset: plan.preset }),
         ...(plan.agentSetup === undefined ? {} : { setup: plan.agentSetup }),
+        ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
         approve: args.flags.get('approve') === true,
         ...bootFields(plan),
       },
@@ -361,6 +365,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         cwd: process.cwd(),
         ...bootFields(plan),
         ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+        ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
         ...at,
@@ -379,6 +384,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     ...bootFields(plan),
     ...(plan.preset === undefined ? {} : { preset: plan.preset }),
     ...(plan.agentSetup === undefined ? {} : { setup: plan.agentSetup }),
+    ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
     ...modelFlags(args),
     ...at,
     approve,
@@ -401,6 +407,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
       cwd: cwdFlag(args),
       ...bootFields(plan),
       ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+      ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
       ...modelFlags(args),
@@ -419,6 +426,7 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
       cwd: cwdFlag(args),
       ...bootFields(plan),
       ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+      ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
       approve: args.flags.get('approve') === true,
     })
     await host.closed

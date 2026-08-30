@@ -107,7 +107,7 @@ class TestClient {
 
 async function startHost(
   adapter: ScriptedAdapter,
-  extra?: { sessionsRoot?: string; prepare?: (root: Context) => void; approve?: boolean; agentSetup?: (agentCtx: Context) => void },
+  extra?: { sessionsRoot?: string; prepare?: (root: Context) => void; approve?: boolean; agentSetup?: (agentCtx: Context) => void; agentPreset?: string },
 ): Promise<{ host: ProtocolHostHandle; client: TestClient; sessionsRoot: string }> {
   const client = new TestClient()
   const sessionsRoot = extra?.sessionsRoot ?? tempDir('minidsh-proto-sessions-')
@@ -117,6 +117,7 @@ async function startHost(
     logger: silent,
     ...(extra?.approve === undefined ? {} : { approve: extra.approve }),
     ...(extra?.agentSetup === undefined ? {} : { agentSetup: extra.agentSetup }),
+    ...(extra?.agentPreset === undefined ? {} : { agentPreset: extra.agentPreset }),
     patches: [{ id: 'llm-deepseek', disabled: true }],
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
@@ -478,5 +479,33 @@ describe('the route over the wire', () => {
     await client.waitForIdle(sessionId)
     expect(adapter.calls.map((call) => call.model)).toEqual(['scripted-model', 'scripted-3'])
     expect(client.frames('agent/options')).toHaveLength(3)
+  })
+})
+
+describe('what the review found', () => {
+  it('validates agentOptions on the create path, where they become the session base route', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { client } = await startHost(adapter)
+    // A step ceiling that is not a number would silently remove the ceiling.
+    expect((await client.call('session/prompt', { text: 'go', agentOptions: { ...SCRIPTED, maxSteps: 'lots' } })).error?.code).toBe(-32602)
+    expect((await client.call('session/prompt', { text: 'go', agentOptions: { ...SCRIPTED, maxSteps: 0 } })).error?.code).toBe(-32602)
+    // A route to nowhere is refused before it becomes a durable fact.
+    expect((await client.call('session/prompt', { text: 'go', agentOptions: { provider: 'nowhere', model: 'x' } })).error?.code).toBe(-32602)
+    // And a field the vocabulary does not have is named rather than ignored.
+    expect((await client.call('session/prompt', { text: 'go', agentOptions: { ...SCRIPTED, effort: 'high' } })).error?.code).toBe(-32602)
+    // Nothing was created by any of them.
+    expect(client.frames('agent/options')).toHaveLength(0)
+    const ok = await client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: { ...SCRIPTED, maxSteps: 3 } })
+    await client.waitForIdle(ok.sessionId)
+    expect((client.frames('agent/options')[0]!.event.data as { options: { maxSteps: number } }).options.maxSteps).toBe(3)
+  })
+
+  it('records the preset a surface composed its agents from', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { host, client } = await startHost(adapter, { agentSetup: () => {}, agentPreset: 'reviewer' })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const agent = host.root.get(AGENTS).get(asSessionId(sessionId))!
+    expect(agent.session.header.agentPreset).toBe('reviewer')
   })
 })

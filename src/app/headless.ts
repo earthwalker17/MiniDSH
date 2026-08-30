@@ -6,7 +6,7 @@
  * `onEvent`.
  */
 import { createRoot, type Context, type Logger } from '../kernel/index.ts'
-import { AGENTS, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
+import { AGENTS, mergeAgentOptions, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
 import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
 import { SANDBOX, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
@@ -61,6 +61,8 @@ export interface TaskOptions extends BootOptions {
   readonly preset?: string
   /** Per-agent world: runs on the agent scope during creation (the factory's scoped settle is the fail-loud gate). */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
+  /** The name that world was composed from, recorded in the session header. */
+  readonly agentPreset?: string
 }
 
 /** Continuing a stored session: `resumeTask` keeps its id, `forkTask` branches it. */
@@ -78,6 +80,8 @@ export interface ContinueOptions extends BootOptions {
   readonly preset?: string
   /** Per-agent world for the continued lifecycle. */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
+  /** The name that world was composed from; a resumed session keeps the one its header already records. */
+  readonly agentPreset?: string
 }
 
 export interface TaskResult {
@@ -174,15 +178,22 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
   const root = await bootComposition(options, onEvent)
   try {
     const defaults = options.agentDefaults ?? defaultAgentOptions()
-    const effort = options.reasoningEffort ?? defaults.reasoningEffort
-    const maxSteps = options.maxSteps ?? defaults.maxSteps
-    const agentOptions: AgentOptions = {
-      provider: options.provider ?? defaults.provider,
+    // The same merge a live switch and a resume take: an effort is an
+    // ADAPTER-OWNED id, so a flag that changes the route drops an effort the
+    // settings named for the old one rather than sending it to a provider
+    // that would refuse it on every step.
+    const agentOptions: AgentOptions = mergeAgentOptions(defaults, {
       model: options.model,
-      ...(effort === undefined ? {} : { reasoningEffort: effort }),
-      ...(maxSteps === undefined ? {} : { maxSteps }),
-    }
-    const handle = await root.get(AGENTS).create(root, { cwd: options.cwd, agentOptions, ...(options.setup === undefined ? {} : { setup: options.setup }) })
+      ...(options.provider === undefined ? {} : { provider: options.provider }),
+      ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
+      ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
+    })
+    const handle = await root.get(AGENTS).create(root, {
+      cwd: options.cwd,
+      agentOptions,
+      ...(options.setup === undefined ? {} : { setup: options.setup }),
+      ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
+    })
     applyAuthority(root, handle, options)
     applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)

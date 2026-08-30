@@ -226,3 +226,50 @@ describe('cli surface', () => {
     }
   })
 })
+
+describe('what the review found', () => {
+  it('drops a settings effort when a flag changes the route, instead of sending it to a provider that refuses it', async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const adapter = new ScriptedAdapter().script(assistantText('ok'))
+    const seen: (string | undefined)[] = []
+    const result = await runTask({
+      task: 'go',
+      cwd,
+      // The settings named an effort for ANOTHER provider's model.
+      agentDefaults: { provider: 'anthropic', model: 'claude-sonnet-5', reasoningEffort: 'xhigh' },
+      provider: 'scripted',
+      model: 'scripted-model',
+      sessionsRoot: tempDir('minidsh-sessions-'),
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (root) => {
+        root.get(LLM).registerAdapter(root, adapter)
+      },
+    })
+    seen.push(adapter.calls[0]?.reasoningEffort)
+    expect(result.exitCode).toBe(0)
+    // An effort id belongs to the adapter that defined it: the route changed, so it is gone.
+    expect(seen).toEqual([undefined])
+  })
+
+  it('records the agent preset a session was composed from, so a resume can compose the same world', async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const adapter = new ScriptedAdapter().script(assistantText('done'))
+    const result = await runTask({
+      task: 'go',
+      cwd,
+      model: 'scripted-model',
+      provider: 'scripted',
+      agentPreset: 'reviewer',
+      sessionsRoot,
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (root) => void root.get(LLM).registerAdapter(root, adapter),
+    })
+    expect(result.exitCode).toBe(0)
+    const file = readdirSync(sessionsRoot).find((name) => name.endsWith('.jsonl'))!
+    const header = JSON.parse(readFileSync(join(sessionsRoot, file), 'utf8').split('\n')[0]!) as { agentPreset?: string }
+    expect(header.agentPreset).toBe('reviewer')
+  })
+})

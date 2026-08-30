@@ -88,3 +88,41 @@ describe('applying a preset in a real composition', () => {
     expect(session.events).toHaveLength(before) // nothing entered the log
   })
 })
+
+describe('a preset meets a delegated session', () => {
+  it('refuses before writing anything, so the log never claims a preset that was not applied', async () => {
+    const { APPROVAL } = await import('../../core/approval/index.ts')
+    const { SESSIONS } = await import('../../core/session/index.ts')
+    const adapter = new ScriptedAdapter()
+    root = await bootComposition({
+      sessionsRoot: tempDir('minidsh-presets-'),
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (context) => void context.get(LLM).registerAdapter(context, adapter),
+    })
+    const session = root.get(SESSIONS).create({ cwd: process.cwd() })
+    // A delegated child: opened read-only, approvals pinned.
+    root.get(SANDBOX).open(session, { mode: 'read-only', reason: 'delegation' })
+    root.get(APPROVAL).open(session, { policy: 'never', reason: 'delegation' })
+    const before = session.events.length
+    const presets = root.get(PRESETS)
+    // A wider sandbox is refused, and nothing was written.
+    expect(() => presets.apply(session, 'danger-full-access')).toThrowError(/wider than the "read-only"/)
+    expect(session.events).toHaveLength(before)
+    await root.get(SESSIONS).detach(session)
+
+    // The half-applied case: a child opened wide enough for the preset's
+    // sandbox but pinned — its sandbox half alone would have succeeded and
+    // left a pair matching no preset at all, under an intent event claiming one.
+    const pinned = root.get(SESSIONS).create({ cwd: process.cwd() })
+    root.get(SANDBOX).open(pinned, { mode: 'danger-full-access', reason: 'delegation' })
+    root.get(APPROVAL).open(pinned, { policy: 'never', reason: 'delegation' })
+    const pinnedBefore = pinned.events.length
+    expect(() => presets.apply(pinned, 'workspace-write')).toThrowError(/pinned to "never"/)
+    expect(pinned.events).toHaveLength(pinnedBefore)
+    // The preset whose pair the child already matches still applies.
+    presets.apply(pinned, 'danger-full-access')
+    expect(pinned.events.length).toBeGreaterThan(pinnedBefore)
+    await root.get(SESSIONS).detach(pinned)
+  })
+})

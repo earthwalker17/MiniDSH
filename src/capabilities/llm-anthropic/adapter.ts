@@ -32,6 +32,9 @@ const ADAPTIVE_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as con
 /** Budgets for a manual-thinking model's effort ids; each must stay below `max_tokens`. */
 const MANUAL_BUDGETS: Readonly<Record<string, number>> = { low: 2048, high: 6144, max: 24_576 }
 
+/** A dated snapshot answers to its undated alias: `claude-haiku-4-5` IS `claude-haiku-4-5-20251001`. */
+const ALIASES: Readonly<Record<string, string>> = { 'claude-haiku-4-5': 'claude-haiku-4-5-20251001' }
+
 /** Verified against the live models overview on 2026-08-30; ids are pinned snapshots. */
 const CATALOG: readonly CatalogModel[] = [
   // Fable 5 refuses `thinking.type: "disabled"`, so `off` is not in its set.
@@ -68,7 +71,21 @@ export class AnthropicAdapter implements LlmAdapter {
   }
 
   private catalog(model: string): CatalogModel {
-    return CATALOG.find((entry) => entry.id === model) ?? unlisted(model)
+    const id = ALIASES[model] ?? model
+    return CATALOG.find((entry) => entry.id === id) ?? unlisted(model)
+  }
+
+  /**
+   * The output cap for a request. A named effort on a manual-thinking model
+   * needs room for its budget AND an answer, so a caller who named an effort
+   * but no cap gets one large enough to honour it — refusing here would make
+   * an effort this adapter advertises unusable at its own default.
+   */
+  private capFor(entry: CatalogModel, request: LlmRequest): number {
+    if (request.maxTokens !== undefined) return request.maxTokens
+    const base = Math.min(this.options.defaultMaxTokens, entry.maxOutputTokens)
+    const budget = entry.thinking === 'manual' && request.reasoningEffort !== undefined ? MANUAL_BUDGETS[request.reasoningEffort] : undefined
+    return budget === undefined ? base : Math.min(entry.maxOutputTokens, Math.max(base, budget + base))
   }
 
   resolveModel(model: string): ResolvedModel {
@@ -91,7 +108,10 @@ export class AnthropicAdapter implements LlmAdapter {
     if (request.temperature !== undefined && !entry.sampling) {
       throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" does not accept a temperature (the API returns 400 for any non-default value)`)
     }
-    const maxTokens = request.maxTokens ?? Math.min(this.options.defaultMaxTokens, entry.maxOutputTokens)
+    if (request.maxTokens !== undefined && request.maxTokens > entry.maxOutputTokens) {
+      throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" caps output at ${entry.maxOutputTokens} tokens, but the request asks for ${request.maxTokens}`)
+    }
+    const maxTokens = this.capFor(entry, request)
     const effort = request.reasoningEffort
     let thinking: Record<string, unknown> = {}
     if (effort !== undefined) {
@@ -102,6 +122,8 @@ export class AnthropicAdapter implements LlmAdapter {
         thinking = effort === 'off' ? { thinking: { type: 'disabled' } } : { output_config: { effort } }
       } else if (effort !== 'off') {
         const budget = MANUAL_BUDGETS[effort]!
+        // Only an EXPLICIT cap can be too small now: `capFor` sizes an implicit
+        // one to fit. Refuse rather than shrink the budget the caller asked for.
         if (budget >= maxTokens) {
           throw new LlmError('UNSUPPORTED_OPTION', `reasoning effort "${effort}" on "${request.model}" needs max_tokens above ${budget}, got ${maxTokens}`)
         }
@@ -209,7 +231,9 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   const retryAfterMs = parseRetryAfter(headers.get('retry-after'))
   const options = { status, ...(requestId ? { requestId } : {}), ...(retryAfterMs === undefined ? {} : { retryAfterMs }) }
   let code: LlmErrorCode
-  if (status === 400 && /prompt is too long|context window|too many tokens/i.test(message)) code = 'CONTEXT_WINDOW_EXCEEDED'
+  // Two real 400 forms mean overflow: the input alone exceeding the window, and
+  // input + max_tokens exceeding it. Only the first says "prompt is too long".
+  if (status === 400 && /prompt is too long|context window|context limit|exceed context|too many tokens/i.test(message)) code = 'CONTEXT_WINDOW_EXCEEDED'
   else if (status === 400 && /temperature|top_p|top_k|is deprecated for this model|not supported for this model/i.test(message)) code = 'UNSUPPORTED_OPTION'
   else if (status === 401 || status === 403) code = 'AUTH'
   else if (status === 402) code = 'QUOTA'

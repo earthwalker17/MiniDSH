@@ -10,7 +10,7 @@
 import { statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { Context } from '../../kernel/index.ts'
-import { AGENTS, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_DECIDED, APPROVAL_POLICIES, isApprovalPolicy, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
 import { COMPACTION } from '../../core/compaction/index.ts'
 import { asSessionId } from '../../core/ids.ts'
@@ -43,6 +43,8 @@ export interface ProtocolServerConfig {
   readonly serverVersion: string
   /** Applied to every agent this surface creates or resumes. */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
+  /** The name of the preset `setup` composes, recorded in each session's header. */
+  readonly agentPreset?: string
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
 }
@@ -59,14 +61,32 @@ function requireString(params: Record<string, unknown>, key: string, method: str
   return value
 }
 
-/** Overrides merged over defaults, undefined values never clobbering. */
-function mergeAgentOptions(defaults: AgentOptions, overrides: unknown, method: string): { full: AgentOptions; partial: Partial<AgentOptions> } {
+/**
+ * Overrides merged over defaults. Every value is validated here rather than at
+ * the first paid step, because the merge's result becomes the session's
+ * durable base route — a `maxSteps` of `"lots"` would silently remove the step
+ * ceiling, and a route to nowhere would be recorded before it failed. The
+ * merge itself is `core/agent`'s, so a route change drops an adapter-owned
+ * effort the caller did not restate, exactly as a live switch does.
+ */
+function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: string): { full: AgentOptions; partial: Partial<AgentOptions> } {
   if (overrides !== undefined && !isRecord(overrides)) throw new RpcFailure(INVALID_PARAMS, `${method}: "agentOptions" must be an object`)
   const partial: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(overrides ?? {})) {
-    if (value !== undefined) partial[key] = value
+    if (value === undefined) continue
+    if (key === 'maxSteps' || key === 'maxTokens') {
+      if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new RpcFailure(INVALID_PARAMS, `${method}: "${key}" must be a positive integer`)
+    } else if (key === 'temperature') {
+      if (typeof value !== 'number' || !Number.isFinite(value)) throw new RpcFailure(INVALID_PARAMS, `${method}: "temperature" must be a number`)
+    } else if (key === 'provider' || key === 'model' || key === 'reasoningEffort') {
+      if (typeof value !== 'string' || value.length === 0) throw new RpcFailure(INVALID_PARAMS, `${method}: "${key}" must be a non-empty string`)
+    } else {
+      throw new RpcFailure(INVALID_PARAMS, `${method}: "agentOptions" has no field "${key}"`)
+    }
+    partial[key] = value
   }
-  return { full: { ...defaults, ...partial } as AgentOptions, partial: partial as Partial<AgentOptions> }
+  const typed = partial as Partial<AgentOptions>
+  return { full: mergeAgentOptions(defaults, typed), partial: typed }
 }
 
 export class ProtocolServer {
@@ -316,12 +336,16 @@ export class ProtocolServer {
       throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "sessionId" must be a string')
     }
     const agents = this.ctx.get(AGENTS)
-    const options = mergeAgentOptions(this.config.defaultAgentOptions, params.agentOptions, 'session/prompt')
+    const options = readAgentOptions(this.config.defaultAgentOptions, params.agentOptions, 'session/prompt')
+    // A route to nowhere is refused here, on every path, rather than becoming
+    // this session's recorded base and failing at its first paid step.
+    this.assertRoutable(options.partial, 'session/prompt')
+    const preset = this.config.agentPreset === undefined ? {} : { agentPreset: this.config.agentPreset }
     const setup = this.config.setup === undefined ? {} : { setup: this.config.setup }
     if (requested === undefined) {
       if (params.cwd !== undefined && typeof params.cwd !== 'string') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd" must be a string')
       const cwd = params.cwd === undefined ? this.config.cwd : this.workspaceFor(params.cwd)
-      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...setup })
+      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...preset, ...setup })
       this.owned.set(handle.agent.id, handle)
       return handle.agent
     }
@@ -329,10 +353,7 @@ export class ProtocolServer {
     if (live) {
       // Options on a prompt to a LIVE session are the same durable switch
       // `session/model` makes: merged over the base, logged iff they differ.
-      if (Object.keys(options.partial).length > 0) {
-        this.assertRoutable(options.partial, 'session/prompt')
-        live.configure(options.partial)
-      }
+      if (Object.keys(options.partial).length > 0) live.configure(options.partial)
       return live
     }
     let inflight = this.resuming.get(requested)

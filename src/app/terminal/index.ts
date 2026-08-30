@@ -38,6 +38,8 @@ export interface TerminalOptions extends BootOptions {
   readonly maxSteps?: number
   /** Per-agent world for every agent this surface creates or attaches (built from a named agent preset). */
   readonly agentSetup?: (agentCtx: Context) => void | Promise<void>
+  /** The name of that preset, recorded in the header of a session this surface creates. */
+  readonly agentPreset?: string
   /** Injected for tests; defaults to process stdin/stdout. */
   readonly io?: { readonly input: NodeJS.ReadableStream; readonly output: NodeJS.WritableStream }
 }

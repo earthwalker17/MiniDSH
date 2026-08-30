@@ -17,6 +17,8 @@ export interface ServeOptions extends BootOptions {
   readonly output?: NodeJS.WritableStream
   /** Per-agent world for every agent the protocol surface creates or resumes (built from a named agent preset). */
   readonly agentSetup?: (agentCtx: Context) => void | Promise<void>
+  /** The name of that preset, so each session's header records the world it was composed from. */
+  readonly agentPreset?: string
 }
 
 export interface ProtocolHostHandle {
@@ -37,6 +39,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
     onClose: () => resolveClosed(),
     ...(options.agentSetup === undefined ? {} : { setup: options.agentSetup }),
+    ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     ...(options.input === undefined ? {} : { input: options.input }),
     ...(options.output === undefined ? {} : { output: options.output }),
   }

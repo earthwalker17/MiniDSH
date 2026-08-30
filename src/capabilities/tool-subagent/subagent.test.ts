@@ -159,8 +159,9 @@ describe('delegation through the full composition', () => {
     await handle.dispose()
   })
 
-  it('hides the delegation tool from the child and refuses a call to it, so depth cannot be evaded', async () => {
-    const w = await world()
+  it('hides the delegation tool at the depth cap and refuses a call to it, so the limit is a fact about the world', async () => {
+    // maxDepth 1: the child is already at the cap, so it never sees the tool.
+    const w = await world([{ id: 'tool-subagent', config: { maxDepth: 1 } }])
     let childSaw: string[] = []
     w.adapter.script(
       assistantToolCall('call-1', 'subagent', { description: 'nested', prompt: 'Delegate again.' }),
@@ -267,5 +268,112 @@ describe('delegation through the full composition', () => {
     // And its own delegation would count from depth 1, not from zero.
     expect(w.root.get(TOOLS).get('subagent', resumed.agent)).toBeDefined()
     await resumed.dispose()
+  })
+})
+
+describe('what the review found', () => {
+  it('closes the start/end pair even when the child loses durability, and reports it to the parent', async () => {
+    const w = await world()
+    scriptDelegation(w.adapter, 'a task', 'an answer')
+    // The child's own session cannot be persisted: its flush rejects forever.
+    const { SESSION_FLUSH } = await import('../../core/session/index.ts')
+    w.root.on(SESSION_FLUSH, (session) => {
+      if (session.header.delegatedBy !== undefined) throw new Error('disk full')
+    })
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('go'))
+    await handle.agent.whenIdle()
+    // The pair is balanced: a delegation that started is a delegation that ended.
+    expect(eventsOf(handle.agent.session, SUBAGENT_START.type)).toHaveLength(1)
+    const end = eventsOf(handle.agent.session, SUBAGENT_END.type)
+    expect(end).toHaveLength(1)
+    expect((end[0]!.data as { reason: { kind: string; code?: string } }).reason).toMatchObject({ kind: 'error', code: 'DURABILITY_LOST' })
+    const result = handle.agent.session.events.find((event) => matches(event, TOOL_RESULT))!
+    expect(result.data.error?.code).toBe('SUBAGENT_INCOMPLETE')
+    expect(resultText(result.data.message)).toContain('DURABILITY_LOST')
+    await handle.dispose()
+  })
+
+  it('lets a child delegate once more under the cap, and each generation opens under its own parent', async () => {
+    const w = await world([{ id: 'tool-subagent', config: { maxDepth: 2 } }])
+    let childTools: string[] = []
+    let grandchildTools: string[] = []
+    w.adapter.script(
+      assistantToolCall('call-1', 'subagent', { description: 'level one', prompt: 'Delegate deeper.' }),
+      (request) => {
+        childTools = (request.tools ?? []).map((tool) => tool.name)
+        return assistantToolCall('call-2', 'subagent', { description: 'level two', prompt: 'Do the work.' })
+      },
+      (request) => {
+        grandchildTools = (request.tools ?? []).map((tool) => tool.name)
+        return assistantText('the grandchild did it')
+      },
+      assistantText('the child reports back'),
+      assistantText('done'),
+    )
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('go'))
+    await handle.agent.whenIdle()
+    // Depth 1 may still delegate; depth 2 is the cap, so the tool is gone there.
+    expect(childTools).toContain('subagent')
+    expect(grandchildTools).not.toContain('subagent')
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    const childEvents = storedEvents(w.sessionsRoot, start.childId)
+    const inner = childEvents.find((event) => event.type === SUBAGENT_START.type)!.data as { childId: string; depth: number }
+    expect(inner.depth).toBe(2)
+    // Each generation opened exactly once, under its own parent's authority —
+    // the grandchild does not re-run the child's opening.
+    const grandchild = storedEvents(w.sessionsRoot, inner.childId)
+    expect(grandchild.filter((event) => event.type === 'sandbox/mode').map((event) => event.data)).toEqual([{ mode: 'workspace-write', enforcement: 'none', reason: 'delegation' }])
+    expect(grandchild.filter((event) => event.type === 'approval/policy')).toHaveLength(1)
+    expect(JSON.parse(readFileSync(join(w.sessionsRoot, `${encodeURIComponent(inner.childId)}.jsonl`), 'utf8').split('\n')[0]!)).toMatchObject({
+      delegatedBy: start.childId,
+      delegationDepth: 2,
+    })
+    const result = handle.agent.session.events.find((event) => matches(event, TOOL_RESULT))!
+    expect(resultText(result.data.message)).toContain('the child reports back')
+    await handle.dispose()
+  })
+
+  it('refuses a fork of a delegated child below its opening authority, and allows one above it', async () => {
+    const w = await world()
+    scriptDelegation(w.adapter, 'a task', 'an answer')
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('go'))
+    await handle.agent.whenIdle()
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    await handle.dispose()
+    const agents = w.root.get(AGENTS)
+    // seq 0 is `agent/options`; the delegation stamps follow it.
+    await expect(agents.fork(w.root, asSessionId(start.childId), 0)).rejects.toThrowError(/cuts below the delegation opening/)
+    const whole = await agents.fork(w.root, asSessionId(start.childId))
+    expect(whole.agent.session.header).toMatchObject({ delegatedBy: handle.agent.id, delegationDepth: 1 })
+    // The fork came back under the same fence.
+    expect(() => w.root.get(SANDBOX).setMode(whole.agent.session, 'danger-full-access')).toThrowError(expect.objectContaining({ code: 'SANDBOX_CEILING' }))
+    await whole.dispose()
+  })
+
+  it('cancels a child whose parent call was already aborted, instead of running a paid turn for it', async () => {
+    const w = await world()
+    const controller = new AbortController()
+    let childRan = false
+    w.adapter.script(
+      assistantToolCall('call-1', 'subagent', { description: 'a task', prompt: 'work' }),
+      () => {
+        childRan = true
+        return assistantText('never wanted')
+      },
+      assistantText('done'),
+    )
+    const handle = await w.create()
+    const { toolCall } = await import('../../core/tools/index.ts')
+    // The call arrives with a signal that is ALREADY aborted: no `abort` event
+    // will ever fire, and `cancel()` does nothing to an agent that has not
+    // started — so only refusing to start it keeps the turn from running.
+    controller.abort()
+    const result = await w.root.get(TOOLS).execute(toolCall('call-x', 'subagent', JSON.stringify({ description: 'a task', prompt: 'work' }), handle.agent, controller.signal))
+    expect(result.isError).toBe(true)
+    expect(childRan).toBe(false)
+    await handle.dispose()
   })
 })

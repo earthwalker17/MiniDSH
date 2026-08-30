@@ -34,6 +34,8 @@ export interface ProtocolConfig {
   readonly serverVersion?: string
   /** Per-agent world for every agent this surface creates or resumes (the app builds it from a named preset). */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
+  /** The name of that preset, recorded in each session's header so a resume can compose the same world. */
+  readonly agentPreset?: string
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
   readonly onClose?: () => void
 }
@@ -56,6 +58,7 @@ export const protocolStdioPlugin: Plugin<ProtocolConfig> = {
         defaultAgentOptions: config.defaultAgentOptions,
         serverVersion: config.serverVersion ?? '0.1.0',
         ...(config.setup === undefined ? {} : { setup: config.setup }),
+        ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }),
         ...(config.onClose === undefined ? {} : { onClose: config.onClose }),
       },
       (frame) => transport.send(frame),

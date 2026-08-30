@@ -20,7 +20,8 @@ import {
   type AuthorityPresetSpec,
   type AuthorityState,
 } from '../../core/presets/index.ts'
-import { effectiveSandboxMode, SANDBOX, SANDBOX_MODES, type Sandbox } from '../../core/sandbox/index.ts'
+import { delegationPin } from '../../core/approval/index.ts'
+import { delegationCeiling, effectiveSandboxMode, isWider, SANDBOX, SANDBOX_MODES, type Sandbox } from '../../core/sandbox/index.ts'
 import { matches, SESSION_EVENT, type EventEnvelope, type Session } from '../../core/session/index.ts'
 
 export interface AuthorityPresetsConfig {
@@ -69,9 +70,24 @@ class PresetService implements AuthorityPresets {
     })
   }
 
+  /**
+   * Validate BOTH halves before writing anything. The intent event is a
+   * durable claim that a preset was applied, and the two setters can each
+   * refuse (a delegated session's ceiling and pin) — so a refusal after the
+   * append would leave the log asserting a preset that never took, and a
+   * refusal between the setters would leave a pair matching no preset at all.
+   */
   apply(session: Session, name: string): void {
     const spec = this.table.get(name)
     if (!spec) throw new Error(`unknown authority preset "${name}" (known: ${this.names().join(', ')})`)
+    const ceiling = delegationCeiling(session.facts)
+    if (ceiling !== undefined && isWider(spec.sandbox, ceiling)) {
+      throw new Error(`preset "${name}" wants sandbox "${spec.sandbox}", wider than the "${ceiling}" this delegated session was opened under`)
+    }
+    const pin = delegationPin(session.facts)
+    if (pin !== undefined && spec.approval !== pin) {
+      throw new Error(`preset "${name}" wants approvals "${spec.approval}", but this delegated session is pinned to "${pin}"`)
+    }
     session.append(AUTHORITY_PRESET, { name })
     this.sandbox.setMode(session, spec.sandbox)
     this.approval.setPolicy(session, spec.approval)

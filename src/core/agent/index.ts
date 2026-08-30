@@ -7,7 +7,9 @@ import { emitEvent, serialEvent, serviceKey, waterfallEvent, type Context, type 
 import type { SessionId } from '../ids.ts'
 import { restoreMessage } from '../llm/message.ts'
 import type { Message } from '../llm/types.ts'
+import { delegationPin } from '../approval/events.ts'
 import { PERSISTENCE, type StoredSession } from '../persistence/index.ts'
+import { delegationCeiling } from '../sandbox/events.ts'
 import {
   eventKind,
   foldRequestHeader,
@@ -328,6 +330,17 @@ class AgentRegistry implements Agents {
   async fork(owner: Context, source: Session | SessionId, boundary?: number, options: ForkAgentOptions = {}): Promise<AgentHandle> {
     const src = this.forkSource(source)
     const seed = sliceForkSeed(src.events, boundary)
+    // A fork of a delegated session must carry that session's fence with it.
+    // A boundary below the opening stamps would produce a session the header
+    // still calls a child while its authority re-opened at the deployment
+    // default — possibly WIDER than the ceiling it was delegated under.
+    if (src.header.delegatedBy !== undefined) {
+      const ceiling = delegationCeiling(src.events)
+      const pin = delegationPin(src.events)
+      if ((ceiling !== undefined && delegationCeiling(seed) === undefined) || (pin !== undefined && delegationPin(seed) === undefined)) {
+        throw new Error(`fork of "${src.parentId}": the boundary cuts below the delegation opening, which would drop the authority this session was delegated under`)
+      }
+    }
     return this.create(owner, {
       cwd: src.cwd,
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),

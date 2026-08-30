@@ -27,7 +27,7 @@
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { AGENTS, resolveCallConfig, type Agent, type AgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, resolveCallConfig, type Agent, type AgentOptions, type CreateAgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { messageText, createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
@@ -113,6 +113,14 @@ interface Deps {
   readonly toolName: string
 }
 
+/**
+ * The WORLD an agent was composed from, remembered per agent so a child
+ * composes what its parent's world IS, not the delegation wrapper the parent
+ * happens to be stored with. Without this, a grandchild would re-run its
+ * grandparent's opening stamps and collide with its own.
+ */
+const worldSetups = new WeakMap<Agent, CreateAgentOptions['setup']>()
+
 /** The authority a child opens under, read from the parent BEFORE the first await. */
 function captureAuthority(parent: Agent, sandbox: Sandbox): { readonly mode: SandboxMode } {
   return { mode: effectiveSandboxMode(parent.session.facts) ?? sandbox.defaultMode }
@@ -173,8 +181,21 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   const inherited = captureAuthority(parent, deps.sandbox)
   const route = await resolveCallConfig(parent, { purpose: PURPOSE, signal: exec.callSignal })
   const agentOptions: AgentOptions = { ...route, maxSteps: deps.config.maxSteps }
-  const denied = [deps.toolName, ...(deps.config.toolFilter?.deny ?? [])]
-  const restriction: ToolRestriction = { ...(deps.config.toolFilter?.allow === undefined ? {} : { allow: deps.config.toolFilter.allow }), deny: denied }
+  // The child keeps this tool only if it could still use it: at the cap it is
+  // hidden AND unknown, so a depth limit is a fact about the child's world
+  // rather than an error it discovers by trying.
+  const childMayDelegate = depth + 1 <= deps.config.maxDepth
+  const denied = [...(childMayDelegate ? [] : [deps.toolName]), ...(deps.config.toolFilter?.deny ?? [])]
+  const restriction: ToolRestriction = {
+    ...(deps.config.toolFilter?.allow === undefined ? {} : { allow: [...deps.config.toolFilter.allow, ...(childMayDelegate ? [deps.toolName] : [])] }),
+    ...(denied.length > 0 ? { deny: denied } : {}),
+  }
+  // The parent's WORLD, never the delegation closure it is stored with. `has`,
+  // not `??`: a recorded world of `undefined` (a parent created with no setup
+  // at all) is a real answer, and falling through would compose the parent's
+  // delegation wrapper into the child — re-opening authority that is already
+  // open, one generation late.
+  const world = worldSetups.has(parent) ? worldSetups.get(parent) : parent.setup
 
   const handle = await deps.ctx.get(AGENTS).create(parent.ctx, {
     cwd: parent.session.header.cwd,
@@ -187,7 +208,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
       // The child's world is its parent's, then narrowed: same preset, same
       // tools minus the filter, its own persona, and an authority that opens
       // as a ceiling before a single effect can run.
-      await parent.setup?.(childCtx, child)
+      await world?.(childCtx, child)
       deps.sandbox.open(child.session, { mode: inherited.mode, reason: 'delegation' })
       deps.approval.open(child.session, { policy: 'never', reason: 'delegation' })
       deps.ctx.get(TOOLS).restrict(childCtx, restriction)
@@ -196,6 +217,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   })
 
   const child = handle.agent
+  worldSetups.set(child, world)
   parent.session.append(SUBAGENT_START, {
     callId: exec.callId,
     childId: child.id,
@@ -210,17 +232,38 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   const onAbort = (): void => child.cancel({ kind: 'parent' })
   exec.callSignal.addEventListener('abort', onAbort, { once: true })
   try {
+    // `addEventListener('abort')` never fires on an ALREADY-aborted signal, and
+    // two awaits stand between the tool call and here. Cancelling is not enough
+    // either: `cancel` only aborts a RUNNING agent, and this child has not
+    // started, so the `followup` below would start a full paid turn for a call
+    // its caller had already given up on. Never start it.
+    if (exec.callSignal.aborted) {
+      parent.session.append(SUBAGENT_END, { callId: exec.callId, childId: child.id, reason: { kind: 'cancelled' } })
+      throw Object.assign(new Error('the subagent was not started: the call was cancelled'), { code: 'ABORTED_BEFORE_DISPATCH' })
+    }
     child.followup(createUserMessage(args.prompt))
     await child.whenIdle()
-    await child.session.flush()
-    const reason = finalReason(child.session)
+    // The end record is owed on EVERY exit path, exactly as the driver owes
+    // `step/end`: a child whose persistence is quarantined makes this flush
+    // throw, and an unpaired `subagent/start` would leave the parent's log
+    // unable to explain the very failure the pair exists for.
+    let lost: unknown
+    try {
+      await child.session.flush()
+    } catch (error) {
+      lost = error
+    }
+    const reason: TurnEndReason = lost
+      ? { kind: 'error', code: 'DURABILITY_LOST', message: lost instanceof Error ? lost.message : String(lost) }
+      : finalReason(child.session)
     const output = finalText(child.session)
     const usage = childUsage(child.session)
     parent.session.append(SUBAGENT_END, { callId: exec.callId, childId: child.id, reason, ...(usage === undefined ? {} : { usage }) })
     if (reason.kind !== 'completed') {
       // Not a partial success: the parent is told the turn did not finish, and
       // still gets whatever the child managed to say.
-      throw Object.assign(new Error(`the subagent's turn ended ${reason.kind}${output.length > 0 ? `; it had said: ${output}` : ''}`), { code: 'SUBAGENT_INCOMPLETE' })
+      const detail = reason.kind === 'error' ? `${reason.kind} (${reason.code})` : reason.kind
+      throw Object.assign(new Error(`the subagent's turn ended ${detail}${output.length > 0 ? `; it had said: ${output}` : ''}`), { code: 'SUBAGENT_INCOMPLETE' })
     }
     return { output, childId: child.id }
   } finally {

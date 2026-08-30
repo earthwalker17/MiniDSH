@@ -21,7 +21,7 @@ import type { Context, Disposer } from '../kernel/index.ts'
 import { AGENT_OPTIONS } from '../core/agent/index.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
 import { foldAuxCalls, LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/aux-call.ts'
-import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, type EventEnvelope } from '../core/session/index.ts'
+import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, REQUEST_HEADER, type EventEnvelope } from '../core/session/index.ts'
 
 /**
  * How a retried step replays.
@@ -105,6 +105,10 @@ export function providersIn(events: readonly EventEnvelope[]): string[] {
   const providers = new Set<string>()
   for (const event of events) {
     if (matches(event, REQUEST_CONTEXT)) providers.add(event.data.provider)
+    // The header too: a step whose every attempt FAILED writes a header and
+    // its chunks but no assistant message, and a log from before the base
+    // route was recorded has neither of the other two.
+    else if (matches(event, REQUEST_HEADER)) providers.add(event.data.header.provider)
     else if (matches(event, AGENT_OPTIONS)) providers.add(event.data.options.provider)
     else if (matches(event, LLM_AUX_CALL)) providers.add(event.data.provider)
     else if (matches(event, ASSISTANT_MESSAGE) && event.data.message.source.kind === 'assistant') providers.add(event.data.message.source.provider)

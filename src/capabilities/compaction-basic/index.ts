@@ -27,6 +27,7 @@ import {
   AGENTS,
   resolveCallConfig,
   type Agent,
+  type CallConfig,
   type RequestErrorAction,
 } from '../../core/agent/index.ts'
 import {
@@ -166,13 +167,29 @@ class BasicCompaction implements Compaction {
     // log from before the record existed falls back to the live adapter.
     const logged = foldRequestContext(agent.session.facts)?.contextWindow
     if (logged !== undefined) return logged
+    return this.windowOf(agent.options.provider, agent.options.model)
+  }
+
+  private windowOf(provider: string, model: string): number {
     const llm = this.ctx.tryGet(LLM)
     if (!llm) return 0
     try {
-      return llm.resolveModel(agent.options.provider, agent.options.model).contextWindow
+      return llm.resolveModel(provider, model).contextWindow
     } catch {
       return 0
     }
+  }
+
+  /**
+   * The budget a PLAN must fit: the smaller of what the conversation is
+   * measured against and what the summariser can actually read. A role may
+   * point `compaction` at a cheaper model with a much smaller window, and a
+   * span planned against the loop's window would overflow that model on every
+   * attempt — buying nothing and eventually disabling the automatic triggers.
+   */
+  private planBudget(route: { provider: string; model: string }, budget: number): number {
+    const summariser = this.windowOf(route.provider, route.model)
+    return summariser > 0 ? Math.min(budget, summariser) : budget
   }
 
   underPressure(agent: Agent): boolean {
@@ -230,11 +247,17 @@ class BasicCompaction implements Compaction {
     const budget = this.budgetFor(agent)
     if (budget <= 0) return { kind: 'nothing-to-do' }
     const projected = meterSession(session.facts, budget).projectedTokens
-    const plan = planCompaction(session.facts, session.surfaceSeqs(), { budgetTokens: budget, retainRatio: this.config.retainRatio })
+    // The summary's route decides what the plan may hold, so it is resolved
+    // BEFORE the plan and passed to the call that uses it.
+    const route = await resolveCallConfig(agent, { purpose: PURPOSE, ...(signal ? { signal } : {}) })
+    const plan = planCompaction(session.facts, session.surfaceSeqs(), {
+      budgetTokens: this.planBudget(route, budget),
+      retainRatio: this.config.retainRatio,
+    })
     if (!plan) return { kind: 'nothing-to-do' }
 
     const statusBefore = agent.status
-    const summary = await this.summarise(llm, prompt, agent, plan, signal)
+    const summary = await this.summarise(llm, prompt, agent, plan, route, signal)
     if (summary === undefined) {
       this.failures.set(agent, (this.failures.get(agent) ?? 0) + 1)
       return { kind: 'nothing-to-do' }
@@ -299,6 +322,7 @@ class BasicCompaction implements Compaction {
     prompt: Prompt,
     agent: Agent,
     plan: CompactionPlan,
+    route: CallConfig,
     signal?: AbortSignal,
   ): Promise<{ text: string; seq: number } | undefined> {
     const session = agent.session
@@ -313,10 +337,10 @@ class BasicCompaction implements Compaction {
     messages.push(createPluginMessage(PLUGIN, INSTRUCTION, 'compaction-instruction'))
 
     const assembled = await prompt.assemble(agent)
-    // The same resolution as a loop step, with a purpose instead of a
-    // position: a role listener may send the summary down a cheaper route,
-    // and the record `runAuxCall` writes names whatever route was used.
-    const route = await resolveCallConfig(agent, { purpose: PURPOSE, ...(signal ? { signal } : {}) })
+    // The route was resolved by the caller — the same resolution a loop step
+    // takes, with a purpose instead of a position — because the plan had to
+    // fit the model that would read it. The record `runAuxCall` writes names
+    // whatever route was used.
     const request: LlmRequest & { purpose: string } = {
       provider: route.provider,
       model: route.model,
