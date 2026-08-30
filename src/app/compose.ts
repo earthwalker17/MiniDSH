@@ -26,6 +26,7 @@ import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
 import { fsObservationPolicyPlugin } from '../capabilities/fs-observation-policy/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { retryPlugin } from '../capabilities/llm-retry/index.ts'
+import { modelRolesPlugin } from '../capabilities/model-roles/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
 import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
 import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructions/index.ts'
@@ -56,6 +57,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       deepseekPlugin,
       anthropicPlugin,
       retryPlugin,
+      modelRolesPlugin,
       toolsPlugin,
       promptPlugin,
       approvalPlugin,
@@ -290,6 +292,8 @@ export function compose(options: ComposeOptions): Row[] {
   // request is actually routed there, and the catalog then says what exists.
   rows.push(defineRow('llm-anthropic', anthropicPlugin, {}))
   rows.push(defineRow('llm-retry', retryPlugin, {}))
+  // Empty by default: a deployment names its roles by patching this row.
+  rows.push(defineRow('model-roles', modelRolesPlugin, {}))
   rows.push(defineRow('tools', toolsPlugin))
   rows.push(defineRow('prompt', promptPlugin))
   rows.push(defineRow('approval', approvalPlugin, options.approvalPolicy === undefined ? {} : { policy: options.approvalPolicy }))
