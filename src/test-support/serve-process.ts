@@ -28,6 +28,8 @@ export interface ServeOptions {
   /** Grant every approval without asking a client (the S2 arc); omit to answer over the wire. */
   readonly approve?: boolean
   readonly sandbox?: string
+  /** Extra argv for the spawned host (e.g. `--patch`). */
+  readonly args?: readonly string[]
 }
 
 export class ServeProcess {
@@ -43,6 +45,7 @@ export class ServeProcess {
     const argv = [SERVE_BIN, 'serve', '--cwd', cwd]
     if (options.approve) argv.push('--approve')
     if (options.sandbox) argv.push('--sandbox', options.sandbox)
+    if (options.args) argv.push(...options.args)
     this.child = spawn(process.execPath, argv, { env: { ...process.env, MINIDSH_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] })
     spawned.push(this.child)
     this.exited = new Promise((resolve) => this.child.on('exit', (code) => resolve(code)))
