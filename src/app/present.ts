@@ -16,6 +16,7 @@ import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { formatTokens } from '../core/metering/index.ts'
 import { AUTHORITY_PRESET } from '../core/presets/index.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
+import { SUBAGENT_END, SUBAGENT_START } from '../capabilities/tool-subagent/index.ts'
 import { ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 
 export function preview(text: string, max = 80): string {
@@ -61,6 +62,15 @@ export function describeEvent(event: EventEnvelope): string | undefined {
   if (matches(event, AUTHORITY_PRESET)) return `[preset: ${event.data.name}]`
   if (matches(event, APPROVAL_ASKED)) return `? ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${event.data.reason}` : ''}`
   if (matches(event, APPROVAL_DECIDED)) return `! ${event.data.id} ${event.data.outcome}`
+  if (matches(event, SUBAGENT_START)) {
+    const { childId, depth, provider, model, sandbox } = event.data
+    return `[subagent ${childId} · depth ${depth} · ${provider}/${model} · ${sandbox}, approvals never]`
+  }
+  if (matches(event, SUBAGENT_END)) {
+    const { childId, reason, usage } = event.data
+    const cost = usage === undefined ? '' : ` · ${formatTokens(usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0))} in · ${formatTokens(usage.outputTokens)} out`
+    return `[subagent ${childId} ${reason.kind}${cost}]`
+  }
   if (matches(event, COMPACTION_APPLIED)) {
     const { shadowedSeqs, trigger, surfaceTokensBefore, surfaceTokensAfter } = event.data
     return `[compacted ${shadowedSeqs.length} messages · ${trigger} · ~${formatTokens(surfaceTokensBefore)} → ~${formatTokens(surfaceTokensAfter)}]`
@@ -124,6 +134,9 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       if (covered) lines.push(`                    for: ${covered}`)
     } else if (matches(event, APPROVAL_DECIDED)) {
       lines.push(`${at(event.seq)}  decided     ${event.data.id} ${event.data.outcome}`)
+    } else if (matches(event, SUBAGENT_START)) {
+      // A delegation is an authority act: the child's whole scope is decided here.
+      lines.push(`${at(event.seq)}  delegated   ${event.data.childId} under ${event.data.sandbox}, approvals ${event.data.approval} (depth ${event.data.depth})`)
     } else if (matches(event, TOOL_RESULT)) {
       const error = event.data.error
       if (error && DENIALS.has(error.code)) lines.push(`${at(event.seq)}  denied      ${error.code} (${calls.get(event.data.callId) ?? ''})`)

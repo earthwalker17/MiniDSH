@@ -32,6 +32,7 @@ import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
 import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructions/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { toolShellPlugin } from '../capabilities/tool-shell/index.ts'
+import { toolSubagentPlugin } from '../capabilities/tool-subagent/index.ts'
 
 export interface Row {
   readonly id: string
@@ -72,6 +73,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       spillLocalPlugin,
       toolEditorPlugin,
       toolShellPlugin,
+      toolSubagentPlugin,
       contextRuntimePlugin,
       workspaceInstructionsPlugin,
       agentPlugin,
@@ -307,6 +309,7 @@ export function compose(options: ComposeOptions): Row[] {
   if (options.spillRoot !== undefined) rows.push(defineRow('spill', spillLocalPlugin, { root: options.spillRoot }))
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))
+  rows.push(defineRow('tool-subagent', toolSubagentPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))
   // `maxBytes` is the deployment's prompt-budget choice, made here rather than
   // defaulted inside the capability.

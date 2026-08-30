@@ -449,6 +449,7 @@ const AUTHORITY_SENSITIVE = new Set([
   'shell',
   'tool-shell',
   'tool-editor',
+  'tool-subagent',
   'spill',
 ])
 
@@ -474,6 +475,7 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'shell-stdio',
   'tool-shell',
   'tool-editor',
+  'tool-subagent',
   'spill-local',
 ])
 
@@ -580,7 +582,9 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   if (sub === 'list') {
     return withPersistence(plan, (persistence) => {
       for (const header of persistence.list()) {
-        process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\n`)
+        // Lineage is durable: a delegated child says whose work it was doing.
+        const lineage = header.delegatedBy === undefined ? '' : `\t↳ delegated by ${header.delegatedBy} (depth ${header.delegationDepth ?? 1})`
+        process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}${lineage}\n`)
       }
       return 0
     })
@@ -603,6 +607,9 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         if (stored.damaged) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, damaged: true })}\n`)
       } else {
         process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        if (stored.header.delegatedBy !== undefined) {
+          process.stdout.write(`delegated by ${stored.header.delegatedBy} (depth ${stored.header.delegationDepth ?? 1})\n`)
+        }
         // What this session cost and how full its context got, measured
         // against the window the log itself names for the route in use; a log
         // from before `request/context` existed prints the numbers alone.
