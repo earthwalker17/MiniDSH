@@ -20,6 +20,7 @@ import { authorityPresetsPlugin } from '../capabilities/authority-presets/index.
 import { compactionBasicPlugin } from '../capabilities/compaction-basic/index.ts'
 import { contextRuntimePlugin } from '../capabilities/context-runtime/index.ts'
 import { credentialsLocalPlugin } from '../capabilities/credentials-local/index.ts'
+import { anthropicPlugin } from '../capabilities/llm-anthropic/index.ts'
 import { deepseekPlugin } from '../capabilities/llm-deepseek/index.ts'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
 import { fsObservationPolicyPlugin } from '../capabilities/fs-observation-policy/index.ts'
@@ -53,6 +54,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       credentialsLocalPlugin,
       llmPlugin,
       deepseekPlugin,
+      anthropicPlugin,
       retryPlugin,
       toolsPlugin,
       promptPlugin,
@@ -284,6 +286,9 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('credentials', credentialsLocalPlugin, options.credentialsPath === undefined ? {} : { path: options.credentialsPath }))
   rows.push(defineRow('llm', llmPlugin))
   rows.push(defineRow('llm-deepseek', deepseekPlugin, {}))
+  // Both providers are always routable; a missing key bites only when a
+  // request is actually routed there, and the catalog then says what exists.
+  rows.push(defineRow('llm-anthropic', anthropicPlugin, {}))
   rows.push(defineRow('llm-retry', retryPlugin, {}))
   rows.push(defineRow('tools', toolsPlugin))
   rows.push(defineRow('prompt', promptPlugin))
