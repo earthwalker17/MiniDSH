@@ -106,8 +106,8 @@ describe('agents.resume', () => {
     const { harness: h, dir: base } = await persistedHarness()
     storeCrashedLog(h, 'crashed')
 
-    // No request/header in the stored log: resume demands a model config.
-    await expect(h.root.get(AGENTS).resume(h.root, asSessionId('crashed'))).rejects.toThrowError(/no stored request\/header/)
+    // No base route and no request/header in the stored log: resume demands a model config.
+    await expect(h.root.get(AGENTS).resume(h.root, asSessionId('crashed'))).rejects.toThrowError(/no stored agent\/options or request\/header/)
 
     h.adapter.script(assistantText('recovered'))
     const resumed = await h.root.get(AGENTS).resume(h.root, asSessionId('crashed'), {
@@ -346,7 +346,9 @@ describe('crash repair closes the committed surface, not just the logged calls',
       'step/end',
       'turn/end',
       'session/end-seed',
-      // A log from before opening records existed gets them at pickup.
+      // A log from before opening records existed gets them at pickup: the
+      // base route first (the factory's act), then the two authority knobs.
+      'agent/options',
       'approval/policy',
       'sandbox/mode',
     ])
@@ -362,5 +364,66 @@ describe('crash repair closes the committed surface, not just the logged calls',
     await resumed.agent.whenIdle()
     expect((resumed.agent.session.events.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('completed')
     await resumed.dispose()
+  })
+})
+
+describe('the base route survives its process', () => {
+  it('resumes from the base route, not from a header a listener rewrote, and records an override as a resume', async () => {
+    const { harness: h, dir: base } = await persistedHarness()
+    const { AGENT_OPTIONS, AGENT_REQUEST } = await import('../agent/index.ts')
+    h.adapter.script(assistantText('one'), assistantText('two'), assistantText('three'))
+    const rewrite = h.root.on(AGENT_REQUEST, async (_context, next) => ({ ...(await next()), model: 'cheap-model' }), { global: true })
+    const first = await h.create()
+    const id = first.agent.id
+    first.agent.followup(createUserMessage('go'))
+    await first.agent.whenIdle()
+    // The last header names the rewrite; a resume that folded the header would adopt it as the base.
+    expect(first.agent.session.foldRequestHeader()!.model).toBe('cheap-model')
+    await first.dispose()
+    await rewrite()
+
+    const resumed = await h.root.get(AGENTS).resume(h.root, id)
+    expect(resumed.agent.options).toEqual({ provider: 'scripted', model: 'scripted-model' })
+    resumed.agent.followup(createUserMessage('again'))
+    await resumed.agent.whenIdle()
+    expect(h.adapter.calls.at(-1)!.model).toBe('scripted-model')
+    expect(resumed.agent.session.events.filter((event) => event.type === AGENT_OPTIONS.type)).toHaveLength(1)
+    await resumed.dispose()
+
+    const overridden = await h.root.get(AGENTS).resume(h.root, id, { agentOptions: { reasoningEffort: 'low' } })
+    const records = overridden.agent.session.events.filter((event) => event.type === AGENT_OPTIONS.type).map((event) => event.data)
+    expect(records.at(-1)).toEqual({ options: { provider: 'scripted', model: 'scripted-model', reasoningEffort: 'low' }, reason: 'resume' })
+    await overridden.dispose()
+    expect(fileEvents(base, id).filter((event) => event.type === AGENT_OPTIONS.type)).toHaveLength(2)
+  })
+
+  it('a log from before the base was recorded derives it from the header and records it at pickup', async () => {
+    const { harness: h, dir: base } = await persistedHarness()
+    const { AGENT_OPTIONS } = await import('../agent/index.ts')
+    const { REQUEST_HEADER, STEP_END, TURN_END } = await import('../session/index.ts')
+    const sessions = h.root.get(SESSIONS)
+    const id = asSessionId('old-log')
+    const session = sessions.create({ cwd: process.cwd(), id })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('go') }, { surfaceOp: { op: 'append' } })
+    session.append(REQUEST_HEADER, {
+      turn: 1,
+      step: 1,
+      header: { provider: 'scripted', model: 'legacy-model', reasoningEffort: 'low', system: '', tools: [] },
+      reason: 'initial',
+    })
+    session.append(STEP_END, { turn: 1, step: 1 })
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+    await sessions.detach(session)
+
+    const resumed = await h.root.get(AGENTS).resume(h.root, id, { defaults: { provider: 'scripted', model: 'default-model', maxSteps: 3 } })
+    // The header is the authority for the model-visible fields; `maxSteps` alone survives from the defaults.
+    expect(resumed.agent.options).toEqual({ provider: 'scripted', model: 'legacy-model', reasoningEffort: 'low', maxSteps: 3 })
+    expect(resumed.agent.session.events.filter((event) => event.type === AGENT_OPTIONS.type).map((event) => event.data)).toEqual([
+      { options: { provider: 'scripted', model: 'legacy-model', reasoningEffort: 'low', maxSteps: 3 }, reason: 'initial' },
+    ])
+    await resumed.dispose()
+    expect(fileEvents(base, id).some((event) => event.type === AGENT_OPTIONS.type)).toBe(true)
   })
 })

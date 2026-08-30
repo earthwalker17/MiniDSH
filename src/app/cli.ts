@@ -11,6 +11,7 @@
  */
 import { createRoot, describeConfigError, type Logger } from '../kernel/index.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
+import { foldRequestContext } from '../core/session/index.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
@@ -36,7 +37,7 @@ interface ParsedArgs {
   readonly patchFiles: string[]
 }
 
-const VALUE_FLAGS = new Set(['cwd', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset', 'agent-preset'])
+const VALUE_FLAGS = new Set(['cwd', 'provider', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset', 'agent-preset'])
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
@@ -247,17 +248,20 @@ function presetFlag(args: ParsedArgs, authority: AuthorityFlags, home: HomeLayou
 }
 
 interface CommonModelFlags {
+  readonly provider?: string
   readonly model?: string
   readonly reasoningEffort?: string
   readonly maxSteps?: number
 }
 
 function modelFlags(args: ParsedArgs): CommonModelFlags {
+  const provider = args.flags.get('provider')
   const model = args.flags.get('model')
   const effort = args.flags.get('effort')
   const maxStepsRaw = args.flags.get('max-steps')
   const maxSteps = typeof maxStepsRaw === 'string' ? Number(maxStepsRaw) : undefined
   return {
+    ...(typeof provider === 'string' ? { provider } : {}),
     ...(typeof model === 'string' ? { model } : {}),
     ...(typeof effort === 'string' ? { reasoningEffort: effort } : {}),
     ...(maxSteps === undefined || Number.isNaN(maxSteps) ? {} : { maxSteps }),
@@ -299,7 +303,7 @@ function reportError(error: unknown): number {
 async function runCommand(args: ParsedArgs): Promise<number> {
   const task = args.positional.join(' ').trim()
   if (task.length === 0) {
-    return usage('usage: minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--approve] [--json]')
+    return usage('usage: minidsh run "<task>" [--cwd dir] [--provider id] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--approve] [--json]')
   }
   const plan = await prepareBoot(args, 'headless')
   if (typeof plan === 'string') return usage(plan)
@@ -311,6 +315,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         task,
         cwd: cwdFlag(args),
         model: flags.model ?? plan.settings.agent.model,
+        ...(flags.provider === undefined ? {} : { provider: flags.provider }),
         ...(flags.reasoningEffort === undefined ? {} : { reasoningEffort: flags.reasoningEffort }),
         ...(flags.maxSteps === undefined ? {} : { maxSteps: flags.maxSteps }),
         ...(plan.preset === undefined ? {} : { preset: plan.preset }),
@@ -336,7 +341,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   const headless = args.flags.get('headless') === true
   if (!id || (headless && task.length === 0)) {
     return usage(
-      `usage: minidsh ${kind} <id> ["<task>"]${kind === 'fork' ? ' [--at seq]' : ''} [--headless] [--model id] [--effort id] [--max-steps n] [--approve] [--json]`,
+      `usage: minidsh ${kind} <id> ["<task>"]${kind === 'fork' ? ' [--at seq]' : ''} [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--approve] [--json]`,
     )
   }
   const atRaw = args.flags.get('at')
@@ -598,14 +603,16 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         if (stored.damaged) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, damaged: true })}\n`)
       } else {
         process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
-        // What this session cost and how full its context got. The window is
-        // not known off-line (it is a live adapter fact), so the ratio is
-        // omitted and only the measured numbers are printed.
-        const metrics = meterSession(stored.events, 0)
+        // What this session cost and how full its context got, measured
+        // against the window the log itself names for the route in use; a log
+        // from before `request/context` existed prints the numbers alone.
+        const window = foldRequestContext(stored.events)?.contextWindow ?? 0
+        const metrics = meterSession(stored.events, window)
         if (metrics.sessionInput + metrics.sessionOutput + metrics.sessionCacheRead > 0) {
+          const ratio = window > 0 ? ` (${Math.round(metrics.ratio * 100)}% of ${formatTokens(window)})` : ''
           process.stdout.write(
             `usage: ${formatTokens(metrics.sessionInput)} in · ${formatTokens(metrics.sessionCacheRead)} cached · ` +
-              `${formatTokens(metrics.sessionOutput)} out · context now ~${formatTokens(metrics.projectedTokens)}\n`,
+              `${formatTokens(metrics.sessionOutput)} out · context now ~${formatTokens(metrics.projectedTokens)}${ratio}\n`,
           )
         }
         for (const event of stored.events) {
@@ -640,10 +647,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     default:
       process.stdout.write(
         'MiniDSH — usage:\n' +
-          '  minidsh run "<task>" [--cwd dir] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
-          '  minidsh chat ["<task>"] [--cwd dir] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
-          '  minidsh resume <id> ["<task>"] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
-          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
+          '  minidsh run "<task>" [--cwd dir] [--provider id] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
+          '  minidsh chat ["<task>"] [--cwd dir] [--provider id] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
+          '  minidsh resume <id> ["<task>"] [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
+          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
           '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
           '  minidsh config [--json]\n' +
           '  minidsh sessions list\n' +

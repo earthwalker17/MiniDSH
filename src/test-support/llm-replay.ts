@@ -10,11 +10,18 @@
  * request's `purpose` — a loop-built request never carries one. Both cursors
  * are asserted, so a compacted log replays its compaction at the same point,
  * with the same summary, or the oracle fails.
+ *
+ * A log may name more than one provider (a mid-session route switch, a role
+ * that sent the summary elsewhere): one shared script serves every provider
+ * the log names, and each provider's window is answered from the log's own
+ * `request/context` records — so a replay meters exactly what the recording
+ * metered without a key for either provider.
  */
 import type { Context, Disposer } from '../kernel/index.ts'
+import { AGENT_OPTIONS } from '../core/agent/index.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
-import { foldAuxCalls, type AuxCallRecord } from '../core/llm/aux-call.ts'
-import { matches, ASSISTANT_CHUNK, type EventEnvelope } from '../core/session/index.ts'
+import { foldAuxCalls, LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/aux-call.ts'
+import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, type EventEnvelope } from '../core/session/index.ts'
 
 /**
  * How a retried step replays.
@@ -93,24 +100,44 @@ export function auxCallChunks(record: AuxCallRecord): StreamChunk[] {
   return chunks
 }
 
+/** Every provider a log names: its routes, its summaries, and the messages it produced. */
+export function providersIn(events: readonly EventEnvelope[]): string[] {
+  const providers = new Set<string>()
+  for (const event of events) {
+    if (matches(event, REQUEST_CONTEXT)) providers.add(event.data.provider)
+    else if (matches(event, AGENT_OPTIONS)) providers.add(event.data.options.provider)
+    else if (matches(event, LLM_AUX_CALL)) providers.add(event.data.provider)
+    else if (matches(event, ASSISTANT_MESSAGE) && event.data.message.source.kind === 'assistant') providers.add(event.data.message.source.provider)
+  }
+  return [...providers]
+}
+
+/** The window the log recorded per route, so a replay meters what the recording metered. */
+export function windowsIn(events: readonly EventEnvelope[]): Map<string, number> {
+  const windows = new Map<string, number>()
+  for (const event of events) {
+    if (matches(event, REQUEST_CONTEXT) && event.data.contextWindow !== undefined) {
+      windows.set(`${event.data.provider}/${event.data.model}`, event.data.contextWindow)
+    }
+  }
+  return windows
+}
+
 /** A recorded out-of-loop call: its purpose travels with its chunks, so a replay can refuse to serve one purpose's record to another's request. */
 interface AuxGroup {
   readonly purpose: string
   readonly chunks: StreamChunk[]
 }
 
-class ReplayAdapter implements LlmAdapter {
-  readonly provider: string
+/** The one script every provider facade serves from: log order is the cursor, whatever route a call took. */
+class ReplayScript {
   private readonly script: StreamChunk[][]
   private readonly auxScript: AuxGroup[]
-  private readonly contextWindow: number
   private cursor = 0
   private auxCursor = 0
-  constructor(provider: string, script: StreamChunk[][], auxScript: AuxGroup[], contextWindow: number) {
-    this.provider = provider
+  constructor(script: StreamChunk[][], auxScript: AuxGroup[]) {
     this.script = script
     this.auxScript = auxScript
-    this.contextWindow = contextWindow
   }
 
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
@@ -134,14 +161,6 @@ class ReplayAdapter implements LlmAdapter {
     for (const chunk of group) yield chunk
   }
 
-  resolveModel(_model: string): ResolvedModel {
-    return { contextWindow: this.contextWindow, defaultMaxTokens: 8192, reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'high' } }
-  }
-
-  listModels(): readonly ModelInfo[] {
-    return [{ id: 'replay', name: 'Replay' }]
-  }
-
   consumed(): number {
     return this.cursor
   }
@@ -159,36 +178,74 @@ class ReplayAdapter implements LlmAdapter {
   }
 }
 
+class ReplayAdapter implements LlmAdapter {
+  readonly provider: string
+  private readonly shared: ReplayScript
+  private readonly windows: ReadonlyMap<string, number>
+  private readonly fallbackWindow: number
+  constructor(provider: string, shared: ReplayScript, windows: ReadonlyMap<string, number>, fallbackWindow: number) {
+    this.provider = provider
+    this.shared = shared
+    this.windows = windows
+    this.fallbackWindow = fallbackWindow
+  }
+
+  stream(request: LlmRequest): AsyncIterable<StreamChunk> {
+    return this.shared.stream(request)
+  }
+
+  resolveModel(model: string): ResolvedModel {
+    // The window the log recorded for this route; a log from before
+    // `request/context` existed falls back to the caller's number.
+    const contextWindow = this.windows.get(`${this.provider}/${model}`) ?? this.fallbackWindow
+    return { contextWindow, defaultMaxTokens: 8192, reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'high' } }
+  }
+
+  listModels(): readonly ModelInfo[] {
+    return [{ id: 'replay', name: 'Replay' }]
+  }
+}
+
 export interface ReplayHandle {
   dispose: Disposer
   assertConsumed(): void
   readonly steps: number
   /** Recorded out-of-loop calls (compaction summaries) available to replay. */
   readonly auxCalls: number
+  /** The providers the replay answers for. */
+  readonly providers: readonly string[]
 }
 
-/** Registers a replay adapter derived from `events` on `owner.llm`. */
+/**
+ * Registers a replay adapter derived from `events` on `owner.llm`, under every
+ * provider the log names (or the given ones). `contextWindow` is the fallback
+ * for a route the log recorded no window for.
+ */
 export function installLlmReplay(
   owner: Context,
-  options: { events: readonly EventEnvelope[]; provider?: string; contextWindow?: number; attempts?: ReplayAttempts },
+  options: { events: readonly EventEnvelope[]; provider?: string; providers?: readonly string[]; contextWindow?: number; attempts?: ReplayAttempts },
 ): ReplayHandle {
   const script = deriveReplayScript(options.events, options.attempts)
   const auxScript = foldAuxCalls(options.events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) }))
-  // The window is a live adapter fact the log does not carry. A replay that
-  // needs compaction to trigger where it did should pin an absolute budget on
-  // the compaction row rather than hope two adapters agree about a window.
-  const adapter = new ReplayAdapter(options.provider ?? 'deepseek', script, auxScript, options.contextWindow ?? 1_000_000)
-  const dispose = owner.get(LLM).registerAdapter(owner, adapter)
+  const shared = new ReplayScript(script, auxScript)
+  const windows = windowsIn(options.events)
+  const named = options.providers ?? (options.provider === undefined ? providersIn(options.events) : [options.provider])
+  const providers = named.length > 0 ? named : ['deepseek']
+  const llm = owner.get(LLM)
+  const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, options.contextWindow ?? 1_000_000)))
   return {
-    dispose,
+    dispose: async () => {
+      for (const dispose of disposers) await dispose()
+    },
     steps: script.length,
     auxCalls: auxScript.length,
+    providers,
     assertConsumed() {
-      if (adapter.consumed() !== adapter.total()) {
-        throw new Error(`llm-replay: replayed ${adapter.consumed()} of ${adapter.total()} recorded steps`)
+      if (shared.consumed() !== shared.total()) {
+        throw new Error(`llm-replay: replayed ${shared.consumed()} of ${shared.total()} recorded steps`)
       }
-      if (adapter.auxConsumed() !== adapter.auxTotal()) {
-        throw new Error(`llm-replay: replayed ${adapter.auxConsumed()} of ${adapter.auxTotal()} recorded out-of-loop calls`)
+      if (shared.auxConsumed() !== shared.auxTotal()) {
+        throw new Error(`llm-replay: replayed ${shared.auxConsumed()} of ${shared.auxTotal()} recorded out-of-loop calls`)
       }
     },
   }

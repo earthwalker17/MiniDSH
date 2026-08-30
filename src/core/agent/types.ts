@@ -21,6 +21,9 @@ export interface AgentOptions extends CallConfig {
   readonly maxSteps?: number
 }
 
+/** Why an `agent/options` record was written: the opening base, a durable switch, or an override at resume. */
+export type AgentOptionsReason = 'initial' | 'change' | 'resume'
+
 /** The live agent handle. `id` equals the session id. */
 export interface Agent {
   readonly id: SessionId
@@ -28,7 +31,20 @@ export interface Agent {
   readonly status: AgentStatus
   /** The agent's scoped context: registrations here are visible to and live with this agent alone. */
   readonly ctx: Context
+  /**
+   * The BASE route and limits this agent runs from — the fold of `agent/options`.
+   * A per-request rewrite on `agent/request` (a role) never changes it, which
+   * is what lets a resume rebuild from the base rather than from the last
+   * rewrite the log happened to record.
+   */
   readonly options: AgentOptions
+  /**
+   * The durable switch: merges `options` over the base, appends
+   * `agent/options{reason: 'change'}` iff something actually changed, and
+   * takes effect at the next step. Undefined values never clobber; a route
+   * change drops an effort the switch did not name (effort ids are adapter-owned).
+   */
+  configure(options: Partial<AgentOptions>): AgentOptions
   /** Low-level delivery; `followup`/`steer`/`inject` are the presets. */
   send(message: Message, target: InboxTarget, wakeup: boolean): void
   followup(message: Message): void
@@ -103,12 +119,20 @@ export interface PreStepContext {
 
 export type PreStepDecision = { readonly kind: 'reject' } | { readonly kind: 'enter'; readonly messages: readonly Message[] }
 
+/**
+ * The `agent/request` waterfall's subject: the base config a call starts from,
+ * which a listener may rewrite. A loop step carries its position; a call that
+ * is NOT a step (a compaction summary, a delegated child's route) carries a
+ * `purpose` instead — the one discriminator a role routes on, and a field the
+ * provider never sees.
+ */
 export interface RequestContext {
   readonly agent: Agent
-  readonly turn: number
-  readonly step: number
+  readonly turn?: number
+  readonly step?: number
   readonly config: CallConfig
-  readonly signal: AbortSignal
+  readonly signal?: AbortSignal
+  readonly purpose?: string
 }
 
 export interface RequestErrorContext {

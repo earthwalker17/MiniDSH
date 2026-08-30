@@ -321,3 +321,30 @@ describe('compaction through the real loop', () => {
     expect(surfaceTexts(agent)[0]).toContain('<system-reminder>')
   })
 })
+
+describe('the summary takes the route the log names', () => {
+  it('measures against the window the log records and summarises down the route a listener chose', async () => {
+    const test = await harness({ retainRatio: 0.25, maxTokens: 512 })
+    arm(test)
+    const { AGENT_REQUEST } = await import('../../core/agent/index.ts')
+    test.root.on(
+      AGENT_REQUEST,
+      async (context, next) => {
+        const config = await next()
+        return context.purpose === 'compaction' ? { ...config, model: 'cheap-model' } : config
+      },
+      { global: true },
+    )
+    const { agent } = await test.create()
+    await grow(agent, 4)
+    const outcome = await test.root.get(COMPACTION).compactNow(agent)
+    expect(outcome.kind).toBe('compacted')
+    const record = appliedRecords(agent).at(-1)!.data as { budgetTokens: number; auxCallSeq: number }
+    // No budgetTokens configured: the budget is the window the log recorded for the loop's route.
+    expect(record.budgetTokens).toBe(100_000)
+    const aux = agent.session.events[record.auxCallSeq]!.data as AuxCallRecord
+    expect([aux.provider, aux.model]).toEqual(['scripted', 'cheap-model'])
+    // The loop's own route never moved: the summary's route is the aux record's, not the header's.
+    expect(agent.session.foldRequestHeader()!.model).toBe('scripted-model')
+  })
+})

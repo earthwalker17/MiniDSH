@@ -4,14 +4,18 @@ import {
   AGENT_INBOX_CLAIMED,
   AGENT_INBOX_DISCARDED,
   AGENT_INBOX_INSERTED,
+  AGENT_OPTIONS,
   AGENT_PRE_STEP,
-  AGENT_REQUEST,
   AGENT_REQUEST_ERROR,
   AGENT_STATUS,
   AGENT_TURN_STOPPING,
+  canonicalAgentOptions,
   foldInbox,
   Inbox,
   INBOX_SPLICED,
+  mergeAgentOptions,
+  resolveCallConfig,
+  sameAgentOptions,
   type Agent,
   type AgentOptions,
   type AgentStatus,
@@ -28,7 +32,9 @@ import { PROMPT, type AssembledPrompt, type Prompt } from '../prompt/index.ts'
 import {
   ASSISTANT_CHUNK,
   ASSISTANT_MESSAGE,
+  foldRequestContext,
   matches,
+  REQUEST_CONTEXT,
   REQUEST_HEADER,
   STEP_END,
   STEP_START,
@@ -37,6 +43,7 @@ import {
   TURN_END,
   TURN_START,
   USER_MESSAGE,
+  type RequestContextRecord,
   type RequestHeader,
   type Session,
   type TurnEndReason,
@@ -77,12 +84,13 @@ type StepResult =
 export class ReactLoopAgent implements Agent {
   readonly id: SessionId
   readonly session: Session
-  readonly options: AgentOptions
   readonly inbox: Inbox
+  /** The base route: the fold of `agent/options`, held live so every step starts from it. */
+  private base: AgentOptions
   private _ctx: Context | undefined
   private _status: AgentStatus = 'idle'
   private deps: LoopDeps | undefined
-  private readonly maxSteps: number
+  private maxSteps: number
   private turnCount = 0
   private firstLiveTurn = 1
   private abort = new AbortController()
@@ -93,7 +101,7 @@ export class ReactLoopAgent implements Agent {
   constructor(session: Session, options: AgentOptions) {
     this.id = session.id
     this.session = session
-    this.options = options
+    this.base = canonicalAgentOptions(options)
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS
     this.inbox = new Inbox(
       (event, message, target) => this.onInbox(event, message, target),
@@ -127,6 +135,20 @@ export class ReactLoopAgent implements Agent {
 
   get status(): AgentStatus {
     return this._status
+  }
+
+  get options(): AgentOptions {
+    return this.base
+  }
+
+  configure(options: Partial<AgentOptions>): AgentOptions {
+    const merged = mergeAgentOptions(this.base, options)
+    if (sameAgentOptions(merged, this.base)) return this.base
+    this.base = merged
+    this.maxSteps = merged.maxSteps ?? DEFAULT_MAX_STEPS
+    // The switch IS its event; the next step resolves its route from here.
+    this.session.append(AGENT_OPTIONS, { options: merged, reason: 'change' })
+    return merged
   }
 
   private onInbox(event: 'inserted' | 'discarded' | 'claimed', message: Message, target?: InboxTarget): void {
@@ -230,7 +252,14 @@ export class ReactLoopAgent implements Agent {
           if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
         }
         let decision: PreStepDecision
+        let config: CallConfig
         try {
+          // The route first: what a pre-step listener measures against (the
+          // window a pressure check needs) must be the route THIS step will
+          // use, and a listener that rewrites it (a role) is consulted once
+          // per step — here, for the step and its context record alike.
+          config = await resolveCallConfig(this, { turn, step, signal })
+          this.recordRoute(config)
           decision = await this.ctx.waterfall(
             AGENT_PRE_STEP,
             { agent: this, messages: claimed, turn, step, signal },
@@ -263,7 +292,7 @@ export class ReactLoopAgent implements Agent {
           // pre-step await re-delivers a prompt on resume rather than losing it
           // (the accepted failure mode is a rare double-delivery, never a loss).
           commitClaim()
-          result = await this.step(turn, step, signal)
+          result = await this.step(turn, step, signal, config)
         } finally {
           // step/end must close the step even when the request throws (e.g. cancellation),
           // so the turn stays structurally valid before turn/end.
@@ -307,18 +336,9 @@ export class ReactLoopAgent implements Agent {
     }
   }
 
-  private async step(turn: number, step: number, signal: AbortSignal): Promise<StepResult> {
+  private async step(turn: number, step: number, signal: AbortSignal, config: CallConfig): Promise<StepResult> {
     const deps = this.deps!
     const assembled = await deps.prompt.assemble(this)
-    const baseConfig: CallConfig = {
-      provider: this.options.provider,
-      model: this.options.model,
-      ...(this.options.reasoningEffort === undefined ? {} : { reasoningEffort: this.options.reasoningEffort }),
-      ...(this.options.maxTokens === undefined ? {} : { maxTokens: this.options.maxTokens }),
-      ...(this.options.temperature === undefined ? {} : { temperature: this.options.temperature }),
-    }
-    const config = await this.ctx.waterfall(AGENT_REQUEST, { agent: this, turn, step, config: baseConfig, signal }, async () => baseConfig)
-
     const header = this.buildHeader(config, assembled)
     const folded = this.session.foldRequestHeader()
     if (!folded || JSON.stringify(folded) !== JSON.stringify(header)) {
@@ -467,6 +487,28 @@ export class ReactLoopAgent implements Agent {
     } catch (error) {
       throw new DurabilityLost(error instanceof AggregateError && error.errors.length === 1 ? error.errors[0] : error)
     }
+  }
+
+  /**
+   * `request/context`: the step's route and the window the adapter advertises
+   * for it, written only when one of them differs from the last record. It
+   * sits outside header equality — the window is not model-visible — so a
+   * capacity change never forces a header snapshot, and everything that
+   * meters (compaction's trigger, the terminal, `sessions show`) reads the
+   * window from the log rather than from a live adapter.
+   */
+  private recordRoute(config: CallConfig): void {
+    let contextWindow: number | undefined
+    try {
+      contextWindow = this.deps!.llm.resolveModel(config.provider, config.model).contextWindow
+    } catch {
+      // An unknown provider: the request itself will say so (NO_ADAPTER); the record then carries no window.
+      contextWindow = undefined
+    }
+    const record: RequestContextRecord = { provider: config.provider, model: config.model, ...(contextWindow === undefined ? {} : { contextWindow }) }
+    const last = foldRequestContext(this.session.facts)
+    if (last && last.provider === record.provider && last.model === record.model && last.contextWindow === record.contextWindow) return
+    this.session.append(REQUEST_CONTEXT, record)
   }
 
   private buildHeader(config: CallConfig, assembled: AssembledPrompt): RequestHeader {

@@ -459,3 +459,24 @@ describe('protocol-stdio: the authority control plane', () => {
     expect((await client.call('session/authority', { sessionId, preset: 'nope' })).error?.code).toBe(-32602)
   })
 })
+
+describe('the route over the wire', () => {
+  it('session/model reads and switches the base route as a durable event, refusing a provider this host lacks', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'), assistantText('again'))
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    expect(await client.result('session/model', { sessionId })).toEqual(SCRIPTED)
+    const switched = await client.result('session/model', { sessionId, model: 'scripted-2', reasoningEffort: 'low' })
+    expect(switched).toEqual({ provider: 'scripted', model: 'scripted-2', reasoningEffort: 'low' })
+    const record = await client.waitFor(() => client.frames('agent/options').at(1), 'the switch frame')
+    expect(record.event.data).toEqual({ options: { provider: 'scripted', model: 'scripted-2', reasoningEffort: 'low' }, reason: 'change' })
+    expect((await client.call('session/model', { sessionId, provider: 'nowhere' })).error?.code).toBe(-32602)
+    expect((await client.call('session/model', { sessionId, model: '' })).error?.code).toBe(-32602)
+    // A prompt to a live session may carry the same switch; the next step follows it.
+    await client.result('session/prompt', { sessionId, text: 'more', agentOptions: { model: 'scripted-3' } })
+    await client.waitForIdle(sessionId)
+    expect(adapter.calls.map((call) => call.model)).toEqual(['scripted-model', 'scripted-3'])
+    expect(client.frames('agent/options')).toHaveLength(3)
+  })
+})

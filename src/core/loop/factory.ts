@@ -1,5 +1,5 @@
 import type { Context, Disposer, Plugin } from '../../kernel/index.ts'
-import { AGENTS, type AgentFactory, type AgentHandle, type CreateAgentOptions } from '../agent/index.ts'
+import { AGENT_OPTIONS, AGENTS, foldAgentOptions, sameAgentOptions, type AgentFactory, type AgentHandle, type CreateAgentOptions } from '../agent/index.ts'
 import { LLM } from '../llm/index.ts'
 import { PROMPT } from '../prompt/index.ts'
 import { SESSIONS } from '../session/index.ts'
@@ -37,6 +37,14 @@ class LoopFactory implements AgentFactory {
     // The scope resolves services through the loop context and is keyed by the agent itself.
     const scope = this.ctx.child({ scope: agent, label: `agent:${session.id}` })
     agent.attach(scope)
+    // The base route is an opening fact, like the authority knobs: written
+    // before publication iff the seed does not already say it. A log from
+    // before the record existed gets one at pickup (`initial`); an override at
+    // resume is a `resume`; a fork born with overrides changed at its birth.
+    const folded = foldAgentOptions(session.facts)
+    if (!folded || !sameAgentOptions(folded, agent.options)) {
+      session.append(AGENT_OPTIONS, { options: agent.options, reason: !folded ? 'initial' : session.origin === 'resumed' ? 'resume' : 'change' })
+    }
 
     // One disposal, run at most once, shared by every path that can end the agent:
     // an explicit handle.dispose(), the creator's unwind, the loop plugin's unwind

@@ -22,7 +22,9 @@ import type {
   AgentFactory,
   AgentHandle,
   AgentOptions,
+  AgentOptionsReason,
   AgentStatus,
+  CallConfig,
   CancelCause,
   CreateAgentOptions,
   ForkAgentOptions,
@@ -52,6 +54,91 @@ export const AGENT_PRE_STEP = waterfallEvent<[context: PreStepContext], Promise<
 export const AGENT_REQUEST = waterfallEvent<[context: RequestContext], Promise<RequestContext['config']>>('agent/request')
 export const AGENT_REQUEST_ERROR = waterfallEvent<[context: RequestErrorContext], Promise<RequestErrorAction>>('agent/request-error')
 export const AGENT_TURN_STOPPING = serialEvent<[context: TurnStoppingContext]>('agent/turn-stopping')
+
+// ---- the base route ---------------------------------------------------------
+
+/**
+ * Log-only, folded by `findLast`: the BASE route and limits an agent runs
+ * from. Written at creation (`initial`), by `Agent.configure` (`change`), and
+ * by an override at resume (`resume`) — the same discipline as the authority
+ * knobs. The effective per-request route lives in `request/header` and
+ * `request/context`; this record is what a resume rebuilds from, so a role
+ * that rewrote the last request can never become the base.
+ */
+export const AGENT_OPTIONS = eventKind<{ options: AgentOptions; reason: AgentOptionsReason }>('agent/options')
+
+export function foldAgentOptions(events: readonly EventEnvelope[]): AgentOptions | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!
+    if (matches(event, AGENT_OPTIONS)) return event.data.options
+  }
+  return undefined
+}
+
+/** Canonical form for equality and for the log: optional fields absent, never `undefined`. */
+export function canonicalAgentOptions(options: AgentOptions): AgentOptions {
+  return {
+    provider: options.provider,
+    model: options.model,
+    ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
+    ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+    ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+    ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
+  }
+}
+
+export function sameAgentOptions(a: AgentOptions, b: AgentOptions): boolean {
+  return JSON.stringify(canonicalAgentOptions(a)) === JSON.stringify(canonicalAgentOptions(b))
+}
+
+/**
+ * A switch merged over a base. An undefined value never clobbers; a route
+ * change (provider or model) drops an effort the switch did not name, because
+ * effort ids are adapter-owned and one adapter's id means nothing to another.
+ */
+export function mergeAgentOptions(base: AgentOptions, partial: Partial<AgentOptions>): AgentOptions {
+  const merged: Record<string, unknown> = { ...canonicalAgentOptions(base) }
+  for (const [key, value] of Object.entries(partial)) {
+    if (value !== undefined) merged[key] = value
+  }
+  const routeChanged = merged.provider !== base.provider || merged.model !== base.model
+  if (routeChanged && partial.reasoningEffort === undefined) delete merged.reasoningEffort
+  return canonicalAgentOptions(merged as unknown as AgentOptions)
+}
+
+/** The model-visible part of the base: what a call starts from before `agent/request`. */
+export function baseCallConfig(options: AgentOptions): CallConfig {
+  return {
+    provider: options.provider,
+    model: options.model,
+    ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
+    ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+    ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+  }
+}
+
+/**
+ * THE route resolution for every model call made about an agent — a loop step
+ * (with its position) or an out-of-loop call (with its `purpose`): the base
+ * config, then the `agent/request` waterfall in the agent's scope. One path,
+ * so a role listener is consulted for a compaction summary or a child's route
+ * exactly as it is for a step.
+ */
+export async function resolveCallConfig(
+  agent: Agent,
+  call: { readonly purpose?: string; readonly turn?: number; readonly step?: number; readonly signal?: AbortSignal },
+): Promise<CallConfig> {
+  const config = baseCallConfig(agent.options)
+  const context: RequestContext = {
+    agent,
+    config,
+    ...(call.turn === undefined ? {} : { turn: call.turn }),
+    ...(call.step === undefined ? {} : { step: call.step }),
+    ...(call.signal === undefined ? {} : { signal: call.signal }),
+    ...(call.purpose === undefined ? {} : { purpose: call.purpose }),
+  }
+  return agent.ctx.waterfall(AGENT_REQUEST, context, async () => config)
+}
 
 // ---- inbox ----------------------------------------------------------------
 
@@ -299,30 +386,39 @@ class AgentRegistry implements Agents {
 
 /**
  * Model config for an agent continuing over a seed: explicit overrides > the
- * seed's folded `request/header` > surface defaults. Undefined override values
- * never clobber a folded fact.
+ * seed's folded BASE (`agent/options`) > the seed's folded `request/header`
+ * (a log from before the base was recorded) > surface defaults. Undefined
+ * override values never clobber a folded fact.
  */
 function resolveSeedAgentOptions(seed: readonly EventEnvelope[], options: ResumeAgentOptions, what: string): AgentOptions {
-  const header = foldRequestHeader(seed)
   const merged: Record<string, unknown> = { ...options.defaults }
-  if (header) {
-    // The header is the whole model-config authority: an optional it omits was
-    // genuinely absent, so a default must not resurrect it. Only `maxSteps`
-    // survives from defaults — it is deliberately not model-visible.
-    merged.provider = header.provider
-    merged.model = header.model
+  const base = foldAgentOptions(seed)
+  const header = base ? undefined : foldRequestHeader(seed)
+  // A folded fact is the whole model-config authority: an optional it omits
+  // was genuinely absent, so a default must not resurrect it. Only `maxSteps`
+  // survives from defaults when the fact does not name one — it is
+  // deliberately not model-visible.
+  const recorded = base ?? header
+  if (recorded) {
+    merged.provider = recorded.provider
+    merged.model = recorded.model
     for (const key of ['reasoningEffort', 'maxTokens', 'temperature'] as const) {
-      if (header[key] !== undefined) merged[key] = header[key]
+      if (recorded[key] !== undefined) merged[key] = recorded[key]
       else delete merged[key]
     }
+    if (base?.maxSteps !== undefined) merged.maxSteps = base.maxSteps
   }
-  for (const [key, value] of Object.entries(options.agentOptions ?? {})) {
-    if (value !== undefined) merged[key] = value
-  }
+  const partial = options.agentOptions ?? {}
   if (typeof merged.provider !== 'string' || typeof merged.model !== 'string') {
-    throw new Error(`${what}: no stored request/header to derive the model from; pass agentOptions`)
+    if (typeof partial.provider !== 'string' || typeof partial.model !== 'string') {
+      throw new Error(`${what}: no stored agent/options or request/header to derive the model from; pass agentOptions`)
+    }
+    merged.provider = partial.provider
+    merged.model = partial.model
   }
-  return merged as unknown as AgentOptions
+  // An override at resume is a switch over the recorded base: the same merge
+  // rule as a live `configure`, so a route change drops an unnamed effort.
+  return mergeAgentOptions(merged as unknown as AgentOptions, partial)
 }
 
 /** The agent registry plugin: provides `ctx.agents`. The loop registers the factory. */

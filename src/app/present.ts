@@ -9,13 +9,14 @@
  * Pure functions over events, no state: a surface that streams (the terminal)
  * layers its own live cases on top and falls back here for everything else.
  */
+import { AGENT_OPTIONS } from '../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../core/approval/index.ts'
 import { COMPACTION_APPLIED } from '../core/compaction/index.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { formatTokens } from '../core/metering/index.ts'
 import { AUTHORITY_PRESET } from '../core/presets/index.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
-import { ASSISTANT_MESSAGE, matches, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
+import { ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 
 export function preview(text: string, max = 80): string {
   const oneLine = text.replace(/\s+/g, ' ').trim()
@@ -47,6 +48,16 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     return `[sandbox: ${mode} (${reason}; ${confinement(mode, enforcement)})]`
   }
   if (matches(event, APPROVAL_POLICY)) return `[approvals: ${event.data.policy}]`
+  if (matches(event, AGENT_OPTIONS)) {
+    // The opening base is what the banner already said; a switch is news.
+    if (event.data.reason === 'initial') return undefined
+    const { provider, model, reasoningEffort } = event.data.options
+    return `[model: ${provider}/${model}${reasoningEffort ? ` · effort ${reasoningEffort}` : ''} (${event.data.reason})]`
+  }
+  if (matches(event, REQUEST_CONTEXT)) {
+    const { provider, model, contextWindow } = event.data
+    return `[route: ${provider}/${model}${contextWindow === undefined ? '' : ` · window ${formatTokens(contextWindow)}`}]`
+  }
   if (matches(event, AUTHORITY_PRESET)) return `[preset: ${event.data.name}]`
   if (matches(event, APPROVAL_ASKED)) return `? ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${event.data.reason}` : ''}`
   if (matches(event, APPROVAL_DECIDED)) return `! ${event.data.id} ${event.data.outcome}`

@@ -77,7 +77,7 @@ describe('headless runner (real composition, scripted model)', () => {
       const agents = root.get(AGENTS)
       const abandoned = await agents.create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
       // Stamps were recorded, the log is not empty — and still nothing is stored.
-      expect(abandoned.agent.session.events.map((event) => event.type)).toEqual(['approval/policy', 'sandbox/mode', 'composition/applied'])
+      expect(abandoned.agent.session.events.map((event) => event.type)).toEqual(['agent/options', 'approval/policy', 'sandbox/mode', 'composition/applied'])
       await abandoned.dispose()
       expect(readdirSync(sessionsRoot)).toEqual([])
 
@@ -89,7 +89,7 @@ describe('headless runner (real composition, scripted model)', () => {
       const files = readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))
       expect(files).toHaveLength(1)
       const lines = readFileSync(join(sessionsRoot, files[0]!), 'utf8').trim().split('\n')
-      expect(lines.slice(1, 4).map((line) => (JSON.parse(line) as { type: string }).type)).toEqual(['approval/policy', 'sandbox/mode', 'composition/applied'])
+      expect(lines.slice(1, 5).map((line) => (JSON.parse(line) as { type: string }).type)).toEqual(['agent/options', 'approval/policy', 'sandbox/mode', 'composition/applied'])
     } finally {
       await root.dispose()
     }

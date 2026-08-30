@@ -72,6 +72,21 @@ export interface RequestHeader {
 
 export type RequestHeaderReason = 'initial' | 'change' | 'resume'
 
+/**
+ * Route metadata for the next request — the resolved provider and model and
+ * the window the adapter advertises for them — logged only when one of them
+ * changes. It sits OUTSIDE header equality (the window is not model-visible),
+ * so a capacity change never forces a header snapshot, and a reader (the
+ * meter, a replay, `sessions show`) learns the window from the log instead of
+ * from a live adapter. DSH's `request/context`.
+ */
+export interface RequestContextRecord {
+  readonly provider: string
+  readonly model: string
+  /** Maximum combined request and response tokens, when the adapter advertises one. */
+  readonly contextWindow?: number
+}
+
 // ---- core event kinds -----------------------------------------------------
 
 export const TURN_START = eventKind<{ turn: number }>('turn/start')
@@ -80,6 +95,8 @@ export const STEP_START = eventKind<{ turn: number; step: number }>('step/start'
 export const STEP_END = eventKind<{ turn: number; step: number }>('step/end')
 export const USER_MESSAGE = eventKind<{ message: Message }>('user/message')
 export const REQUEST_HEADER = eventKind<{ turn: number; step: number; header: RequestHeader; reason: RequestHeaderReason }>('request/header')
+/** Log-only: the route and its window, written before the step's pre-step listeners run, iff it differs from the last one. */
+export const REQUEST_CONTEXT = eventKind<RequestContextRecord>('request/context')
 /** One raw stream chunk. `attempt` (1-based per step) separates a retried attempt's chunks from the one that succeeded. */
 export const ASSISTANT_CHUNK = eventKind<{ turn: number; step: number; attempt: number; chunk: JsonValue }>('assistant/chunk')
 export const ASSISTANT_MESSAGE = eventKind<{ turn: number; step: number; message: Message; usage?: TokenUsage; interrupted?: true }>('assistant/message')

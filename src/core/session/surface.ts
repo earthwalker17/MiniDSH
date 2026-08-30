@@ -3,11 +3,13 @@ import type { Message } from '../llm/types.ts'
 import {
   ASSISTANT_MESSAGE,
   matches,
+  REQUEST_CONTEXT,
   REQUEST_HEADER,
   SURFACE_TYPES,
   TOOL_RESULT,
   USER_MESSAGE,
   type EventEnvelope,
+  type RequestContextRecord,
   type RequestHeader,
 } from './types.ts'
 
@@ -31,6 +33,15 @@ export function foldRequestHeader(events: readonly EventEnvelope[]): RequestHead
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]!
     if (matches(event, REQUEST_HEADER)) return event.data.header
+  }
+  return undefined
+}
+
+/** The latest route/window record folded from the log, or undefined if none written. */
+export function foldRequestContext(events: readonly EventEnvelope[]): RequestContextRecord | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!
+    if (matches(event, REQUEST_CONTEXT)) return event.data
   }
   return undefined
 }

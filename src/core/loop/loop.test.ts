@@ -255,10 +255,12 @@ describe('agent loop: turn/step lifecycle', () => {
     // Every raw stream chunk is logged; collapse them to check the skeleton.
     const skeleton = types(agent.session.events).filter((type, index, all) => type !== 'assistant/chunk' || all[index - 1] !== 'assistant/chunk')
     expect(skeleton).toEqual([
+      'agent/options', // the base route, recorded at creation
       'approval/policy', // the opening authority, recorded at creation
       'sandbox/mode',
       'inbox/spliced', // the followup's durable insert
       'turn/start',
+      'request/context', // the step's route and window, before its pre-step listeners
       'step/start',
       'user/message',
       'inbox/spliced', // the claim, committed after the entered message
@@ -297,7 +299,7 @@ describe('agent loop: turn/step lifecycle', () => {
     agent.followup(createUserMessage('hi'))
     await agent.whenIdle()
     // The claim is committed with the block that consumed it: durable = live.
-    expect(types(agent.session.events)).toEqual(['approval/policy', 'sandbox/mode', 'inbox/spliced', 'turn/start', 'inbox/spliced', 'turn/end'])
+    expect(types(agent.session.events)).toEqual(['agent/options', 'approval/policy', 'sandbox/mode', 'inbox/spliced', 'turn/start', 'request/context', 'inbox/spliced', 'turn/end'])
     expect((agent.session.events.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('blocked')
     expect(harness.adapter.calls).toHaveLength(0)
   })
@@ -458,11 +460,82 @@ describe('agent loop: ownership', () => {
     agent.inject(createPluginMessage('test', 'remember: be brief'))
     // Injection alone does not wake the driver; its durable insert is the only fact.
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(agent.session.events.map((event) => event.type)).toEqual(['approval/policy', 'sandbox/mode', 'inbox/spliced'])
+    expect(agent.session.events.map((event) => event.type)).toEqual(['agent/options', 'approval/policy', 'sandbox/mode', 'inbox/spliced'])
     agent.followup(createUserMessage('hi'))
     await agent.whenIdle()
     const userMessages = agent.session.deriveMessages().filter((message) => message.role === 'user')
     expect(userMessages).toHaveLength(2)
     expect(userMessages.some((message) => message.source.kind === 'plugin')).toBe(true)
+  })
+})
+
+describe('the route as durable facts', () => {
+  it('writes request/context before the first pre-step, and again only when the route or its window changes', async () => {
+    harness = await coreHarness()
+    harness.adapter.script(assistantText('one'), assistantText('two'))
+    const { AGENT_PRE_STEP } = await import('../agent/index.ts')
+    const { foldRequestContext, REQUEST_CONTEXT } = await import('../session/index.ts')
+    const { agent } = await harness.create()
+    const seenAtPreStep: unknown[] = []
+    harness.root.on(
+      AGENT_PRE_STEP,
+      async (context, next) => {
+        seenAtPreStep.push(foldRequestContext(context.agent.session.facts))
+        return next()
+      },
+      { global: true },
+    )
+    agent.followup(createUserMessage('first'))
+    await agent.whenIdle()
+    agent.followup(createUserMessage('second'))
+    await agent.whenIdle()
+    // The scripted adapter advertises a 100k window, and the record named the
+    // route AND the window before the first pre-step listener ran — which is
+    // what lets a pressure check measure against the route this step uses.
+    expect(seenAtPreStep[0]).toEqual({ provider: 'scripted', model: 'scripted-model', contextWindow: 100_000 })
+    expect(agent.session.events.filter((event) => event.type === REQUEST_CONTEXT.type)).toHaveLength(1)
+  })
+
+  it('configure is one durable switch: logged iff it changes, effective at the next step, and an unnamed effort dies with a route change', async () => {
+    harness = await coreHarness()
+    harness.adapter.script(assistantText('one'), assistantText('two'))
+    const { AGENT_OPTIONS } = await import('../agent/index.ts')
+    const { agent } = await harness.create({ reasoningEffort: 'high' })
+    agent.followup(createUserMessage('first'))
+    await agent.whenIdle()
+    // A restatement is not a switch.
+    expect(agent.configure({ reasoningEffort: 'high' })).toBe(agent.options)
+    const switched = agent.configure({ model: 'other-model' })
+    expect(switched).toEqual({ provider: 'scripted', model: 'other-model' })
+    expect(agent.options).toBe(switched)
+    agent.followup(createUserMessage('second'))
+    await agent.whenIdle()
+    const records = agent.session.events.filter((event) => event.type === AGENT_OPTIONS.type).map((event) => event.data)
+    expect(records).toEqual([
+      { options: { provider: 'scripted', model: 'scripted-model', reasoningEffort: 'high' }, reason: 'initial' },
+      { options: { provider: 'scripted', model: 'other-model' }, reason: 'change' },
+    ])
+    expect(harness.adapter.calls.map((call) => [call.model, call.reasoningEffort])).toEqual([
+      ['scripted-model', 'high'],
+      ['other-model', undefined],
+    ])
+    const routes = agent.session.events.filter((event) => event.type === 'request/context').map((event) => (event.data as { model: string }).model)
+    expect(routes).toEqual(['scripted-model', 'other-model'])
+  })
+
+  it('a listener rewriting the route is consulted before pre-step and never touches the base', async () => {
+    harness = await coreHarness()
+    harness.adapter.script(assistantText('one'))
+    const { AGENT_OPTIONS, AGENT_REQUEST } = await import('../agent/index.ts')
+    harness.root.on(AGENT_REQUEST, async (_context, next) => ({ ...(await next()), model: 'cheap-model' }), { global: true })
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    expect(harness.adapter.calls[0]!.model).toBe('cheap-model')
+    expect((agent.session.events.find((event) => event.type === 'request/context')!.data as { model: string }).model).toBe('cheap-model')
+    expect(agent.session.foldRequestHeader()!.model).toBe('cheap-model')
+    // The effective route is the header's and the context record's; the base is untouched.
+    expect(agent.options.model).toBe('scripted-model')
+    expect(agent.session.events.filter((event) => event.type === AGENT_OPTIONS.type)).toHaveLength(1)
   })
 })

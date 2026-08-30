@@ -148,6 +148,8 @@ export class ProtocolServer {
         return this.approvalAnswer(record)
       case 'session/authority':
         return this.authority(record)
+      case 'session/model':
+        return this.model(record)
       case 'shutdown':
         return this.shutdown()
       default:
@@ -248,6 +250,36 @@ export class ProtocolServer {
     return this.withPreset({ sandbox: mode, approval: approval.policyFor(agent.session), enforcement: sandbox.enforcementFor(mode) })
   }
 
+  /**
+   * Read or switch a live session's BASE route. A switch IS its durable event
+   * (`agent/options{change}`), so a client never holds route state of its own
+   * — it reads the log like every other surface. The provider must be one
+   * this host has an adapter for: a route to nowhere is refused here, not at
+   * the next paid step.
+   */
+  private model(params: Record<string, unknown>): AgentOptions {
+    const sessionId = requireString(params, 'sessionId', 'session/model')
+    const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
+    if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
+    const partial: { provider?: string; model?: string; reasoningEffort?: string } = {}
+    for (const key of ['provider', 'model', 'reasoningEffort'] as const) {
+      const value = params[key]
+      if (value === undefined) continue
+      if (typeof value !== 'string' || value.length === 0) throw new RpcFailure(INVALID_PARAMS, `session/model: "${key}" must be a non-empty string`)
+      partial[key] = value
+    }
+    this.assertRoutable(partial, 'session/model')
+    if (Object.keys(partial).length > 0) agent.configure(partial)
+    return agent.options
+  }
+
+  /** A route names a provider this host serves, or it is refused before it can become a durable fact. */
+  private assertRoutable(partial: Partial<AgentOptions>, method: string): void {
+    if (partial.provider !== undefined && !this.ctx.get(LLM).hasProvider(partial.provider)) {
+      throw new RpcFailure(INVALID_PARAMS, `${method}: no adapter for provider "${partial.provider}"`)
+    }
+  }
+
   private async prompt(params: Record<string, unknown>): Promise<PromptResult> {
     if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
     const text = requireString(params, 'text', 'session/prompt')
@@ -294,7 +326,15 @@ export class ProtocolServer {
       return handle.agent
     }
     const live = agents.get(asSessionId(requested))
-    if (live) return live
+    if (live) {
+      // Options on a prompt to a LIVE session are the same durable switch
+      // `session/model` makes: merged over the base, logged iff they differ.
+      if (Object.keys(options.partial).length > 0) {
+        this.assertRoutable(options.partial, 'session/prompt')
+        live.configure(options.partial)
+      }
+      return live
+    }
     let inflight = this.resuming.get(requested)
     if (!inflight) {
       inflight = agents

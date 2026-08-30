@@ -7,7 +7,7 @@
  */
 import { APPROVAL_ASKED } from '../../core/approval/index.ts'
 import { formatTokens, meterSession } from '../../core/metering/index.ts'
-import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, TRACE_TYPES, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
+import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TRACE_TYPES, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
 import type { StreamChunk } from '../../core/llm/index.ts'
 import { describeEvent, transcriptLines } from '../present.ts'
 
@@ -23,7 +23,11 @@ export class TerminalRenderer {
   private streaming = false
   private thinking = false
   private readonly seen: EventEnvelope[] = []
-  /** Learned from the `initialize` catalog, which the client reads after construction. */
+  /**
+   * The catalog's answer at attach time, replaced by whatever the session's own
+   * `request/context` records say from then on — the log names the window
+   * for the route actually in use, a switch included.
+   */
   private contextWindow = 0
 
   useContextWindow(tokens: number): void {
@@ -32,7 +36,17 @@ export class TerminalRenderer {
 
   /** Records history rendered by `renderHistory`, which never passes through `onEvent`. */
   seed(events: readonly EventEnvelope[]): void {
-    for (const event of events) if (!TRACE_TYPES.has(event.type)) this.seen.push(event)
+    for (const event of events) this.track(event)
+  }
+
+  private track(event: EventEnvelope): void {
+    // The trace tier is the bulk of a long session by two orders of magnitude
+    // and the meter never reads it: keeping it would make every rendered line
+    // an O(all chunks) fold and retain the whole stream in the client. The same
+    // classification the runtime's own folds use (`Session.facts`).
+    if (TRACE_TYPES.has(event.type)) return
+    this.seen.push(event)
+    if (matches(event, REQUEST_CONTEXT) && event.data.contextWindow !== undefined) this.contextWindow = event.data.contextWindow
   }
 
   /**
@@ -55,11 +69,7 @@ export class TerminalRenderer {
   }
 
   onEvent(event: EventEnvelope): string {
-    // The trace tier is the bulk of a long session by two orders of magnitude
-    // and the meter never reads it: keeping it would make every rendered line
-    // an O(all chunks) fold and retain the whole stream in the client. The same
-    // classification the runtime's own folds use (`Session.facts`).
-    if (!TRACE_TYPES.has(event.type)) this.seen.push(event)
+    this.track(event)
     // The streaming cases are the terminal's own; everything else is the shared projection.
     if (matches(event, ASSISTANT_CHUNK)) {
       const chunk = event.data.chunk as unknown as StreamChunk

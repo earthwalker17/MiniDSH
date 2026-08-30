@@ -17,7 +17,7 @@ import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import { matches, type SessionEventFrame } from '../../core/session/index.ts'
-import type { ApprovalAnswerResult, AuthorityView, CompactResult, EventsResult, InitializeResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
+import type { ApprovalAnswerResult, AuthorityView, CompactResult, EventsResult, InitializeResult, ModelResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
@@ -170,6 +170,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       await compactNow()
       return
     }
+    if (command === '/model') {
+      await switchModel(line)
+      return
+    }
     // Before the catch-all, not after it: `/cancel` sat below the unknown-command
     // branch and could never run.
     if (command === '/cancel') {
@@ -214,6 +218,38 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       } else {
         out.write('nothing worth compacting yet\n')
       }
+    } catch (error) {
+      printError(error)
+    }
+    if (status === 'idle') prompt()
+  }
+
+  /**
+   * `/model` reads the base route; `/model <provider>/<model> [effort]` (or
+   * `/model <model> [effort]` on the same provider) switches it over the wire,
+   * where it becomes a durable `agent/options` event the renderer reports back.
+   */
+  async function switchModel(line: string): Promise<void> {
+    const [, target, effort] = line.split(/\s+/, 3)
+    if (sessionId === undefined) {
+      out.write('no session yet - send a prompt first\n')
+      prompt()
+      return
+    }
+    const params: Record<string, string> = { sessionId }
+    if (target) {
+      const slash = target.indexOf('/')
+      if (slash > 0) {
+        params.provider = target.slice(0, slash)
+        params.model = target.slice(slash + 1)
+      } else {
+        params.model = target
+      }
+    }
+    if (effort) params.reasoningEffort = effort
+    try {
+      const route = await client.request<ModelResult>('session/model', params)
+      out.write(`model: ${route.provider}/${route.model}${route.reasoningEffort ? ` · effort ${route.reasoningEffort}` : ''}\n`)
     } catch (error) {
       printError(error)
     }
@@ -284,7 +320,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
     if (contextWindow) renderer.useContextWindow(contextWindow)
     const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
-    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/compact shrinks context, /exit quits, Ctrl+C cancels)\n`)
+    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /exit quits, Ctrl+C cancels)\n`)
 
     if (attaching) {
       const agents = host.root.get(AGENTS)

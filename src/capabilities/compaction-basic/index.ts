@@ -25,6 +25,7 @@ import {
   AGENT_REQUEST_ERROR,
   AGENT_TURN_STOPPING,
   AGENTS,
+  resolveCallConfig,
   type Agent,
   type RequestErrorAction,
 } from '../../core/agent/index.ts'
@@ -43,7 +44,7 @@ import { createPluginMessage } from '../../core/llm/message.ts'
 import type { LlmRequest, Message } from '../../core/llm/types.ts'
 import { estimateMessage, meterSession } from '../../core/metering/index.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
-import { deriveEventMessage, USER_MESSAGE } from '../../core/session/index.ts'
+import { deriveEventMessage, foldRequestContext, USER_MESSAGE } from '../../core/session/index.ts'
 
 export interface CompactionBasicConfig {
   /** Compact when the projected request reaches this fraction of the budget. */
@@ -51,10 +52,10 @@ export interface CompactionBasicConfig {
   /** Fraction of the budget kept as recent history. */
   readonly retainRatio?: number | undefined
   /**
-   * An absolute context budget, overriding the model's advertised window.
-   * A deployment knob (spend, latency) AND the only way to exercise
-   * compaction deterministically: an adapter's window is a live fact the log
-   * does not carry, so a replay cannot depend on two adapters agreeing.
+   * An absolute context budget, overriding the window the log names for the
+   * route (`request/context`). A deployment knob: spend, latency, or a model
+   * whose advertised window is far larger than the history it is worth
+   * carrying.
    */
   readonly budgetTokens?: number | undefined
   /** Generation cap for the summary itself. */
@@ -160,6 +161,11 @@ class BasicCompaction implements Compaction {
   /** The budget every path measures against. */
   budgetFor(agent: Agent): number {
     if (this.config.budgetTokens !== undefined) return this.config.budgetTokens
+    // The window the log names for the route the next step will use — a
+    // durable fact every reader shares, written before this listener runs. A
+    // log from before the record existed falls back to the live adapter.
+    const logged = foldRequestContext(agent.session.facts)?.contextWindow
+    if (logged !== undefined) return logged
     const llm = this.ctx.tryGet(LLM)
     if (!llm) return 0
     try {
@@ -307,9 +313,14 @@ class BasicCompaction implements Compaction {
     messages.push(createPluginMessage(PLUGIN, INSTRUCTION, 'compaction-instruction'))
 
     const assembled = await prompt.assemble(agent)
+    // The same resolution as a loop step, with a purpose instead of a
+    // position: a role listener may send the summary down a cheaper route,
+    // and the record `runAuxCall` writes names whatever route was used.
+    const route = await resolveCallConfig(agent, { purpose: PURPOSE, ...(signal ? { signal } : {}) })
     const request: LlmRequest & { purpose: string } = {
-      provider: agent.options.provider,
-      model: agent.options.model,
+      provider: route.provider,
+      model: route.model,
+      ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
       system: assembled.system,
       messages,
       tools: assembled.tools,

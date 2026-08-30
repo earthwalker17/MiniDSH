@@ -1,7 +1,7 @@
 import type { Plugin } from '../../kernel/index.ts'
 import { INVARIANTS, type InvariantInstaller } from '../invariants/index.ts'
 import { LLM_STREAM, type LlmRequest } from '../llm/index.ts'
-import type { RequestHeader } from '../session/index.ts'
+import { foldRequestContext, type RequestHeader } from '../session/index.ts'
 import { loopRequestSession } from './marker.ts'
 
 /** Canonical string for header equality, including nullable optional fields. */
@@ -66,6 +66,11 @@ const install: InvariantInstaller = (ctx, fail) => {
     const header = session.foldRequestHeader()
     if (!header) fail('loop-built request has no request/header in the log')
     else if (canonHeader(header) !== requestAsHeader(request)) fail('request header diverges from the folded request/header')
+    // The route record precedes the step's pre-step listeners and names the
+    // route the step uses: a request down any other route is a driver bug.
+    const route = foldRequestContext(session.facts)
+    if (!route) fail('loop-built request has no request/context in the log')
+    else if (route.provider !== request.provider || route.model !== request.model) fail('request route diverges from the folded request/context')
   })
 }
 

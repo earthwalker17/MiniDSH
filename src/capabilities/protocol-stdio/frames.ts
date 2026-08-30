@@ -122,6 +122,22 @@ export interface CancelParams {
   readonly sessionId: string
 }
 
+/**
+ * Read or switch a live session's BASE route. Omitting every field reads;
+ * each given field is merged over the base as one durable switch
+ * (`agent/options{change}`), effective at the next step. A provider must be
+ * one this host has an adapter for.
+ */
+export interface ModelParams {
+  readonly sessionId: string
+  readonly provider?: string
+  readonly model?: string
+  readonly reasoningEffort?: string
+}
+
+/** The base route after the call — unchanged when nothing was given or nothing differed. */
+export type ModelResult = AgentOptions
+
 export interface CompactParams {
   readonly sessionId: string
 }
