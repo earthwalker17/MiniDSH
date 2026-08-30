@@ -196,3 +196,46 @@ describe('LlmRuntime', () => {
     expect(() => llm.resolveModel('ghost', 'm')).toThrowError(LlmError)
   })
 })
+
+describe('replay state', () => {
+  it('prunes the envelope in step with the blocks a max-tokens finish drops, and discards a misaligned one', () => {
+    const assembler = new BlockAssembler()
+    assembler.push({ type: 'block-start', index: 0, blockType: 'reasoning' })
+    assembler.push({ type: 'reasoning-delta', index: 0, text: 'hm' })
+    assembler.push({ type: 'block-start', index: 1, blockType: 'text' })
+    assembler.push({ type: 'text-delta', index: 1, text: 'partial' })
+    assembler.push({ type: 'tool-call-delta', index: 2, id: asCallId('c1'), name: 'edit', argumentsDelta: '{"p' })
+    assembler.push({ type: 'finish', reason: { kind: 'max-tokens' }, replayState: { response: { id: 'r1' }, blocks: [{ sig: 'a' }, null, { sig: 'c' }] } })
+    // The truncated tool call is dropped, and so is its signature — nothing else moves.
+    expect(assembler.blocks().map((block) => block.type)).toEqual(['reasoning', 'text'])
+    expect(assembler.replayState).toEqual({ response: { id: 'r1' }, blocks: [{ sig: 'a' }, null] })
+
+    const misaligned = new BlockAssembler()
+    misaligned.push({ type: 'text-delta', index: 0, text: 'x' })
+    misaligned.push({ type: 'finish', reason: { kind: 'stop' }, replayState: { response: 'r', blocks: [1, 2] } })
+    expect(misaligned.replayState).toBeUndefined()
+
+    const whole = new BlockAssembler()
+    whole.push({ type: 'text-delta', index: 0, text: 'x' })
+    whole.push({ type: 'finish', reason: { kind: 'stop' }, replayState: { response: { id: 'r2' } } })
+    expect(whole.replayState).toEqual({ response: { id: 'r2' } })
+  })
+
+  it('reaches only the provider that produced it: a foreign replay state is stripped before the adapter, the history untouched', async () => {
+    const { root, llm } = await harness()
+    const a = new ScriptedAdapter({ provider: 'a' }).script(assistantText('from a'))
+    const b = new ScriptedAdapter({ provider: 'b' }).script(assistantText('from b'))
+    llm.registerAdapter(root, a)
+    llm.registerAdapter(root, b)
+    const { createAssistantMessage, createUserMessage } = await import('./message.ts')
+    const signed = createAssistantMessage([{ type: 'text', text: 'earlier' }], 'a', 'a-model', { response: { sig: 's' } })
+    const messages = Object.freeze([createUserMessage('hi'), signed])
+    await collect(llm.stream(request({ provider: 'a', model: 'a-model', messages })))
+    await collect(llm.stream(request({ provider: 'b', model: 'b-model', messages })))
+    // Its own provider sees the very same history (nothing to strip); the other sees the neutral message.
+    expect(a.calls[0]!.messages).toBe(messages)
+    expect((b.calls[0]!.messages[1]!.source as { replayState?: unknown }).replayState).toBeUndefined()
+    expect(b.calls[0]!.messages[1]!.content).toEqual(signed.content)
+    expect((messages[1]!.source as { replayState?: unknown }).replayState).toEqual({ response: { sig: 's' } })
+  })
+})

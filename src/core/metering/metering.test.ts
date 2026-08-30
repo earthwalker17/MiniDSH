@@ -252,3 +252,32 @@ describe('formatTokens', () => {
     expect(formatTokens(1_000_000)).toBe('1000k')
   })
 })
+
+describe('cache writes', () => {
+  it('counts a cache write as billed prompt, for the next request and for the session total', async () => {
+    const { session } = await newSession()
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('hi') }, { surfaceOp: { op: 'append' } })
+    session.append(REQUEST_HEADER, { turn: 1, step: 1, header, reason: 'initial' })
+    session.append(
+      ASSISTANT_MESSAGE,
+      {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage([{ type: 'text', text: 'ok' }], 'p', 'm'),
+        usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 40 },
+      },
+      { surfaceOp: { op: 'append' } },
+    )
+    session.append(STEP_END, { turn: 1, step: 1 })
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+    const metrics = meterSession(session.facts, 1000)
+    // Uncached + read + written is what the provider read; the output it produced joins the projection.
+    expect(metrics.reportedPrompt).toBe(150)
+    expect(metrics.projectedTokens).toBe(155)
+    expect(metrics.sessionCacheRead).toBe(100)
+    expect(metrics.sessionCacheWrite).toBe(40)
+    expect(metrics.sessionInput).toBe(10)
+  })
+})

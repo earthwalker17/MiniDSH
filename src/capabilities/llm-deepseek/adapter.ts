@@ -9,6 +9,11 @@ export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 export const DEFAULT_MAX_TOKENS = 8192
 const IDLE_TIMEOUT_MS = 300_000
 const USER_AGENT = 'minidsh/0.1.0 (+https://github.com/earthwalker17/MiniDSH)'
+/**
+ * DeepSeek's own vocabulary. The provider silently maps `medium` and `xhigh`
+ * to `high`; the adapter refuses them instead, because a request the log
+ * records must be the request the provider served.
+ */
 const EFFORTS = ['off', 'low', 'high', 'max'] as const
 
 const MODELS: readonly ModelInfo[] = [
@@ -16,6 +21,9 @@ const MODELS: readonly ModelInfo[] = [
   { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
   { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp' },
 ]
+
+/** The one model that takes images; every other id — catalogued or not — is text only. */
+const VISION_MODELS: ReadonlySet<string> = new Set(['deepseek-v4-flash-vision-exp'])
 
 export interface DeepSeekAdapterOptions {
   /** The credential's NAME, for error messages; never the value. */
@@ -38,11 +46,22 @@ export class DeepSeekAdapter implements LlmAdapter {
     return MODELS
   }
 
-  resolveModel(_model: string): ResolvedModel {
-    return { contextWindow: DEFAULT_CONTEXT_WINDOW, defaultMaxTokens: this.options.defaultMaxTokens, reasoning: { efforts: EFFORTS, defaultEffort: 'high' } }
+  /** An uncatalogued id is accepted as text-only under the deployment defaults: the catalog is advisory, never a gate. */
+  resolveModel(model: string): ResolvedModel {
+    return {
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
+      defaultMaxTokens: this.options.defaultMaxTokens,
+      reasoning: { efforts: EFFORTS, defaultEffort: 'high' },
+      inputModalities: VISION_MODELS.has(model) ? ['text', 'image'] : ['text'],
+    }
   }
 
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
+    // Options first, before any I/O: an effort outside the vocabulary is
+    // refused rather than handed to a provider that would quietly alias it.
+    if (request.reasoningEffort !== undefined && !(EFFORTS as readonly string[]).includes(request.reasoningEffort)) {
+      throw new LlmError('UNSUPPORTED_REASONING_EFFORT', `DeepSeek does not support reasoning effort "${request.reasoningEffort}" (one of ${EFFORTS.join(', ')})`)
+    }
     const apiKey = this.options.resolveKey()
     if (!apiKey || apiKey.trim().length === 0) {
       throw new LlmError('MISSING_CREDENTIAL', `DeepSeek API key not set (expected credential ${this.options.apiKeyRef})`)

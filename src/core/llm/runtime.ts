@@ -1,14 +1,34 @@
 import { type Context, type Disposer, type Plugin, serviceKey, waterfallEvent } from '../../kernel/index.ts'
-import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from './types.ts'
+import { deepFreeze } from '../json.ts'
+import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type Message, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from './types.ts'
 
 /**
  * A model as the catalog advertises it: the adapter's own facts plus the
- * context window. The window travels with the catalog because a surface that
- * must meter context (§ `core/metering`) has no other way to learn it — and
- * because it is a model fact, not a runtime one.
+ * context window and modalities. The window travels with the catalog because
+ * a surface that must meter context (§ `core/metering`) has no other way to
+ * learn it — and because it is a model fact, not a runtime one.
  */
 export interface ModelCatalogEntry extends ModelInfo {
   readonly contextWindow: number
+  readonly inputModalities?: readonly ModelModality[]
+}
+
+/**
+ * History as an adapter may see it: an assistant message's replay state is
+ * handed only to the provider that produced it. Another provider gets the
+ * provider-neutral message — its own serializer decides what a foreign
+ * reasoning block becomes. Pure; a message with nothing to strip is returned
+ * as is, so an unchanged history stays reference-identical.
+ */
+export function stripForeignReplayState(messages: readonly Message[], provider: string): readonly Message[] {
+  let changed = false
+  const out = messages.map((message) => {
+    const source = message.source
+    if (source.kind !== 'assistant' || source.replayState === undefined || source.provider === provider) return message
+    changed = true
+    return deepFreeze({ ...message, source: { kind: 'assistant' as const, provider: source.provider, model: source.model } })
+  })
+  return changed ? out : messages
 }
 
 /** One registered provider and the models it advertises. */
@@ -69,7 +89,10 @@ class LlmRuntime implements Llm {
       id: adapter.provider,
       // Enriched here rather than widening `LlmAdapter.listModels`: one adapter
       // method stays the source of the window, and no adapter has to repeat it.
-      models: adapter.listModels().map((model) => ({ ...model, contextWindow: adapter.resolveModel(model.id).contextWindow })),
+      models: adapter.listModels().map((model) => {
+        const resolved = adapter.resolveModel(model.id)
+        return { ...model, contextWindow: resolved.contextWindow, ...(resolved.inputModalities === undefined ? {} : { inputModalities: resolved.inputModalities }) }
+      }),
     }))
   }
 
@@ -102,8 +125,13 @@ class LlmRuntime implements Llm {
       yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'request aborted before the provider was called', code: 'ABORTED' } } }
       return
     }
+    // Inside the terminal continuation — after the reconstruction observer
+    // has seen the request the loop built — a foreign provider's replay state
+    // is stripped: what the log records is still what the model was shown.
+    const messages = stripForeignReplayState(request.messages, request.provider)
+    const prepared = messages === request.messages ? request : Object.freeze({ ...request, messages })
     try {
-      for await (const chunk of adapter.stream(request)) yield chunk
+      for await (const chunk of adapter.stream(prepared)) yield chunk
     } catch (error) {
       yield adapterFailureChunk(error, request.signal)
     }

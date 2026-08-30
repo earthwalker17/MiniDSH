@@ -1,6 +1,6 @@
 import { asMessageId, newMessageId, type CallId } from '../ids.ts'
 import { deepFreeze } from '../json.ts'
-import type { ContentBlock, Message, MessageSource } from './types.ts'
+import type { ContentBlock, Message, MessageSource, ReplayEnvelope } from './types.ts'
 
 /** Builds a frozen message with a fresh id. */
 export function createMessage(role: Message['role'], content: ContentBlock[], source: MessageSource): Message {
@@ -17,8 +17,9 @@ export function createPluginMessage(plugin: string, text: string, form?: string)
   return createMessage('user', [{ type: 'text', text }], form === undefined ? { kind: 'plugin', plugin } : { kind: 'plugin', plugin, form })
 }
 
-export function createAssistantMessage(content: ContentBlock[], provider: string, model: string): Message {
-  return createMessage('assistant', content, { kind: 'assistant', provider, model })
+/** `replayState` is the adapter's own envelope for replaying this response to the same provider (see `ReplayEnvelope`). */
+export function createAssistantMessage(content: ContentBlock[], provider: string, model: string, replayState?: ReplayEnvelope): Message {
+  return createMessage('assistant', content, replayState === undefined ? { kind: 'assistant', provider, model } : { kind: 'assistant', provider, model, replayState })
 }
 
 /** A tool result is a user-role message carrying one tool-result block. */

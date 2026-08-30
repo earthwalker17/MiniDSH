@@ -71,6 +71,7 @@ export interface ContextMetrics {
   readonly sessionInput: number
   readonly sessionOutput: number
   readonly sessionCacheRead: number
+  readonly sessionCacheWrite: number
   /** What the NEXT request is expected to cost, in prompt tokens. */
   readonly projectedTokens: number
   readonly budgetTokens: number
@@ -97,6 +98,7 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
   let sessionInput = 0
   let sessionOutput = 0
   let sessionCacheRead = 0
+  let sessionCacheWrite = 0
   let lastUsage: TokenUsage | undefined
   let lastUsageSeq = -1
   let replacedSinceUsage = false
@@ -116,6 +118,7 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
         sessionInput += auxUsage.inputTokens
         sessionOutput += auxUsage.outputTokens
         sessionCacheRead += auxUsage.cacheReadTokens ?? 0
+        sessionCacheWrite += auxUsage.cacheWriteTokens ?? 0
       }
       continue
     }
@@ -125,6 +128,7 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
     sessionInput += usage.inputTokens
     sessionOutput += usage.outputTokens
     sessionCacheRead += usage.cacheReadTokens ?? 0
+    sessionCacheWrite += usage.cacheWriteTokens ?? 0
     lastUsage = usage
     lastUsageSeq = event.seq
     replacedSinceUsage = false
@@ -132,8 +136,9 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
   }
 
   // `inputTokens` is cache-EXCLUSIVE by the vocabulary's own contract, so the
-  // prompt the provider actually read is the sum of the two.
-  const reportedPrompt = lastUsage ? lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0) : 0
+  // prompt the provider actually read is the sum of the three: uncached,
+  // read from its cache, and written to it.
+  const reportedPrompt = lastUsage ? lastUsage.inputTokens + (lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheWriteTokens ?? 0) : 0
   const reportedOutput = lastUsage?.outputTokens ?? 0
 
   // Addressed by seq, never by array index: a seeded or repaired log can hold
@@ -171,6 +176,7 @@ export function meterSession(events: readonly EventEnvelope[], budgetTokens: num
     sessionInput,
     sessionOutput,
     sessionCacheRead,
+    sessionCacheWrite,
     projectedTokens,
     budgetTokens,
     ratio: budgetTokens > 0 ? projectedTokens / budgetTokens : 0,

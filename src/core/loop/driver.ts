@@ -411,7 +411,9 @@ export class ReactLoopAgent implements Agent {
         return { kind: 'error', reason: { kind: 'error', code: finish.failure.code, message: finish.failure.message } }
       }
 
-      const message = createAssistantMessage(blocks, config.provider, config.model)
+      // The adapter's replay envelope rides on the message's source, pruned to
+      // the blocks the message carries; it is the provider's own to read back.
+      const message = createAssistantMessage(blocks, config.provider, config.model, assembler.replayState)
       const usage = assembler.usage
       this.session.append(
         ASSISTANT_MESSAGE,

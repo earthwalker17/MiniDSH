@@ -4,6 +4,7 @@
  * closed — consumers switch exhaustively.
  */
 import type { CallId, MessageId, SessionId } from '../ids.ts'
+import type { JsonValue } from '../json.ts'
 
 export type Role = 'system' | 'user' | 'assistant'
 
@@ -15,10 +16,25 @@ export type ContentBlock =
 
 export type ContentBlockType = ContentBlock['type']
 
+/**
+ * Adapter-private, JSON-lossless state for replaying a response to the SAME
+ * provider — a thinking signature, an encrypted reasoning item. `response`
+ * covers the whole response; `blocks`, when present, aligns one entry with
+ * each content block in the order the blocks were opened, so the assembler
+ * can prune it in step with a block it drops (a max-tokens finish drops tool
+ * calls); a length mismatch discards the whole envelope rather than
+ * misaligning it. Opaque everywhere but its own adapter, and stripped by the
+ * runtime before a message reaches any other provider.
+ */
+export interface ReplayEnvelope {
+  readonly response: JsonValue
+  readonly blocks?: readonly JsonValue[]
+}
+
 /** How a message entered the conversation. A tool result is a user-role message. */
 export type MessageSource =
   | { readonly kind: 'user' }
-  | { readonly kind: 'assistant'; readonly provider: string; readonly model: string }
+  | { readonly kind: 'assistant'; readonly provider: string; readonly model: string; readonly replayState?: ReplayEnvelope }
   | { readonly kind: 'tool'; readonly callId: CallId }
   | { readonly kind: 'plugin'; readonly plugin: string; readonly form?: string }
 
@@ -58,11 +74,18 @@ export interface LlmRequest {
   readonly purpose?: string
 }
 
-/** Disjoint token counts: billed input = inputTokens + cacheReadTokens; reasoningTokens ⊆ outputTokens. */
+/**
+ * DISJOINT token counts: `inputTokens` is uncached input only; billed input
+ * = inputTokens + cacheReadTokens + cacheWriteTokens. An adapter whose
+ * provider folds cache hits into its prompt total (DeepSeek's `prompt_tokens`)
+ * subtracts them out. `reasoningTokens` is informational and already inside
+ * `outputTokens`.
+ */
 export interface TokenUsage {
   readonly inputTokens: number
   readonly outputTokens: number
   readonly cacheReadTokens?: number
+  readonly cacheWriteTokens?: number
   readonly reasoningTokens?: number
 }
 
@@ -89,12 +112,18 @@ export type StreamChunk =
   | { readonly type: 'tool-call-delta'; readonly index: number; readonly id?: CallId; readonly name?: string; readonly argumentsDelta: string }
   | { readonly type: 'block-end'; readonly index: number; readonly block: ContentBlock }
   | { readonly type: 'usage'; readonly usage: TokenUsage }
-  | { readonly type: 'finish'; readonly reason: FinishReason }
+  /** `replayState` travels only with a successful finish (`stop` | `tool-calls` | `max-tokens`). */
+  | { readonly type: 'finish'; readonly reason: FinishReason; readonly replayState?: ReplayEnvelope }
+
+/** What a model can take as input. Merge-extensible in spirit; `text` is universal. */
+export type ModelModality = 'text' | 'image'
 
 export interface ResolvedModel {
   readonly contextWindow: number
   readonly defaultMaxTokens: number
   readonly reasoning: { readonly efforts: readonly string[]; readonly defaultEffort?: string }
+  /** Absent means text only. */
+  readonly inputModalities?: readonly ModelModality[]
 }
 
 export interface ModelInfo {
@@ -105,8 +134,15 @@ export interface ModelInfo {
 /**
  * A provider adapter. `stream` performs one provider attempt; `resolveModel`
  * exposes adapter-owned facts (context window, default max tokens, the opaque
- * reasoning-effort ids). Effort ids never leak beyond the adapter and the CLI
- * flag that the adapter validates.
+ * reasoning-effort ids, input modalities). Effort ids never leak beyond the
+ * adapter and the CLI flag that the adapter validates.
+ *
+ * The rule for an option the provider cannot honour: refuse BEFORE any I/O
+ * with a specific code — `UNSUPPORTED_OPTION` (a sampling field the wire has
+ * no honest spelling for), `UNSUPPORTED_REASONING_EFFORT` (an effort outside
+ * the model's set), `UNSUPPORTED_CONTENT` (a modality the model lacks) —
+ * never drop, alias or clamp it: a request the log records must be the
+ * request the provider served.
  */
 export interface LlmAdapter {
   readonly provider: string
@@ -135,6 +171,11 @@ export type LlmErrorCode =
   | 'STREAM_CLOSED'
   | 'MISSING_CREDENTIAL'
   | 'INVALID_CREDENTIAL'
+  | 'UNSUPPORTED_OPTION'
+  | 'UNSUPPORTED_REASONING_EFFORT'
+  | 'UNSUPPORTED_CONTENT'
+  | 'UNKNOWN_MODEL'
+  | 'REFUSAL'
 
 export class LlmError extends Error {
   readonly code: LlmErrorCode

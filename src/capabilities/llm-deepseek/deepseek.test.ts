@@ -112,3 +112,26 @@ describe('DeepSeek serialization', () => {
     ])
   })
 })
+
+describe('DeepSeek adapter options', () => {
+  it('refuses an effort outside its vocabulary before any I/O, and advertises modalities per model', async () => {
+    const { DeepSeekAdapter } = await import('./adapter.ts')
+    let resolved = 0
+    const adapter = new DeepSeekAdapter({
+      apiKeyRef: 'DEEPSEEK_API_KEY',
+      resolveKey: () => {
+        resolved += 1
+        return 'never-used'
+      },
+      baseURL: 'http://127.0.0.1:1',
+      defaultMaxTokens: 16,
+    })
+    // The provider would quietly map `medium` to `high`; the adapter refuses instead, before touching the key or the wire.
+    const stream = adapter.stream({ provider: 'deepseek', model: 'deepseek-v4-flash', messages: [], reasoningEffort: 'medium' })
+    await expect(stream[Symbol.asyncIterator]().next()).rejects.toMatchObject({ code: 'UNSUPPORTED_REASONING_EFFORT' })
+    expect(resolved).toBe(0)
+    expect(adapter.resolveModel('deepseek-v4-flash').inputModalities).toEqual(['text'])
+    expect(adapter.resolveModel('deepseek-v4-flash-vision-exp').inputModalities).toEqual(['text', 'image'])
+    expect(adapter.resolveModel('some-future-id').inputModalities).toEqual(['text'])
+  })
+})

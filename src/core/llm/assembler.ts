@@ -1,5 +1,5 @@
 import { asCallId } from '../ids.ts'
-import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from './types.ts'
+import type { ContentBlock, FinishReason, ReplayEnvelope, StreamChunk, TokenUsage } from './types.ts'
 
 interface Partial {
   blockType: ContentBlock['type']
@@ -14,13 +14,16 @@ interface Partial {
  * Folds a chunk stream into assembled content blocks plus usage and finish.
  * Tolerant of delta-only protocols (a delta opens its block); `block-end`'s
  * block, when present, is authoritative. A `max-tokens` finish drops
- * incomplete tool-call blocks.
+ * incomplete tool-call blocks — and the replay envelope's per-block entries
+ * are pruned in the same pass, so what is stored beside a message always
+ * aligns with the blocks the message actually carries.
  */
 export class BlockAssembler {
   private readonly partials = new Map<number, Partial>()
   private readonly order: number[] = []
   private _usage: TokenUsage | undefined
   private _finish: FinishReason = { kind: 'stop' }
+  private _replay: ReplayEnvelope | undefined
 
   push(chunk: StreamChunk): void {
     switch (chunk.type) {
@@ -54,6 +57,7 @@ export class BlockAssembler {
         break
       case 'finish':
         this._finish = chunk.reason
+        this._replay = chunk.replayState
         break
     }
   }
@@ -83,16 +87,38 @@ export class BlockAssembler {
     }
   }
 
-  blocks(): ContentBlock[] {
+  /** The assembled blocks, and which opened positions survived (for pruning the replay envelope in step). */
+  private fold(): { blocks: ContentBlock[]; kept: number[] } {
     const dropToolCalls = this._finish.kind === 'max-tokens'
-    const out: ContentBlock[] = []
-    for (const index of this.order) {
+    const blocks: ContentBlock[] = []
+    const kept: number[] = []
+    this.order.forEach((index, position) => {
       const block = this.assemble(this.partials.get(index)!)
-      if (!block) continue
-      if (dropToolCalls && block.type === 'tool-call') continue
-      out.push(block)
-    }
-    return out
+      if (!block) return
+      if (dropToolCalls && block.type === 'tool-call') return
+      blocks.push(block)
+      kept.push(position)
+    })
+    return { blocks, kept }
+  }
+
+  blocks(): ContentBlock[] {
+    return this.fold().blocks
+  }
+
+  /**
+   * The finish's replay envelope, its per-block entries pruned to the blocks
+   * `blocks()` kept. An envelope whose `blocks` do not align one-to-one with
+   * the opened blocks is discarded whole: a misaligned signature is worse
+   * than none, because the provider would reject or misattribute it.
+   */
+  get replayState(): ReplayEnvelope | undefined {
+    const envelope = this._replay
+    if (!envelope) return undefined
+    if (envelope.blocks === undefined) return envelope
+    if (envelope.blocks.length !== this.order.length) return undefined
+    const { kept } = this.fold()
+    return { response: envelope.response, blocks: kept.map((position) => envelope.blocks![position]!) }
   }
 
   get usage(): TokenUsage | undefined {
