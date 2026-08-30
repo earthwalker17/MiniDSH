@@ -31,7 +31,8 @@ export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
  */
 export type SandboxEnforcement = 'full' | 'partial' | 'none'
 
-export type SandboxReason = 'initial' | 'change' | 'resume'
+/** `delegation`: the opening stamp of a child, copied from its parent — and the ceiling every later stamp is held under. */
+export type SandboxReason = 'initial' | 'change' | 'resume' | 'delegation'
 
 /** The per-call stamp. */
 export interface SandboxExecutionPolicy {
@@ -47,7 +48,7 @@ export interface SandboxPolicyRequest {
   readonly mode?: SandboxMode
 }
 
-export type SandboxErrorCode = 'SANDBOX_UNAVAILABLE' | 'SANDBOX_NOT_WIDER' | 'SANDBOX_ESCALATION_DENIED'
+export type SandboxErrorCode = 'SANDBOX_UNAVAILABLE' | 'SANDBOX_NOT_WIDER' | 'SANDBOX_ESCALATION_DENIED' | 'SANDBOX_CEILING' | 'SANDBOX_ALREADY_OPEN'
 
 export class SandboxError extends Error {
   readonly code: SandboxErrorCode
@@ -118,6 +119,19 @@ export function effectiveSandboxMode(events: readonly EventEnvelope[]): SandboxM
   return lastSandboxStamp(events)?.mode
 }
 
+/**
+ * The delegation ceiling: the mode a delegated child opened under, when its
+ * FIRST stamp says so. Nothing in that session — a switch, an escalation, a
+ * forged stamp — may ever be wider. Absent for a session that is not a child.
+ */
+export function delegationCeiling(events: readonly EventEnvelope[]): SandboxMode | undefined {
+  for (const event of events) {
+    if (!matches(event, SANDBOX_MODE)) continue
+    return event.data.reason === 'delegation' ? event.data.mode : undefined
+  }
+  return undefined
+}
+
 // ---- the service ----------------------------------------------------------
 
 export interface Sandbox {
@@ -134,9 +148,14 @@ export interface Sandbox {
    * Records the mode a session opens under, iff nothing is recorded yet —
    * the deployment default for a fresh session, nothing new for a resumed one
    * whose log already says. Called at `agent/created`, before publication.
+   *
+   * With an `opening`, the explicit form a creator uses BEFORE publication
+   * (in `setup`): the child opens under the mode its parent had at
+   * delegation, stamped `reason: 'delegation'` — which is also its ceiling.
+   * Refused if the session has already recorded a stamp.
    */
-  open(session: Session): void
-  /** The durable switch. Appends `sandbox/mode` iff the recorded stamp changes. */
+  open(session: Session, opening?: { readonly mode: SandboxMode; readonly reason: 'delegation' }): void
+  /** The durable switch. Appends `sandbox/mode` iff the recorded stamp changes; refused past a delegation ceiling. */
   setMode(session: Session, mode: SandboxMode): SandboxMode
   /** What the mounted execution world can enforce for a mode on this host. */
   enforcementFor(mode: SandboxMode): SandboxEnforcement
@@ -190,17 +209,38 @@ class SandboxService implements Sandbox {
   resolve(request: SandboxPolicyRequest): SandboxExecutionPolicy {
     const session = request.session
     const workspaceRoot = this.rootFor(session)
-    if (request.mode !== undefined) return { mode: request.mode, workspaceRoot }
+    if (request.mode !== undefined) {
+      // An approved escalation is a wider call, and a delegated child's calls
+      // are never wider than its ceiling — the approval pin already refuses
+      // the ask, and this refuses the grant should any answerer ever say yes.
+      if (session) this.assertUnderCeiling(session, request.mode)
+      return { mode: request.mode, workspaceRoot }
+    }
     const mode = (session ? effectiveSandboxMode(session.facts) : undefined) ?? this.defaultMode
     if (session) this.record(session, mode)
     return { mode, workspaceRoot }
   }
 
-  open(session: Session): void {
-    this.record(session, effectiveSandboxMode(session.facts) ?? this.defaultMode)
+  open(session: Session, opening?: { readonly mode: SandboxMode; readonly reason: 'delegation' }): void {
+    if (opening === undefined) {
+      this.record(session, effectiveSandboxMode(session.facts) ?? this.defaultMode)
+      return
+    }
+    if (lastSandboxStamp(session.facts) !== undefined) {
+      throw new SandboxError('SANDBOX_ALREADY_OPEN', `session ${session.id} has already recorded its opening sandbox mode`)
+    }
+    session.append(SANDBOX_MODE, { mode: opening.mode, enforcement: this.enforcementFor(opening.mode), reason: opening.reason })
+  }
+
+  private assertUnderCeiling(session: Session, mode: SandboxMode): void {
+    const ceiling = delegationCeiling(session.facts)
+    if (ceiling !== undefined && isWider(mode, ceiling)) {
+      throw new SandboxError('SANDBOX_CEILING', `session ${session.id} was delegated under "${ceiling}" and cannot be widened to "${mode}"`)
+    }
   }
 
   setMode(session: Session, mode: SandboxMode): SandboxMode {
+    this.assertUnderCeiling(session, mode)
     const recorded = lastSandboxStamp(session.facts)
     // Compare against what actually governed the session, not only against what
     // was recorded: a session that has not acted yet is under the default, and

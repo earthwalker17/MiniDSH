@@ -539,3 +539,43 @@ describe('the route as durable facts', () => {
     expect(agent.session.events.filter((event) => event.type === AGENT_OPTIONS.type)).toHaveLength(1)
   })
 })
+
+describe('creation under a signal, and the world a child can join', () => {
+  it('rolls back a creation whose signal was aborted during setup: no agent, no session', async () => {
+    harness = await coreHarness()
+    const { SESSIONS } = await import('../session/index.ts')
+    const agents = harness.root.get(AGENTS)
+    const controller = new AbortController()
+    await expect(
+      agents.create(harness.root, {
+        cwd: process.cwd(),
+        agentOptions: { provider: 'scripted', model: 'scripted-model' },
+        signal: controller.signal,
+        setup: () => controller.abort(),
+      }),
+    ).rejects.toThrowError(/aborted during setup/)
+    expect(agents.list()).toEqual([])
+    expect(harness.root.get(SESSIONS).list()).toEqual([])
+    await expect(
+      agents.create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'scripted', model: 'scripted-model' }, signal: AbortSignal.abort() }),
+    ).rejects.toThrowError(/before it began/)
+  })
+
+  it('exposes the setup it was composed with, and records lineage and preset in its header', async () => {
+    harness = await coreHarness()
+    const { asSessionId } = await import('../ids.ts')
+    const setup = (): void => {}
+    const handle = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      setup,
+      delegatedBy: asSessionId('session-parent'),
+      delegationDepth: 1,
+      agentPreset: 'reviewer',
+    })
+    expect(handle.agent.setup).toBe(setup)
+    expect(handle.agent.session.header).toMatchObject({ delegatedBy: 'session-parent', delegationDepth: 1, agentPreset: 'reviewer' })
+    expect(handle.agent.session.header).not.toHaveProperty('parentId')
+    await handle.dispose()
+  })
+})

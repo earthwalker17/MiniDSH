@@ -32,9 +32,24 @@ export interface ToolCall {
   readonly signal: AbortSignal
 }
 
+/**
+ * A subtractive view over the tools an agent inherits: `allow` keeps only the
+ * named ones, `deny` removes the named ones, allow before deny, several
+ * restrictions intersect. A tool the restriction hides is unknown to the
+ * model (absent from its schemas) AND refused at execution — one resolver
+ * decides both, so nothing can be called that was never shown. The scope's
+ * OWN registrations are exempt: a child keeps the tools it answers through.
+ */
+export interface ToolRestriction {
+  readonly allow?: readonly string[] | undefined
+  readonly deny?: readonly string[] | undefined
+}
+
 export interface Tools {
   register<Args, Value extends JsonValue>(owner: Context, definition: ToolDefinition<Args, Value>): Disposer
   guard(owner: Context, guard: ToolGuard): Disposer
+  /** Installs a restriction on the owner's scope (an unscoped owner is refused: it would hide tools from every agent). */
+  restrict(owner: Context, restriction: ToolRestriction): Disposer
   get(name: string, agent?: Agent): AnyToolDefinition | undefined
   list(agent?: Agent): AnyToolDefinition[]
   schemas(agent?: Agent): ToolSchema[]
@@ -73,6 +88,7 @@ function codeOf(error: unknown): string {
 class ToolRegistry implements Tools {
   private readonly definitions = new ScopedLayers<AnyToolDefinition>()
   private readonly guards = new ScopedLayers<ToolGuard>()
+  private readonly restrictions = new WeakMap<object, ToolRestriction[]>()
   private guardSeq = 0
   private readonly ctx: Context
   private readonly defaultTimeoutMs: number
@@ -100,12 +116,43 @@ class ToolRegistry implements Tools {
     return owner.effect(() => () => void layer.delete(key), 'tool.guard')
   }
 
+  restrict(owner: Context, restriction: ToolRestriction): Disposer {
+    const scope = owner.scope
+    if (scope === null || typeof scope !== 'object') {
+      throw new Error('a tool restriction needs a scoped owner: an unscoped one would hide tools from every agent')
+    }
+    let list = this.restrictions.get(scope)
+    if (!list) {
+      list = []
+      this.restrictions.set(scope, list)
+    }
+    const entry: ToolRestriction = { ...(restriction.allow === undefined ? {} : { allow: [...restriction.allow] }), ...(restriction.deny === undefined ? {} : { deny: [...restriction.deny] }) }
+    list.push(entry)
+    this.ctx.emit(TOOLS_CHANGE)
+    return owner.effect(() => () => {
+      const index = list.indexOf(entry)
+      if (index >= 0) list.splice(index, 1)
+      this.ctx.emit(TOOLS_CHANGE)
+    }, 'tool.restrict')
+  }
+
+  /** The one visibility rule: the agent's own registrations always; an inherited one unless a restriction hides it. */
+  private visible(name: string, agent: Agent | undefined): boolean {
+    if (!agent) return true
+    const restrictions = this.restrictions.get(agent)
+    if (!restrictions || restrictions.length === 0) return true
+    if (this.definitions.owns(name, agent)) return true
+    return restrictions.every((restriction) => (restriction.allow === undefined || restriction.allow.includes(name)) && !(restriction.deny ?? []).includes(name))
+  }
+
   get(name: string, agent?: Agent): AnyToolDefinition | undefined {
-    return this.definitions.get(name, agent)
+    return this.visible(name, agent) ? this.definitions.get(name, agent) : undefined
   }
 
   list(agent?: Agent): AnyToolDefinition[] {
-    return [...this.definitions.view(agent).values()].toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return [...this.definitions.view(agent).values()]
+      .filter((def) => this.visible(def.name, agent))
+      .toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   }
 
   /** Events about a call are dispatched in the acting agent's scope; agent-less calls are unscoped. */

@@ -24,8 +24,23 @@ export function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
 
 export const APPROVAL_ASKED = eventKind<{ id: string; toolName: string; callId?: string; reason?: string }>('approval/asked')
 export const APPROVAL_DECIDED = eventKind<{ id: string; outcome: ApprovalOutcome }>('approval/decided')
+/** `delegation`: the opening stamp of a child, pinned by its parent — and the pin every later stamp is held to. */
+export type ApprovalPolicyReason = 'initial' | 'change' | 'delegation'
 /** Log-only, like `sandbox/mode`: the LAST such event is the session policy. */
-export const APPROVAL_POLICY = eventKind<{ policy: ApprovalPolicy; reason: 'initial' | 'change' }>('approval/policy')
+export const APPROVAL_POLICY = eventKind<{ policy: ApprovalPolicy; reason: ApprovalPolicyReason }>('approval/policy')
+
+/**
+ * The delegation pin: the policy a delegated child opened under, when its
+ * FIRST stamp says so. It never changes for the life of the session — the
+ * pin is what makes a child's authority a ceiling and not a suggestion.
+ */
+export function delegationPin(events: readonly EventEnvelope[]): ApprovalPolicy | undefined {
+  for (const event of events) {
+    if (!matches(event, APPROVAL_POLICY)) continue
+    return event.data.reason === 'delegation' ? event.data.policy : undefined
+  }
+  return undefined
+}
 
 export function effectiveApprovalPolicy(events: readonly EventEnvelope[]): ApprovalPolicy | undefined {
   for (let i = events.length - 1; i >= 0; i--) {

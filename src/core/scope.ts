@@ -37,6 +37,11 @@ export class ScopedLayers<T> {
     return (subject ? this.scoped.get(subject)?.get(name) : undefined) ?? this.globals.get(name)
   }
 
+  /** True when `subject`'s OWN layer holds `name` — a registration made through its scope, not an inherited global. */
+  owns(name: string, subject: object): boolean {
+    return this.scoped.get(subject)?.has(name) ?? false
+  }
+
   /** The globals merged with the subject's layer; a local entry shadows a same-named global. */
   view(subject?: object): Map<string, T> {
     const merged = new Map(this.globals)

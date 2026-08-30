@@ -6,6 +6,7 @@
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
+import { APPROVAL, APPROVAL_POLICY, type ApprovalPolicy } from '../../core/approval/index.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import { SANDBOX, SANDBOX_MODE, type SandboxMode } from '../../core/sandbox/index.ts'
 import { matches } from '../../core/session/index.ts'
@@ -49,7 +50,24 @@ function authorityLines(ctx: Context, agent: Agent | undefined): string[] {
             '  Follow the escalation guidance a refusal returns rather than working around it.',
           ]
         : []
-  return [`- Sandbox: ${mode}. ${effect}`, ...confinement, '- A denial is policy, not a bug: never rewrite an action to hide its effect.']
+  return [`- Sandbox: ${mode}. ${effect}`, ...confinement, ...approvalLines(ctx, agent), '- A denial is policy, not a bug: never rewrite an action to hide its effect.']
+}
+
+/** The approval policy the session OPENED under — its first stamp, immutable — and, for a delegated child, what that means. */
+function approvalLines(ctx: Context, agent: Agent | undefined): string[] {
+  const approval = ctx.tryGet(APPROVAL)
+  if (!approval) return []
+  const first = agent?.session.facts.find((event) => matches(event, APPROVAL_POLICY))
+  const policy: ApprovalPolicy = first ? first.data.policy : approval.defaultPolicy
+  const lines = [policy === 'ask' ? '- Approvals: ask. An action outside the sandbox is put to the user before it runs.' : '- Approvals: never. Nothing is put to the user; an action that would need approval is refused.']
+  if (agent?.session.header.delegatedBy !== undefined) {
+    lines.push(
+      '- You are a delegated subagent. Your authority was fixed when you were started and cannot be widened from inside this session:',
+      '  an action that would need approval is refused automatically. When the task needs access beyond that, do not retry the refused action —',
+      '  finish what you can and state the limitation in your reply, so the delegating agent can handle it.',
+    )
+  }
+  return lines
 }
 
 export const contextRuntimePlugin: Plugin<ContextRuntimeConfig | undefined> = {

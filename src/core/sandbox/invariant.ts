@@ -12,20 +12,31 @@ import { INVARIANTS, type InvariantFailure, type InvariantInstaller } from '../i
 import { matches, type EventEnvelope } from '../session/index.ts'
 import { SESSION_EVENT } from '../session/store.ts'
 import type { Session } from '../session/session.ts'
-import { isSandboxMode, SANDBOX_MODE } from './index.ts'
+import { isSandboxMode, isWider, SANDBOX_MODE, type SandboxMode } from './index.ts'
+import type { ApprovalPolicy } from '../approval/index.ts'
 
 const ENFORCEMENTS: ReadonlySet<string> = new Set(['full', 'partial', 'none'])
-const SANDBOX_REASONS: ReadonlySet<string> = new Set(['initial', 'change', 'resume'])
-const POLICY_REASONS: ReadonlySet<string> = new Set(['initial', 'change'])
+const SANDBOX_REASONS: ReadonlySet<string> = new Set(['initial', 'change', 'resume', 'delegation'])
+const POLICY_REASONS: ReadonlySet<string> = new Set(['initial', 'change', 'delegation'])
 
+/**
+ * A `delegation` opening is a ceiling the whole session is held under: no
+ * later `sandbox/mode` may be wider than it, and no later `approval/policy`
+ * may differ from the pin. Pre-commit, so a forged widening never enters the
+ * log — the setters refuse first, and this refuses whatever gets past them.
+ */
 interface Trace {
   lastSeq: number
   asked: Set<string>
   decided: Set<string>
+  sandboxStamps: number
+  policyStamps: number
+  ceiling: SandboxMode | undefined
+  pin: ApprovalPolicy | undefined
 }
 
 function freshTrace(): Trace {
-  return { lastSeq: -1, asked: new Set(), decided: new Set() }
+  return { lastSeq: -1, asked: new Set(), decided: new Set(), sandboxStamps: 0, policyStamps: 0, ceiling: undefined, pin: undefined }
 }
 
 function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): void {
@@ -36,12 +47,26 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     if (!isSandboxMode(mode)) fail(`sandbox/mode carries an unknown mode ${JSON.stringify(mode)}`)
     if (!ENFORCEMENTS.has(enforcement)) fail(`sandbox/mode carries an unknown enforcement ${JSON.stringify(enforcement)}`)
     if (!SANDBOX_REASONS.has(reason)) fail(`sandbox/mode carries an unknown reason ${JSON.stringify(reason)}`)
+    if (reason === 'delegation') {
+      if (trace.sandboxStamps > 0) fail('a delegation opening must be the first sandbox/mode of its session')
+      if (isSandboxMode(mode)) trace.ceiling = mode
+    } else if (trace.ceiling !== undefined && isSandboxMode(mode) && isWider(mode, trace.ceiling)) {
+      fail(`sandbox/mode "${mode}" widens past the delegation ceiling "${trace.ceiling}"`)
+    }
+    trace.sandboxStamps += 1
     return
   }
   if (matches(event, APPROVAL_POLICY)) {
     const { policy, reason } = event.data
     if (!isApprovalPolicy(policy)) fail(`approval/policy carries an unknown policy ${JSON.stringify(policy)}`)
     if (!POLICY_REASONS.has(reason)) fail(`approval/policy carries an unknown reason ${JSON.stringify(reason)}`)
+    if (reason === 'delegation') {
+      if (trace.policyStamps > 0) fail('a delegation opening must be the first approval/policy of its session')
+      if (isApprovalPolicy(policy)) trace.pin = policy
+    } else if (trace.pin !== undefined && policy !== trace.pin) {
+      fail(`approval/policy "${String(policy)}" leaves the delegation pin "${trace.pin}"`)
+    }
+    trace.policyStamps += 1
     return
   }
   if (matches(event, APPROVAL_ASKED)) {
@@ -81,7 +106,7 @@ const installAuthorityInvariant: InvariantInstaller = (ctx, fail) => {
     }
     // Observation is pre-commit and any observer may still reject this event, so
     // the advanced trace is only staged here and committed once the event lands.
-    const next: Trace = { lastSeq: trace.lastSeq, asked: new Set(trace.asked), decided: new Set(trace.decided) }
+    const next: Trace = { ...trace, asked: new Set(trace.asked), decided: new Set(trace.decided) }
     validate(next, event, fail)
     staged.set(session, next)
   })

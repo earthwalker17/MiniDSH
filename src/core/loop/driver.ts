@@ -21,6 +21,7 @@ import {
   type AgentStatus,
   type CallConfig,
   type CancelCause,
+  type CreateAgentOptions,
   type InboxTarget,
   type PreStepDecision,
 } from '../agent/index.ts'
@@ -85,6 +86,7 @@ export class ReactLoopAgent implements Agent {
   readonly id: SessionId
   readonly session: Session
   readonly inbox: Inbox
+  readonly setup: CreateAgentOptions['setup']
   /** The base route: the fold of `agent/options`, held live so every step starts from it. */
   private base: AgentOptions
   private _ctx: Context | undefined
@@ -98,9 +100,10 @@ export class ReactLoopAgent implements Agent {
   private disposed = false
   private idleWaiters: (() => void)[] = []
 
-  constructor(session: Session, options: AgentOptions) {
+  constructor(session: Session, options: AgentOptions, setup?: CreateAgentOptions['setup']) {
     this.id = session.id
     this.session = session
+    this.setup = setup
     this.base = canonicalAgentOptions(options)
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS
     this.inbox = new Inbox(

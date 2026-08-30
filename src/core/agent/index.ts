@@ -16,6 +16,7 @@ import {
   sliceForkSeed,
   type EventEnvelope,
   type Session,
+  type SessionHeader,
 } from '../session/index.ts'
 import type {
   Agent,
@@ -315,6 +316,10 @@ class AgentRegistry implements Agents {
       createdAt: stored.header.createdAt,
       ...(stored.header.parentId === undefined ? {} : { parentId: stored.header.parentId }),
       ...(stored.header.seedLength === undefined ? {} : { seedLength: stored.header.seedLength }),
+      // Lineage is immutable: a resumed child is still a child, at its depth, of its world.
+      ...(stored.header.delegatedBy === undefined ? {} : { delegatedBy: stored.header.delegatedBy }),
+      ...(stored.header.delegationDepth === undefined ? {} : { delegationDepth: stored.header.delegationDepth }),
+      ...(stored.header.agentPreset === undefined ? {} : { agentPreset: stored.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `session "${id}"`),
       ...(options.setup === undefined ? {} : { setup: options.setup }),
     })
@@ -329,6 +334,11 @@ class AgentRegistry implements Agents {
       seed,
       parentId: src.parentId,
       seedLength: seed.length,
+      // A fork of a delegated child is still delegated: the seed carries the
+      // opening stamps that fence it, and the header carries its depth.
+      ...(src.header.delegatedBy === undefined ? {} : { delegatedBy: src.header.delegatedBy }),
+      ...(src.header.delegationDepth === undefined ? {} : { delegationDepth: src.header.delegationDepth }),
+      ...(src.header.agentPreset === undefined ? {} : { agentPreset: src.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `fork of "${src.parentId}"`),
       ...(options.setup === undefined ? {} : { setup: options.setup }),
     })
@@ -346,18 +356,19 @@ class AgentRegistry implements Agents {
     return stored
   }
 
-  private forkSource(source: Session | SessionId): { events: readonly EventEnvelope[]; cwd: string; parentId: SessionId } {
+  private forkSource(source: Session | SessionId): { events: readonly EventEnvelope[]; cwd: string; parentId: SessionId; header: SessionHeader } {
     if (typeof source !== 'string') {
-      return { events: source.events, cwd: source.header.cwd, parentId: source.id }
+      return { events: source.events, cwd: source.header.cwd, parentId: source.id, header: source.header }
     }
     const live = this.agents.get(source)
-    if (live) return { events: live.session.events, cwd: live.session.header.cwd, parentId: live.session.id }
+    if (live) return { events: live.session.events, cwd: live.session.header.cwd, parentId: live.session.id, header: live.session.header }
     const stored = this.loadStored(source)
     const closers = repairInterruptedTail(stored.events)
     return {
       events: closers.length === 0 ? stored.events : [...stored.events, ...closers],
       cwd: stored.header.cwd,
       parentId: stored.header.id,
+      header: stored.header,
     }
   }
 

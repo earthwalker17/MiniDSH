@@ -94,7 +94,9 @@ describe('DeepSeek serialization', () => {
     const wire = serializeMessages('be helpful', messages)
     expect(wire[0]).toEqual({ role: 'system', content: 'be helpful' })
     expect(wire[1]).toEqual({ role: 'user', content: 'hi' })
-    expect(wire[2]).toMatchObject({ role: 'assistant', content: '', tool_calls: [{ id: call, type: 'function', function: { name: 'edit', arguments: '{}' } }] })
+    // `reasoning_content` is always present, empty when the turn had none: in
+    // thinking mode with tools attached, omitting it is a 400.
+    expect(wire[2]).toEqual({ role: 'assistant', content: '', reasoning_content: '', tool_calls: [{ id: call, type: 'function', function: { name: 'edit', arguments: '{}' } }] })
     expect(wire[3]).toEqual({ role: 'tool', tool_call_id: call, content: 'done' })
   })
 

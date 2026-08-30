@@ -45,6 +45,12 @@ export interface Agent {
    * change drops an effort the switch did not name (effort ids are adapter-owned).
    */
   configure(options: Partial<AgentOptions>): AgentOptions
+  /**
+   * The composer of this agent's world (the `setup` it was created with), so
+   * a creator of a child can compose the SAME world into the child's scope
+   * before adding what the child alone needs (DSH's `composeFrom`).
+   */
+  readonly setup: CreateAgentOptions['setup']
   /** Low-level delivery; `followup`/`steer`/`inject` are the presets. */
   send(message: Message, target: InboxTarget, wakeup: boolean): void
   followup(message: Message): void
@@ -68,7 +74,17 @@ export interface CreateAgentOptions {
   readonly origin?: import('../session/index.ts').SessionOrigin
   readonly parentId?: SessionId
   readonly seedLength?: number
+  /** Delegation lineage, recorded in the header (see `SessionHeader`). */
+  readonly delegatedBy?: SessionId
+  readonly delegationDepth?: number
+  /** The preset name the world was composed from, recorded in the header. */
+  readonly agentPreset?: string
   readonly createdAt?: number
+  /**
+   * A creation that is cancelled before it publishes rolls back unannounced:
+   * a delegating tool call aborted mid-setup leaves no agent, no session file.
+   */
+  readonly signal?: AbortSignal
   /**
    * Composes the agent's local world before publication: registrations and
    * plugins mounted through `agentCtx` are visible to this agent alone and

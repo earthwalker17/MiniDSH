@@ -41,11 +41,15 @@ export function serializeMessages(system: string | undefined, messages: readonly
       const toolCalls = message.content
         .filter((b): b is Extract<ContentBlock, { type: 'tool-call' }> => b.type === 'tool-call')
         .map((b) => ({ id: b.id, type: 'function' as const, function: { name: b.name, arguments: b.arguments } }))
-      const reasoning = reasoningOf(message.content)
+      // `reasoning_content` is ALWAYS present, empty when the turn had none:
+      // in thinking mode with tools attached, DeepSeek refuses an assistant
+      // tool-call turn that omits it (400, probed 2026-08-30) — and a turn
+      // another provider produced has none to give. An empty string is
+      // accepted; omission is not.
       wire.push({
         role: 'assistant',
         content: textOf(message.content),
-        ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
+        reasoning_content: reasoningOf(message.content),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
       })
       continue

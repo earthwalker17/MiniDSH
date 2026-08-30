@@ -9,6 +9,9 @@ export interface CreateSessionOptions {
   readonly parentId?: SessionId
   readonly seed?: readonly EventEnvelope[]
   readonly seedLength?: number
+  readonly delegatedBy?: SessionId
+  readonly delegationDepth?: number
+  readonly agentPreset?: string
   readonly createdAt?: number
   readonly origin?: SessionOrigin
   /**
@@ -70,6 +73,9 @@ class SessionStore implements Sessions, SessionHost {
       cwd: options.cwd,
       ...(options.parentId === undefined ? {} : { parentId: options.parentId }),
       ...(options.seedLength === undefined ? {} : { seedLength: options.seedLength }),
+      ...(options.delegatedBy === undefined ? {} : { delegatedBy: options.delegatedBy }),
+      ...(options.delegationDepth === undefined ? {} : { delegationDepth: options.delegationDepth }),
+      ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     }
     const session = new Session(header, this, options.seed, options.origin)
     this.sessions.set(id, session)

@@ -259,3 +259,47 @@ describe('what the model is told about its authority', () => {
     }
   })
 })
+
+describe('what a delegated child is told', () => {
+  it('renders the approval policy the session opened under and, for a child, the delegation statement — byte-stable', async () => {
+    const { APPROVAL } = await import('../core/approval/index.ts')
+    const { asSessionId } = await import('../core/ids.ts')
+    const root = await bootComposition({
+      sessionsRoot: tempDir('minidsh-sessions-'),
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (context) => void context.get(LLM).registerAdapter(context, new ScriptedAdapter()),
+    })
+    try {
+      const cwd = tempDir('minidsh-cwd-')
+      const options = { provider: 'scripted', model: 'scripted-model' }
+      const top = await root.get(AGENTS).create(root, { cwd, agentOptions: options })
+      const topPrompt = await root.get(PROMPT).assemble(top.agent)
+      expect(topPrompt.system).toContain('Approvals: ask.')
+      expect(topPrompt.system).not.toContain('delegated subagent')
+
+      const child = await root.get(AGENTS).create(root, {
+        cwd,
+        agentOptions: options,
+        delegatedBy: asSessionId(top.agent.id),
+        delegationDepth: 1,
+        setup: (_agentCtx, agent) => {
+          root.get(SANDBOX).open(agent.session, { mode: 'read-only', reason: 'delegation' })
+          root.get(APPROVAL).open(agent.session, { policy: 'never', reason: 'delegation' })
+        },
+      })
+      const before = await root.get(PROMPT).assemble(child.agent)
+      expect(before.system).toContain('Sandbox: read-only')
+      expect(before.system).toContain('Approvals: never.')
+      expect(before.system).toContain('You are a delegated subagent')
+      // The statement reads the OPENING stamps: the section never moves for the session's life.
+      root.get(SANDBOX).setMode(child.agent.session, 'read-only')
+      const after = await root.get(PROMPT).assemble(child.agent)
+      expect(after.system).toBe(before.system)
+      await child.dispose()
+      await top.dispose()
+    } finally {
+      await root.dispose()
+    }
+  })
+})

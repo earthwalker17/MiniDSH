@@ -162,3 +162,29 @@ describe('tool execution pipeline', () => {
     expect(agent.session.events.some((event) => event.type === 'approval/asked')).toBe(false)
   })
 })
+
+describe('tool restriction', () => {
+  it('hides a restricted tool from the model AND refuses it, exempts the scope its own tools, and intersects', async () => {
+    const { tools, agent, signal } = await setup()
+    tools.register(harness!.root, upper)
+    tools.register(harness!.root, { ...upper, name: 'lower' })
+    tools.register(agent.ctx, { ...upper, name: 'mine' })
+    const restrict = tools.restrict(agent.ctx, { deny: ['lower', 'mine'] })
+    // `mine` is the agent's own registration: a restriction never hides the tools a child answers through.
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['mine', 'upper'])
+    // Another view is untouched.
+    expect(tools.schemas().map((schema) => schema.name)).toEqual(['lower', 'upper'])
+    const refused = await tools.execute(call('lower', { text: 'x' }, agent, signal))
+    expect(refused.error?.info?.code).toBe('UNKNOWN_TOOL')
+    const allowed = await tools.execute(call('upper', { text: 'x' }, agent, signal))
+    expect(allowed.isError).toBe(false)
+    // A second restriction intersects with the first.
+    const narrow = tools.restrict(agent.ctx, { allow: ['mine'] })
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['mine'])
+    await narrow()
+    await restrict()
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['lower', 'mine', 'upper'])
+    // An unscoped restriction would hide tools from every agent: refused.
+    expect(() => tools.restrict(harness!.root, { deny: ['upper'] })).toThrowError(/scoped owner/)
+  })
+})

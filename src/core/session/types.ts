@@ -123,8 +123,15 @@ export interface SessionHeader {
   readonly id: SessionId
   readonly createdAt: number
   readonly cwd: string
+  /** Fork lineage: the session this one was sliced from, with the length of the inherited prefix. */
   readonly parentId?: SessionId
   readonly seedLength?: number
+  /** Delegation lineage: the session whose agent created this one as a child. Distinct from fork lineage — a spawned child inherits no history. */
+  readonly delegatedBy?: SessionId
+  /** Absent (zero) for a top-level session, the parent's depth + 1 for a delegated child. Durable, so a resumed child can never delegate as top-level. */
+  readonly delegationDepth?: number
+  /** The agent preset this session's world was composed from, when one was named — so a resume, or a child, can compose the same world. */
+  readonly agentPreset?: string
 }
 
 /**

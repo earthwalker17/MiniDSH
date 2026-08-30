@@ -256,3 +256,51 @@ describe('the stamp is legible on its own', () => {
     expect(lastSandboxStamp(agent.session.events)).toEqual({ mode: 'workspace-write', enforcement: 'none', reason: 'initial' })
   })
 })
+
+describe('a delegated session: the opening is the ceiling', () => {
+  it('opens under a delegation stamp before publication, and every widening is refused before it can enter the log', async () => {
+    harness = await coreHarness()
+    const { delegationCeiling } = await import('./index.ts')
+    const sandbox = harness.root.get(SANDBOX)
+    const approval = harness.root.get(APPROVAL)
+    const agents = harness.root.get(AGENTS)
+    const handle = await agents.create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      // What a delegating tool does in the child's setup: open both knobs under the parent's authority, explicitly.
+      setup: (_agentCtx, agent) => {
+        sandbox.open(agent.session, { mode: 'workspace-write', reason: 'delegation' })
+        approval.open(agent.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    const session = handle.agent.session
+    // The seed wins: the `agent/created` opening wrote nothing on top of it.
+    expect(stamps(session.events)).toEqual([{ mode: 'workspace-write', enforcement: 'none', reason: 'delegation' }])
+    expect(session.events.filter((event) => matches(event, APPROVAL_POLICY)).map((event) => event.data)).toEqual([{ policy: 'never', reason: 'delegation' }])
+    expect(delegationCeiling(session.facts)).toBe('workspace-write')
+
+    // The setters refuse a widening, an escalation grant included.
+    expect(() => sandbox.setMode(session, 'danger-full-access')).toThrowError(expect.objectContaining({ code: 'SANDBOX_CEILING' }))
+    expect(() => sandbox.resolve({ session, mode: 'danger-full-access' })).toThrowError(expect.objectContaining({ code: 'SANDBOX_CEILING' }))
+    expect(() => approval.setPolicy(session, 'ask')).toThrowError(expect.objectContaining({ code: 'APPROVAL_PINNED' }))
+    expect(() => sandbox.open(session, { mode: 'danger-full-access', reason: 'delegation' })).toThrowError(expect.objectContaining({ code: 'SANDBOX_ALREADY_OPEN' }))
+    expect(() => approval.open(session, { policy: 'ask', reason: 'delegation' })).toThrowError(expect.objectContaining({ code: 'APPROVAL_ALREADY_OPEN' }))
+    // And the invariant refuses a forged widening pre-commit, so nothing that got past a setter could land either.
+    expect(() => session.append(SANDBOX_MODE, { mode: 'danger-full-access', enforcement: 'none', reason: 'change' })).toThrowError(/widens past the delegation ceiling/)
+    expect(() => session.append(APPROVAL_POLICY, { policy: 'ask', reason: 'change' })).toThrowError(/leaves the delegation pin/)
+
+    // Narrowing stays legal, returning to the ceiling is legal, restating the pin is not a switch.
+    expect(sandbox.setMode(session, 'read-only')).toBe('read-only')
+    expect(sandbox.setMode(session, 'workspace-write')).toBe('workspace-write')
+    expect(approval.setPolicy(session, 'never')).toBe('never')
+    expect(stamps(session.events).map((stamp) => stamp.mode)).toEqual(['workspace-write', 'read-only', 'workspace-write'])
+
+    // A delegation stamp that is not the first of its knob is refused for any session.
+    const { agent: top } = await harness.create()
+    expect(() => top.session.append(SANDBOX_MODE, { mode: 'read-only', enforcement: 'none', reason: 'delegation' })).toThrowError(/must be the first/)
+    expect(() => top.session.append(APPROVAL_POLICY, { policy: 'never', reason: 'delegation' })).toThrowError(/must be the first/)
+    // A top-level session has no ceiling: widening is its own business.
+    expect(sandbox.setMode(top.session, 'danger-full-access')).toBe('danger-full-access')
+    await handle.dispose()
+  })
+})

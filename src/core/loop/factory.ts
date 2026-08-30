@@ -19,6 +19,7 @@ class LoopFactory implements AgentFactory {
   }
 
   async create(owner: Context, options: CreateAgentOptions): Promise<AgentHandle> {
+    if (options.signal?.aborted) throw new Error('agent creation aborted before it began')
     const sessions = this.ctx.get(SESSIONS)
     const agents = this.ctx.get(AGENTS)
     // Unpublished: session publication follows agent publication, so a rolled-
@@ -31,9 +32,12 @@ class LoopFactory implements AgentFactory {
       ...(options.origin === undefined ? {} : { origin: options.origin }),
       ...(options.parentId === undefined ? {} : { parentId: options.parentId }),
       ...(options.seedLength === undefined ? {} : { seedLength: options.seedLength }),
+      ...(options.delegatedBy === undefined ? {} : { delegatedBy: options.delegatedBy }),
+      ...(options.delegationDepth === undefined ? {} : { delegationDepth: options.delegationDepth }),
+      ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
       ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }),
     })
-    const agent = new ReactLoopAgent(session, options.agentOptions)
+    const agent = new ReactLoopAgent(session, options.agentOptions, options.setup)
     // The scope resolves services through the loop context and is keyed by the agent itself.
     const scope = this.ctx.child({ scope: agent, label: `agent:${session.id}` })
     agent.attach(scope)
@@ -68,6 +72,8 @@ class LoopFactory implements AgentFactory {
       if (options.setup) await options.setup(scope, agent)
       // Publication is atomic: what setup mounted is active (or creation fails) before the agent is visible.
       const report = await scope.settle((plugin) => plugin.scope === agent)
+      // A creator that gave up during setup gets a rollback, not a published agent it no longer wants.
+      if (options.signal?.aborted) throw new Error(`agent ${session.id}: creation aborted during setup`)
       if (report.pending.length > 0 || report.failed.length > 0) {
         const pending = report.pending.map((entry) => `${entry.name} (needs ${entry.missing.join(', ') || 'nothing'})`).join('; ')
         const failed = report.failed.map((entry) => `${entry.name}: ${entry.error instanceof Error ? entry.error.message : String(entry.error)}`).join('; ')

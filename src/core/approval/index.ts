@@ -20,6 +20,7 @@ import {
   APPROVAL_DECIDED,
   APPROVAL_POLICIES,
   APPROVAL_POLICY,
+  delegationPin,
   effectiveApprovalPolicy,
   isApprovalOutcome,
   type ApprovalOutcome,
@@ -27,6 +28,17 @@ import {
 } from './events.ts'
 
 export * from './events.ts'
+
+export type ApprovalErrorCode = 'APPROVAL_PINNED' | 'APPROVAL_ALREADY_OPEN'
+
+export class ApprovalError extends Error {
+  readonly code: ApprovalErrorCode
+  constructor(code: ApprovalErrorCode, message: string) {
+    super(message)
+    this.name = 'ApprovalError'
+    this.code = code
+  }
+}
 
 export interface ApprovalRequest {
   readonly agent: Agent
@@ -47,14 +59,18 @@ export interface ApprovalPrompt extends ApprovalRequest {
 
 export interface Approval {
   request(request: ApprovalRequest): Promise<ApprovalOutcome>
-  /** The durable switch. Appends `approval/policy` iff the policy actually changes. */
+  /** The durable switch. Appends `approval/policy` iff the policy actually changes; refused on a delegated session, whose policy is pinned. */
   setPolicy(session: Session, policy: ApprovalPolicy): ApprovalPolicy
   /**
    * Records the policy a session opens under, iff nothing is recorded yet — so
    * every decision is preceded by the policy that governed it, and the audit
    * reads what the session started under. Called at `agent/created`.
+   *
+   * With an `opening`, the explicit form a creator uses BEFORE publication
+   * (in `setup`): a delegated child opens pinned, `reason: 'delegation'`.
+   * Refused if the session has already recorded a policy.
    */
-  open(session: Session): void
+  open(session: Session, opening?: { readonly policy: ApprovalPolicy; readonly reason: 'delegation' }): void
   /** The policy governing a session: its last recorded one, else the deployment default. */
   policyFor(session: Session | undefined): ApprovalPolicy
   readonly defaultPolicy: ApprovalPolicy
@@ -75,12 +91,22 @@ class ApprovalService implements Approval {
     return (session ? effectiveApprovalPolicy(session.facts) : undefined) ?? this.defaultPolicy
   }
 
-  open(session: Session): void {
-    if (effectiveApprovalPolicy(session.facts) !== undefined) return
-    session.append(APPROVAL_POLICY, { policy: this.defaultPolicy, reason: 'initial' })
+  open(session: Session, opening?: { readonly policy: ApprovalPolicy; readonly reason: 'delegation' }): void {
+    const recorded = effectiveApprovalPolicy(session.facts)
+    if (opening === undefined) {
+      if (recorded !== undefined) return
+      session.append(APPROVAL_POLICY, { policy: this.defaultPolicy, reason: 'initial' })
+      return
+    }
+    if (recorded !== undefined) throw new ApprovalError('APPROVAL_ALREADY_OPEN', `session ${session.id} has already recorded its opening approval policy`)
+    session.append(APPROVAL_POLICY, { policy: opening.policy, reason: opening.reason })
   }
 
   setPolicy(session: Session, policy: ApprovalPolicy): ApprovalPolicy {
+    const pin = delegationPin(session.facts)
+    if (pin !== undefined && policy !== pin) {
+      throw new ApprovalError('APPROVAL_PINNED', `session ${session.id} was delegated with approvals pinned to "${pin}" and cannot be switched to "${policy}"`)
+    }
     // Record what the session started under BEFORE the change, exactly as the
     // sandbox does: the audit then reads "started X, then changed to Y".
     this.open(session)
