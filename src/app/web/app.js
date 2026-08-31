@@ -27,6 +27,13 @@ const state = {
   streaming: undefined,
   pendingApproval: undefined,
   workspaceId: undefined,
+  /**
+   * The live status, kept beside the view: `session.status` flips at turn end,
+   * but the last `session.view` was published mid-turn and still says
+   * `running`. Re-rendering from the view alone would put a finished turn back
+   * into "running" and leave it there.
+   */
+  status: undefined,
 }
 
 // ---- rendering -------------------------------------------------------------
@@ -114,7 +121,11 @@ function renderTranscript() {
 
 function renderView() {
   const view = state.window?.view
-  $('status').textContent = view ? view.status : ''
+  // Session-scoped controls mean nothing without a session, and a knob showing
+  // its first option reads as a setting that is in force. Disable until there
+  // is something for them to act on.
+  for (const id of ['sandbox', 'approval', 'compact', 'cancel']) $(id).disabled = !view
+  $('status').textContent = view ? (state.status ?? view.status) : ''
   $('context').textContent =
     view?.context && view.context.budgetTokens > 0
       ? `ctx ${Math.round(view.context.ratio * 100)}% · ${tokens(view.context.projectedTokens)}/${tokens(view.context.budgetTokens)}`
@@ -158,6 +169,7 @@ const fail = (error) => {
 async function openSession(sessionId) {
   if (state.window && state.window.sessionId !== sessionId) await state.wire.request('session/detach', { sessionId: state.window.sessionId }).catch(() => undefined)
   state.window = new SessionWindow(state.wire, sessionId, renderAll)
+  state.status = undefined
   await state.window.attach()
   $('session-id').textContent = sessionId
   await refreshSessions()
@@ -202,6 +214,9 @@ async function send() {
 
 async function openSettings() {
   const described = await state.wire.request('settings/describe')
+  // A save that finished while this read was in flight already closed the
+  // pane; re-opening it here would undo that and look like the save failed.
+  if (state.settingsClosed) return
   const pane = $('settings-fields')
   pane.replaceChildren()
   for (const namespace of described.namespaces) {
@@ -214,8 +229,12 @@ async function openSettings() {
       input.dataset.key = key
       input.dataset.revision = String(namespace.revision)
       input.dataset.kind = Array.isArray(spec.type) ? spec.type[0] : (spec.type ?? 'string')
-      input.value = namespace.value?.[key] ?? ''
-      input.placeholder = namespace.base?.[key] ?? ''
+      // The USER layer is what a field holds; the resolved value is only a
+      // placeholder. Showing the resolved value would turn "save" into "pin
+      // today's defaults forever", and a later deployment change would stop
+      // reaching this user.
+      input.value = namespace.user?.[key] ?? ''
+      input.placeholder = namespace.value?.[key] ?? ''
       line.append(input)
       pane.append(line)
     }
@@ -224,6 +243,7 @@ async function openSettings() {
 }
 
 async function saveSettings() {
+  state.settingsClosed = false
   const byNamespace = new Map()
   for (const input of $('settings-fields').querySelectorAll('input')) {
     const entry = byNamespace.get(input.dataset.ns) ?? { patch: {}, revision: Number(input.dataset.revision) }
@@ -238,6 +258,7 @@ async function saveSettings() {
       // silently applied over someone else edit.
       await state.wire.request('settings/set', { ns, patch: entry.patch, expectedRevision: entry.revision, replace: true })
     }
+    state.settingsClosed = true
     $('settings').hidden = true
   } catch (error) {
     fail(error)
@@ -279,6 +300,7 @@ async function start() {
       } else if (method === 'session.view') {
         state.window?.setView(params.view)
       } else if (method === 'session.status') {
+        state.status = params.status
         $('status').textContent = params.status
       } else if (method === 'settings.changed') {
         if (!$('settings').hidden) void openSettings().catch(fail)
@@ -317,9 +339,15 @@ async function start() {
   }
   $('allow').addEventListener('click', () => void answer('allowed-once'))
   $('deny').addEventListener('click', () => void answer('rejected'))
-  $('settings-open').addEventListener('click', () => void openSettings().catch(fail))
+  $('settings-open').addEventListener('click', () => {
+    state.settingsClosed = false
+    void openSettings().catch(fail)
+  })
   $('settings-save').addEventListener('click', () => void saveSettings())
-  $('settings-close').addEventListener('click', () => void ($('settings').hidden = true))
+  $('settings-close').addEventListener('click', () => {
+    state.settingsClosed = true
+    $('settings').hidden = true
+  })
 }
 
 async function answer(outcome) {
@@ -335,4 +363,5 @@ async function answer(outcome) {
   }
 }
 
+renderView()
 void start()

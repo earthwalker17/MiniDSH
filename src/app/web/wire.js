@@ -98,7 +98,11 @@ export class SessionWindow {
     this.hasMore = false
     this.header = undefined
     this.view = undefined
-    this.repairing = false
+    // Live events are applied one at a time. `apply` awaits a repair, and two
+    // events arriving around that await would otherwise interleave: the second
+    // would see the pre-repair cursor, push itself past the hole, and the
+    // repaired range would then be dropped as already-seen.
+    this.queue = Promise.resolve()
   }
 
   /** Attach (or re-attach): a fresh page and a fresh cursor replace whatever was held. */
@@ -130,10 +134,19 @@ export class SessionWindow {
     this.onChange()
   }
 
-  /** A live event. Already-seen is dropped; a hole is repaired before it is applied. */
-  async apply(event) {
+  /** A live event, applied in arrival order. Already-seen is dropped; a hole is repaired first. */
+  apply(event) {
+    // Serialized, and a failure never blocks the next event.
+    this.queue = this.queue.then(
+      () => this.applyOne(event),
+      () => this.applyOne(event),
+    )
+    return this.queue
+  }
+
+  async applyOne(event) {
     if (event.seq <= this.cursor) return
-    if (event.seq > this.cursor + 1 && !this.repairing) await this.repair(event.seq - 1)
+    if (event.seq > this.cursor + 1) await this.repair(event.seq - 1)
     if (event.seq <= this.cursor) return
     this.events.push(event)
     this.cursor = event.seq
@@ -141,22 +154,17 @@ export class SessionWindow {
   }
 
   async repair(throughSeq) {
-    this.repairing = true
-    try {
-      const { events } = await this.wire.request('session/events', {
-        sessionId: this.sessionId,
-        fromSeq: this.cursor + 1,
-        toSeq: throughSeq,
-        omitTrace: true,
-      })
-      for (const event of events) {
-        if (event.seq <= this.cursor) continue
-        this.events.push(event)
-        this.cursor = event.seq
-      }
-      this.onChange()
-    } finally {
-      this.repairing = false
+    const { events } = await this.wire.request('session/events', {
+      sessionId: this.sessionId,
+      fromSeq: this.cursor + 1,
+      toSeq: throughSeq,
+      omitTrace: true,
+    })
+    for (const event of events) {
+      if (event.seq <= this.cursor) continue
+      this.events.push(event)
+      this.cursor = event.seq
     }
+    this.onChange()
   }
 }

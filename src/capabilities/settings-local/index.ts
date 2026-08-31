@@ -191,7 +191,13 @@ class LocalSettings implements Settings {
       const age = existsSync(lock) ? Date.now() - statSync(lock).mtimeMs : Number.POSITIVE_INFINITY
       if (age < this.staleLockMs) throw new SettingsError('SETTINGS_CONFLICT', `another writer holds ${lock}`)
       rmSync(lock, { force: true })
-      closeSync(openSync(lock, 'wx'))
+      try {
+        closeSync(openSync(lock, 'wx'))
+      } catch {
+        // Two reclaimers of one dead holder: whoever lost the race is a
+        // conflict, not a raw errno escaping the seam.
+        throw new SettingsError('SETTINGS_CONFLICT', `another writer reclaimed ${lock} first`)
+      }
     }
     return () => rmSync(lock, { force: true })
   }

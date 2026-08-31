@@ -17,6 +17,14 @@
   box-sizing: border-box;
 }
 
+/* `display` on a class beats the user agent's `[hidden] { display: none }`, so
+   every hidden element below needs this or it is never hidden at all — which is
+   how a phantom approval prompt and a permanent "not reachable" banner reached
+   a real browser while every protocol test passed. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   height: 100vh;
