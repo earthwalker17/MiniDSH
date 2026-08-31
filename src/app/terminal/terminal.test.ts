@@ -11,6 +11,7 @@ import { LLM } from '../../core/llm/index.ts'
 import { createAssistantMessage, createUserMessage } from '../../core/llm/message.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
+import type { SessionView } from '../../capabilities/protocol-stdio/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { runTask } from '../headless.ts'
 import { renderHistory, TerminalRenderer } from './render.ts'
@@ -108,26 +109,47 @@ describe('terminal render (pure)', () => {
     expect(renderHistory(events)).toBe('you> fix the bug\n→ shell {"command":"ls"}\ndone, fixed\n')
   })
 
-  it('shows context pressure only once a window is known, metering the seeded snapshot too', () => {
-    const logged = (value: unknown): unknown => JSON.parse(JSON.stringify(value))
-    const priced = (seq: number, inputTokens: number): EventEnvelope => ({
-      type: 'assistant/message',
-      seq,
-      time: 1,
-      data: { turn: 1, step: 1, message: logged(createAssistantMessage([{ type: 'text', text: 'ok' }], 'p', 'm')), usage: { inputTokens, outputTokens: 0 } },
-      surfaceOp: { op: 'append' },
+  it('renders the context pressure the host publishes, and says nothing when there is no news', () => {
+    const authority = { sandbox: 'workspace-write', approval: 'ask', enforcement: 'none' } as const
+    const quiet: SessionView = { status: 'idle', pendingApprovals: [], authority }
+    const at = (projectedTokens: number): SessionView => ({
+      ...quiet,
+      context: {
+        reportedPrompt: projectedTokens,
+        reportedOutput: 0,
+        sessionInput: projectedTokens,
+        sessionOutput: 0,
+        sessionCacheRead: 0,
+        sessionCacheWrite: 0,
+        projectedTokens,
+        budgetTokens: 10_000,
+        ratio: projectedTokens / 10_000,
+        priced: true,
+      },
     })
 
-    // No window from the catalog (an adapter that never advertised one): silent.
-    const blind = new TerminalRenderer()
-    expect(blind.onEvent(priced(0, 4000))).toBe('')
-
     const renderer = new TerminalRenderer()
-    renderer.useContextWindow(10_000)
-    // The attach snapshot never passes through onEvent, so it must be seeded
-    // or a resumed session would meter only what it saw since attaching.
-    renderer.seed([priced(0, 4000)])
-    expect(renderer.onEvent(priced(1, 8000))).toBe('[ctx 80% · 8k/10k]\n')
+    // A session with no priced request yet: the host reports no context, and a
+    // client that invented a number here would be inventing one.
+    expect(renderer.onView(quiet)).toBe('')
+    // The numbers are the host's whole-session fold, so a client holding one
+    // PAGE still shows the pressure of the whole session.
+    expect(renderer.onView(at(8000))).toBe('[ctx 80% · 8k/10k]\n')
+    // A view republished for some other reason (an approval, a switch) is not news.
+    expect(renderer.onView(at(8000))).toBe('')
+    expect(renderer.onView(at(9000))).toBe('[ctx 90% · 9k/10k]\n')
+  })
+
+  it('does not print an assistant message that already streamed', () => {
+    const logged = (value: unknown): unknown => JSON.parse(JSON.stringify(value))
+    const message: EventEnvelope = {
+      type: 'assistant/message',
+      seq: 3,
+      time: 1,
+      data: { turn: 1, step: 1, message: logged(createAssistantMessage([{ type: 'text', text: 'already on screen' }], 'p', 'm')) },
+      surfaceOp: { op: 'append' },
+    }
+    expect(new TerminalRenderer().onEvent(message)).toBe('')
   })
 })
 
@@ -209,6 +231,51 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     expect(driver.text()).toContain('plan remembered')
     driver.type('go on')
     await driver.see('continuing the plan')
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
+
+  it('pages a long session instead of dumping it, and /history walks backwards', async () => {
+    const sessionsRoot = tempDir('minidsh-term-sessions-')
+    const cwd = tempDir('minidsh-term-cwd-')
+    const noop = defineTool({
+      name: 'noop',
+      description: 'does nothing',
+      input: z.object({ step: z.number() }),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: () => [{ type: 'text', text: 'ok' }],
+    })
+    // One turn of 55 steps: 56 arrived messages, past the host's 50-message page.
+    const steps = Array.from({ length: 54 }, (_unused, index) => assistantToolCall(`c${index}`, 'noop', { step: index }))
+    const first = await runTask({
+      task: 'the very first thing I asked',
+      cwd,
+      model: 'scripted-model',
+      provider: 'scripted',
+      maxSteps: 60,
+      sessionsRoot,
+      ...scriptedBoot(new ScriptedAdapter().script(...steps, assistantText('all done')), (root) => root.get(TOOLS).register(root, noop)),
+    })
+    expect(first.exitCode).toBe(0)
+
+    const driver = terminalDriver()
+    const exitCode = runTerminal({
+      cwd,
+      sessionsRoot,
+      resumeId: first.sessionId,
+      ...scriptedBoot(new ScriptedAdapter().script(assistantText('carrying on'))),
+      io: { input: driver.input, output: driver.output },
+    })
+    await driver.see(`resumed ${first.sessionId}`)
+    // The tail is there, the head is not — and the terminal says so rather than
+    // silently truncating.
+    expect(driver.text()).toContain('all done')
+    expect(driver.text()).toContain('earlier events')
+    expect(driver.text()).not.toContain('the very first thing I asked')
+
+    driver.type('/history')
+    await driver.see('→ noop')
     driver.type('/exit')
     expect(await exitCode).toBe(0)
   })

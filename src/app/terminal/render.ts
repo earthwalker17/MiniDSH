@@ -5,71 +5,44 @@
  * from the projection every plain-text surface shares (`app/present.ts`). No
  * terminal state leaks in here — the controller owns interaction.
  */
+import { formatTokens, type ContextMetrics } from '../../core/metering/index.ts'
+import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
 import { APPROVAL_ASKED } from '../../core/approval/index.ts'
-import { formatTokens, meterSession } from '../../core/metering/index.ts'
-import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TRACE_TYPES, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
 import type { StreamChunk } from '../../core/llm/index.ts'
+import type { SessionView } from '../../capabilities/protocol-stdio/index.ts'
 import { describeEvent, transcriptLines } from '../present.ts'
 
 /**
  * Folds live session events into raw terminal writes (may be partial lines).
  *
- * It also keeps the events it has seen so it can run the shared metering fold
- * (`core/metering`) — the client computes context pressure from the same
- * durable facts the runtime does, rather than being told a number. `seed` takes
- * the attach snapshot so a resumed session meters its whole history.
+ * It retains NOTHING of the session. Context pressure used to be metered here
+ * from a client-side copy of every fact, which only worked while the client was
+ * handed the whole log; a client holding a page cannot fold it, so the host —
+ * which owns the fold already — publishes the numbers and this renders them.
  */
 export class TerminalRenderer {
   private streaming = false
   private thinking = false
-  private readonly seen: EventEnvelope[] = []
-  /**
-   * The catalog's answer at attach time, replaced by whatever the session's own
-   * `request/context` records say from then on — the log names the window
-   * for the route actually in use, a switch included.
-   */
-  private contextWindow = 0
-
-  useContextWindow(tokens: number): void {
-    this.contextWindow = tokens
-  }
-
-  /** Records history rendered by `renderHistory`, which never passes through `onEvent`. */
-  seed(events: readonly EventEnvelope[]): void {
-    for (const event of events) this.track(event)
-  }
-
-  private track(event: EventEnvelope): void {
-    // The trace tier is the bulk of a long session by two orders of magnitude
-    // and the meter never reads it: keeping it would make every rendered line
-    // an O(all chunks) fold and retain the whole stream in the client. The same
-    // classification the runtime's own folds use (`Session.facts`).
-    if (TRACE_TYPES.has(event.type)) return
-    this.seen.push(event)
-    if (matches(event, REQUEST_CONTEXT) && event.data.contextWindow !== undefined) this.contextWindow = event.data.contextWindow
-  }
+  /** The last numbers published, so an unchanged view prints nothing. */
+  private context: ContextMetrics | undefined
 
   /**
-   * `[ctx 34% · 12.4k/128k]`, or '' when no window is known.
+   * `[ctx 34% · 12.4k/128k]`, or '' when the host has nothing to report.
    *
-   * The denominator is the MODEL's window, which is a fact this client can
-   * know. A deployment may compact earlier than that — `budgetTokens` is
-   * policy the wire does not carry — so this line answers "how full is the
-   * window", and the `[compacted …]` line answers "and the runtime acted".
-   * Claiming to show the runtime's own budget would be claiming to know
-   * something the client cannot see.
+   * The denominator is the window the log names for the route in use. A
+   * deployment may compact earlier than that — its own `budgetTokens` is policy
+   * the wire does not carry — so this line answers "how full is the window",
+   * and the `[compacted …]` line answers "and the runtime acted".
    */
-  private contextLine(): string {
-    const budget = this.contextWindow
-    if (budget <= 0) return ''
-    const metrics = meterSession(this.seen, budget)
-    if (metrics.projectedTokens === 0) return ''
-    const percent = Math.round(metrics.ratio * 100)
-    return `[ctx ${percent}% · ${formatTokens(metrics.projectedTokens)}/${formatTokens(budget)}]\n`
+  onView(view: SessionView): string {
+    const next = view.context
+    if (!next || next.budgetTokens <= 0 || next.projectedTokens === 0) return ''
+    if (this.context?.projectedTokens === next.projectedTokens && this.context.budgetTokens === next.budgetTokens) return ''
+    this.context = next
+    return `[ctx ${Math.round(next.ratio * 100)}% · ${formatTokens(next.projectedTokens)}/${formatTokens(next.budgetTokens)}]\n`
   }
 
   onEvent(event: EventEnvelope): string {
-    this.track(event)
     // The streaming cases are the terminal's own; everything else is the shared projection.
     if (matches(event, ASSISTANT_CHUNK)) {
       const chunk = event.data.chunk as unknown as StreamChunk
@@ -89,9 +62,9 @@ export class TerminalRenderer {
       }
       return ''
     }
-    // The step is priced here, so this is where the number can change; the
-    // text itself already streamed.
-    if (matches(event, ASSISTANT_MESSAGE)) return this.contextLine()
+    // The text already streamed, and the shared projection would print it
+    // again; the pressure it changed arrives as the view that follows it.
+    if (matches(event, ASSISTANT_MESSAGE)) return ''
     // A completed turn needs no line; the prompt returning says it. An ask is
     // rendered by the controller's `[y/N]` prompt, so its line would be a twin.
     if (matches(event, TURN_END) && event.data.reason.kind === 'completed') return ''

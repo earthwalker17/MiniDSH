@@ -6,8 +6,12 @@
  * frames by their durable ids, steers the running turn by typing, and cancels
  * on Ctrl+C. Attaching to a stored session (resume/fork) is prepared host-side
  * by the app assembly; the client then drives the live session over the wire —
- * transcript snapshot first, live rendering only from the seq after it, so a
- * self-waking resumed session never renders twice.
+ * a bounded tail PAGE first, live rendering only from the seq after the cursor
+ * the host cut it against, so a self-waking resumed session never renders twice
+ * and a long one is never dumped whole into a terminal (`/history` pages back).
+ *
+ * It holds no copy of the session: context pressure arrives as `session.view`,
+ * because a client with one page cannot fold it.
  */
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
@@ -17,7 +21,17 @@ import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import { matches, type SessionEventFrame } from '../../core/session/index.ts'
-import type { ApprovalAnswerResult, AuthorityView, CompactResult, EventsResult, InitializeResult, ModelResult, PromptResult } from '../../capabilities/protocol-stdio/index.ts'
+import type {
+  ApprovalAnswerResult,
+  AttachResult,
+  AuthorityView,
+  CompactResult,
+  InitializeResult,
+  ModelResult,
+  PageResult,
+  PromptResult,
+  SessionView,
+} from '../../capabilities/protocol-stdio/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
@@ -69,10 +83,12 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   let pendingApproval: { id: string; toolName: string } | undefined
   let exiting = false
   let lastInterrupt = 0
-  /** Until the attach snapshot is rendered, live frames wait in the backlog. */
+  /** Until the attach page is rendered, live frames wait in the backlog. */
   let attached = !attaching
   let liveFromSeq = 0
   const backlog: SessionEventFrame[] = []
+  /** Where `/history` reads from: the cut this client synchronized on, and the oldest event it holds. */
+  let history: { cursor: number; oldest: number; hasMore: boolean } | undefined
 
   const prompt = (): void => {
     if (!exiting) out.write('you> ')
@@ -110,6 +126,12 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
         if (sessionId !== undefined && projected.sessionId !== sessionId) return
         status = projected.status
         if (status === 'idle' && attached) prompt()
+      } else if (method === 'session.view') {
+        const projected = params as { sessionId: string; view: SessionView }
+        if (sessionId !== undefined && projected.sessionId !== sessionId) return
+        if (!attached) return
+        const line = renderer.onView(projected.view)
+        if (line) out.write(line)
       }
     },
     onEnd: () => void exit(1),
@@ -172,6 +194,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       await compactNow()
       return
     }
+    if (command === '/history') {
+      await showOlder()
+      return
+    }
     if (command === '/model') {
       await switchModel(line)
       return
@@ -198,6 +224,34 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       printError(error)
       if (status === 'idle') prompt()
     }
+  }
+
+  /**
+   * One page further back, anchored to the cut this client attached on. A
+   * terminal cannot scroll, so it prints; the anchor is what keeps the pages
+   * consistent while the session keeps appending underneath them.
+   */
+  async function showOlder(): Promise<void> {
+    if (sessionId === undefined || history === undefined) {
+      out.write('nothing attached to page back through\n')
+      prompt()
+      return
+    }
+    if (!history.hasMore) {
+      out.write('that is the whole session\n')
+      prompt()
+      return
+    }
+    try {
+      const older = await client.request<PageResult>('session/page', { sessionId, throughSeq: history.cursor, beforeSeq: history.oldest })
+      const transcript = renderHistory(older.page.events)
+      if (older.page.hasMore) out.write(`… ${older.page.from} earlier events\n`)
+      if (transcript) out.write(transcript)
+      history = { cursor: history.cursor, oldest: older.page.from, hasMore: older.page.hasMore }
+    } catch (error) {
+      printError(error)
+    }
+    if (status === 'idle') prompt()
   }
 
   /**
@@ -317,10 +371,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const init = await client.request<InitializeResult>('initialize')
     const provider = overrides.provider ?? init.defaultAgentOptions.provider
     const model = overrides.model ?? init.defaultAgentOptions.model
-    // The catalog carries the window, so the client meters context from the
-    // same durable facts the runtime does instead of being told a number.
     const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
-    if (contextWindow) renderer.useContextWindow(contextWindow)
     const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
     out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /exit quits, Ctrl+C cancels)\n`)
 
@@ -339,25 +390,23 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       // resumed session keeps what it recorded unless someone says otherwise.
       applyAuthority(host.root, handle, options)
       sessionId = handle.agent.id
-      // Snapshot first; live rendering starts at the seq after it, and the
-      // backlog replays whatever streamed while we attached (a resumed session
-      // may have woken on its restored inbox already).
-      const history = await client.request<EventsResult>('session/events', { sessionId })
-      // The snapshot is rendered by `renderHistory`, not `onEvent`, so the
-      // metering fold must be told about it explicitly or a resumed session
-      // would meter only what it saw since attaching.
-      renderer.seed(history.events)
-      const transcript = renderHistory(history.events)
+      // Attach first; live rendering starts at the seq after the cursor, and
+      // the backlog replays whatever streamed while we attached (a resumed
+      // session may have woken on its restored inbox already).
+      const attachment = await client.request<AttachResult>('session/attach', { sessionId })
+      const transcript = renderHistory(attachment.page.events)
+      if (attachment.page.hasMore) out.write(`… ${attachment.page.from} earlier events (/history shows the page before this one)\n`)
       if (transcript) out.write(transcript)
       out.write(options.resumeId !== undefined ? `resumed ${sessionId}\n` : `forked ${options.forkId} → ${sessionId}\n`)
-      liveFromSeq = history.events.length === 0 ? 0 : history.events.at(-1)!.seq + 1
-      // A prompt already pending in the snapshot (asked, never decided) still needs an answer.
-      const asked = new Map<string, { id: string; toolName: string; reason?: string }>()
-      for (const event of history.events) {
-        if (matches(event, APPROVAL_ASKED)) asked.set(event.data.id, event.data)
-        else if (matches(event, APPROVAL_DECIDED)) asked.delete(event.data.id)
-      }
-      for (const data of asked.values()) askApproval(data)
+      // The cursor is the host's own, not inferred from the last event on the
+      // page: a page that does not run to the head would otherwise open a gap.
+      liveFromSeq = attachment.cursor + 1
+      history = { cursor: attachment.cursor, oldest: attachment.page.from, hasMore: attachment.page.hasMore }
+      const line = renderer.onView(attachment.view)
+      if (line) out.write(line)
+      // A prompt asked and never decided still needs an answer; the host folds
+      // that pair, because half of it can fall outside a page.
+      for (const pending of attachment.view.pendingApprovals) askApproval(pending)
       attached = true
       for (const frame of backlog.splice(0)) handleFrame(frame)
     }
