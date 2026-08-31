@@ -10,30 +10,92 @@
 import { statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { Context } from '../../kernel/index.ts'
-import { AGENTS, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
-import { APPROVAL, APPROVAL_DECIDED, APPROVAL_POLICIES, isApprovalPolicy, type ApprovalOutcome, type ApprovalPrompt } from '../../core/approval/index.ts'
+import { AGENTS, AGENT_OPTIONS, foldAgentOptions, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
+import {
+  APPROVAL,
+  APPROVAL_ASKED,
+  APPROVAL_DECIDED,
+  APPROVAL_POLICIES,
+  APPROVAL_POLICY,
+  effectiveApprovalPolicy,
+  isApprovalPolicy,
+  openApprovals,
+  type ApprovalOutcome,
+  type ApprovalPrompt,
+} from '../../core/approval/index.ts'
 import { COMPACTION } from '../../core/compaction/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
+import { meterSession } from '../../core/metering/index.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
-import { PRESETS } from '../../core/presets/index.ts'
-import { canonicalPath, effectiveSandboxMode, isInside, isSandboxMode, SANDBOX, SANDBOX_MODES } from '../../core/sandbox/index.ts'
-import { SESSIONS, matches, type EventEnvelope, type Session } from '../../core/session/index.ts'
+import { AUTHORITY_PRESET, PRESETS } from '../../core/presets/index.ts'
+import { canonicalPath, effectiveSandboxMode, isInside, isSandboxMode, SANDBOX, SANDBOX_MODE, SANDBOX_MODES } from '../../core/sandbox/index.ts'
+import {
+  ASSISTANT_MESSAGE,
+  REQUEST_CONTEXT,
+  SESSIONS,
+  TRACE_TYPES,
+  foldRequestContext,
+  matches,
+  pageEvents,
+  type EventEnvelope,
+  type Session,
+  type SessionHeader,
+} from '../../core/session/index.ts'
 import {
   INTERNAL_ERROR,
   INVALID_PARAMS,
   METHOD_NOT_FOUND,
   RpcFailure,
   type ApprovalAnswerResult,
+  type AttachResult,
   type AuthorityView,
   type CompactResult,
   type EventsResult,
   type InitializeResult,
+  type PageResult,
   type PromptResult,
   type RpcNotification,
   type RpcResponse,
+  type SessionView,
 } from './frames.ts'
+
+/**
+ * Stored sessions kept parsed for a reader paging backwards. A cold read is a
+ * whole-file parse; backward paging asks for the same session repeatedly, and a
+ * session that goes live is served from the live log instead.
+ */
+const COLD_SOURCE_CACHE = 3
+
+/**
+ * The durable kinds that move a `SessionView`. Named from the kind tokens, so a
+ * renamed event is a compile error rather than a view that quietly stops
+ * updating. A surface `replace` is handled separately — it is an op, not a kind.
+ */
+const VIEW_CHANGING: ReadonlySet<string> = new Set([
+  ASSISTANT_MESSAGE.type,
+  APPROVAL_ASKED.type,
+  APPROVAL_DECIDED.type,
+  APPROVAL_POLICY.type,
+  SANDBOX_MODE.type,
+  AUTHORITY_PRESET.type,
+  AGENT_OPTIONS.type,
+  REQUEST_CONTEXT.type,
+])
+
+/** One session as a reader sees it — live or stored, addressed the same way. */
+interface SessionSource {
+  readonly header: SessionHeader
+  /** Every tier, dense and zero-based, so a seq is an index. */
+  readonly events: readonly EventEnvelope[]
+  /** The log without its trace tier, seqs preserved: what a page is cut from. */
+  readonly facts: readonly EventEnvelope[]
+  /** The seq of the last event, or -1 for an empty log. */
+  readonly cursor: number
+  readonly agent?: Agent | undefined
+  readonly damaged?: true
+}
 
 export interface ProtocolServerConfig {
   readonly cwd: string
@@ -58,6 +120,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function requireString(params: Record<string, unknown>, key: string, method: string): string {
   const value = params[key]
   if (typeof value !== 'string' || value.length === 0) throw new RpcFailure(INVALID_PARAMS, `${method}: "${key}" must be a non-empty string`)
+  return value
+}
+
+/** An optional non-negative integer, refused rather than coerced. */
+function optionalCount(params: Record<string, unknown>, key: string, method: string): number | undefined {
+  const value = params[key]
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new RpcFailure(INVALID_PARAMS, `${method}: "${key}" must be a non-negative integer`)
+  }
   return value
 }
 
@@ -101,6 +173,8 @@ export class ProtocolServer {
   private readonly resuming = new Map<string, Promise<Agent>>()
   /** Every in-flight acquire, so shutdown can drain creations racing it. */
   private readonly inflight = new Set<Promise<Agent>>()
+  /** Parsed stored sessions, most recently used last (insertion order IS the LRU). */
+  private readonly cold = new Map<string, SessionSource>()
   private closed = false
   private shuttingDown = false
 
@@ -113,10 +187,30 @@ export class ProtocolServer {
   // ---- outbound: the two notifications ------------------------------------
 
   onSessionEvent(session: Session, event: EventEnvelope): void {
+    // A live event means any stored copy of this session is behind; the live
+    // log is the source from here on. Done even while closed, so a reattaching
+    // reader never sees a stale parse.
+    if (this.cold.size > 0) this.cold.delete(session.id)
     if (this.closed) return
     this.emit({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: session.id, event } })
     // The durable decision settles the answerable frame, whoever decided it.
     if (matches(event, APPROVAL_DECIDED)) this.pendingApprovals.delete(`${session.id}:${event.data.id}`)
+    // A page-holding client cannot recompute these folds, so the host re-sends
+    // them whenever a durable fact moved one. A replace is included because it
+    // makes the meter re-estimate the whole surface.
+    if (VIEW_CHANGING.has(event.type) || event.surfaceOp?.op === 'replace') this.publishView(session)
+  }
+
+  /** The view as it now stands, for every reader of this session. */
+  private publishView(session: Session): void {
+    const view = this.viewOf({
+      header: session.header,
+      events: session.events,
+      facts: session.facts,
+      cursor: session.seq - 1,
+      agent: this.ctx.get(AGENTS).get(session.id),
+    })
+    this.emit({ jsonrpc: '2.0', method: 'session.view', params: { sessionId: session.id, view } })
   }
 
   onAgentStatus(agent: Agent, status: 'idle' | 'running'): void {
@@ -160,6 +254,10 @@ export class ProtocolServer {
         return this.prompt(record)
       case 'session/events':
         return this.events(record)
+      case 'session/attach':
+        return this.attach(record)
+      case 'session/page':
+        return this.page(record)
       case 'session/cancel':
         return this.cancel(record)
       case 'session/compact':
@@ -372,15 +470,140 @@ export class ProtocolServer {
 
   private events(params: Record<string, unknown>): EventsResult {
     const sessionId = requireString(params, 'sessionId', 'session/events')
-    const fromSeq = params.fromSeq ?? 0
-    if (typeof fromSeq !== 'number' || !Number.isInteger(fromSeq) || fromSeq < 0) {
-      throw new RpcFailure(INVALID_PARAMS, 'session/events: "fromSeq" must be a non-negative integer')
+    const fromSeq = optionalCount(params, 'fromSeq', 'session/events') ?? 0
+    const toSeq = optionalCount(params, 'toSeq', 'session/events')
+    const limit = optionalCount(params, 'limit', 'session/events')
+    if (params.omitTrace !== undefined && typeof params.omitTrace !== 'boolean') {
+      throw new RpcFailure(INVALID_PARAMS, 'session/events: "omitTrace" must be a boolean')
     }
+    const source = this.sourceFor(sessionId)
+    // `slice(fromSeq)` is a seq-indexed slice: the log is a dense zero-based
+    // prefix (§4), live and stored alike, and the session invariant refuses a
+    // discontinuity before it enters the log.
+    let events = source.events.slice(fromSeq, toSeq === undefined ? undefined : toSeq + 1)
+    if (params.omitTrace === true) events = events.filter((event) => !TRACE_TYPES.has(event.type))
+    if (limit !== undefined) events = events.slice(0, limit)
+    return { header: source.header, events, ...(source.damaged ? { damaged: true as const } : {}) }
+  }
+
+  /**
+   * Attach: the header, the folds a paged client cannot compute, a
+   * message-aligned tail page, and the cursor it was cut against.
+   *
+   * There is no lower-bound cursor by design — a reconnecting client
+   * re-attaches and replaces its window. The whole frame is built in ONE
+   * synchronous window: `Session.events`/`facts` are the live arrays, and a
+   * page taken on one side of an await with a cursor read on the other would
+   * open a gap no dedup could see.
+   */
+  private attach(params: Record<string, unknown>): AttachResult {
+    const sessionId = requireString(params, 'sessionId', 'session/attach')
+    const limit = optionalCount(params, 'limit', 'session/attach')
+    const source = this.sourceFor(sessionId)
+    const page = pageEvents(source.facts, { throughSeq: source.cursor, ...(limit === undefined ? {} : { maxMessages: limit }) })
+    return {
+      header: source.header,
+      view: this.viewOf(source),
+      page,
+      cursor: source.cursor,
+      ...(source.damaged ? { damaged: true as const } : {}),
+    }
+  }
+
+  /** An older page beneath a cut the client already holds. Identity and view come from the attach frame alone. */
+  private page(params: Record<string, unknown>): PageResult {
+    const sessionId = requireString(params, 'sessionId', 'session/page')
+    const throughSeq = params.throughSeq
+    if (typeof throughSeq !== 'number' || !Number.isInteger(throughSeq) || throughSeq < -1) {
+      throw new RpcFailure(INVALID_PARAMS, 'session/page: "throughSeq" must be an integer >= -1')
+    }
+    const beforeSeq = optionalCount(params, 'beforeSeq', 'session/page')
+    const limit = optionalCount(params, 'limit', 'session/page')
+    const source = this.sourceFor(sessionId)
+    // The anchor is a postcondition, not a hint: a page past the cut the client
+    // synchronized on would silently interleave with its live tail.
+    if (throughSeq > source.cursor) {
+      throw new RpcFailure(INVALID_PARAMS, `session/page: "throughSeq" ${throughSeq} is past this session's cursor ${source.cursor}`)
+    }
+    return {
+      page: pageEvents(source.facts, {
+        throughSeq,
+        ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        ...(limit === undefined ? {} : { maxMessages: limit }),
+      }),
+    }
+  }
+
+  /**
+   * The live session, or the stored one — and reading a stored one NEVER
+   * resumes it. Observing a transcript must not start an agent: a reader who
+   * opened a session to look at it would otherwise pay for a model, take its
+   * write lease, and change what it was looking at.
+   */
+  private sourceFor(sessionId: string): SessionSource {
     const live = this.ctx.get(SESSIONS).get(asSessionId(sessionId))
-    if (live) return { header: live.header, events: live.events.slice(fromSeq) }
+    if (live) {
+      return { header: live.header, events: live.events, facts: live.facts, cursor: live.seq - 1, agent: this.ctx.get(AGENTS).get(asSessionId(sessionId)) }
+    }
+    const cached = this.cold.get(sessionId)
+    if (cached) {
+      // Refresh recency: a reader paging backwards touches one session repeatedly.
+      this.cold.delete(sessionId)
+      this.cold.set(sessionId, cached)
+      return cached
+    }
     const stored = this.ctx.tryGet(PERSISTENCE)?.load(sessionId)
     if (!stored) throw new RpcFailure(INTERNAL_ERROR, `no session "${sessionId}"`)
-    return { header: stored.header, events: stored.events.slice(fromSeq), ...(stored.damaged ? { damaged: true as const } : {}) }
+    const source: SessionSource = {
+      header: stored.header,
+      events: stored.events,
+      facts: stored.events.filter((event) => !TRACE_TYPES.has(event.type)),
+      cursor: stored.events.length - 1,
+      ...(stored.damaged ? { damaged: true as const } : {}),
+    }
+    // A cold read costs a whole-file parse (~167 ms and ~28 MB on a 400-turn
+    // session), and backward paging asks for the same session again and again.
+    this.cold.set(sessionId, source)
+    while (this.cold.size > COLD_SOURCE_CACHE) this.cold.delete(this.cold.keys().next().value!)
+    return source
+  }
+
+  /**
+   * The folds a client holding only a page cannot do for itself, each computed
+   * by whoever already owns it. Nothing here is new truth: every field is a
+   * projection of durable facts.
+   */
+  private viewOf(source: SessionSource): SessionView {
+    const facts = source.facts
+    const sandbox = this.ctx.get(SANDBOX)
+    const mode = effectiveSandboxMode(facts) ?? sandbox.defaultMode
+    const authority = this.withPreset({
+      sandbox: mode,
+      approval: effectiveApprovalPolicy(facts) ?? this.ctx.get(APPROVAL).defaultPolicy,
+      enforcement: sandbox.enforcementFor(mode),
+    })
+    const route = foldRequestContext(facts)
+    const options = source.agent?.options ?? foldAgentOptions(facts)
+    const window = route?.contextWindow ?? this.catalogWindow(options)
+    return {
+      status: source.agent?.status ?? 'idle',
+      pendingApprovals: openApprovals(facts),
+      authority,
+      ...(options === undefined ? {} : { options }),
+      ...(route === undefined ? {} : { route }),
+      ...(window === undefined || window <= 0 ? {} : { context: meterSession(facts, window) }),
+    }
+  }
+
+  /**
+   * The window a route's adapter advertises, for a session that has not yet
+   * written a `request/context`. The log's own record wins the moment there is
+   * one — this only answers "before the first request".
+   */
+  private catalogWindow(options: AgentOptions | undefined): number | undefined {
+    if (!options) return undefined
+    const provider = this.ctx.get(LLM).providers().find((entry) => entry.id === options.provider)
+    return provider?.models.find((model) => model.id === options.model)?.contextWindow
   }
 
   private cancel(params: Record<string, unknown>): Record<string, never> {

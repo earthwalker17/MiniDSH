@@ -13,6 +13,7 @@ import { LLM, LlmError } from '../../core/llm/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { startProtocolHost, type ProtocolHostHandle } from '../../app/serve.ts'
+import type { AttachResult, PageResult, SessionView } from './frames.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const SCRIPTED = { provider: 'scripted', model: 'scripted-model' }
@@ -507,5 +508,154 @@ describe('what the review found', () => {
     await client.waitForIdle(sessionId)
     const agent = host.root.get(AGENTS).get(asSessionId(sessionId))!
     expect(agent.session.header.agentPreset).toBe('reviewer')
+  })
+})
+
+describe('protocol-stdio: the paged attach', () => {
+  /** `turns` completed turns on one session, so a page has something to cut. */
+  async function session(turns: number, extra?: Parameters<typeof startHost>[1]) {
+    const adapter = new ScriptedAdapter().script(...Array.from({ length: turns }, (_unused, index) => assistantText(`answer ${index + 1}`)))
+    const started = await startHost(adapter, extra)
+    const { sessionId } = await started.client.result<{ sessionId: string }>('session/prompt', { text: 'turn 1', agentOptions: SCRIPTED })
+    await started.client.waitForIdle(sessionId)
+    for (let turn = 2; turn <= turns; turn++) {
+      await started.client.result('session/prompt', { sessionId, text: `turn ${turn}` })
+      await started.client.waitFor(
+        () => (started.client.frames('turn/end').filter((frame) => frame.sessionId === sessionId).length >= turn ? true : undefined),
+        `turn ${turn} to end`,
+      )
+    }
+    return { ...started, sessionId }
+  }
+
+  it('answers with the header, a bounded tail page, the cursor it was cut against, and the folds a page cannot do', async () => {
+    const { client, sessionId } = await session(6)
+    const attached = await client.result<AttachResult>('session/attach', { sessionId, limit: 2 })
+
+    expect(attached.header.id).toBe(sessionId)
+    expect(attached.cursor).toBeGreaterThan(0)
+    expect(attached.page.to).toBe(attached.cursor)
+    expect(attached.page.hasMore).toBe(true)
+    // Two arrived messages, not six turns' worth.
+    const arrivals = attached.page.events.filter((event) => event.surfaceOp?.op === 'append')
+    expect(arrivals).toHaveLength(2)
+    // The folds a partial reader provably cannot compute for itself.
+    expect(attached.view.status).toBe('idle')
+    expect(attached.view.authority.sandbox).toBe('workspace-write')
+    expect(attached.view.pendingApprovals).toEqual([])
+    expect(attached.view.options?.model).toBe(SCRIPTED.model)
+    expect(attached.view.context?.projectedTokens).toBeGreaterThan(0)
+  })
+
+  it('leaves the trace tier out of a page — that is what turns megabytes into kilobytes', async () => {
+    const { client, sessionId } = await session(3)
+    const attached = await client.result<AttachResult>('session/attach', { sessionId })
+    expect(attached.page.events.some((event) => event.type === 'assistant/chunk')).toBe(false)
+    // The whole-log read still serves every tier: replay and the audit need it.
+    const whole = await client.result<{ events: { type: string }[] }>('session/events', { sessionId })
+    expect(whole.events.some((event) => event.type === 'assistant/chunk')).toBe(true)
+  })
+
+  it('pages backwards to the head of the log and stops claiming more exactly there', async () => {
+    const { client, sessionId } = await session(6)
+    const attached = await client.result<AttachResult>('session/attach', { sessionId, limit: 2 })
+
+    const seen: number[] = attached.page.events.map((event) => event.seq)
+    let before = attached.page.from
+    let hasMore = attached.page.hasMore
+    let pages = 1
+    while (hasMore) {
+      const older = await client.result<PageResult>('session/page', { sessionId, throughSeq: attached.cursor, beforeSeq: before, limit: 2 })
+      seen.unshift(...older.page.events.map((event) => event.seq))
+      before = older.page.from
+      hasMore = older.page.hasMore
+      expect(++pages).toBeLessThan(30)
+    }
+    expect(pages).toBeGreaterThan(1)
+    expect(seen[0]).toBe(0)
+    // Every fact of the log, once, in order — paging lost nothing and repeated nothing.
+    const whole = await client.result<{ events: { type: string; seq: number }[] }>('session/events', { sessionId })
+    expect(seen).toEqual(whole.events.filter((event) => event.type !== 'assistant/chunk').map((event) => event.seq))
+  })
+
+  it('refuses a page anchored past the cursor the client synchronized on', async () => {
+    const { client, sessionId } = await session(2)
+    const attached = await client.result<AttachResult>('session/attach', { sessionId })
+    const reply = await client.call('session/page', { sessionId, throughSeq: attached.cursor + 5 })
+    expect(reply.error?.code).toBe(-32602)
+    expect(reply.error?.message).toContain('past this session')
+  })
+
+  it('reads a stored session without resuming it — looking at a transcript must not start an agent', async () => {
+    const first = await session(2)
+    const { sessionId, sessionsRoot } = first
+    await first.host.dispose()
+
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot })
+    const attached = await second.client.result<AttachResult>('session/attach', { sessionId })
+    expect(attached.header.id).toBe(sessionId)
+    expect(attached.page.events.length).toBeGreaterThan(0)
+    expect(attached.view.status).toBe('idle')
+    // No agent, and no write lease: the session is still exactly stored.
+    expect(second.host.root.get(AGENTS).list()).toHaveLength(0)
+    expect(readdirSync(sessionsRoot).filter((name) => name.endsWith('.lock'))).toHaveLength(0)
+    // And a second read is served from the same parse.
+    const again = await second.client.result<AttachResult>('session/attach', { sessionId })
+    expect(again.cursor).toBe(attached.cursor)
+  })
+
+  it('publishes the view again whenever a durable fact moves one of its folds', async () => {
+    const { client, sessionId } = await session(2)
+    const views = client.notifications.filter((entry) => entry.method === 'session.view')
+    expect(views.length).toBeGreaterThan(0)
+    const last = views.at(-1)!.params as unknown as { sessionId: string; view: SessionView }
+    expect(last.sessionId).toBe(sessionId)
+    expect(last.view.context?.projectedTokens).toBeGreaterThan(0)
+    expect(last.view.authority.enforcement).toBe('none')
+  })
+
+  it('serves a gap repair as a range bounded at both ends, with the trace tier dropped', async () => {
+    const { client, sessionId } = await session(4)
+    const attached = await client.result<AttachResult>('session/attach', { sessionId, limit: 1 })
+    expect(attached.page.from).toBeGreaterThan(2)
+    const repair = await client.result<{ events: { seq: number; type: string }[] }>('session/events', {
+      sessionId,
+      fromSeq: 2,
+      toSeq: attached.page.from,
+      omitTrace: true,
+    })
+    expect(repair.events[0]!.seq).toBe(2)
+    expect(repair.events.at(-1)!.seq).toBeLessThanOrEqual(attached.page.from)
+    expect(repair.events.some((event) => event.type === 'assistant/chunk')).toBe(false)
+  })
+
+  it('shows an outstanding approval in the view, and drops it once it is decided', async () => {
+    const gated = defineTool({
+      name: 'gated',
+      description: 'needs consent',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const { client } = await startHost(adapter, {
+      prepare: (root) => {
+        root.get(TOOLS).register(root, gated)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'gated' ? { kind: 'ask' } : next()))
+      },
+    })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    const ask = await client.waitFor(() => client.frames('approval/asked')[0], 'the approval frame')
+    const id = ask.event.data.id as string
+
+    const waiting = await client.result<AttachResult>('session/attach', { sessionId })
+    expect(waiting.view.pendingApprovals.map((pending) => pending.id)).toEqual([id])
+    expect(waiting.view.pendingApprovals[0]!.toolName).toBe('gated')
+
+    await client.result('approval/answer', { sessionId, id, outcome: 'allowed-once' })
+    await client.waitForIdle(sessionId)
+    const settled = await client.result<AttachResult>('session/attach', { sessionId })
+    expect(settled.view.pendingApprovals).toEqual([])
   })
 })

@@ -50,12 +50,32 @@ export function effectiveApprovalPolicy(events: readonly EventEnvelope[]): Appro
   return undefined
 }
 
-/** Approvals asked and not yet decided, in asking order — the open half of the audit pair. */
-export function undecidedApprovals(events: readonly EventEnvelope[]): string[] {
-  const open = new Map<string, true>()
+/** An approval asked and not yet decided — everything an answerer needs to render the question. */
+export interface OpenApproval {
+  readonly id: string
+  readonly toolName: string
+  readonly reason?: string
+}
+
+/**
+ * Approvals asked and not yet decided, in asking order — the open half of the
+ * audit pair. A client that holds only a PAGE of the log cannot compute this
+ * (an `asked` whose `decided` fell outside the page is a phantom prompt; an
+ * outstanding `asked` below the page strands a real one), so the host folds it
+ * and sends the answer.
+ */
+export function openApprovals(events: readonly EventEnvelope[]): OpenApproval[] {
+  const open = new Map<string, OpenApproval>()
   for (const event of events) {
-    if (matches(event, APPROVAL_ASKED)) open.set(event.data.id, true)
-    else if (matches(event, APPROVAL_DECIDED)) open.delete(event.data.id)
+    if (matches(event, APPROVAL_ASKED)) {
+      const { id, toolName, reason } = event.data
+      open.set(id, { id, toolName, ...(reason === undefined ? {} : { reason }) })
+    } else if (matches(event, APPROVAL_DECIDED)) open.delete(event.data.id)
   }
-  return [...open.keys()]
+  return [...open.values()]
+}
+
+/** The open ids alone — the same fold, for callers that only close the pair. */
+export function undecidedApprovals(events: readonly EventEnvelope[]): string[] {
+  return openApprovals(events).map((approval) => approval.id)
 }

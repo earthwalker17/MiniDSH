@@ -6,10 +6,11 @@
  * event and notification types).
  */
 import type { AgentOptions } from '../../core/agent/index.ts'
-import type { ApprovalPolicy } from '../../core/approval/index.ts'
+import type { ApprovalPolicy, OpenApproval } from '../../core/approval/index.ts'
 import type { ProviderInfo } from '../../core/llm/index.ts'
+import type { ContextMetrics } from '../../core/metering/index.ts'
 import type { SandboxEnforcement, SandboxMode } from '../../core/sandbox/index.ts'
-import type { EventEnvelope, SessionEventFrame, SessionHeader } from '../../core/session/index.ts'
+import type { EventEnvelope, RequestContextRecord, SessionEventFrame, SessionHeader } from '../../core/session/index.ts'
 
 // ---- JSON-RPC 2.0 envelope ------------------------------------------------
 
@@ -109,6 +110,12 @@ export interface PromptResult {
 export interface EventsParams {
   readonly sessionId: string
   readonly fromSeq?: number
+  /** Inclusive upper bound. With `fromSeq` this is a gap repair: a range bounded at both ends. */
+  readonly toSeq?: number
+  /** Ceiling on events returned, from `fromSeq` forward. */
+  readonly limit?: number
+  /** Drop the trace tier (`assistant/chunk`). A repair wants the facts, not the streaming fidelity. */
+  readonly omitTrace?: boolean
 }
 
 export interface EventsResult {
@@ -116,6 +123,76 @@ export interface EventsResult {
   readonly events: readonly EventEnvelope[]
   /** The store holds bytes beyond `events` (corruption past a torn tail): the stream is a readable prefix, not the whole session. */
   readonly damaged?: true
+}
+
+// ---- the paged attach ------------------------------------------------------
+
+/**
+ * The folds a client holding only a PAGE cannot compute for itself, done by
+ * whoever already owns each one. This is the live control plane the protocol
+ * owns (§8), widened from the bare status projection to exactly what a partial
+ * reader is missing — never a re-shaping of events, which cross the wire
+ * verbatim.
+ */
+export interface SessionView {
+  readonly status: 'idle' | 'running'
+  /** Context pressure, metered against the window the log names for the route in use. Absent for a session with no priced request. */
+  readonly context?: ContextMetrics
+  /** Asked and not yet decided. A page cannot fold this: half a pair is a phantom prompt or a stranded one. */
+  readonly pendingApprovals: readonly OpenApproval[]
+  readonly authority: AuthorityView
+  /** The BASE route (`agent/options`). Absent for a session that is not live. */
+  readonly options?: AgentOptions
+  /** The EFFECTIVE route of the last request, and the window its adapter advertises. */
+  readonly route?: RequestContextRecord
+}
+
+/** A message-aligned slice of the log. `from`/`to` are inclusive seq bounds; `to` is -1 for an empty page. */
+export interface EventPageFrame {
+  readonly events: readonly EventEnvelope[]
+  readonly from: number
+  readonly to: number
+  /** Events exist below `from`. */
+  readonly hasMore: boolean
+}
+
+export interface AttachParams {
+  readonly sessionId: string
+  /** Messages the tail page may carry; clamped by the host. */
+  readonly limit?: number
+}
+
+/**
+ * There is deliberately NO lower-bound cursor here. A reconnecting client
+ * re-attaches and REPLACES its window from a fresh page; a gap inside one
+ * connection is repaired with `session/events` bounded at both ends. A
+ * resume-from-seq attach would have to promise retention the host does not owe.
+ */
+export interface AttachResult {
+  readonly header: SessionHeader
+  readonly view: SessionView
+  readonly page: EventPageFrame
+  /**
+   * The seq of the last event the page was cut against (-1 for an empty log):
+   * the dedup watermark, and the anchor every later `session/page` must pin to.
+   * A live frame at or below it is a duplicate.
+   */
+  readonly cursor: number
+  readonly damaged?: true
+}
+
+export interface PageParams {
+  readonly sessionId: string
+  /** The consistent cut, from the attach frame's `cursor`. Past the live cursor is INVALID_PARAMS. */
+  readonly throughSeq: number
+  /** Exclusive upper bound for an older page: the `from` of the page already held. */
+  readonly beforeSeq?: number
+  readonly limit?: number
+}
+
+/** Identity and derived state come from the attach frame alone; a page is only a slice. */
+export interface PageResult {
+  readonly page: EventPageFrame
 }
 
 export interface CancelParams {
@@ -170,4 +247,14 @@ export type SessionEventParams = SessionEventFrame
 export interface SessionStatusParams {
   readonly sessionId: string
   readonly status: 'idle' | 'running'
+}
+
+/**
+ * `session.view` params: the host-computed folds, re-sent whenever one of them
+ * changes. `session.status` stays beside it rather than folding into it —
+ * status is the cheapest and most frequent signal, and clients already read it.
+ */
+export interface SessionViewParams {
+  readonly sessionId: string
+  readonly view: SessionView
 }
