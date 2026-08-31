@@ -212,6 +212,11 @@ export interface AttachParams {
   readonly limit?: number
 }
 
+/** Stop receiving one session's events — or, with no id, every session's. */
+export interface DetachParams {
+  readonly sessionId?: string
+}
+
 /**
  * There is deliberately NO lower-bound cursor here. A reconnecting client
  * re-attaches and REPLACES its window from a fresh page; a gap inside one

@@ -54,6 +54,19 @@ export type SettingsFile = z.infer<typeof settingsSchema>
 export interface ResolvedSettings {
   /** The default agent options every surface shares (protocol `initialize` included). */
   readonly agent: AgentOptions
+  /**
+   * The BASE the runtime settings store is registered with: the pure built-ins.
+   * The store applies settings.json as its own user layer, so anything already
+   * merged here would be applied twice.
+   */
+  readonly agentBase: AgentOptions
+  /**
+   * What outranks the file — today just `MINIDSH_MODEL`. The store's two layers
+   * cannot express it (a user layer always wins over its base), so it travels
+   * separately and is applied ABOVE whatever the store resolves. Precedence
+   * stays one statement in one place instead of an accident of merge order.
+   */
+  readonly agentOverrides: Partial<AgentOptions>
 }
 
 export interface ResolveSettingsOptions {
@@ -90,15 +103,22 @@ const present = (value: string | undefined): string | undefined => (value !== un
 export function resolveSettings(options: ResolveSettingsOptions = {}): ResolvedSettings {
   const file = options.path === undefined ? {} : readSettingsFile(options.path)
   const env = options.env ?? process.env
-  const base = defaultAgentOptions()
-  const effort = file.agent?.reasoningEffort
-  const maxSteps = file.agent?.maxSteps
+  const builtins = defaultAgentOptions()
+  const model = present(env.MINIDSH_MODEL)
+  const layer = file.agent ?? {}
   return {
+    agentBase: builtins,
+    agentOverrides: model === undefined ? {} : { model },
     agent: {
-      provider: file.agent?.provider ?? base.provider,
-      model: present(env.MINIDSH_MODEL) ?? file.agent?.model ?? base.model,
-      ...(effort === undefined ? {} : { reasoningEffort: effort }),
-      ...(maxSteps === undefined ? {} : { maxSteps }),
+      provider: layer.provider ?? builtins.provider,
+      // The environment still wins over the file, as it always has.
+      model: model ?? layer.model ?? builtins.model,
+      // Every field the layer may carry travels, or the same file would mean
+      // two different things to the CLI and to the wire.
+      ...(layer.reasoningEffort === undefined ? {} : { reasoningEffort: layer.reasoningEffort }),
+      ...(layer.maxSteps === undefined ? {} : { maxSteps: layer.maxSteps }),
+      ...(layer.maxTokens === undefined ? {} : { maxTokens: layer.maxTokens }),
+      ...(layer.temperature === undefined ? {} : { temperature: layer.temperature }),
     },
   }
 }

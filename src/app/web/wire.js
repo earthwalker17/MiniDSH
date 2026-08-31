@@ -17,6 +17,8 @@
 
 const BACKOFF_BASE_MS = 500
 const BACKOFF_MAX_MS = 10_000
+/** Events per repair round trip; a hole is fetched in pages like everything else. */
+const REPAIR_LIMIT = 500
 
 export class Wire {
   constructor(url, handlers) {
@@ -98,6 +100,8 @@ export class SessionWindow {
     this.hasMore = false
     this.header = undefined
     this.view = undefined
+    /** No page yet: an event applied before one would repair from seq 0. */
+    this.attached = false
     // Live events are applied one at a time. `apply` awaits a repair, and two
     // events arriving around that await would otherwise interleave: the second
     // would see the pre-repair cursor, push itself past the hole, and the
@@ -105,8 +109,26 @@ export class SessionWindow {
     this.queue = Promise.resolve()
   }
 
-  /** Attach (or re-attach): a fresh page and a fresh cursor replace whatever was held. */
-  async attach() {
+  /**
+   * Attach (or re-attach): a fresh page and a fresh cursor replace whatever was
+   * held. Queued behind `apply`, and applying the result of the attach queued
+   * behind it too — an event that arrives while the attach RPC is in flight
+   * would otherwise be applied against the PRE-attach cursor, and its repair
+   * would land after the page that already contained it.
+   */
+  attach() {
+    const attached = this.queue.then(
+      () => this.attachOnce(),
+      () => this.attachOnce(),
+    )
+    this.queue = attached.then(
+      () => undefined,
+      () => undefined,
+    )
+    return attached
+  }
+
+  async attachOnce() {
     const attached = await this.wire.request('session/attach', { sessionId: this.sessionId })
     if (attached.cursor < this.cursor) throw new Error('the host answered with a cursor behind what was already applied')
     this.header = attached.header
@@ -115,6 +137,7 @@ export class SessionWindow {
     this.cursor = attached.cursor
     this.oldest = attached.page.from
     this.hasMore = attached.page.hasMore
+    this.attached = true
     this.onChange()
     return attached
   }
@@ -145,6 +168,10 @@ export class SessionWindow {
   }
 
   async applyOne(event) {
+    // Before the first page there is nothing to apply INTO, and a repair from
+    // cursor -1 would ask for the whole log — the one thing paging exists to
+    // avoid. The attach that follows carries this event anyway.
+    if (!this.attached) return
     if (event.seq <= this.cursor) return
     if (event.seq > this.cursor + 1) await this.repair(event.seq - 1)
     if (event.seq <= this.cursor) return
@@ -153,18 +180,27 @@ export class SessionWindow {
     this.onChange()
   }
 
+  /**
+   * Fetch a hole, bounded at BOTH ends and in pages. A repair is a range read,
+   * not a whole-log read: asking for everything from the cursor would undo the
+   * paging the rest of this client is built on.
+   */
   async repair(throughSeq) {
-    const { events } = await this.wire.request('session/events', {
-      sessionId: this.sessionId,
-      fromSeq: this.cursor + 1,
-      toSeq: throughSeq,
-      omitTrace: true,
-    })
-    for (const event of events) {
-      if (event.seq <= this.cursor) continue
-      this.events.push(event)
-      this.cursor = event.seq
+    while (this.cursor < throughSeq) {
+      const { events } = await this.wire.request('session/events', {
+        sessionId: this.sessionId,
+        fromSeq: this.cursor + 1,
+        toSeq: throughSeq,
+        limit: REPAIR_LIMIT,
+        omitTrace: true,
+      })
+      if (events.length === 0) break
+      for (const event of events) {
+        if (event.seq <= this.cursor) continue
+        this.events.push(event)
+        this.cursor = event.seq
+      }
+      this.onChange()
     }
-    this.onChange()
   }
 }

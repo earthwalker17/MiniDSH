@@ -23,6 +23,8 @@ import { describeEvent, transcriptLines } from '../present.ts'
 export class TerminalRenderer {
   private streaming = false
   private thinking = false
+  /** Whether text for the message now being assembled reached THIS client. */
+  private streamedText = false
   /** The last numbers published, so an unchanged view prints nothing. */
   private context: ContextMetrics | undefined
 
@@ -48,6 +50,7 @@ export class TerminalRenderer {
       const chunk = event.data.chunk as unknown as StreamChunk
       if (chunk.type === 'text-delta') {
         this.streaming = true
+        this.streamedText = true
         return chunk.text
       }
       if (chunk.type === 'reasoning-delta' && !this.thinking) {
@@ -62,9 +65,18 @@ export class TerminalRenderer {
       }
       return ''
     }
-    // The text already streamed, and the shared projection would print it
-    // again; the pressure it changed arrives as the view that follows it.
-    if (matches(event, ASSISTANT_MESSAGE)) return ''
+    // Suppressed only when THIS client actually streamed the text. An attach
+    // cut can land between a message's chunks and the message itself — the
+    // chunks are below the cursor and never delivered — and suppressing
+    // unconditionally would then drop the answer entirely.
+    if (matches(event, ASSISTANT_MESSAGE)) {
+      const streamed = this.streamedText
+      this.streamedText = false
+      if (streamed) return ''
+      const line = describeEvent(event)
+      return line === undefined ? '' : `${line}
+`
+    }
     // A completed turn needs no line; the prompt returning says it. An ask is
     // rendered by the controller's `[y/N]` prompt, so its line would be a twin.
     if (matches(event, TURN_END) && event.data.reason.kind === 'completed') return ''

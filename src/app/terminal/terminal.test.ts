@@ -140,16 +140,26 @@ describe('terminal render (pure)', () => {
     expect(renderer.onView(at(9000))).toBe('[ctx 90% · 9k/10k]\n')
   })
 
-  it('does not print an assistant message that already streamed', () => {
+  it('prints an assistant message it did not stream, and stays quiet about one it did', () => {
     const logged = (value: unknown): unknown => JSON.parse(JSON.stringify(value))
-    const message: EventEnvelope = {
+    const message = (text: string, seq: number): EventEnvelope => ({
       type: 'assistant/message',
-      seq: 3,
+      seq,
       time: 1,
-      data: { turn: 1, step: 1, message: logged(createAssistantMessage([{ type: 'text', text: 'already on screen' }], 'p', 'm')) },
+      data: { turn: 1, step: 1, message: logged(createAssistantMessage([{ type: 'text', text }], 'p', 'm')) },
       surfaceOp: { op: 'append' },
-    }
-    expect(new TerminalRenderer().onEvent(message)).toBe('')
+    })
+
+    // An attach cut can land between a message's chunks and the message: the
+    // chunks are below the cursor and never delivered, so suppressing
+    // unconditionally would drop the answer entirely.
+    expect(new TerminalRenderer().onEvent(message('never streamed here', 3))).toBe('never streamed here\n')
+
+    const renderer = new TerminalRenderer()
+    expect(renderer.onEvent(chunkEvent({ type: 'text-delta', index: 0, text: 'already on screen' }, 2))).toBe('already on screen')
+    expect(renderer.onEvent(message('already on screen', 3))).toBe('')
+    // And the next message is judged on its own: state does not leak forward.
+    expect(renderer.onEvent(message('a later one, unstreamed', 4))).toBe('a later one, unstreamed\n')
   })
 })
 

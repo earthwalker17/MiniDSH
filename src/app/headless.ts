@@ -51,6 +51,17 @@ export interface BootOptions {
   readonly extraBaseRows?: readonly Row[]
   /** Resolved agent defaults (settings layer); falls back to the pure built-ins. */
   readonly agentDefaults?: AgentOptions
+  /**
+   * The BASE the runtime settings store is registered with — the pure built-ins.
+   * The store applies settings.json as its own user layer, so registering the
+   * merged value would apply that file twice.
+   */
+  readonly agentSettingsBase?: AgentOptions
+  /**
+   * What outranks the settings file (today `MINIDSH_MODEL`). The store's layers
+   * cannot express it, so a surface reading the store live applies it on top.
+   */
+  readonly agentOverrides?: Partial<AgentOptions>
   readonly logger?: Logger
   /** Runs after settle, before the agent is created (tests register a scripted adapter here). */
   readonly prepare?: (root: Context) => void | Promise<void>
@@ -138,7 +149,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     const failed = report.failed.map((entry) => `${entry.name}: ${entry.error instanceof Error ? entry.error.message : String(entry.error)}`).join('; ')
     throw new Error(`composition did not settle — pending: [${pending}] failed: [${failed}]`)
   }
-  registerAgentSettings(root, options.agentDefaults ?? defaultAgentOptions())
+  registerAgentSettings(root, options.agentSettingsBase ?? options.agentDefaults ?? defaultAgentOptions())
   await options.prepare?.(root)
   if (onEvent) root.on(SESSION_EVENT, (session, event) => onEvent({ sessionId: session.id, event }))
   return root
@@ -148,9 +159,10 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
  * Which settings namespaces exist is app assembly, so the boot claims them —
  * not a capability, and never the model.
  *
- * The BASE is the value this process already resolved (built-ins, then the
- * environment, then the file), so boot precedence is untouched and a wire write
- * lands as one layer ABOVE it. Registering is skipped when no store is mounted:
+ * The BASE is this process's resolution MINUS the settings file — built-ins and
+ * the environment — because the store re-applies that file as its own user
+ * layer. Handing it the merged value would apply the file twice and make it
+ * outrank `MINIDSH_MODEL`. Registering is skipped when no store is mounted:
  * a hermetic composition then has no settings service at all, and every reader
  * falls back to the values it was handed.
  */

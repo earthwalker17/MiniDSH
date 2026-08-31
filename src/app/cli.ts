@@ -107,12 +107,14 @@ function bootFields(plan: BootPlan): {
   credentialsPath: string
   settingsStorePath: string
   agentDefaults: ResolvedSettings['agent']
+  agentSettingsBase: ResolvedSettings['agentBase']
+  agentOverrides: ResolvedSettings['agentOverrides']
   configLayers: NamedLayer[]
   logger: Logger
   sandbox?: SandboxMode
   approvalPolicy?: ApprovalPolicy
 } {
-  return { ...plan.home, agentDefaults: plan.settings.agent, configLayers: plan.loaded.layers, logger: stderrLogger, ...plan.authority }
+  return { ...plan.home, agentDefaults: plan.settings.agent, agentSettingsBase: plan.settings.agentBase, agentOverrides: plan.settings.agentOverrides, configLayers: plan.loaded.layers, logger: stderrLogger, ...plan.authority }
 }
 
 /** The rows a boot would mount from the built-ins alone — the base every layered view starts from. */
@@ -466,7 +468,7 @@ async function webCommand(args: ParsedArgs): Promise<number> {
     })
     process.stdout.write(`minidsh web — open this once:\n\n  ${web.url}\n\n`)
     if (host !== undefined && host !== '127.0.0.1' && host !== 'localhost') {
-      process.stderr.write(`warning: bound to ${host}; anyone who can reach it and holds the token drives an agent on this machine\n`)
+      process.stderr.write(`warning: bound to ${host}; whoever reaches this url first drives an agent on this machine\n`)
     }
     await web.closed
     await web.dispose()

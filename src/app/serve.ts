@@ -41,6 +41,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
+    ...(options.agentOverrides === undefined ? {} : { agentOverrides: options.agentOverrides }),
     onClose: () => resolveClosed(),
     ...(options.agentSetup === undefined ? {} : { setup: options.agentSetup }),
     ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),

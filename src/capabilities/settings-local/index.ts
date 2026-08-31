@@ -190,13 +190,24 @@ class LocalSettings implements Settings {
       // forever; anything younger than the stale window is a real writer.
       const age = existsSync(lock) ? Date.now() - statSync(lock).mtimeMs : Number.POSITIVE_INFINITY
       if (age < this.staleLockMs) throw new SettingsError('SETTINGS_CONFLICT', `another writer holds ${lock}`)
-      rmSync(lock, { force: true })
+      // Reclaiming is the protocol's one TWO-step (remove, then create), so it
+      // runs under its own exclusive-create mutex — the same discipline the
+      // session lease uses. Without it two reclaimers of one dead holder could
+      // both remove and both create, and the second remove would delete the
+      // first's fresh lock: two writers, both believing they hold it.
+      const steal = `${lock}.steal`
       try {
+        closeSync(openSync(steal, 'wx'))
+      } catch {
+        throw new SettingsError('SETTINGS_CONFLICT', `another writer is reclaiming ${lock}`)
+      }
+      try {
+        rmSync(lock, { force: true })
         closeSync(openSync(lock, 'wx'))
       } catch {
-        // Two reclaimers of one dead holder: whoever lost the race is a
-        // conflict, not a raw errno escaping the seam.
         throw new SettingsError('SETTINGS_CONFLICT', `another writer reclaimed ${lock} first`)
+      } finally {
+        rmSync(steal, { force: true })
       }
     }
     return () => rmSync(lock, { force: true })

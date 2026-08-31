@@ -274,6 +274,10 @@ async function start() {
       $('offline').hidden = true
       try {
         state.init = await state.wire.request('initialize')
+        // This surface renders one session at a time, so it watches one at a
+        // time. Left un-narrowed it would be counted as an answerer for every
+        // approval on the host and park questions it never shows.
+        await state.wire.request('session/detach')
         const picker = $('workspace')
         picker.replaceChildren(el('option', undefined, 'every workspace'))
         picker.firstChild.value = ''

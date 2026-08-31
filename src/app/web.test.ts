@@ -39,13 +39,14 @@ function tempDir(prefix: string): string {
   return dir
 }
 
-async function web(...script: ReturnType<typeof assistantText>[]): Promise<{ host: WebHostHandle; origin: string; token: string }> {
-  const adapter = new ScriptedAdapter().script(...(script.length > 0 ? script : [assistantText('hello from a browser')]))
+async function web(options: { host?: string } = {}): Promise<{ host: WebHostHandle; origin: string; token: string }> {
+  const adapter = new ScriptedAdapter().script(assistantText('hello from a browser'))
   const host = await startWebHost({
     cwd: tempDir('minidsh-web-cwd-'),
     sessionsRoot: tempDir('minidsh-web-sessions-'),
     logger: silent,
     patches: [{ id: 'llm-deepseek', disabled: true }],
+    ...(options.host === undefined ? {} : { host: options.host }),
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
     },
@@ -77,12 +78,18 @@ async function signIn(origin: string, token: string): Promise<string> {
 }
 
 describe('the web surface trust fence', () => {
-  it('serves nothing without the cookie, and mints one only for the printed token', async () => {
+  it('serves nothing without the cookie, and mints one only for the printed token — once', async () => {
     const { origin, token } = await web()
     expect((await fetch(`${origin}/`)).status).toBe(401)
     expect((await fetch(`${origin}/?token=wrong`, { redirect: 'manual' })).status).toBe(401)
 
     const cookie = await signIn(origin, token)
+    // Spent. A URL in a shell history must not stay a full-authority
+    // credential for the life of the process.
+    const replayed = await fetch(`${origin}/?token=${token}`, { redirect: 'manual' })
+    expect(replayed.status).toBe(401)
+    expect(await replayed.text()).toContain('already been used')
+    // The cookie it minted still works.
     const page = await fetch(`${origin}/`, { headers: { cookie } })
     expect(page.status).toBe(200)
     expect(await page.text()).toContain('MiniDSH')
@@ -106,6 +113,41 @@ describe('the web surface trust fence', () => {
     for (const path of ['/../package.json', '/nested/app.js', '/app.ts']) {
       expect((await fetch(`${origin}${path}`, { headers: { cookie } })).status).toBe(404)
     }
+  })
+
+  it('closes an upgrade to a path nobody serves, instead of holding the socket open', async () => {
+    const { host, origin, token } = await web()
+    const cookie = await signIn(origin, token)
+    // Registering an `upgrade` listener stops Node from destroying unclaimed
+    // sockets itself, so an unhandled path would otherwise stay open forever
+    // with no credential ever checked.
+    const socket = new WebSocket(`ws://127.0.0.1:${host.port}/nothing-here`, { headers: { cookie } } as never)
+    sockets.push(socket)
+    const outcome = await new Promise<string>((resolve) => {
+      socket.addEventListener('open', () => resolve('opened'), { once: true })
+      socket.addEventListener('error', () => resolve('closed'), { once: true })
+      socket.addEventListener('close', () => resolve('closed'), { once: true })
+      setTimeout(() => resolve('left hanging'), 3000)
+    })
+    expect(outcome).toBe('closed')
+  })
+
+  it('answers a wildcard bind, where an allow-list built from the bind address never could', async () => {
+    // `--host 0.0.0.0` is offered by the CLI. `0.0.0.0` is never a Host header
+    // any client sends, so a list built from it would 403 every request and the
+    // flag would be broken; the fence falls back to "an Origin must match the
+    // Host it was sent to", which is the strongest check still meaningful when
+    // the host does not know its own names.
+    const { host, origin, token } = await web({ host: '0.0.0.0' })
+    const cookie = await signIn(origin, token)
+    expect(await status(host.port, { cookie })).toBe(200)
+    // A foreign Origin is still refused before any credential is looked at.
+    expect(await status(host.port, { cookie, origin: 'http://evil.example' })).toBe(403)
+    // And a different Host is refused by the cookie, which is bound to the
+    // authority it was minted for — so the fallback loosens the Host CHECK
+    // without loosening what the credential is good for.
+    expect(await status(host.port, { cookie, host: 'anything.example' })).toBe(401)
+    expect(await status(host.port, {})).toBe(401)
   })
 
   it('refuses the upgrade to a client that never signed in', async () => {

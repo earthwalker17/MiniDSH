@@ -30,6 +30,7 @@ export class WebHostProcess {
   stdout = ''
   stderr = ''
   private urlPromise: Promise<string>
+  private session: Promise<{ origin: string; cookie: string }> | undefined
 
   constructor(cwd: string, home: string, options: WebHostOptions = {}) {
     const argv = [WEB_BIN, 'web', '--cwd', cwd, '--port', '0']
@@ -56,13 +57,19 @@ export class WebHostProcess {
     return this.urlPromise
   }
 
-  /** The token-for-cookie exchange, exactly as opening the printed URL does. */
-  async signIn(): Promise<{ origin: string; cookie: string }> {
-    const url = new URL(await this.url())
-    const response = await fetch(url, { redirect: 'manual' })
-    if (response.status !== 303) throw new Error(`the launch url answered ${response.status}`)
-    const cookie = response.headers.getSetCookie()[0]!.split(';', 1)[0]!
-    return { origin: url.origin, cookie }
+  /**
+   * The token-for-cookie exchange, exactly as opening the printed URL does —
+   * ONCE. The launch token is spent by the first exchange, so every later
+   * connection reuses the cookie, which is what a browser does too.
+   */
+  signIn(): Promise<{ origin: string; cookie: string }> {
+    return (this.session ??= (async () => {
+      const url = new URL(await this.url())
+      const response = await fetch(url, { redirect: 'manual' })
+      if (response.status !== 303) throw new Error(`the launch url answered ${response.status}`)
+      const cookie = response.headers.getSetCookie()[0]!.split(';', 1)[0]!
+      return { origin: url.origin, cookie }
+    })())
   }
 
   async connect(): Promise<WebClient> {

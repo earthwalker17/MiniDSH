@@ -63,6 +63,16 @@ export class ClientConnection {
     this.watching.delete(sessionId)
   }
 
+  /**
+   * Watch nothing at all. A client that has not attached yet watches
+   * EVERYTHING, which also makes it a candidate answerer for every approval —
+   * so a surface that shows only the session it has open says so explicitly
+   * rather than parking questions it will never display.
+   */
+  detachAll(): void {
+    this.watching = new Set()
+  }
+
   send(frame: RpcResponse | RpcNotification, droppable = false): void {
     if (this.closed) return
     this.options.send(frame, droppable)

@@ -36,6 +36,7 @@ const OP_PONG = 0xa
 /** Close codes this carrier sends. 1009 and 1003 are RFC; 1013 is "try again later". */
 const CLOSE_UNSUPPORTED_DATA = 1003
 const CLOSE_TOO_LARGE = 1009
+const CLOSE_PROTOCOL_ERROR = 1002
 const CLOSE_SLOW_CLIENT = 1013
 
 export interface WebSocketCarrierOptions {
@@ -97,17 +98,34 @@ export function encodeTextFrame(text: string): Buffer {
   return Buffer.concat([head, payload])
 }
 
+/** A control frame's payload may not exceed 125 bytes (RFC 6455 §5.5); a longer
+ *  one would not fit the single length byte and would desynchronize the stream
+ *  for everything after it. A ping we echo is the peer's payload, so clip it. */
 function encodeControlFrame(opcode: number, payload: Buffer = Buffer.alloc(0)): Buffer {
+  const clipped = payload.length > 125 ? payload.subarray(0, 125) : payload
   const head = Buffer.alloc(2)
   head[0] = 0x80 | opcode
-  head[1] = payload.length
-  return Buffer.concat([head, payload])
+  head[1] = clipped.length
+  return Buffer.concat([head, clipped])
 }
 
 interface DecodedFrame {
   readonly fin: boolean
   readonly opcode: number
+  readonly masked: boolean
   readonly payload: Buffer
+}
+
+/** Marks a socket as claimed by a carrier, so the app can close what nobody took. */
+const HANDLED = Symbol.for('minidsh.upgrade.handled')
+
+function markHandled(socket: Duplex): void {
+  ;(socket as unknown as Record<symbol, boolean>)[HANDLED] = true
+}
+
+/** Whether some carrier on this server answered the upgrade. */
+export function upgradeWasHandled(socket: Duplex): boolean {
+  return (socket as unknown as Record<symbol, boolean>)[HANDLED] === true
 }
 
 /** Decodes whole frames from a buffer, returning the undecoded remainder. */
@@ -143,7 +161,7 @@ export function decodeFrames(buffer: Buffer, maxPayload: number): { frames: Deco
     if (cursor + length > buffer.length) break
     const payload = Buffer.from(buffer.subarray(cursor, cursor + length))
     if (mask) for (let index = 0; index < payload.length; index++) payload[index] = payload[index]! ^ mask[index % 4]!
-    frames.push({ fin, opcode, payload })
+    frames.push({ fin, opcode, masked, payload })
     at = cursor + length
   }
   return { frames, rest: buffer.subarray(at) }
@@ -163,7 +181,11 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex): void => {
     const requestPath = (request.url ?? '/').split('?', 1)[0]
+    // Not ours: leave it for another carrier on this server. It is NOT closed
+    // here — the app that owns the server closes what nobody claimed, because
+    // registering an `upgrade` listener stops Node from destroying it.
     if (requestPath !== path) return
+    markHandled(socket)
     const key = request.headers['sec-websocket-key']
     if (request.headers.upgrade?.toLowerCase() !== 'websocket' || typeof key !== 'string') {
       socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
@@ -180,6 +202,7 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
 
     let buffered: Buffer = Buffer.alloc(0)
     let fragments: Buffer[] = []
+    let fragmentBytes = 0
     let fragmentOpcode = OP_CONTINUATION
     let awaitingPong = false
     let closed = false
@@ -251,16 +274,31 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
           close(CLOSE_UNSUPPORTED_DATA, 'text frames only')
           return
         }
+        if (!frame.masked) {
+          // RFC 6455 §5.1: a server MUST close on an unmasked client frame.
+          close(CLOSE_PROTOCOL_ERROR, 'client frames must be masked')
+          return
+        }
         if (frame.opcode === OP_TEXT || frame.opcode === OP_CONTINUATION) {
           if (frame.opcode === OP_TEXT) {
             fragments = [frame.payload]
             fragmentOpcode = OP_TEXT
+            fragmentBytes = frame.payload.length
           } else {
             fragments.push(frame.payload)
+            fragmentBytes += frame.payload.length
+          }
+          // The ceiling bounds a MESSAGE, not a frame: without this a peer
+          // could stream unbounded continuation frames and grow the buffer
+          // forever while every individual frame stayed under the limit.
+          if (fragmentBytes > maxMessage) {
+            close(CLOSE_TOO_LARGE, 'message too large')
+            return
           }
           if (!frame.fin) continue
           const text = Buffer.concat(fragments).toString('utf8')
           fragments = []
+          fragmentBytes = 0
           if (fragmentOpcode !== OP_TEXT) continue
           let parsed: unknown
           try {

@@ -50,6 +50,32 @@ describe('resolveSettings', () => {
     expect(resolveSettings({ path: join(tempDir('minidsh-none-'), 'settings.json'), env: {} }).agent).toEqual(defaultAgentOptions())
   })
 
+  it('carries every field the layer may hold, so one file means one thing to every reader', () => {
+    const path = settingsFile({ agent: { maxTokens: 2048, temperature: 0.25 } })
+    expect(resolveSettings({ path, env: {} }).agent).toEqual({ ...defaultAgentOptions(), maxTokens: 2048, temperature: 0.25 })
+  })
+
+  it('splits the store base from what outranks the store, so the file cannot beat the environment', () => {
+    const layer = { provider: 'from-file', model: 'from-file' }
+    const path = settingsFile({ agent: layer })
+    const resolved = resolveSettings({ path, env: { MINIDSH_MODEL: 'from-env' } })
+    expect(resolved.agent.model).toBe('from-env')
+
+    // The store is registered with the pure built-ins and applies the file as
+    // its own user layer; a base with the file already in it would apply the
+    // file twice. But a user layer always beats its base, so the environment
+    // cannot live in the base either — it travels separately and is applied on
+    // top, which is the only order that keeps the documented precedence.
+    expect(resolved.agentBase).toEqual(defaultAgentOptions())
+    const stored = { ...resolved.agentBase, ...layer }
+    expect(stored.model).toBe('from-file')
+    expect({ ...stored, ...resolved.agentOverrides }.model).toBe('from-env')
+
+    // With no environment override there is nothing to apply, and the store's
+    // own resolution is the whole answer.
+    expect(resolveSettings({ path, env: {} }).agentOverrides).toEqual({})
+  })
+
   it('surfaces a broken file as broken, naming the path', () => {
     const garbled = settingsFile('not json')
     expect(() => resolveSettings({ path: garbled, env: {} })).toThrow(/not valid JSON/)

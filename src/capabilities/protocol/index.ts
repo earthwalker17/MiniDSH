@@ -32,7 +32,7 @@ import type { WorkspaceInfo } from './frames.ts'
 export { ClientConnection } from './connection.ts'
 export { ProtocolHost } from './host.ts'
 export { NdjsonTransport } from './transport-ndjson.ts'
-export { acceptKey, decodeFrames, encodeTextFrame, serveWebSocket } from './transport-ws.ts'
+export { acceptKey, decodeFrames, encodeTextFrame, serveWebSocket, upgradeWasHandled } from './transport-ws.ts'
 
 /**
  * One way clients reach the host. A stream pair is one client; other carriers
@@ -86,6 +86,8 @@ export interface ProtocolConfig {
    */
   readonly workspaces?: readonly { readonly id?: string; readonly name?: string; readonly root: string }[]
   readonly defaultAgentOptions: AgentOptions
+  /** What outranks the settings store for this process (e.g. `MINIDSH_MODEL`). */
+  readonly agentOverrides?: Partial<AgentOptions>
   readonly serverVersion?: string
   /** Per-agent world for every agent this surface creates or resumes (the app builds it from a named preset). */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
@@ -123,6 +125,7 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
       workspaceRoots,
       workspaces,
       defaultAgentOptions: config.defaultAgentOptions,
+      ...(config.agentOverrides === undefined ? {} : { agentOverrides: config.agentOverrides }),
       serverVersion: config.serverVersion ?? '0.1.0',
       // A stream carrier's client IS this process's reason to run: when the
       // last one hangs up, the host is done. A socket says otherwise — nobody

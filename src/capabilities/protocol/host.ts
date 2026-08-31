@@ -114,6 +114,14 @@ export interface ProtocolServerConfig {
   /** Named places to work, canonical roots, ids already resolved. */
   readonly workspaces: readonly WorkspaceInfo[]
   readonly defaultAgentOptions: AgentOptions
+  /**
+   * What outranks the settings store (a process-level override such as
+   * `MINIDSH_MODEL`). The store's base/user layers cannot express something
+   * that beats the user layer, so it is applied here, above whatever it
+   * resolves — and it is already folded into `defaultAgentOptions` for the
+   * composition that has no store at all.
+   */
+  readonly agentOverrides?: Partial<AgentOptions>
   readonly serverVersion: string
   /** Applied to every agent this surface creates or resumes. */
   readonly setup?: (agentCtx: Context) => void | Promise<void>
@@ -455,7 +463,8 @@ export class ProtocolHost {
     const settings = this.ctx.tryGet(SETTINGS)
     if (!settings) return this.config.defaultAgentOptions
     try {
-      return settings.read('agent').value as unknown as AgentOptions
+      const stored = settings.read('agent').value as unknown as AgentOptions
+      return mergeAgentOptions(stored, this.config.agentOverrides ?? {})
     } catch {
       return this.config.defaultAgentOptions
     }
@@ -731,6 +740,13 @@ export class ProtocolHost {
    * session's questions, so it leaves their answerer sets too.
    */
   private detach(connection: ClientConnection, params: Record<string, unknown>): Record<string, never> {
+    if (params.sessionId === undefined) {
+      // No id: watch nothing. A client that renders only what it attached to
+      // says so, instead of counting as an answerer for every session.
+      connection.detachAll()
+      this.withdrawFromApprovals(connection)
+      return {}
+    }
     const sessionId = requireString(params, 'sessionId', 'session/detach')
     connection.detach(sessionId)
     this.withdrawFromApprovals(connection, sessionId)
