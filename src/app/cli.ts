@@ -27,6 +27,7 @@ import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout
 import { auditLines, describeEvent } from './present.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
+import { startWebHost } from './web.ts'
 import { runTerminal } from './terminal/index.ts'
 
 interface ParsedArgs {
@@ -37,7 +38,7 @@ interface ParsedArgs {
   readonly patchFiles: string[]
 }
 
-const VALUE_FLAGS = new Set(['cwd', 'provider', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset', 'agent-preset'])
+const VALUE_FLAGS = new Set(['cwd', 'provider', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset', 'agent-preset', 'port', 'host'])
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
@@ -104,6 +105,7 @@ function bootFields(plan: BootPlan): {
   spillRoot: string
   globalInstructionsPath: string
   credentialsPath: string
+  settingsStorePath: string
   agentDefaults: ResolvedSettings['agent']
   configLayers: NamedLayer[]
   logger: Logger
@@ -438,6 +440,43 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
 }
 
 /**
+ * `minidsh web` — the same protocol over a WebSocket, plus the browser client.
+ *
+ * It prints ONE url carrying a one-shot launch token, and binds loopback unless
+ * `--host` says otherwise: this surface can write files and run commands, so
+ * reaching it is a deliberate act. There is no per-user identity — many
+ * windows, one principal, whoever ran this.
+ */
+async function webCommand(args: ParsedArgs): Promise<number> {
+  const plan = await prepareBoot(args, 'none')
+  if (typeof plan === 'string') return usage(plan)
+  const port = args.flags.get('port')
+  if (port !== undefined && (typeof port !== 'string' || !/^\d+$/.test(port))) return usage('--port takes a number')
+  const host = args.flags.get('host')
+  if (host !== undefined && typeof host !== 'string') return usage('--host takes an address')
+  try {
+    const web = await startWebHost({
+      cwd: cwdFlag(args),
+      ...bootFields(plan),
+      ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+      ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
+      approve: args.flags.get('approve') === true,
+      ...(port === undefined ? {} : { port: Number(port) }),
+      ...(host === undefined ? {} : { host }),
+    })
+    process.stdout.write(`minidsh web — open this once:\n\n  ${web.url}\n\n`)
+    if (host !== undefined && host !== '127.0.0.1' && host !== 'localhost') {
+      process.stderr.write(`warning: bound to ${host}; anyone who can reach it and holds the token drives an agent on this machine\n`)
+    }
+    await web.closed
+    await web.dispose()
+    return 0
+  } catch (error) {
+    return reportError(error)
+  }
+}
+
+/**
  * Built-in rows a config layer can widen authority or blind the runtime
  * through — including the effect boundaries themselves: the fence lives in
  * the fs provider and the refusal in the shell provider, so replacing either
@@ -655,6 +694,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       return continueCommand(args, 'fork')
     case 'serve':
       return serveCommand(args)
+    case 'web':
+      return webCommand(args)
     case 'config':
       return configCommand(args)
     case 'sessions':
@@ -667,6 +708,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           '  minidsh resume <id> ["<task>"] [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
           '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
           '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
+          '  minidsh web [--cwd dir] [--port n] [--host addr] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
           '  minidsh config [--json]\n' +
           '  minidsh sessions list\n' +
           '  minidsh sessions show <id> [--json|--audit]\n' +

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MiniDSH</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <aside>
+      <div class="pane-head">
+        <select id="workspace" title="workspace"></select>
+        <button id="new" title="start a new session">new</button>
+      </div>
+      <div id="sessions" class="sessions"></div>
+      <button id="settings-open" class="ghost">settings</button>
+    </aside>
+
+    <main>
+      <header>
+        <span id="session-id" class="mono">new session</span>
+        <span id="status" class="pill"></span>
+        <span id="context" class="pill"></span>
+        <span id="route" class="pill"></span>
+        <span id="authority" class="pill"></span>
+        <span class="spacer"></span>
+        <select id="sandbox" title="sandbox mode">
+          <option value="read-only">read-only</option>
+          <option value="workspace-write">workspace-write</option>
+          <option value="danger-full-access">danger-full-access</option>
+        </select>
+        <select id="approval" title="approval policy">
+          <option value="ask">ask</option>
+          <option value="never">never</option>
+        </select>
+        <button id="compact" title="shrink the model's context">compact</button>
+        <button id="cancel" title="stop the running turn">cancel</button>
+      </header>
+
+      <div id="offline" class="banner offline" hidden>the host is not reachable — reconnecting</div>
+      <div id="error" class="banner error" hidden></div>
+      <div id="approval-bar" class="banner ask" hidden>
+        <span id="approval-text"></span>
+        <button id="allow">allow once</button>
+        <button id="deny">deny</button>
+      </div>
+
+      <div id="log" class="log"></div>
+
+      <footer>
+        <textarea id="prompt" rows="3" placeholder="say something — Enter sends, Shift+Enter is a newline"></textarea>
+        <button id="send">send</button>
+      </footer>
+    </main>
+
+    <div id="settings" class="modal" hidden>
+      <div class="sheet">
+        <h2>settings</h2>
+        <p class="hint">Defaults for the next session. A session already running keeps what its log recorded.</p>
+        <div id="settings-fields"></div>
+        <div class="actions">
+          <button id="settings-save">save</button>
+          <button id="settings-close" class="ghost">close</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
