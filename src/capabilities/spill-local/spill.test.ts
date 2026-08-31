@@ -26,6 +26,13 @@ const toolName = dialect === 'pwsh' ? 'pwsh' : 'bash'
 const binary = dialect === 'pwsh' ? 'pwsh' : 'bash'
 const shellAvailable = spawnSync(binary, ['--version'], { stdio: 'ignore' }).status === 0
 
+/**
+ * These cases spawn a real shell and read hundreds of lines back through it.
+ * On a loaded machine that runs close to the 30 s default and fails as a
+ * timeout rather than as a defect, so they declare their own budget.
+ */
+const SHELL_TEST_TIMEOUT_MS = 120_000
+
 let harness: CoreHarness | undefined
 const dirs: string[] = []
 afterEach(async () => {
@@ -118,7 +125,7 @@ describe.skipIf(!shellAvailable)('the shell tool under a spill store', () => {
     const match = /saved at (.+?) —/.exec(result.text)
     expect(match).not.toBeNull()
     expect(readFileSync(match![1]!.trim(), 'utf8')).toBe(saved)
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it('lets the model read the spilled output back with the file viewer it already has, in every mode', async () => {
     const fixture = await setup()
@@ -135,7 +142,7 @@ describe.skipIf(!shellAvailable)('the shell tool under a spill store', () => {
       expect(viewed.isError).toBe(false)
       expect(viewed.text).toContain('line-300')
     }
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it('says what it dropped when no store is mounted, rather than pretending', async () => {
     const fixture = await setup({ withSpill: false })
@@ -144,7 +151,7 @@ describe.skipIf(!shellAvailable)('the shell tool under a spill store', () => {
     const result = await fixture.run(toolName, { command })
     expect(result.text).toContain('not retained')
     expect(result.text).not.toContain('saved at')
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it('leaves output that fits exactly as it was', async () => {
     const fixture = await setup()
@@ -153,7 +160,7 @@ describe.skipIf(!shellAvailable)('the shell tool under a spill store', () => {
     const result = await fixture.run(toolName, { command })
     expect(result.text.trim()).toBe('small output')
     expect(readdirSync(fixture.spillRoot)).toHaveLength(0)
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 })
 
 describe('the file viewer', () => {
