@@ -8,8 +8,13 @@
 import type { RpcNotification, RpcResponse } from './frames.ts'
 
 export interface ConnectionOptions {
-  /** Where frames go. A carrier owns framing and flow control; this is the sink. */
-  readonly send: (frame: RpcResponse | RpcNotification) => void
+  /**
+   * Where frames go. A carrier owns framing and flow control; this is the sink.
+   * `droppable` marks a frame the client can lose without losing meaning — the
+   * trace tier, which is streaming fidelity and nothing a fold reads. A carrier
+   * under pressure may skip those; it may never skip a fact or a surface event.
+   */
+  readonly send: (frame: RpcResponse | RpcNotification, droppable: boolean) => void
   /**
    * Whether a client on this carrier may end the whole host. True for stdio and
    * the loopback pair, where the client IS the process's reason to run; false
@@ -58,9 +63,9 @@ export class ClientConnection {
     this.watching.delete(sessionId)
   }
 
-  send(frame: RpcResponse | RpcNotification): void {
+  send(frame: RpcResponse | RpcNotification, droppable = false): void {
     if (this.closed) return
-    this.options.send(frame)
+    this.options.send(frame, droppable)
   }
 
   close(): void {

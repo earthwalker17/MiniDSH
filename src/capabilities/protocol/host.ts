@@ -13,7 +13,7 @@
  * "this client is gone" rather than "dispose the work it started".
  */
 import { statSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, AGENT_OPTIONS, foldAgentOptions, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
 import {
@@ -63,7 +63,10 @@ import {
   type PageResult,
   type PromptResult,
   type RpcNotification,
+  type SessionSummary,
   type SessionView,
+  type SessionsListResult,
+  type WorkspaceInfo,
 } from './frames.ts'
 
 /**
@@ -106,6 +109,8 @@ export interface ProtocolServerConfig {
   readonly cwd: string
   /** Canonical directories a client-chosen `cwd` must lie under. */
   readonly workspaceRoots: readonly string[]
+  /** Named places to work, canonical roots, ids already resolved. */
+  readonly workspaces: readonly WorkspaceInfo[]
   readonly defaultAgentOptions: AgentOptions
   readonly serverVersion: string
   /** Applied to every agent this surface creates or resumes. */
@@ -239,8 +244,8 @@ export class ProtocolHost {
 
   // ---- outbound: the notifications ----------------------------------------
 
-  private broadcast(sessionId: string, frame: RpcNotification): void {
-    for (const connection of this.connections) if (connection.watches(sessionId)) connection.send(frame)
+  private broadcast(sessionId: string, frame: RpcNotification, droppable = false): void {
+    for (const connection of this.connections) if (connection.watches(sessionId)) connection.send(frame, droppable)
   }
 
   onSessionEvent(session: Session, event: EventEnvelope): void {
@@ -249,7 +254,10 @@ export class ProtocolHost {
     // reader never sees a stale parse.
     if (this.cold.size > 0) this.cold.delete(session.id)
     if (this.closed) return
-    this.broadcast(session.id, { jsonrpc: '2.0', method: 'session.event', params: { sessionId: session.id, event } })
+    // The trace tier is what a carrier under pressure is allowed to drop: it is
+    // recorded for streaming fidelity, no fold reads it, and `assistant/message`
+    // carries the same text durably a moment later.
+    this.broadcast(session.id, { jsonrpc: '2.0', method: 'session.event', params: { sessionId: session.id, event } }, TRACE_TYPES.has(event.type))
     // The durable decision settles the answerable frame, whoever decided it.
     if (matches(event, APPROVAL_DECIDED)) this.pendingApprovals.delete(`${session.id}:${event.data.id}`)
     // A page-holding client cannot recompute these folds, so the host re-sends
@@ -317,6 +325,8 @@ export class ProtocolHost {
         return this.initialize()
       case 'session/prompt':
         return this.prompt(record)
+      case 'sessions/list':
+        return this.sessionsList(record)
       case 'session/events':
         return this.events(record)
       case 'session/attach':
@@ -352,7 +362,48 @@ export class ProtocolHost {
       defaultAgentOptions: this.config.defaultAgentOptions,
       defaultAuthority: this.defaultAuthority(),
       workspaceRoots: this.config.workspaceRoots,
+      workspaces: this.config.workspaces,
     }
+  }
+
+  /**
+   * Every session a client could open, live or stored, newest first. A browser
+   * has no other way to find one; `persistence.list` reads a bounded header
+   * prefix per file, so this needs no projection to stay cheap.
+   */
+  private sessionsList(params: Record<string, unknown>): SessionsListResult {
+    const workspaceId = params.workspaceId
+    if (workspaceId !== undefined && typeof workspaceId !== 'string') {
+      throw new RpcFailure(INVALID_PARAMS, 'sessions/list: "workspaceId" must be a string')
+    }
+    const live = new Map(this.ctx.get(SESSIONS).list().map((session) => [String(session.id), session.header]))
+    const stored = this.ctx.tryGet(PERSISTENCE)?.list() ?? []
+    const headers = new Map(stored.map((header) => [String(header.id), header]))
+    // A live session that has not recorded a conversation fact yet has no file,
+    // so the union is what "every session" means.
+    for (const [id, header] of live) headers.set(id, header)
+    const sessions: SessionSummary[] = []
+    for (const header of headers.values()) {
+      const workspace = this.workspaceOf(header.cwd)
+      if (workspaceId !== undefined && workspace?.id !== workspaceId) continue
+      sessions.push({
+        id: String(header.id),
+        createdAt: header.createdAt,
+        cwd: header.cwd,
+        live: live.has(String(header.id)),
+        ...(workspace === undefined ? {} : { workspaceId: workspace.id }),
+        ...(header.parentId === undefined ? {} : { parentId: String(header.parentId) }),
+        ...(header.delegatedBy === undefined ? {} : { delegatedBy: String(header.delegatedBy) }),
+        ...(header.agentPreset === undefined ? {} : { agentPreset: header.agentPreset }),
+      })
+    }
+    sessions.sort((left, right) => right.createdAt - left.createdAt)
+    return { sessions }
+  }
+
+  /** The workspace a path belongs to, derived — no session stores a workspace id. */
+  private workspaceOf(cwd: string): WorkspaceInfo | undefined {
+    return this.config.workspaces.find((workspace) => isInside(workspace.root, cwd))
   }
 
   /**
@@ -361,6 +412,30 @@ export class ProtocolHost {
    * derives from, so it must exist and lie under one of the host's roots; the
    * canonical path (links followed) is what is checked and what is recorded.
    */
+  /**
+   * Where a new session works: a workspace id, or a path, or the host's own
+   * default. Never both — given both, the host refuses rather than guessing
+   * which one the client meant.
+   */
+  private resolveCwd(params: Record<string, unknown>): string {
+    const { cwd, workspaceId, path } = params
+    if (cwd !== undefined && typeof cwd !== 'string') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd" must be a string')
+    if (workspaceId !== undefined && typeof workspaceId !== 'string') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "workspaceId" must be a string')
+    if (path !== undefined && typeof path !== 'string') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "path" must be a string')
+    if (cwd !== undefined && workspaceId !== undefined) {
+      throw new RpcFailure(INVALID_PARAMS, 'session/prompt: give "workspaceId" or "cwd", not both')
+    }
+    if (workspaceId === undefined) {
+      if (path !== undefined) throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "path" is relative to a "workspaceId"')
+      return cwd === undefined ? this.config.cwd : this.workspaceFor(cwd)
+    }
+    const workspace = this.config.workspaces.find((one) => one.id === workspaceId)
+    if (!workspace) throw new RpcFailure(INVALID_PARAMS, `session/prompt: no workspace "${workspaceId}"`)
+    // Resolved and then held to exactly the same four checks a raw path is:
+    // naming a workspace is a convenience, not a wider permission.
+    return this.workspaceFor(path === undefined ? workspace.root : join(workspace.root, path))
+  }
+
   private workspaceFor(raw: string): string {
     if (!isAbsolute(raw)) throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd" must be an absolute path')
     let canonical: string
@@ -517,8 +592,7 @@ export class ProtocolHost {
     const preset = this.config.agentPreset === undefined ? {} : { agentPreset: this.config.agentPreset }
     const setup = this.config.setup === undefined ? {} : { setup: this.config.setup }
     if (requested === undefined) {
-      if (params.cwd !== undefined && typeof params.cwd !== 'string') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd" must be a string')
-      const cwd = params.cwd === undefined ? this.config.cwd : this.workspaceFor(params.cwd)
+      const cwd = this.resolveCwd(params)
       const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...preset, ...setup })
       this.owned.set(handle.agent.id, handle)
       return handle.agent
