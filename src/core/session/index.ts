@@ -4,6 +4,15 @@ export { Session, SessionForkError, sliceForkSeed, type SessionHost } from './se
 export { deriveEventMessage, foldRequestContext, foldRequestHeader, foldSurfaceSeqs, Surface } from './surface.ts'
 export { repairInterruptedTail } from './repair.ts'
 export {
+  DEFAULT_PAGE_MESSAGES,
+  MAX_PAGE_EVENTS,
+  MAX_PAGE_MESSAGES,
+  groupStart,
+  pageEvents,
+  type EventPage,
+  type PageRequest,
+} from './page.ts'
+export {
   SESSIONS,
   SESSION_CREATED,
   SESSION_EVENT,
