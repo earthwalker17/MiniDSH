@@ -21,6 +21,7 @@ import { APPROVAL, APPROVAL_REQUEST } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { canonicalPath, SANDBOX } from '../../core/sandbox/index.ts'
 import { SESSIONS, SESSION_EVENT } from '../../core/session/index.ts'
+import { SETTINGS_CHANGED } from '../../core/settings/index.ts'
 import { ClientConnection } from './connection.ts'
 import { ProtocolHost } from './host.ts'
 import { NdjsonTransport } from './transport-ndjson.ts'
@@ -134,6 +135,7 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
     ctx.on(SESSION_EVENT, (session, event) => host.onSessionEvent(session, event))
     ctx.on(AGENT_STATUS, (agent, status) => host.onAgentStatus(agent, status))
     ctx.on(APPROVAL_REQUEST, (prompt, next) => host.answerApproval(prompt, next))
+    ctx.on(SETTINGS_CHANGED, (ns, revision) => host.onSettingsChanged(ns, revision))
     ctx.effect(() => {
       const stops = carriers.map((carrier) => {
         if (carrier.kind === 'websocket') {

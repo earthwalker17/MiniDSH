@@ -15,15 +15,38 @@ import { z } from 'zod'
 import type { AgentOptions } from '../core/agent/index.ts'
 import { defaultAgentOptions } from './compose.ts'
 
+/** The `agent` namespace's USER layer: every field optional, because a layer states only overrides. */
+const agentLayerSchema = z.strictObject({
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  reasoningEffort: z.string().min(1).optional(),
+  maxSteps: z.number().int().positive().optional(),
+  maxTokens: z.number().int().positive().optional(),
+  temperature: z.number().optional(),
+})
+
+/**
+ * The `agent` namespace's RESOLVED value — the layer merged over the base a
+ * boot registered. A route always names a provider and a model, so those are
+ * required here and optional above; this is what a wire write is validated
+ * against before anything is persisted.
+ */
+export const agentSettingsSchema = z.strictObject({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  reasoningEffort: z.string().min(1).optional(),
+  maxSteps: z.number().int().positive().optional(),
+  maxTokens: z.number().int().positive().optional(),
+  temperature: z.number().optional(),
+})
+
 const settingsSchema = z.strictObject({
-  agent: z
-    .strictObject({
-      provider: z.string().min(1).optional(),
-      model: z.string().min(1).optional(),
-      reasoningEffort: z.string().min(1).optional(),
-      maxSteps: z.number().int().positive().optional(),
-    })
-    .optional(),
+  agent: agentLayerSchema.optional(),
+  /**
+   * Per-namespace write revisions, the store's own bookkeeping. Read here only
+   * so a document a wire client wrote still loads at boot.
+   */
+  revisions: z.record(z.string(), z.number().int().nonnegative()).optional(),
 })
 
 export type SettingsFile = z.infer<typeof settingsSchema>

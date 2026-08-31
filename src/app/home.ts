@@ -49,8 +49,20 @@ export interface HomeLayout {
   readonly spillRoot: string
   readonly globalInstructionsPath: string
   readonly credentialsPath: string
+  /**
+   * The same file `settingsPath()` names, carried down as plugin config because
+   * the settings store now WRITES it at runtime. The boot-time read stays in
+   * the app; nothing below `app` may resolve the home for itself.
+   */
+  readonly settingsStorePath: string
 }
 
 export function homeLayout(): HomeLayout {
-  return { sessionsRoot: sessionsDir(), spillRoot: spillDir(), globalInstructionsPath: globalInstructionsPath(), credentialsPath: credentialsPath() }
+  return {
+    sessionsRoot: sessionsDir(),
+    spillRoot: spillDir(),
+    globalInstructionsPath: globalInstructionsPath(),
+    credentialsPath: credentialsPath(),
+    settingsStorePath: settingsPath(),
+  }
 }

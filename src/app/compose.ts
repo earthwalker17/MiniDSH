@@ -20,6 +20,7 @@ import { authorityPresetsPlugin } from '../capabilities/authority-presets/index.
 import { compactionBasicPlugin } from '../capabilities/compaction-basic/index.ts'
 import { contextRuntimePlugin } from '../capabilities/context-runtime/index.ts'
 import { credentialsLocalPlugin } from '../capabilities/credentials-local/index.ts'
+import { settingsLocalPlugin } from '../capabilities/settings-local/index.ts'
 import { anthropicPlugin } from '../capabilities/llm-anthropic/index.ts'
 import { deepseekPlugin } from '../capabilities/llm-deepseek/index.ts'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
@@ -54,6 +55,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       sessionPlugin,
       sessionInvariantPlugin,
       credentialsLocalPlugin,
+      settingsLocalPlugin,
       llmPlugin,
       deepseekPlugin,
       anthropicPlugin,
@@ -259,6 +261,8 @@ export interface ComposeOptions {
   readonly dialect: ShellDialect
   /** Secret-store path for `credentials-local`; omitted = env-only resolution. */
   readonly credentialsPath?: string
+  /** The settings document the store reads and writes; omitted mounts no settings service. */
+  readonly settingsStorePath?: string
   readonly approve?: boolean
   readonly invariants?: boolean
   /** Deployment default for sessions that have recorded no mode of their own. */
@@ -288,6 +292,9 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('session', sessionPlugin))
   if (withInvariants) rows.push(defineRow('session-invariant', sessionInvariantPlugin))
   rows.push(defineRow('credentials', credentialsLocalPlugin, options.credentialsPath === undefined ? {} : { path: options.credentialsPath }))
+  // Omitted mounts nothing, so a hermetic test has no settings service and the
+  // protocol falls back to the values its config carries.
+  if (options.settingsStorePath !== undefined) rows.push(defineRow('settings', settingsLocalPlugin, { path: options.settingsStorePath }))
   rows.push(defineRow('llm', llmPlugin))
   rows.push(defineRow('llm-deepseek', deepseekPlugin, {}))
   // Both providers are always routable; a missing key bites only when a

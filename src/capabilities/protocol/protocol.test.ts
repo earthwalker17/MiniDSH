@@ -1,5 +1,5 @@
 /** The client protocol, exercised byte-level over an in-memory duplex pair. */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -118,6 +118,9 @@ async function startHost(
     extraClients?: number
     /** Whether each client's carrier may shut the host down (default true, as stdio is). */
     allowShutdown?: boolean
+    /** Mounts the settings store; omitted, the composition has none and the host uses its config value. */
+    settingsStorePath?: string
+    agentDefaults?: { provider: string; model: string }
   },
 ): Promise<{ host: ProtocolHostHandle; client: TestClient; clients: TestClient[]; sessionsRoot: string }> {
   const clients = Array.from({ length: 1 + (extra?.extraClients ?? 0) }, () => new TestClient())
@@ -129,6 +132,8 @@ async function startHost(
     ...(extra?.approve === undefined ? {} : { approve: extra.approve }),
     ...(extra?.agentSetup === undefined ? {} : { agentSetup: extra.agentSetup }),
     ...(extra?.agentPreset === undefined ? {} : { agentPreset: extra.agentPreset }),
+    ...(extra?.settingsStorePath === undefined ? {} : { settingsStorePath: extra.settingsStorePath }),
+    ...(extra?.agentDefaults === undefined ? {} : { agentDefaults: extra.agentDefaults }),
     patches: [{ id: 'llm-deepseek', disabled: true }],
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
@@ -377,7 +382,6 @@ describe('protocol: the workspace root is host policy', () => {
    * workspace-write. A client may now choose WHERE inside the host's roots.
    */
   it('refuses a cwd outside the host workspace roots, a non-directory, and a relative path; accepts a subdirectory', async () => {
-    const { mkdirSync, writeFileSync } = await import('node:fs')
     const adapter = new ScriptedAdapter().script(assistantText('hi'))
     const { client } = await startHost(adapter)
     const init = await client.result<{ workspaceRoots: string[] }>('initialize')
@@ -674,6 +678,62 @@ describe('protocol: the paged attach', () => {
   })
 })
 
+describe('protocol: settings over the wire', () => {
+  const withStore = async (extraClients = 0) =>
+    startHost(new ScriptedAdapter().script(assistantText('a')), {
+      settingsStorePath: join(tempDir('minidsh-settings-home-'), 'settings.json'),
+      agentDefaults: SCRIPTED,
+      extraClients,
+    })
+
+  it('describes what may be written, with its base, its revision and a schema to render', async () => {
+    const { client } = await withStore()
+    const described = await client.result<{ namespaces: { ns: string; base: unknown; value: unknown; revision: number; schema?: unknown }[] }>('settings/describe')
+    const agent = described.namespaces.find((one) => one.ns === 'agent')!
+    expect(agent.base).toEqual(SCRIPTED)
+    expect(agent.value).toEqual(SCRIPTED)
+    expect(agent.revision).toBe(0)
+    expect(agent.schema).toBeDefined()
+  })
+
+  it('requires the revision a writer read, and refuses a stale one', async () => {
+    const { client } = await withStore()
+    const unfenced = await client.call('settings/set', { ns: 'agent', patch: { model: 'anything' } })
+    expect(unfenced.error?.message).toContain('"expectedRevision" is required')
+
+    const written = await client.result<{ revision: number }>('settings/set', { ns: 'agent', patch: { model: 'chosen' }, expectedRevision: 0 })
+    expect(written.revision).toBe(1)
+    const stale = await client.call('settings/set', { ns: 'agent', patch: { model: 'other' }, expectedRevision: 0 })
+    expect(stale.error?.message).toContain('changed since revision 0')
+  })
+
+  it('changes what the NEXT session starts from, read live rather than captured at boot', async () => {
+    const { client } = await withStore()
+    await client.result('settings/set', { ns: 'agent', patch: { maxSteps: 7 }, expectedRevision: 0 })
+    const init = await client.result<{ defaultAgentOptions: { maxSteps?: number } }>('initialize')
+    expect(init.defaultAgentOptions.maxSteps).toBe(7)
+
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi' })
+    await client.waitForIdle(sessionId)
+    const attached = await client.result<AttachResult>('session/attach', { sessionId })
+    expect(attached.view.options?.maxSteps).toBe(7)
+  })
+
+  it('tells a second client that someone wrote, so no pane shows a stale value', async () => {
+    const { clients } = await withStore(1)
+    const [first, second] = clients as [TestClient, TestClient]
+    await first.result('settings/set', { ns: 'agent', patch: { model: 'shared' }, expectedRevision: 0 })
+    const announced = await second.waitFor(() => second.notifications.find((entry) => entry.method === 'settings.changed'), 'the settings notification')
+    expect(announced.params).toEqual({ ns: 'agent', revision: 1 })
+  })
+
+  it('answers honestly where no settings store is mounted, instead of pretending', async () => {
+    const { client } = await startHost(new ScriptedAdapter())
+    const reply = await client.call('settings/describe')
+    expect(reply.error?.message).toContain('no settings capability')
+  })
+})
+
 describe('protocol: workspaces are addressing, never authority', () => {
   async function withWorkspaces(): Promise<{ client: TestClient; roots: string[] }> {
     const roots = [tempDir('minidsh-ws-a-'), tempDir('minidsh-ws-b-')]
@@ -751,7 +811,7 @@ describe('protocol: workspaces are addressing, never authority', () => {
     await client.waitForIdle(theirs.sessionId)
 
     const all = await client.result<{ sessions: { id: string; workspaceId?: string; live: boolean }[] }>('sessions/list')
-    expect(all.sessions.map((one) => one.id).sort()).toEqual([mine.sessionId, theirs.sessionId].sort())
+    expect(all.sessions.map((one) => one.id).toSorted()).toEqual([mine.sessionId, theirs.sessionId].toSorted())
     expect(all.sessions.every((one) => one.live)).toBe(true)
 
     const filtered = await client.result<{ sessions: { id: string }[] }>('sessions/list', { workspaceId: beta.id })

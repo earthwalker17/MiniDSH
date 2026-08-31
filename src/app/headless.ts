@@ -5,6 +5,7 @@
  * log. It only touches `ctx.agents`/`ctx.sessions` and renders through
  * `onEvent`.
  */
+import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS, mergeAgentOptions, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
 import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
@@ -12,10 +13,13 @@ import { SANDBOX, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
 import { messageText } from '../core/llm/message.ts'
 import { PRESETS } from '../core/presets/index.ts'
+import { SETTINGS } from '../core/settings/index.ts'
+import type { JsonValue } from '../core/json.ts'
 import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { compose, COMPOSITION, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
 import { applyLayers, type NamedLayer } from './config.ts'
+import { agentSettingsSchema } from './settings.ts'
 import { compositionRecordPlugin } from '../capabilities/composition-record/index.ts'
 import type { ShellDialect } from '../capabilities/shell-stdio/index.ts'
 
@@ -36,6 +40,8 @@ export interface BootOptions {
   readonly globalInstructionsPath?: string
   /** Secret-store path for the credentials row; omitted = env-only (hermetic tests). */
   readonly credentialsPath?: string
+  /** The settings document the runtime store reads and writes; omitted mounts no settings service. */
+  readonly settingsStorePath?: string
   readonly dialect?: ShellDialect
   /** The programmatic app/test layer, applied before any disk layer. */
   readonly patches?: readonly Patch[]
@@ -106,6 +112,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
       ...(options.spillRoot === undefined ? {} : { spillRoot: options.spillRoot }),
       ...(options.globalInstructionsPath === undefined ? {} : { globalInstructionsPath: options.globalInstructionsPath }),
       ...(options.credentialsPath === undefined ? {} : { credentialsPath: options.credentialsPath }),
+      ...(options.settingsStorePath === undefined ? {} : { settingsStorePath: options.settingsStorePath }),
       ...(options.approve === undefined ? {} : { approve: options.approve }),
       ...(options.invariants === undefined ? {} : { invariants: options.invariants }),
       ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
@@ -131,9 +138,29 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     const failed = report.failed.map((entry) => `${entry.name}: ${entry.error instanceof Error ? entry.error.message : String(entry.error)}`).join('; ')
     throw new Error(`composition did not settle — pending: [${pending}] failed: [${failed}]`)
   }
+  registerAgentSettings(root, options.agentDefaults ?? defaultAgentOptions())
   await options.prepare?.(root)
   if (onEvent) root.on(SESSION_EVENT, (session, event) => onEvent({ sessionId: session.id, event }))
   return root
+}
+
+/**
+ * Which settings namespaces exist is app assembly, so the boot claims them —
+ * not a capability, and never the model.
+ *
+ * The BASE is the value this process already resolved (built-ins, then the
+ * environment, then the file), so boot precedence is untouched and a wire write
+ * lands as one layer ABOVE it. Registering is skipped when no store is mounted:
+ * a hermetic composition then has no settings service at all, and every reader
+ * falls back to the values it was handed.
+ */
+function registerAgentSettings(root: Context, base: AgentOptions): void {
+  const settings = root.tryGet(SETTINGS)
+  if (!settings) return
+  settings.register(root, 'agent', agentSettingsSchema, {
+    base,
+    schema: z.toJSONSchema(agentSettingsSchema) as JsonValue,
+  })
 }
 
 /**

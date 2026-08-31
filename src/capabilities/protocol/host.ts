@@ -34,6 +34,8 @@ import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { meterSession } from '../../core/metering/index.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
+import { SETTINGS, SettingsError, type Settings } from '../../core/settings/index.ts'
+import type { JsonValue } from '../../core/json.ts'
 import { AUTHORITY_PRESET, PRESETS } from '../../core/presets/index.ts'
 import { canonicalPath, effectiveSandboxMode, isInside, isSandboxMode, SANDBOX, SANDBOX_MODE, SANDBOX_MODES } from '../../core/sandbox/index.ts'
 import {
@@ -345,6 +347,12 @@ export class ProtocolHost {
         return this.authority(record)
       case 'session/model':
         return this.model(record)
+      case 'settings/describe':
+        return { namespaces: this.settings().describe() }
+      case 'settings/get':
+        return this.settings().read(requireString(record, 'ns', 'settings/get'))
+      case 'settings/set':
+        return this.settingsSet(record)
       case 'shutdown':
         // Host-wide, and therefore not every carrier's to call: a browser tab
         // closing must not end a daemon other clients are attached to.
@@ -359,7 +367,7 @@ export class ProtocolHost {
     return {
       serverInfo: { name: 'minidsh', version: this.config.serverVersion },
       providers: this.ctx.get(LLM).providers(),
-      defaultAgentOptions: this.config.defaultAgentOptions,
+      defaultAgentOptions: this.agentDefaults(),
       defaultAuthority: this.defaultAuthority(),
       workspaceRoots: this.config.workspaceRoots,
       workspaces: this.config.workspaces,
@@ -399,6 +407,58 @@ export class ProtocolHost {
     }
     sessions.sort((left, right) => right.createdAt - left.createdAt)
     return { sessions }
+  }
+
+  private settings(): Settings {
+    const settings = this.ctx.tryGet(SETTINGS)
+    if (!settings) throw new RpcFailure(INTERNAL_ERROR, 'this host has no settings capability mounted')
+    return settings
+  }
+
+  /**
+   * A write is REQUIRED to echo the revision it read. The fence is optional
+   * upstream and enforced nowhere, which means two panes can lose each other's
+   * edits; a client that read a value has a revision to give, so requiring it
+   * costs nothing and closes that.
+   */
+  private settingsSet(params: Record<string, unknown>): unknown {
+    const ns = requireString(params, 'ns', 'settings/set')
+    const revision = optionalCount(params, 'expectedRevision', 'settings/set')
+    if (revision === undefined) throw new RpcFailure(INVALID_PARAMS, 'settings/set: "expectedRevision" is required — read it from settings/get first')
+    if (params.replace !== undefined && typeof params.replace !== 'boolean') {
+      throw new RpcFailure(INVALID_PARAMS, 'settings/set: "replace" must be a boolean')
+    }
+    if (!isRecord(params.patch)) throw new RpcFailure(INVALID_PARAMS, 'settings/set: "patch" must be an object')
+    try {
+      return this.settings().write(ns, params.patch as JsonValue, { expectedRevision: revision, replace: params.replace === true })
+    } catch (error) {
+      // A conflict and an invalid value are both the caller's problem, not the host's.
+      if (error instanceof SettingsError) throw new RpcFailure(INVALID_PARAMS, error.message)
+      throw error
+    }
+  }
+
+  /** Every client learns that someone wrote, so a second pane cannot show a stale value. */
+  onSettingsChanged(ns: string, revision: number): void {
+    if (this.closed) return
+    for (const connection of this.connections) connection.send({ jsonrpc: '2.0', method: 'settings.changed', params: { ns, revision } })
+  }
+
+  /**
+   * The defaults a new session starts from. Read LIVE where a settings store is
+   * mounted, so a pane that edits the default is editing what the next session
+   * actually gets; the config value is the fallback for a composition without
+   * one. This is still the DEFAULTS tier — a resumed session rebuilds from its
+   * own log, and nothing here can reach it.
+   */
+  private agentDefaults(): AgentOptions {
+    const settings = this.ctx.tryGet(SETTINGS)
+    if (!settings) return this.config.defaultAgentOptions
+    try {
+      return settings.read('agent').value as unknown as AgentOptions
+    } catch {
+      return this.config.defaultAgentOptions
+    }
   }
 
   /** The workspace a path belongs to, derived — no session stores a workspace id. */
@@ -585,7 +645,7 @@ export class ProtocolHost {
       throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "sessionId" must be a string')
     }
     const agents = this.ctx.get(AGENTS)
-    const options = readAgentOptions(this.config.defaultAgentOptions, params.agentOptions, 'session/prompt')
+    const options = readAgentOptions(this.agentDefaults(), params.agentOptions, 'session/prompt')
     // A route to nowhere is refused here, on every path, rather than becoming
     // this session's recorded base and failing at its first paid step.
     this.assertRoutable(options.partial, 'session/prompt')
@@ -607,7 +667,7 @@ export class ProtocolHost {
     let inflight = this.resuming.get(requested)
     if (!inflight) {
       inflight = agents
-        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.config.defaultAgentOptions, ...setup })
+        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.agentDefaults(), ...setup })
         .then((handle) => {
           this.owned.set(handle.agent.id, handle)
           return handle.agent
