@@ -9,7 +9,7 @@ import { formatTokens, type ContextMetrics } from '../../core/metering/index.ts'
 import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
 import { APPROVAL_ASKED } from '../../core/approval/index.ts'
 import type { StreamChunk } from '../../core/llm/index.ts'
-import type { SessionView } from '../../capabilities/protocol-stdio/index.ts'
+import type { SessionView } from '../../capabilities/protocol/index.ts'
 import { describeEvent, transcriptLines } from '../present.ts'
 
 /**

@@ -4,7 +4,7 @@
  * same newline-delimited framing as any external client — the loopback pair it
  * usually rides on is a carrier detail.
  */
-import { NdjsonTransport } from '../../capabilities/protocol-stdio/index.ts'
+import { NdjsonTransport } from '../../capabilities/protocol/index.ts'
 
 export interface ClientHandlers {
   readonly onNotification: (method: string, params: unknown) => void

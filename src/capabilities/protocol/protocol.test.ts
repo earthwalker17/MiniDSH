@@ -76,11 +76,11 @@ class TestClient {
     return reply.result as T
   }
 
-  frames(type?: string): { sessionId: string; event: { type: string; data: Record<string, unknown> } }[] {
+  frames(type?: string, sessionId?: string): { sessionId: string; event: { type: string; data: Record<string, unknown> } }[] {
     return this.notifications
       .filter((entry) => entry.method === 'session.event')
       .map((entry) => entry.params as { sessionId: string; event: { type: string; data: Record<string, unknown> } })
-      .filter((frame) => type === undefined || frame.event.type === type)
+      .filter((frame) => (type === undefined || frame.event.type === type) && (sessionId === undefined || frame.sessionId === sessionId))
   }
 
   statuses(): { sessionId: string; status: string }[] {
@@ -108,9 +108,19 @@ class TestClient {
 
 async function startHost(
   adapter: ScriptedAdapter,
-  extra?: { sessionsRoot?: string; prepare?: (root: Context) => void; approve?: boolean; agentSetup?: (agentCtx: Context) => void; agentPreset?: string },
-): Promise<{ host: ProtocolHostHandle; client: TestClient; sessionsRoot: string }> {
-  const client = new TestClient()
+  extra?: {
+    sessionsRoot?: string
+    prepare?: (root: Context) => void
+    approve?: boolean
+    agentSetup?: (agentCtx: Context) => void
+    agentPreset?: string
+    /** Extra clients on their own stream carriers — the multi-client shape, with no socket needed. */
+    extraClients?: number
+    /** Whether each client's carrier may shut the host down (default true, as stdio is). */
+    allowShutdown?: boolean
+  },
+): Promise<{ host: ProtocolHostHandle; client: TestClient; clients: TestClient[]; sessionsRoot: string }> {
+  const clients = Array.from({ length: 1 + (extra?.extraClients ?? 0) }, () => new TestClient())
   const sessionsRoot = extra?.sessionsRoot ?? tempDir('minidsh-proto-sessions-')
   const host = await startProtocolHost({
     cwd: tempDir('minidsh-proto-cwd-'),
@@ -124,14 +134,18 @@ async function startHost(
       root.get(LLM).registerAdapter(root, adapter)
       extra?.prepare?.(root)
     },
-    input: client.input,
-    output: client.output,
+    carriers: clients.map((one) => ({
+      kind: 'stream' as const,
+      input: one.input,
+      output: one.output,
+      allowShutdown: extra?.allowShutdown ?? true,
+    })),
   })
   hosts.push(host)
-  return { host, client, sessionsRoot }
+  return { host, client: clients[0]!, clients, sessionsRoot }
 }
 
-describe('protocol-stdio: handshake and streaming', () => {
+describe('protocol: handshake and streaming', () => {
   it('initialize returns the server info, the provider catalog, and the default agent options', async () => {
     const { client } = await startHost(new ScriptedAdapter())
     const result = await client.result<{
@@ -171,7 +185,7 @@ describe('protocol-stdio: handshake and streaming', () => {
   })
 })
 
-describe('protocol-stdio: steering and cancel', () => {
+describe('protocol: steering and cancel', () => {
   it('a steer prompt lands at the next step boundary of the running turn', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
@@ -230,7 +244,7 @@ describe('protocol-stdio: steering and cancel', () => {
   })
 })
 
-describe('protocol-stdio: approvals are the durable frames', () => {
+describe('protocol: approvals are the durable frames', () => {
   const touchy = defineTool({
     name: 'touchy',
     description: 'needs approval',
@@ -277,7 +291,7 @@ describe('protocol-stdio: approvals are the durable frames', () => {
   })
 })
 
-describe('protocol-stdio: resume over the wire', () => {
+describe('protocol: resume over the wire', () => {
   it('prompting a stored session id resumes it in a fresh host, appending to the same file', async () => {
     const first = await startHost(new ScriptedAdapter().script(assistantText('one')))
     const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
@@ -336,7 +350,7 @@ describe('protocol-stdio: resume over the wire', () => {
   })
 })
 
-describe('protocol-stdio: shutdown', () => {
+describe('protocol: shutdown', () => {
   it('disposes owned agents to idle, answers, and reports the surface done — the stored log stays clean', async () => {
     const { host, client, sessionsRoot } = await startHost(new ScriptedAdapter().script(assistantText('done')))
     const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
@@ -355,7 +369,7 @@ describe('protocol-stdio: shutdown', () => {
   })
 })
 
-describe('protocol-stdio: the workspace root is host policy', () => {
+describe('protocol: the workspace root is host policy', () => {
   /**
    * `session/prompt.cwd` becomes the immutable `SessionHeader.cwd`, which IS the
    * sandbox workspace root for the session's whole life. It used to be taken
@@ -385,7 +399,7 @@ describe('protocol-stdio: the workspace root is host policy', () => {
   })
 })
 
-describe('protocol-stdio: the authority control plane', () => {
+describe('protocol: the authority control plane', () => {
   it('reports what a new session would start under, and what this host can enforce', async () => {
     const { client } = await startHost(new ScriptedAdapter())
     const result = await client.result<{ defaultAuthority: { sandbox: string; approval: string; enforcement: string } }>('initialize')
@@ -511,7 +525,7 @@ describe('what the review found', () => {
   })
 })
 
-describe('protocol-stdio: the paged attach', () => {
+describe('protocol: the paged attach', () => {
   /** `turns` completed turns on one session, so a page has something to cut. */
   async function session(turns: number, extra?: Parameters<typeof startHost>[1]) {
     const adapter = new ScriptedAdapter().script(...Array.from({ length: turns }, (_unused, index) => assistantText(`answer ${index + 1}`)))
@@ -657,5 +671,191 @@ describe('protocol-stdio: the paged attach', () => {
     await client.waitForIdle(sessionId)
     const settled = await client.result<AttachResult>('session/attach', { sessionId })
     expect(settled.view.pendingApprovals).toEqual([])
+  })
+})
+
+describe('protocol: more than one client', () => {
+  it('streams one session to every client that has not narrowed away from it', async () => {
+    const { clients } = await startHost(new ScriptedAdapter().script(assistantText('for everyone')), { extraClients: 1 })
+    const [first, second] = clients as [TestClient, TestClient]
+    const { sessionId } = await first.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
+    await first.waitForIdle(sessionId)
+
+    // The second client never asked for anything and still sees the session:
+    // an un-narrowed connection receives everything, exactly as before.
+    expect(second.frames('assistant/message', sessionId).length).toBeGreaterThan(0)
+    expect(second.statuses().some((entry) => entry.sessionId === sessionId)).toBe(true)
+  })
+
+  it('narrows a client to the sessions it attached to, and detaching stops delivery', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('one'), assistantText('two'), assistantText('three'))
+    const { clients } = await startHost(adapter, { extraClients: 1 })
+    const [first, second] = clients as [TestClient, TestClient]
+    const { sessionId: watched } = await first.result<{ sessionId: string }>('session/prompt', { text: 'first', agentOptions: SCRIPTED })
+    await first.waitForIdle(watched)
+
+    await second.result('session/attach', { sessionId: watched })
+    const before = second.frames().length
+    // A second session the narrowed client never attached to.
+    const { sessionId: other } = await first.result<{ sessionId: string }>('session/prompt', { text: 'second', agentOptions: SCRIPTED })
+    await first.waitForIdle(other)
+    expect(second.frames(undefined, other)).toHaveLength(0)
+    expect(second.frames().length).toBe(before)
+
+    // And detaching stops the one it did attach to.
+    await second.result('session/detach', { sessionId: watched })
+    const quiet = second.frames().length
+    await first.result('session/prompt', { sessionId: watched, text: 'more' })
+    await first.waitFor(() => (first.frames('turn/end', watched).length >= 2 ? true : undefined), 'the second turn to end')
+    expect(second.frames().length).toBe(quiet)
+  })
+
+  it('lets either client answer an approval, and tells the loser it is no longer pending', async () => {
+    const gated = defineTool({
+      name: 'shared',
+      description: 'needs consent',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'shared', {}), assistantText('done'))
+    const { clients } = await startHost(adapter, {
+      extraClients: 1,
+      prepare: (root) => {
+        root.get(TOOLS).register(root, gated)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'shared' ? { kind: 'ask' } : next()))
+      },
+    })
+    const [first, second] = clients as [TestClient, TestClient]
+    const { sessionId } = await first.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+
+    // Both clients see the ask, because the durable event IS the frame.
+    const asked = await first.waitFor(() => first.frames('approval/asked')[0], 'the ask on the first client')
+    await second.waitFor(() => second.frames('approval/asked')[0], 'the ask on the second client')
+    const id = asked.event.data.id as string
+
+    const winner = await second.result<{ outcome: string }>('approval/answer', { sessionId, id, outcome: 'allowed-once' })
+    expect(winner.outcome).toBe('accepted')
+    const loser = await first.result<{ outcome: string }>('approval/answer', { sessionId, id, outcome: 'rejected' })
+    expect(loser.outcome).toBe('not-pending')
+    await first.waitForIdle(sessionId)
+    // The decision the other client made reaches this one as the durable event.
+    expect(first.frames('approval/decided')[0]!.event.data.outcome).toBe('allowed-once')
+  })
+
+  it('treats a disconnect as one client leaving, not as a shutdown', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('one'), assistantText('two'))
+    const { host, clients } = await startHost(adapter, { extraClients: 1 })
+    const [first, second] = clients as [TestClient, TestClient]
+    const { sessionId } = await first.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
+    await first.waitForIdle(sessionId)
+
+    // The second client hangs up. The agent it was watching is not its to end.
+    second.input.end()
+    await first.waitFor(() => (host.root.get(AGENTS).get(asSessionId(sessionId)) ? true : undefined), 'the agent to still be live')
+    await first.result('session/prompt', { sessionId, text: 'still here?' })
+    await first.waitFor(() => (first.frames('turn/end', sessionId).length >= 2 ? true : undefined), 'the second turn to end')
+    expect(host.root.get(AGENTS).get(asSessionId(sessionId))).toBeDefined()
+  })
+
+  it('settles an approval nobody is left to answer, rather than parking the agent forever', async () => {
+    const gated = defineTool({
+      name: 'gated',
+      description: 'needs consent',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const { clients } = await startHost(adapter, {
+      extraClients: 1,
+      prepare: (root) => {
+        root.get(TOOLS).register(root, gated)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'gated' ? { kind: 'ask' } : next()))
+      },
+    })
+    const [first, second] = clients as [TestClient, TestClient]
+    const { sessionId } = await first.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    await first.waitFor(() => first.frames('approval/asked', sessionId)[0], 'the ask')
+    // Only the second client is watching this session now.
+    await first.result('session/detach', { sessionId })
+    // It is genuinely parked: nothing has decided it.
+    expect(first.frames('approval/decided', sessionId)).toHaveLength(0)
+
+    second.input.end()
+    // With its last possible answerer gone the question is closed, and the turn
+    // finishes instead of hanging on someone who will never look. Polled by
+    // re-reading the view, because this client stopped receiving frames.
+    const deadline = Date.now() + 5000
+    let settled: AttachResult | undefined
+    for (;;) {
+      const attached = await first.result<AttachResult>('session/attach', { sessionId })
+      if (attached.view.status === 'idle' && attached.view.pendingApprovals.length === 0) {
+        settled = attached
+        break
+      }
+      if (Date.now() > deadline) throw new Error(`the approval never settled: ${JSON.stringify(attached.view)}`)
+      // Re-attaching to read the view widened this client's watch set again; step back out.
+      await first.result('session/detach', { sessionId })
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    const decided = settled.page.events.filter((event) => event.type === 'approval/decided')
+    expect(decided).toHaveLength(1)
+  })
+
+  it('refuses shutdown from a carrier that does not own the process', async () => {
+    const { client } = await startHost(new ScriptedAdapter(), { allowShutdown: false })
+    const reply = await client.call('shutdown')
+    expect(reply.error?.code).toBe(-32602)
+    expect(reply.error?.message).toContain('may not shut the host down')
+    // And the host is still serving.
+    const init = await client.result<{ serverInfo: { name: string } }>('initialize')
+    expect(init.serverInfo.name).toBe('minidsh')
+  })
+
+  /** Every user message this client saw enter the session, in order. */
+  const entered = (client: TestClient, sessionId: string): string[] =>
+    client.frames('user/message', sessionId).map((frame) => ((frame.event.data.message as { content: { text?: string }[] }).content[0] as { text: string }).text)
+
+  async function cancelRace(keepQueued: boolean): Promise<{ first: TestClient; sessionId: string }> {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const adapter = new ScriptedAdapter().script(
+      async () => {
+        await gate
+        return assistantText('the interrupted turn')
+      },
+      assistantText('a'),
+      assistantText('b'),
+      assistantText('c'),
+    )
+    const { clients } = await startHost(adapter, { extraClients: 1 })
+    const [first, second] = clients as [TestClient, TestClient]
+    const { sessionId } = await first.result<{ sessionId: string }>('session/prompt', { text: 'start', agentOptions: SCRIPTED })
+    await first.waitFor(() => first.statuses().find((entry) => entry.status === 'running'), 'the turn to start')
+
+    // The other client queues work; then this one cancels the running turn.
+    await second.result('session/prompt', { sessionId, text: 'the other client work' })
+    await first.result('session/cancel', { sessionId, ...(keepQueued ? { keepQueued: true } : {}) })
+    release()
+    return { first, sessionId }
+  }
+
+  it('does not discard another client work when a cancel says the queue is not its own', async () => {
+    const { first, sessionId } = await cancelRace(true)
+    await first.waitFor(() => (entered(first, sessionId).includes('the other client work') ? true : undefined), 'the queued prompt to be entered')
+  })
+
+  it('still forgets the queue on a plain cancel, which is what one client at a keyboard means', async () => {
+    const { first, sessionId } = await cancelRace(false)
+    // The inbox is FIFO, so anything that survived would run BEFORE this does:
+    // seeing this one entered without the other proves the queue was cleared.
+    await first.result('session/prompt', { sessionId, text: 'sent after the cancel' })
+    await first.waitFor(() => (entered(first, sessionId).includes('sent after the cancel') ? true : undefined), 'the later prompt to be entered')
+    expect(entered(first, sessionId)).not.toContain('the other client work')
   })
 })

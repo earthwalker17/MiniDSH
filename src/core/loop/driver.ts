@@ -21,6 +21,7 @@ import {
   type AgentStatus,
   type CallConfig,
   type CancelCause,
+  type CancelOptions,
   type CreateAgentOptions,
   type InboxTarget,
   type PreStepDecision,
@@ -178,11 +179,12 @@ export class ReactLoopAgent implements Agent {
     this.send(message, 'next-step', false)
   }
 
-  cancel(cause: CancelCause): void {
+  cancel(cause: CancelCause, options?: CancelOptions): void {
     if (cause.kind === 'disposed') this.disposed = true
     // Graceful teardown must not durably erase the queue the log preserves for
-    // the next resume; a user/hook cancel means it.
-    this.inbox.clear(cause.kind !== 'disposed')
+    // the next resume; a user/hook cancel means it, unless the caller says the
+    // queue is not theirs alone to discard (several clients on one session).
+    if (!options?.keepInbox) this.inbox.clear(cause.kind !== 'disposed')
     if (this.running) this.abort.abort(cause)
   }
 

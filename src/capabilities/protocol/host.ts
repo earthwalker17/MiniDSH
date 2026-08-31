@@ -1,11 +1,16 @@
 /**
  * The protocol host: JSON-RPC method handlers, the live control plane a wire
- * needs beyond durable events — the status projection, approval prompts as
- * answerable frames keyed by the durable `approval/asked` id (a host-side
- * pending table, first answer wins), cancel/steer — and the ownership of
- * agents created over the wire. Approval frames have no notification of their
- * own: the durable `approval/asked`/`approval/decided` events streaming over
- * `session.event` ARE the frames.
+ * needs beyond durable events — the status and session projections, approval
+ * prompts as answerable frames keyed by the durable `approval/asked` id (a
+ * host-side pending table, first answer wins across clients), cancel/steer —
+ * and the ownership of agents created over the wire. Approval frames have no
+ * notification of their own: the durable `approval/asked`/`approval/decided`
+ * events streaming over `session.event` ARE the frames.
+ *
+ * The host is per-DEPLOYMENT, not per-client. Everything durable or shared
+ * lives here and outlives any connection; a `ClientConnection` owns only its
+ * frame sink and its watch set. That split is what makes a disconnect mean
+ * "this client is gone" rather than "dispose the work it started".
  */
 import { statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
@@ -43,6 +48,7 @@ import {
   type Session,
   type SessionHeader,
 } from '../../core/session/index.ts'
+import { ClientConnection } from './connection.ts'
 import {
   INTERNAL_ERROR,
   INVALID_PARAMS,
@@ -57,7 +63,6 @@ import {
   type PageResult,
   type PromptResult,
   type RpcNotification,
-  type RpcResponse,
   type SessionView,
 } from './frames.ts'
 
@@ -109,9 +114,13 @@ export interface ProtocolServerConfig {
   readonly agentPreset?: string
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
+  /**
+   * End the host when its last client disconnects. True for a carrier whose
+   * client IS the process's reason to run (stdio, the loopback pair); false for
+   * a socket, where the host outlives every tab that opens it.
+   */
+  readonly closeWithLastClient?: boolean
 }
-
-type Emit = (frame: RpcResponse | RpcNotification) => void
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -161,12 +170,20 @@ function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: st
   return { full: mergeAgentOptions(defaults, typed), partial: typed }
 }
 
-export class ProtocolServer {
+/** A parked approval, and the connections that could still answer it. */
+interface PendingApproval {
+  readonly sessionId: string
+  readonly settle: (outcome: ApprovalOutcome) => void
+  readonly watchers: Set<ClientConnection>
+}
+
+export class ProtocolHost {
   private readonly ctx: Context
   private readonly config: ProtocolServerConfig
-  private readonly emit: Emit
-  /** Answerable approval frames, keyed by `sessionId:durableId`. First answer wins. */
-  private readonly pendingApprovals = new Map<string, (outcome: ApprovalOutcome) => void>()
+  /** Every connected client. Agents outlive all of them. */
+  private readonly connections = new Set<ClientConnection>()
+  /** Answerable approval frames, keyed by `sessionId:durableId`. First answer wins, across clients. */
+  private readonly pendingApprovals = new Map<string, PendingApproval>()
   /** Agents this protocol created (and therefore owns), by session id. */
   private readonly owned = new Map<string, AgentHandle>()
   /** In-flight resumes, so concurrent prompts for one stored id share a transaction. */
@@ -178,13 +195,53 @@ export class ProtocolServer {
   private closed = false
   private shuttingDown = false
 
-  constructor(ctx: Context, config: ProtocolServerConfig, emit: Emit) {
+  constructor(ctx: Context, config: ProtocolServerConfig) {
     this.ctx = ctx
     this.config = config
-    this.emit = emit
   }
 
-  // ---- outbound: the two notifications ------------------------------------
+  // ---- connections --------------------------------------------------------
+
+  connect(connection: ClientConnection): void {
+    if (this.closed) {
+      connection.close()
+      return
+    }
+    this.connections.add(connection)
+  }
+
+  /**
+   * One client is gone. Its agents are NOT: a disconnect is not a shutdown, so
+   * a browser refresh reattaches to work still running. What does end is any
+   * approval only this client could have answered — leaving it parked would
+   * block the agent on a question nobody can see.
+   */
+  disconnect(connection: ClientConnection): void {
+    connection.close()
+    this.connections.delete(connection)
+    this.withdrawFromApprovals(connection)
+    if (this.connections.size === 0 && this.config.closeWithLastClient) this.close()
+  }
+
+  /**
+   * This client can no longer answer — it left, or it stopped watching. An
+   * approval whose last possible answerer is gone is closed rather than left
+   * parked, because a parked question no one can see stops the agent forever.
+   */
+  private withdrawFromApprovals(connection: ClientConnection, sessionId?: string): void {
+    for (const [key, pending] of this.pendingApprovals) {
+      if (sessionId !== undefined && pending.sessionId !== sessionId) continue
+      if (!pending.watchers.delete(connection) || pending.watchers.size > 0) continue
+      this.pendingApprovals.delete(key)
+      pending.settle('unavailable')
+    }
+  }
+
+  // ---- outbound: the notifications ----------------------------------------
+
+  private broadcast(sessionId: string, frame: RpcNotification): void {
+    for (const connection of this.connections) if (connection.watches(sessionId)) connection.send(frame)
+  }
 
   onSessionEvent(session: Session, event: EventEnvelope): void {
     // A live event means any stored copy of this session is behind; the live
@@ -192,7 +249,7 @@ export class ProtocolServer {
     // reader never sees a stale parse.
     if (this.cold.size > 0) this.cold.delete(session.id)
     if (this.closed) return
-    this.emit({ jsonrpc: '2.0', method: 'session.event', params: { sessionId: session.id, event } })
+    this.broadcast(session.id, { jsonrpc: '2.0', method: 'session.event', params: { sessionId: session.id, event } })
     // The durable decision settles the answerable frame, whoever decided it.
     if (matches(event, APPROVAL_DECIDED)) this.pendingApprovals.delete(`${session.id}:${event.data.id}`)
     // A page-holding client cannot recompute these folds, so the host re-sends
@@ -210,42 +267,50 @@ export class ProtocolServer {
       cursor: session.seq - 1,
       agent: this.ctx.get(AGENTS).get(session.id),
     })
-    this.emit({ jsonrpc: '2.0', method: 'session.view', params: { sessionId: session.id, view } })
+    this.broadcast(session.id, { jsonrpc: '2.0', method: 'session.view', params: { sessionId: session.id, view } })
   }
 
   onAgentStatus(agent: Agent, status: 'idle' | 'running'): void {
     if (this.closed) return
-    this.emit({ jsonrpc: '2.0', method: 'session.status', params: { sessionId: agent.id, status } })
+    this.broadcast(agent.id, { jsonrpc: '2.0', method: 'session.status', params: { sessionId: agent.id, status } })
   }
 
-  /** The `approval/request` answerer: park the prompt for the client; delegate when no client can answer. */
+  /**
+   * The `approval/request` answerer. The durable `approval/asked` event already
+   * reached every watching client as a frame, so parking the promise is all
+   * this does — and it parks only if someone is actually watching that session.
+   * With nobody to ask, it delegates down the waterfall rather than hanging the
+   * agent on a question no one will ever see.
+   */
   answerApproval(prompt: ApprovalPrompt, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
     if (this.closed) return next()
+    const watchers = new Set([...this.connections].filter((connection) => connection.watches(prompt.agent.id)))
+    if (watchers.size === 0) return next()
     return new Promise<ApprovalOutcome>((resolve) => {
-      this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, resolve)
+      this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, { sessionId: prompt.agent.id, settle: resolve, watchers })
     })
   }
 
   // ---- inbound ------------------------------------------------------------
 
-  async onFrame(frame: unknown): Promise<void> {
+  async onFrame(connection: ClientConnection, frame: unknown): Promise<void> {
     if (!isRecord(frame) || frame.jsonrpc !== '2.0' || typeof frame.method !== 'string') return
     const id = frame.id
     if (typeof id !== 'number' && typeof id !== 'string') return // a client notification; none are defined
     try {
-      const result = await this.dispatch(frame.method, frame.params)
-      this.emit({ jsonrpc: '2.0', id, result })
+      const result = await this.dispatch(connection, frame.method, frame.params)
+      connection.send({ jsonrpc: '2.0', id, result })
       if (frame.method === 'shutdown') this.close()
     } catch (error) {
       const failure =
         error instanceof RpcFailure
           ? { code: error.code, message: error.message }
           : { code: INTERNAL_ERROR, message: error instanceof Error ? error.message : String(error) }
-      this.emit({ jsonrpc: '2.0', id, error: failure })
+      connection.send({ jsonrpc: '2.0', id, error: failure })
     }
   }
 
-  private dispatch(method: string, params: unknown): Promise<unknown> | unknown {
+  private dispatch(connection: ClientConnection, method: string, params: unknown): Promise<unknown> | unknown {
     const record = isRecord(params) ? params : {}
     switch (method) {
       case 'initialize':
@@ -255,7 +320,9 @@ export class ProtocolServer {
       case 'session/events':
         return this.events(record)
       case 'session/attach':
-        return this.attach(record)
+        return this.attach(connection, record)
+      case 'session/detach':
+        return this.detach(connection, record)
       case 'session/page':
         return this.page(record)
       case 'session/cancel':
@@ -269,6 +336,9 @@ export class ProtocolServer {
       case 'session/model':
         return this.model(record)
       case 'shutdown':
+        // Host-wide, and therefore not every carrier's to call: a browser tab
+        // closing must not end a daemon other clients are attached to.
+        if (!connection.allowShutdown) throw new RpcFailure(INVALID_PARAMS, 'shutdown: this carrier may not shut the host down; close the connection instead')
         return this.shutdown()
       default:
         throw new RpcFailure(METHOD_NOT_FOUND, `unknown method "${method}"`)
@@ -402,7 +472,9 @@ export class ProtocolServer {
     if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
     const text = requireString(params, 'text', 'session/prompt')
     const mode = params.mode ?? 'followup'
-    if (mode !== 'followup' && mode !== 'steer') throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "mode" must be "followup" or "steer"')
+    if (mode !== 'followup' && mode !== 'steer' && mode !== 'auto') {
+      throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "mode" must be "followup", "steer" or "auto"')
+    }
     const acquiring = this.acquire(params)
     this.inflight.add(acquiring)
     let agent: Agent
@@ -422,7 +494,11 @@ export class ProtocolServer {
       throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
     }
     const message = createUserMessage(text)
-    if (mode === 'steer') agent.steer(message)
+    // `auto` is resolved HERE, against the live agent, in the same tick it is
+    // delivered. A client choosing from an observed `session.status` is racing
+    // turn-end with one client and cannot win with two.
+    const target = mode === 'auto' ? (agent.status === 'running' ? 'steer' : 'followup') : mode
+    if (target === 'steer') agent.steer(message)
     else agent.followup(message)
     return { sessionId: agent.id, messageId: message.id }
   }
@@ -496,10 +572,15 @@ export class ProtocolServer {
    * page taken on one side of an await with a cursor read on the other would
    * open a gap no dedup could see.
    */
-  private attach(params: Record<string, unknown>): AttachResult {
+  private attach(connection: ClientConnection, params: Record<string, unknown>): AttachResult {
     const sessionId = requireString(params, 'sessionId', 'session/attach')
     const limit = optionalCount(params, 'limit', 'session/attach')
     const source = this.sourceFor(sessionId)
+    // Subscribe BEFORE the page is cut. A connection that started watching
+    // afterwards would silently miss whatever landed in between; the client
+    // drops anything at or below the cursor, so an overlap is free and a gap
+    // is not.
+    connection.attach(sessionId)
     const page = pageEvents(source.facts, { throughSeq: source.cursor, ...(limit === undefined ? {} : { maxMessages: limit }) })
     return {
       header: source.header,
@@ -508,6 +589,18 @@ export class ProtocolServer {
       cursor: source.cursor,
       ...(source.damaged ? { damaged: true as const } : {}),
     }
+  }
+
+  /**
+   * Stop delivering one session's events to this client. The session is
+   * untouched — but a client that stopped watching can no longer answer that
+   * session's questions, so it leaves their answerer sets too.
+   */
+  private detach(connection: ClientConnection, params: Record<string, unknown>): Record<string, never> {
+    const sessionId = requireString(params, 'sessionId', 'session/detach')
+    connection.detach(sessionId)
+    this.withdrawFromApprovals(connection, sessionId)
+    return {}
   }
 
   /** An older page beneath a cut the client already holds. Identity and view come from the attach frame alone. */
@@ -606,11 +699,21 @@ export class ProtocolServer {
     return provider?.models.find((model) => model.id === options.model)?.contextWindow
   }
 
+  /**
+   * Stop the running turn. `keepQueued` decides what happens to the durable
+   * inbox, and the default is the single-client meaning MiniDSH has always had:
+   * a person cancelling means "and forget what I asked for". A client that
+   * knows it shares the session says `keepQueued: true`, because throwing away
+   * another client's queued prompts is not its call to make.
+   */
   private cancel(params: Record<string, unknown>): Record<string, never> {
     const sessionId = requireString(params, 'sessionId', 'session/cancel')
+    if (params.keepQueued !== undefined && typeof params.keepQueued !== 'boolean') {
+      throw new RpcFailure(INVALID_PARAMS, 'session/cancel: "keepQueued" must be a boolean')
+    }
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
     if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
-    agent.cancel({ kind: 'user' })
+    agent.cancel({ kind: 'user' }, { keepInbox: params.keepQueued === true })
     return {}
   }
 
@@ -636,10 +739,12 @@ export class ProtocolServer {
       throw new RpcFailure(INVALID_PARAMS, 'approval/answer: "outcome" must be "allowed-once" or "rejected"')
     }
     const key = `${sessionId}:${id}`
-    const resolve = this.pendingApprovals.get(key)
-    if (!resolve) return { outcome: 'not-pending' }
+    const pending = this.pendingApprovals.get(key)
+    // First answer wins, whichever client sent it; every other client learns
+    // the outcome from the durable `approval/decided` event, not from here.
+    if (!pending) return { outcome: 'not-pending' }
     this.pendingApprovals.delete(key)
-    resolve(outcome)
+    pending.settle(outcome)
     return { outcome: 'accepted' }
   }
 
@@ -657,12 +762,14 @@ export class ProtocolServer {
     return {}
   }
 
-  /** Idempotent: fail pending approvals closed, then tell the app the surface is done. */
+  /** Idempotent: fail pending approvals closed, drop every connection, then tell the app the surface is done. */
   close(): void {
     if (this.closed) return
     this.closed = true
-    for (const resolve of this.pendingApprovals.values()) resolve('unavailable')
+    for (const pending of this.pendingApprovals.values()) pending.settle('unavailable')
     this.pendingApprovals.clear()
+    for (const connection of this.connections) connection.close()
+    this.connections.clear()
     this.config.onClose?.()
   }
 }

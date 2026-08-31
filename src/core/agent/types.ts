@@ -8,6 +8,16 @@ export type InboxTarget = 'next-turn' | 'next-step'
 
 export type CancelCause = { readonly kind: 'user' } | { readonly kind: 'parent' } | { readonly kind: 'disposed' } | { readonly kind: 'hook'; readonly reason: string }
 
+export interface CancelOptions {
+  /**
+   * Abort the running turn without touching the durable queue. A cancel from
+   * one of several attached clients must not throw away work another client
+   * queued; a graceful teardown keeps the queue for the same reason, and a
+   * lone user's cancel still means "and forget what I asked for".
+   */
+  readonly keepInbox?: boolean
+}
+
 /** The model config an agent starts from, before per-request interception. */
 export interface CallConfig {
   readonly provider: string
@@ -56,7 +66,7 @@ export interface Agent {
   followup(message: Message): void
   steer(message: Message): void
   inject(message: Message): void
-  cancel(cause: CancelCause): void
+  cancel(cause: CancelCause, options?: CancelOptions): void
   whenIdle(): Promise<void>
 }
 

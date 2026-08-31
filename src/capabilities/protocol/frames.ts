@@ -84,13 +84,18 @@ export interface AuthorityParams {
   readonly preset?: string
 }
 
-export type PromptMode = 'followup' | 'steer'
+export type PromptMode = 'followup' | 'steer' | 'auto'
 
 export interface PromptParams {
   /** Absent: create a fresh session. Live: deliver to it. Stored: resume it first. */
   readonly sessionId?: string
   readonly text: string
-  /** `followup` (default) queues a next-turn prompt; `steer` lands at the next step boundary. */
+  /**
+   * `followup` (default) queues a next-turn prompt; `steer` lands at the next
+   * step boundary; `auto` lets the HOST choose against the live agent in the
+   * tick it delivers, which is the only way to choose correctly when a client
+   * cannot know whether the turn it observed is still running.
+   */
   readonly mode?: PromptMode
   readonly agentOptions?: Partial<AgentOptions>
   /**
@@ -197,6 +202,13 @@ export interface PageResult {
 
 export interface CancelParams {
   readonly sessionId: string
+  /**
+   * Leave the durable queue alone (default false — a lone client's cancel
+   * means "and forget what I asked for"). A client that shares the session
+   * with others sets it, because another client's queued prompts are not
+   * its to discard.
+   */
+  readonly keepQueued?: boolean
 }
 
 /**

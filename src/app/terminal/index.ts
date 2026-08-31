@@ -31,7 +31,7 @@ import type {
   PageResult,
   PromptResult,
   SessionView,
-} from '../../capabilities/protocol-stdio/index.ts'
+} from '../../capabilities/protocol/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'

@@ -5,7 +5,7 @@
  * the plugin only reports that the surface is done.
  */
 import type { Context } from '../kernel/index.ts'
-import { protocolStdioPlugin, type ProtocolConfig } from '../capabilities/protocol-stdio/index.ts'
+import { protocolPlugin, type Carrier, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
 import { bootComposition, type BootOptions } from './headless.ts'
 
@@ -15,6 +15,8 @@ export interface ServeOptions extends BootOptions {
   readonly workspaceRoots?: readonly string[]
   readonly input?: NodeJS.ReadableStream
   readonly output?: NodeJS.WritableStream
+  /** Every way clients reach this host. Omitted, it is one stream carrier over `input`/`output`. */
+  readonly carriers?: readonly Carrier[]
   /** Per-agent world for every agent the protocol surface creates or resumes (built from a named agent preset). */
   readonly agentSetup?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, so each session's header records the world it was composed from. */
@@ -42,6 +44,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     ...(options.input === undefined ? {} : { input: options.input }),
     ...(options.output === undefined ? {} : { output: options.output }),
+    ...(options.carriers === undefined ? {} : { carriers: options.carriers }),
   }
   // The protocol row joins the BASE, not a patch layer: a disk patch may
   // target row id "protocol" (it exists before layering), and a layer that
@@ -61,7 +64,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
   if (protocolDisabled) throw new Error('the composition disables row "protocol"; a protocol host cannot run without its surface')
   const root = await bootComposition({
     ...options,
-    extraBaseRows: [...(options.extraBaseRows ?? []), defineRow('protocol', protocolStdioPlugin, protocolConfig)],
+    extraBaseRows: [...(options.extraBaseRows ?? []), defineRow('protocol', protocolPlugin, protocolConfig)],
   })
   let disposed: Promise<void> | undefined
   return {
