@@ -1,5 +1,5 @@
 /** The client protocol, exercised byte-level over an in-memory duplex pair. */
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -671,6 +671,91 @@ describe('protocol: the paged attach', () => {
     await client.waitForIdle(sessionId)
     const settled = await client.result<AttachResult>('session/attach', { sessionId })
     expect(settled.view.pendingApprovals).toEqual([])
+  })
+})
+
+describe('protocol: workspaces are addressing, never authority', () => {
+  async function withWorkspaces(): Promise<{ client: TestClient; roots: string[] }> {
+    const roots = [tempDir('minidsh-ws-a-'), tempDir('minidsh-ws-b-')]
+    const client = new TestClient()
+    const host = await startProtocolHost({
+      cwd: roots[0]!,
+      workspaceRoots: roots,
+      workspaces: [{ root: roots[0]!, name: 'alpha' }, { id: 'beta', root: roots[1]! }],
+      sessionsRoot: tempDir('minidsh-ws-sessions-'),
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (root) => {
+        root.get(LLM).registerAdapter(root, new ScriptedAdapter().script(assistantText('a'), assistantText('b'), assistantText('c'), assistantText('d')))
+      },
+      input: client.input,
+      output: client.output,
+    })
+    hosts.push(host)
+    return { client, roots }
+  }
+
+  it('names each root, deriving a stable id where the deployment chose none', async () => {
+    const { client, roots } = await withWorkspaces()
+    const init = await client.result<{ workspaces: { id: string; name: string; root: string }[]; workspaceRoots: string[] }>('initialize')
+    expect(init.workspaces).toHaveLength(2)
+    expect(init.workspaces[0]!.name).toBe('alpha')
+    expect(init.workspaces[1]!.id).toBe('beta')
+    expect(init.workspaces.map((one) => one.root.toLowerCase())).toEqual(roots.map((root) => root.toLowerCase()))
+    // The derived id is a function of the root, not a fresh uuid: it survives a restart.
+    expect(init.workspaces[0]!.id).toMatch(/^[0-9a-f]{12}$/)
+    // The allow-list is still published beside it — the workspace did not replace it.
+    expect(init.workspaceRoots).toHaveLength(2)
+  })
+
+  it('starts a session in a workspace, and under a path inside it', async () => {
+    const { client, roots } = await withWorkspaces()
+    const init = await client.result<{ workspaces: { id: string; root: string }[] }>('initialize')
+    const alpha = init.workspaces[0]!
+
+    const first = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: alpha.id })
+    const attached = await client.result<AttachResult>('session/attach', { sessionId: first.sessionId })
+    expect(attached.header.cwd.toLowerCase()).toBe(roots[0]!.toLowerCase())
+
+    mkdirSync(join(roots[0]!, 'nested'))
+    const second = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: alpha.id, path: 'nested' })
+    const nested = await client.result<AttachResult>('session/attach', { sessionId: second.sessionId })
+    expect(nested.header.cwd.toLowerCase()).toBe(join(roots[0]!, 'nested').toLowerCase())
+  })
+
+  it('grants nothing the allow-list does not: a path out of the workspace is refused', async () => {
+    const { client } = await withWorkspaces()
+    const init = await client.result<{ workspaces: { id: string }[] }>('initialize')
+    const escape = await client.call('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: init.workspaces[0]!.id, path: '../../..' })
+    expect(escape.error?.code).toBe(-32602)
+    expect(escape.error?.message).toMatch(/workspace roots|not an existing directory/)
+  })
+
+  it('refuses a workspace it does not know, and refuses being told both ways at once', async () => {
+    const { client, roots } = await withWorkspaces()
+    const unknown = await client.call('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: 'nope' })
+    expect(unknown.error?.message).toContain('no workspace "nope"')
+    const both = await client.call('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: 'beta', cwd: roots[0] })
+    expect(both.error?.message).toContain('not both')
+    const orphan = await client.call('session/prompt', { text: 'hi', agentOptions: SCRIPTED, path: 'nested' })
+    expect(orphan.error?.message).toContain('relative to a "workspaceId"')
+  })
+
+  it('lists the sessions of one workspace, live and stored, without touching the others', async () => {
+    const { client } = await withWorkspaces()
+    const init = await client.result<{ workspaces: { id: string }[] }>('initialize')
+    const [alpha, beta] = init.workspaces as [{ id: string }, { id: string }]
+    const mine = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: alpha.id })
+    await client.waitForIdle(mine.sessionId)
+    const theirs = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: beta.id })
+    await client.waitForIdle(theirs.sessionId)
+
+    const all = await client.result<{ sessions: { id: string; workspaceId?: string; live: boolean }[] }>('sessions/list')
+    expect(all.sessions.map((one) => one.id).sort()).toEqual([mine.sessionId, theirs.sessionId].sort())
+    expect(all.sessions.every((one) => one.live)).toBe(true)
+
+    const filtered = await client.result<{ sessions: { id: string }[] }>('sessions/list', { workspaceId: beta.id })
+    expect(filtered.sessions.map((one) => one.id)).toEqual([theirs.sessionId])
   })
 })
 

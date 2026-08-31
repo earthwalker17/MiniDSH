@@ -13,6 +13,8 @@ export interface ServeOptions extends BootOptions {
   readonly cwd: string
   /** Directories a client-chosen session cwd may lie under (default: `cwd`). Host policy, never the wire's. */
   readonly workspaceRoots?: readonly string[]
+  /** Named places to work, so a client need not know host paths. Derived from the roots when unset. */
+  readonly workspaces?: readonly { readonly id?: string; readonly name?: string; readonly root: string }[]
   readonly input?: NodeJS.ReadableStream
   readonly output?: NodeJS.WritableStream
   /** Every way clients reach this host. Omitted, it is one stream carrier over `input`/`output`. */
@@ -45,6 +47,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     ...(options.input === undefined ? {} : { input: options.input }),
     ...(options.output === undefined ? {} : { output: options.output }),
     ...(options.carriers === undefined ? {} : { carriers: options.carriers }),
+    ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
   }
   // The protocol row joins the BASE, not a patch layer: a disk patch may
   // target row id "protocol" (it exists before layering), and a layer that

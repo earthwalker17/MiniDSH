@@ -56,6 +56,18 @@ export class RpcFailure extends Error {
 
 // ---- requests (client → host) ---------------------------------------------
 
+/**
+ * A named place a session can work, so a client need not know or invent host
+ * paths. A workspace is ADDRESSING and never authority: naming one grants
+ * nothing that `workspaceRoots` does not already allow, and the fence a session
+ * runs under still comes from its own immutable header `cwd`.
+ */
+export interface WorkspaceInfo {
+  readonly id: string
+  readonly name: string
+  readonly root: string
+}
+
 export interface InitializeResult {
   readonly serverInfo: { readonly name: string; readonly version: string }
   readonly providers: readonly ProviderInfo[]
@@ -64,6 +76,31 @@ export interface InitializeResult {
   readonly defaultAuthority: AuthorityView
   /** The directories a session's `cwd` — its sandbox workspace root — may lie under. Host policy, never the client's. */
   readonly workspaceRoots: readonly string[]
+  /** The named workspaces this host serves. Derived from `workspaceRoots` when the deployment names none. */
+  readonly workspaces: readonly WorkspaceInfo[]
+}
+
+/** One session a client may open, live or stored. */
+export interface SessionSummary {
+  readonly id: string
+  readonly createdAt: number
+  readonly cwd: string
+  /** The workspace whose root contains `cwd`, when one does. Derived, never stored. */
+  readonly workspaceId?: string
+  /** An agent is running this session right now. */
+  readonly live: boolean
+  readonly parentId?: string
+  readonly delegatedBy?: string
+  readonly agentPreset?: string
+}
+
+export interface SessionsListParams {
+  /** Only sessions whose cwd lies in this workspace. */
+  readonly workspaceId?: string
+}
+
+export interface SessionsListResult {
+  readonly sessions: readonly SessionSummary[]
 }
 
 /** The authority a session is under. `enforcement` is a reported fact about THIS host. */
@@ -105,6 +142,14 @@ export interface PromptParams {
    * the wire may choose WHERE inside the host's policy, never the policy.
    */
   readonly cwd?: string
+  /**
+   * Name the working directory by workspace instead of by path — what a client
+   * that should not have to know host paths uses. Exclusive with `cwd`: given
+   * both, the host refuses rather than guessing which one was meant.
+   */
+  readonly workspaceId?: string
+  /** A path relative to that workspace's root. Absent means the root itself. */
+  readonly path?: string
 }
 
 export interface PromptResult {
