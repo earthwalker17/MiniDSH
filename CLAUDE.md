@@ -77,6 +77,7 @@ Keep the number of sub-agents bounded. Do not spawn dozens of agents that could 
 Never use per-finding fan-out. Do not spawn one agent per file, failure, review finding, or trivial task.
 Each delegated task needs a narrow scope, explicit boundaries, and a compact expected return. Prefer bounded reviewers or small fixed panels over recursive swarms.
 If delegation materially increases token use without increasing output quality, stop and simplify.
+Never link this repository's `node_modules` into a worktree or scratch directory: a later recursive delete of that directory follows the link and destroys the real dependency tree. It has happened twice. A worktree that needs dependencies runs its own `pnpm install`; there is no build step, so `git show <rev>:<path>` usually removes the need for a worktree at all. `.claude/hooks/guard-repo.mjs` enforces this.
 
 ## 9. Persistent Memory
 Use Claude Code's available persistent memory mechanism for concise cross-session handoff.
