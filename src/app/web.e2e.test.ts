@@ -41,15 +41,26 @@ function tempDir(prefix: string): string {
   return dir
 }
 
-/** The four prompts this arc sends, in order — the replay walks the same path. */
+/**
+ * The four prompts this arc sends, in order — the replay walks the same path.
+ *
+ * Each names its file by a RELATIVE path, and says so, because the replay runs
+ * in a different working directory than the recording. A recorded tool call
+ * that named an absolute path inside the live workspace is not reproducible
+ * there: the fence refuses it (correctly — it is outside the replay's root),
+ * the turn still completes on the recorded messages, and `assertConsumed`
+ * still passes, so the only symptom is a file that never appears. Observed
+ * once, on `notes.txt`. The log is an oracle for what the MODEL decided, not
+ * for a path that embedded the workspace it decided in.
+ */
 const PROMPTS = [
-  'Create a file named notes.txt in the working directory whose only line is exactly "the browser drove this" without the quotation marks, then read it back and tell me what it says.',
+  'Create a file at the relative path notes.txt (not an absolute path) whose only line is exactly "the browser drove this" without the quotation marks, then read it back and tell me what it says.',
   // The shell cannot be confined on any host MiniDSH ships for, so this is
   // refused and the model must escalate — which is the consent this arc answers
   // over the socket, with no --approve anywhere.
   'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
   'Read notes.txt one more time and reply with its line.',
-  'Create a file named summary.txt in the working directory whose only line is exactly "reconnected and finished" without the quotation marks.',
+  'Create a file at the relative path summary.txt (not an absolute path) whose only line is exactly "reconnected and finished" without the quotation marks.',
 ] as const
 
 describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket', () => {
