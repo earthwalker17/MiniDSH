@@ -245,7 +245,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     try {
       const older = await client.request<PageResult>('session/page', { sessionId, throughSeq: history.cursor, beforeSeq: history.oldest })
       const transcript = renderHistory(older.page.events)
-      if (older.page.hasMore) out.write(`… ${older.page.from} earlier events\n`)
+      if (older.page.hasMore) out.write('… earlier events remain (/history again)\n')
       if (transcript) out.write(transcript)
       history = { cursor: history.cursor, oldest: older.page.from, hasMore: older.page.hasMore }
     } catch (error) {
@@ -395,7 +395,9 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       // session may have woken on its restored inbox already).
       const attachment = await client.request<AttachResult>('session/attach', { sessionId })
       const transcript = renderHistory(attachment.page.events)
-      if (attachment.page.hasMore) out.write(`… ${attachment.page.from} earlier events (/history shows the page before this one)\n`)
+      // Not `page.from`: that is an inclusive lower SEQ bound, not a count, and
+      // seq space counts the trace tier a page never carries.
+      if (attachment.page.hasMore) out.write('… earlier events remain (/history shows the page before this one)\n')
       if (transcript) out.write(transcript)
       out.write(options.resumeId !== undefined ? `resumed ${sessionId}\n` : `forked ${options.forkId} → ${sessionId}\n`)
       // The cursor is the host's own, not inferred from the last event on the

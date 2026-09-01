@@ -185,11 +185,18 @@ function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: st
   return { full: mergeAgentOptions(defaults, typed), partial: typed }
 }
 
-/** A parked approval, and the connections that could still answer it. */
+/**
+ * A parked approval. It does NOT hold the connections that could answer it:
+ * that set is recomputed from the live connections whenever a watch set moves,
+ * because a client can arrive after the question was asked (the attach frame
+ * carries it in `view.pendingApprovals`) and a client that narrows away can no
+ * longer see it however long it had been connected.
+ */
 interface PendingApproval {
   readonly sessionId: string
+  /** A child mid-delegation reaches only clients that attached to it explicitly (§ `receives`). */
+  readonly underParent: boolean
   readonly settle: (outcome: ApprovalOutcome) => void
-  readonly watchers: Set<ClientConnection>
 }
 
 export class ProtocolHost {
@@ -228,25 +235,30 @@ export class ProtocolHost {
   /**
    * One client is gone. Its agents are NOT: a disconnect is not a shutdown, so
    * a browser refresh reattaches to work still running. What does end is any
-   * approval only this client could have answered — leaving it parked would
-   * block the agent on a question nobody can see.
+   * approval nobody left can answer — leaving it parked would block the agent
+   * on a question no one can see.
    */
   disconnect(connection: ClientConnection): void {
     connection.close()
     this.connections.delete(connection)
-    this.withdrawFromApprovals(connection)
+    this.settleUnwatchedApprovals()
     if (this.connections.size === 0 && this.config.closeWithLastClient) this.close()
   }
 
   /**
-   * This client can no longer answer — it left, or it stopped watching. An
-   * approval whose last possible answerer is gone is closed rather than left
-   * parked, because a parked question no one can see stops the agent forever.
+   * Settle every parked question no connected client can still see.
+   *
+   * Called after ANY change to a watch set — a disconnect, a detach, and an
+   * ATTACH, because a client's first attach narrows it away from every other
+   * session at once. Recomputing beats the snapshot it replaces in both
+   * directions: a client that arrived after the ask is counted (it renders the
+   * question from the attach frame's `pendingApprovals` and can answer it), and
+   * a client that narrowed away is not (it would otherwise hold a question it
+   * can no longer see, and the agent would wait on it forever).
    */
-  private withdrawFromApprovals(connection: ClientConnection, sessionId?: string): void {
+  private settleUnwatchedApprovals(): void {
     for (const [key, pending] of this.pendingApprovals) {
-      if (sessionId !== undefined && pending.sessionId !== sessionId) continue
-      if (!pending.watchers.delete(connection) || pending.watchers.size > 0) continue
+      if (this.anyReceiver(pending.sessionId, pending.underParent)) continue
       this.pendingApprovals.delete(key)
       pending.settle('unavailable')
     }
@@ -254,8 +266,42 @@ export class ProtocolHost {
 
   // ---- outbound: the notifications ----------------------------------------
 
-  private broadcast(sessionId: string, frame: RpcNotification, droppable = false): void {
-    for (const connection of this.connections) if (connection.watches(sessionId)) connection.send(frame, droppable)
+  /**
+   * The live parent that is running this session as its subagent right now, if
+   * there is one: the header names a parent, that parent is still live, and
+   * this host did not itself resume the child — a resumed child is the host's,
+   * and resuming one is how a surface reaches a child at all.
+   *
+   * ONE predicate, two rules. Such a child is read-only over the wire
+   * (`assertDrivable`), and its stream reaches only clients that asked for it
+   * by name (`receives`) rather than every un-narrowed client. Both say the
+   * same thing: while a delegation is in flight, the child belongs to the tool
+   * call that made it.
+   */
+  private parentRunning(sessionId: string, header: SessionHeader): string | undefined {
+    const parentId = header.delegatedBy
+    if (parentId === undefined || this.owned.has(sessionId)) return undefined
+    return this.ctx.get(AGENTS).get(parentId) === undefined ? undefined : parentId
+  }
+
+  /**
+   * Whether this connection receives that session's frames. An un-narrowed
+   * client watches everything — except a child mid-delegation, which it has not
+   * asked to follow. A client attached to the PARENT sees the delegation the
+   * way the parent's own log tells it: `subagent/start` and `subagent/end`.
+   */
+  private receives(connection: ClientConnection, sessionId: string, underParent: boolean): boolean {
+    return underParent ? connection.attached(sessionId) : connection.watches(sessionId)
+  }
+
+  private broadcast(sessionId: string, underParent: boolean, frame: RpcNotification, droppable = false): void {
+    for (const connection of this.connections) if (this.receives(connection, sessionId, underParent)) connection.send(frame, droppable)
+  }
+
+  /** Whether anyone is listening at all — the gate on work done only to be broadcast. */
+  private anyReceiver(sessionId: string, underParent: boolean): boolean {
+    for (const connection of this.connections) if (this.receives(connection, sessionId, underParent)) return true
+    return false
   }
 
   onSessionEvent(session: Session, event: EventEnvelope): void {
@@ -264,10 +310,11 @@ export class ProtocolHost {
     // reader never sees a stale parse.
     if (this.cold.size > 0) this.cold.delete(session.id)
     if (this.closed) return
+    const underParent = this.parentRunning(session.id, session.header) !== undefined
     // The trace tier is what a carrier under pressure is allowed to drop: it is
     // recorded for streaming fidelity, no fold reads it, and `assistant/message`
     // carries the same text durably a moment later.
-    this.broadcast(session.id, { jsonrpc: '2.0', method: 'session.event', params: { sessionId: session.id, event } }, TRACE_TYPES.has(event.type))
+    this.broadcast(session.id, underParent, { jsonrpc: '2.0', method: 'session.event', params: { sessionId: session.id, event } }, TRACE_TYPES.has(event.type))
     // The durable decision settles the answerable frame, whoever decided it.
     if (matches(event, APPROVAL_DECIDED)) this.pendingApprovals.delete(`${session.id}:${event.data.id}`)
     // A page-holding client cannot recompute these folds, so the host re-sends
@@ -278,6 +325,12 @@ export class ProtocolHost {
 
   /** The view as it now stands, for every reader of this session. */
   private publishView(session: Session): void {
+    const underParent = this.parentRunning(session.id, session.header) !== undefined
+    // Every field of a view is an O(facts) fold, and a view is nothing but a
+    // broadcast: with no reader there is nothing to compute. That is most of
+    // what a child mid-delegation used to cost a host, and all of what a session
+    // costs once every client has narrowed elsewhere.
+    if (!this.anyReceiver(session.id, underParent)) return
     const view = this.viewOf({
       header: session.header,
       events: session.events,
@@ -285,12 +338,12 @@ export class ProtocolHost {
       cursor: session.seq - 1,
       agent: this.ctx.get(AGENTS).get(session.id),
     })
-    this.broadcast(session.id, { jsonrpc: '2.0', method: 'session.view', params: { sessionId: session.id, view } })
+    this.broadcast(session.id, underParent, { jsonrpc: '2.0', method: 'session.view', params: { sessionId: session.id, view } })
   }
 
   onAgentStatus(agent: Agent, status: 'idle' | 'running'): void {
     if (this.closed) return
-    this.broadcast(agent.id, { jsonrpc: '2.0', method: 'session.status', params: { sessionId: agent.id, status } })
+    this.broadcast(agent.id, this.parentRunning(agent.id, agent.session.header) !== undefined, { jsonrpc: '2.0', method: 'session.status', params: { sessionId: agent.id, status } })
   }
 
   /**
@@ -302,10 +355,10 @@ export class ProtocolHost {
    */
   answerApproval(prompt: ApprovalPrompt, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
     if (this.closed) return next()
-    const watchers = new Set([...this.connections].filter((connection) => connection.watches(prompt.agent.id)))
-    if (watchers.size === 0) return next()
+    const underParent = this.parentRunning(prompt.agent.id, prompt.agent.session.header) !== undefined
+    if (!this.anyReceiver(prompt.agent.id, underParent)) return next()
     return new Promise<ApprovalOutcome>((resolve) => {
-      this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, { sessionId: prompt.agent.id, settle: resolve, watchers })
+      this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, { sessionId: prompt.agent.id, underParent, settle: resolve })
     })
   }
 
@@ -356,9 +409,9 @@ export class ProtocolHost {
       case 'session/model':
         return this.model(record)
       case 'settings/describe':
-        return { namespaces: this.settings().describe() }
+        return this.asCallerError(() => ({ namespaces: this.settings().describe() }))
       case 'settings/get':
-        return this.settings().read(requireString(record, 'ns', 'settings/get'))
+        return this.asCallerError(() => this.settings().read(requireString(record, 'ns', 'settings/get')))
       case 'settings/set':
         return this.settingsSet(record)
       case 'shutdown':
@@ -421,6 +474,21 @@ export class ProtocolHost {
     const settings = this.ctx.tryGet(SETTINGS)
     if (!settings) throw new RpcFailure(INTERNAL_ERROR, 'this host has no settings capability mounted')
     return settings
+  }
+
+  /**
+   * A namespace the caller named wrongly, or a document it must fix, is the
+   * CALLER's problem — the same rule `settings/set` already applies. Without
+   * this, `settings/get {ns: "nope"}` answered `-32603`, which reads as a host
+   * failure and which a retry policy keyed on it would retry forever.
+   */
+  private asCallerError<T>(read: () => T): T {
+    try {
+      return read()
+    } catch (error) {
+      if (error instanceof SettingsError) throw new RpcFailure(INVALID_PARAMS, error.message)
+      throw error
+    }
   }
 
   /**
@@ -550,7 +618,8 @@ export class ProtocolHost {
   private authority(params: Record<string, unknown>): AuthorityView {
     const sessionId = requireString(params, 'sessionId', 'session/authority')
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
-    if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
+    if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
+    this.assertDrivable(agent, 'session/authority')
     if (params.sandbox !== undefined && !isSandboxMode(params.sandbox)) {
       throw new RpcFailure(INVALID_PARAMS, `session/authority: "sandbox" must be one of ${SANDBOX_MODES.join(' | ')}`)
     }
@@ -592,7 +661,8 @@ export class ProtocolHost {
   private model(params: Record<string, unknown>): AgentOptions {
     const sessionId = requireString(params, 'sessionId', 'session/model')
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
-    if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
+    if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
+    this.assertDrivable(agent, 'session/model')
     const partial: { provider?: string; model?: string; reasoningEffort?: string } = {}
     for (const key of ['provider', 'model', 'reasoningEffort'] as const) {
       const value = params[key]
@@ -603,6 +673,28 @@ export class ProtocolHost {
     this.assertRoutable(partial, 'session/model')
     if (Object.keys(partial).length > 0) agent.configure(partial)
     return agent.options
+  }
+
+  /**
+   * A live delegated child that this host did not itself resume, whose parent
+   * is also live, is inside its parent's tool call right now. It is READ-ONLY
+   * over the wire: `attach`, `page`, `events` and `sessions/list` are untouched
+   * — a human may watch a child — but nothing may prompt, cancel, re-route,
+   * compact or re-authorize it. What the parent receives as the delegation's
+   * answer is whatever the child last said, so a prompt from a surface does not
+   * merely add a turn: it silently BECOMES the answer to a task it never saw.
+   *
+   * `owned` is what keeps a resumed child drivable, which is the supported way
+   * a surface reaches one: this host resumed it, so it is this host's to drive.
+   * A child a delegation tool created is owned by its parent's scope instead.
+   */
+  private assertDrivable(agent: Agent, method: string): void {
+    const parentId = this.parentRunning(agent.id, agent.session.header)
+    if (parentId === undefined) return
+    throw new RpcFailure(
+      INVALID_PARAMS,
+      `${method}: session "${agent.id}" is a subagent of "${parentId}", which is running it now — it can be read, but only its parent may drive it`,
+    )
   }
 
   /** A route names a provider this host serves, or it is refused before it can become a durable fact. */
@@ -668,6 +760,7 @@ export class ProtocolHost {
     }
     const live = agents.get(asSessionId(requested))
     if (live) {
+      this.assertDrivable(live, 'session/prompt')
       // Options on a prompt to a LIVE session are the same durable switch
       // `session/model` makes: merged over the base, logged iff they differ.
       if (Object.keys(options.partial).length > 0) live.configure(options.partial)
@@ -724,6 +817,11 @@ export class ProtocolHost {
     // drops anything at or below the cursor, so an overlap is free and a gap
     // is not.
     connection.attach(sessionId)
+    // A first attach NARROWS an un-narrowed client away from every other
+    // session at once, so this is a watch-set change like any other: a question
+    // parked on a session this client has just stopped watching may now have no
+    // one left who can see it.
+    this.settleUnwatchedApprovals()
     const page = pageEvents(source.facts, { throughSeq: source.cursor, ...(limit === undefined ? {} : { maxMessages: limit }) })
     return {
       header: source.header,
@@ -744,12 +842,12 @@ export class ProtocolHost {
       // No id: watch nothing. A client that renders only what it attached to
       // says so, instead of counting as an answerer for every session.
       connection.detachAll()
-      this.withdrawFromApprovals(connection)
+      this.settleUnwatchedApprovals()
       return {}
     }
     const sessionId = requireString(params, 'sessionId', 'session/detach')
     connection.detach(sessionId)
-    this.withdrawFromApprovals(connection, sessionId)
+    this.settleUnwatchedApprovals()
     return {}
   }
 
@@ -796,7 +894,7 @@ export class ProtocolHost {
       return cached
     }
     const stored = this.ctx.tryGet(PERSISTENCE)?.load(sessionId)
-    if (!stored) throw new RpcFailure(INTERNAL_ERROR, `no session "${sessionId}"`)
+    if (!stored) throw new RpcFailure(INVALID_PARAMS, `no session "${sessionId}"`)
     const source: SessionSource = {
       header: stored.header,
       events: stored.events,
@@ -830,7 +928,14 @@ export class ProtocolHost {
     const window = route?.contextWindow ?? this.catalogWindow(options)
     return {
       status: source.agent?.status ?? 'idle',
-      pendingApprovals: openApprovals(facts),
+      // Only a LIVE agent can have a question outstanding. A stored log read
+      // cold never resumes (that is the point of a cold read), so
+      // `repairInterruptedTail` has not run over it — and a process killed
+      // between `approval/asked` and `approval/decided` leaves exactly the
+      // shape repair exists to close. Folding it here offered a crash artifact
+      // to a browser as a live Allow/Deny on an authority surface, for a
+      // question nothing was waiting on.
+      pendingApprovals: source.agent === undefined ? [] : openApprovals(facts),
       authority,
       ...(options === undefined ? {} : { options }),
       ...(route === undefined ? {} : { route }),
@@ -862,7 +967,8 @@ export class ProtocolHost {
       throw new RpcFailure(INVALID_PARAMS, 'session/cancel: "keepQueued" must be a boolean')
     }
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
-    if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
+    if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
+    this.assertDrivable(agent, 'session/cancel')
     agent.cancel({ kind: 'user' }, { keepInbox: params.keepQueued === true })
     return {}
   }
@@ -875,7 +981,8 @@ export class ProtocolHost {
   private async compact(params: Record<string, unknown>): Promise<CompactResult> {
     const sessionId = requireString(params, 'sessionId', 'session/compact')
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
-    if (!agent) throw new RpcFailure(INTERNAL_ERROR, `no live session "${sessionId}"`)
+    if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
+    this.assertDrivable(agent, 'session/compact')
     const compaction = this.ctx.tryGet(COMPACTION)
     if (!compaction) throw new RpcFailure(INTERNAL_ERROR, 'this host has no compaction capability mounted')
     return compaction.compactNow(agent)

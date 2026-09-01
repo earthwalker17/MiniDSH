@@ -107,7 +107,11 @@ function renderTranscript() {
   log.replaceChildren()
   if (!window_) return
   if (window_.hasMore) {
-    const more = el('button', 'more', `load the ${window_.oldest} earlier events`)
+    // No number: `oldest` is an inclusive lower SEQ bound, not a count, and seq
+    // space includes the trace tier a page never carries — so on exactly the
+    // chunk-heavy sessions paging exists for it overstated by two orders of
+    // magnitude. One click fetches one more page either way.
+    const more = el('button', 'more', 'load earlier events')
     more.addEventListener('click', () => void window_.older().catch(fail))
     log.append(more)
   }

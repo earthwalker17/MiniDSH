@@ -27,12 +27,12 @@
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { AGENTS, resolveCallConfig, type Agent, type AgentOptions, type CreateAgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, type AgentOptions, type CreateAgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { messageText, createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
 import { effectiveSandboxMode, SANDBOX, type Sandbox, type SandboxMode } from '../../core/sandbox/index.ts'
-import { ASSISTANT_MESSAGE, eventKind, matches, TURN_END, type Session, type TurnEndReason } from '../../core/session/index.ts'
+import { ASSISTANT_MESSAGE, matches, TURN_END, type Session, type TurnEndReason } from '../../core/session/index.ts'
 import { defineTool, TOOLS, type ToolContext, type ToolRestriction } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
 
@@ -41,7 +41,13 @@ export interface SubagentConfig {
   readonly maxDepth?: number | undefined
   /** The subtractive view every child gets over the tools it inherits (the delegation tool itself is always denied). */
   readonly toolFilter?: ToolRestriction | undefined
-  /** Replaces the persona section in the child's world. */
+  /**
+   * A persona for the child, entered AHEAD of whatever persona its inherited
+   * world already gives it. Deliberately not a replacement: the child's world
+   * is its parent's, and an agent preset that registers a `persona` of its own
+   * has already claimed that name in the child's scope — registering a second
+   * one there throws, and it took the whole delegation with it.
+   */
   readonly persona?: string | undefined
   /** Step ceiling for a child's single turn (default 12). */
   readonly maxSteps?: number | undefined
@@ -61,25 +67,6 @@ const configSchema = z
 
 const PURPOSE = 'subagent'
 const DEFAULT_TOOL_NAME = 'subagent'
-
-/** Log-only, in the PARENT's session: which child was started for which call, and under what. */
-export const SUBAGENT_START = eventKind<{
-  readonly callId: string
-  readonly childId: string
-  readonly depth: number
-  readonly provider: string
-  readonly model: string
-  readonly sandbox: SandboxMode
-  readonly approval: 'never'
-}>('subagent/start')
-
-/** Log-only, in the PARENT's session: how the child's turn ended, and what it cost. */
-export const SUBAGENT_END = eventKind<{
-  readonly callId: string
-  readonly childId: string
-  readonly reason: TurnEndReason
-  readonly usage?: TokenUsage
-}>('subagent/end')
 
 const DESCRIPTION = `Delegate one bounded, self-contained task to a subagent and wait for its answer.
 
@@ -212,26 +199,33 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
       deps.sandbox.open(child.session, { mode: inherited.mode, reason: 'delegation' })
       deps.approval.open(child.session, { policy: 'never', reason: 'delegation' })
       deps.ctx.get(TOOLS).restrict(childCtx, restriction)
-      if (deps.config.persona !== undefined) deps.prompt.section(childCtx, { name: 'persona', order: -50, text: deps.config.persona })
+      // Its own name, ordered ahead of `persona`: the world above may already
+      // own that name in this scope (an agent preset with a persona of its
+      // own), and a duplicate registration throws — which used to fail the
+      // whole delegation rather than the section.
+      if (deps.config.persona !== undefined) deps.prompt.section(childCtx, { name: 'subagent', order: -60, text: deps.config.persona })
     },
   })
 
   const child = handle.agent
   worldSetups.set(child, world)
-  parent.session.append(SUBAGENT_START, {
-    callId: exec.callId,
-    childId: child.id,
-    depth,
-    provider: route.provider,
-    model: route.model,
-    sandbox: inherited.mode,
-    approval: 'never',
-  })
   // A cancelled parent call cancels the child: its turn ends `cancelled`, its
   // log stays whole, and the tool answers with whatever it had.
   const onAbort = (): void => child.cancel({ kind: 'parent' })
-  exec.callSignal.addEventListener('abort', onAbort, { once: true })
   try {
+    // Inside the try, because everything from here owes `handle.dispose()`: an
+    // append an invariant rejected used to leave a live, published,
+    // wire-addressable child behind with nothing left holding it.
+    parent.session.append(SUBAGENT_START, {
+      callId: exec.callId,
+      childId: child.id,
+      depth,
+      provider: route.provider,
+      model: route.model,
+      sandbox: inherited.mode,
+      approval: 'never',
+    })
+    exec.callSignal.addEventListener('abort', onAbort, { once: true })
     // `addEventListener('abort')` never fires on an ALREADY-aborted signal, and
     // two awaits stand between the tool call and here. Cancelling is not enough
     // either: `cancel` only aborts a RUNNING agent, and this child has not

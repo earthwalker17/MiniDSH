@@ -51,6 +51,15 @@ export class ClientConnection {
     return this.watching === undefined || this.watching.has(sessionId)
   }
 
+  /**
+   * ASKED for this session by name, rather than merely not having narrowed
+   * away from it. The distinction is what a delegated child turns on: a client
+   * that watches everything has not asked to follow someone else's subagent.
+   */
+  attached(sessionId: string): boolean {
+    return this.watching?.has(sessionId) === true
+  }
+
   /** Narrows to this session (and any attached before it). */
   attach(sessionId: string): void {
     this.watching ??= new Set()

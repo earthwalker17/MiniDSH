@@ -20,7 +20,7 @@ import { TOOLS } from '../../core/tools/index.ts'
 import { bootComposition } from '../../app/headless.ts'
 import { auditLines, describeEvent } from '../../app/present.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
-import { SUBAGENT_END, SUBAGENT_START } from './index.ts'
+import { SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const SCRIPTED = { provider: 'scripted', model: 'scripted-model' }

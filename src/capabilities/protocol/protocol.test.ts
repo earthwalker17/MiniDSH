@@ -1004,3 +1004,180 @@ describe('protocol: more than one client', () => {
     expect(entered(first, sessionId)).not.toContain('the other client work')
   })
 })
+
+/**
+ * S6 delegation and S7 multi-client, together — the composition neither session
+ * had a test for. A delegated child is an ordinary published session, so
+ * everything the wire does to a session it also does to a child, unless
+ * something says otherwise.
+ */
+describe('protocol: a delegated child is its parent, not a client', () => {
+  /** A parent that delegates once, a child that answers, a parent that reports. */
+  function delegating(childAnswer: string, parentAnswer: string, gate?: Promise<void>): ScriptedAdapter {
+    return new ScriptedAdapter().script(
+      assistantToolCall('c1', 'subagent', { description: 'find it', prompt: 'answer the question' }),
+      async () => {
+        if (gate) await gate
+        return assistantText(childAnswer)
+      },
+      assistantText(parentAnswer),
+    )
+  }
+
+  const childIdOf = (client: TestClient, sessionId: string): string | undefined =>
+    client.frames('subagent/start', sessionId)[0]?.event.data.childId as string | undefined
+
+  it('streams a child only to a client that asked for it by name', async () => {
+    const { clients } = await startHost(delegating('the child answer', 'the parent answer'), { extraClients: 1 })
+    const [attached, unNarrowed] = clients as [TestClient, TestClient]
+    const { sessionId } = await attached.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    await attached.result('session/attach', { sessionId })
+    await attached.waitForIdle(sessionId)
+
+    const childId = childIdOf(attached, sessionId)
+    expect(childId, 'the parent did not delegate').toBeDefined()
+
+    // The parent's own log is what tells the delegation, which is where a human
+    // looks; the child's stream is not pushed at anyone.
+    expect(attached.frames('subagent/end', sessionId)).toHaveLength(1)
+    expect(attached.frames(undefined, childId)).toHaveLength(0)
+    expect(unNarrowed.frames(undefined, childId)).toHaveLength(0)
+    expect(unNarrowed.notifications.filter((one) => (one.params as { sessionId?: string }).sessionId === childId)).toHaveLength(0)
+
+    // And it stays readable by anyone who asks for it by name.
+    const page = await unNarrowed.result<AttachResult>('session/attach', { sessionId: childId })
+    expect(page.header.delegatedBy).toBe(sessionId)
+    expect(page.page.events.length).toBeGreaterThan(0)
+  })
+
+  it('refuses every write to a live child, so the parent gets the delegated task answer', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { client } = await startHost(delegating('the answer to the delegated task', 'done', held))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    const start = await client.waitFor(() => client.frames('subagent/start', sessionId)[0], 'the delegation to start')
+    const childId = start.event.data.childId as string
+
+    // Everything that would change what the child DOES is refused while its
+    // parent is running it. Reads are not.
+    const writes = [
+      ['session/prompt', { sessionId: childId, text: 'do something else instead' }],
+      ['session/cancel', { sessionId: childId }],
+      ['session/compact', { sessionId: childId }],
+      ['session/model', { sessionId: childId, model: 'scripted-model' }],
+      ['session/authority', { sessionId: childId, sandbox: 'read-only' }],
+    ] as const
+    for (const [method, params] of writes) {
+      const reply = await client.call(method, params)
+      expect(reply.error?.code, `${method} must be refused on a live child`).toBe(-32602)
+      expect(reply.error?.message).toContain('is a subagent of')
+    }
+    // Reading it is still allowed — and attaching to the child narrows this
+    // client to it, so the parent is re-attached to watch the rest.
+    await client.result('session/attach', { sessionId: childId })
+    await client.result('session/attach', { sessionId })
+
+    release()
+    await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+    // The answer the parent was handed is the delegated task's, not a
+    // bystander's: that is the whole point of the refusal.
+    const result = client.frames('tool/result', sessionId)[0]!.event.data
+    expect(JSON.stringify(result)).toContain('the answer to the delegated task')
+  })
+
+  it('lets a resumed child be driven, and still holds it to its ceiling', async () => {
+    const adapter = delegating('the child answer', 'the parent answer').script(assistantText('resumed and answering'))
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const childId = childIdOf(client, sessionId)!
+
+    // A child is disposed with the call that made it, so a prompt RESUMES it —
+    // and a session this host resumed is this host's to drive.
+    await client.result('session/prompt', { sessionId: childId, text: 'say something' })
+    await client.waitForIdle(childId)
+    // Its authority is still what it was delegated under: refused by the
+    // ceiling, not by the ownership rule.
+    const widened = await client.call('session/authority', { sessionId: childId, sandbox: 'danger-full-access' })
+    expect(widened.error?.message).toMatch(/ceiling|cannot be widened/i)
+    expect(widened.error?.message).not.toContain('is a subagent of')
+  })
+})
+
+describe('protocol: who can answer a parked approval', () => {
+  const gated = defineTool({
+    name: 'gated',
+    description: 'needs consent',
+    input: z.object({}),
+    output: z.object({ ok: z.boolean() }),
+    execute: () => ({ ok: true }),
+    render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+  })
+  const withGate = {
+    prepare: (root: Context) => {
+      root.get(TOOLS).register(root, gated)
+      root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'gated' ? { kind: 'ask' } : next()))
+    },
+  }
+
+  it('counts a client that attached AFTER the question, which the attach frame showed it', async () => {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const { clients } = await startHost(adapter, { ...withGate, extraClients: 1 })
+    const [asker, latecomer] = clients as [TestClient, TestClient]
+    // The latecomer watches nothing yet — the shape the browser client starts in.
+    await latecomer.result('session/detach')
+    const { sessionId } = await asker.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    const asked = await asker.waitFor(() => asker.frames('approval/asked', sessionId)[0], 'the ask')
+    const id = asked.event.data.id as string
+
+    // It arrives afterwards, and the attach frame hands it the open question.
+    const attached = await latecomer.result<AttachResult>('session/attach', { sessionId })
+    expect(attached.view.pendingApprovals.map((one) => one.id)).toContain(id)
+
+    // The client that asked leaves. The question is NOT settled: someone is
+    // still looking at it, and an answerer set snapshotted when the question
+    // was asked would have denied the tool under their eyes.
+    asker.input.end()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(latecomer.frames('approval/decided', sessionId)).toHaveLength(0)
+
+    const answered = await latecomer.result<{ outcome: string }>('approval/answer', { sessionId, id, outcome: 'allowed-once' })
+    expect(answered.outcome).toBe('accepted')
+    // The grant it gave is the one that ran: the tool result is not a denial.
+    const decided = await latecomer.waitFor(() => latecomer.frames('approval/decided', sessionId)[0], 'the decision')
+    expect(decided.event.data.outcome).toBe('allowed-once')
+    await latecomer.waitFor(() => latecomer.frames('turn/end', sessionId)[0], 'the turn to end')
+  })
+
+  it('settles a question its last watcher narrowed away from, instead of stranding the agent', async () => {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'), assistantText('a second session'))
+    const { client } = await startHost(adapter, withGate)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    await client.waitFor(() => client.frames('approval/asked', sessionId)[0], 'the ask')
+
+    // A FIRST attach narrows this client away from every other session at once —
+    // including the one whose question it was the only possible answerer for.
+    const { sessionId: other } = await client.result<{ sessionId: string }>('session/prompt', { text: 'elsewhere', agentOptions: SCRIPTED })
+    await client.result('session/attach', { sessionId: other })
+
+    // Nobody can see the question now, so it is closed rather than left to park
+    // an agent forever on something no one will ever be shown. Read back
+    // through a fresh attach, because this client stopped receiving its frames.
+    let settled: AttachResult | undefined
+    const deadline = Date.now() + 3000
+    for (;;) {
+      const view = await client.result<AttachResult>('session/attach', { sessionId })
+      if (view.view.pendingApprovals.length === 0 && view.view.status === 'idle') {
+        settled = view
+        break
+      }
+      if (Date.now() > deadline) throw new Error(`the stranded question never settled: ${JSON.stringify(view.view)}`)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    const decided = settled.page.events.filter((one) => one.type === 'approval/decided')
+    expect(decided).toHaveLength(1)
+    expect((decided[0]!.data as { outcome: string }).outcome).toBe('unavailable')
+  })
+})

@@ -9,14 +9,13 @@
  * Pure functions over events, no state: a surface that streams (the terminal)
  * layers its own live cases on top and falls back here for everything else.
  */
-import { AGENT_OPTIONS } from '../core/agent/index.ts'
+import { AGENT_OPTIONS, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../core/approval/index.ts'
 import { COMPACTION_APPLIED } from '../core/compaction/index.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { formatTokens } from '../core/metering/index.ts'
 import { AUTHORITY_PRESET } from '../core/presets/index.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
-import { SUBAGENT_END, SUBAGENT_START } from '../capabilities/tool-subagent/index.ts'
 import { ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 
 export function preview(text: string, max = 80): string {

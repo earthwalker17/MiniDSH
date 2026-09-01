@@ -42,6 +42,7 @@ import type {
 } from './types.ts'
 
 export * from './types.ts'
+export { SUBAGENT_END, SUBAGENT_START } from './delegation.ts'
 
 // ---- events ---------------------------------------------------------------
 
