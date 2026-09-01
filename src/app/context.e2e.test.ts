@@ -42,8 +42,18 @@ const pwsh = process.platform === 'win32'
 
 /**
  * The budget the whole arc is measured against. Low enough that reading a
- * single bulky file already crosses the threshold, so the arc does not depend
- * on how thoroughly the model chooses to read.
+ * single bulky file already crosses the threshold.
+ *
+ * That is only true if the file is actually READ, which is why the prompts
+ * below name the editor tool and forbid both `view_range` and a shell search.
+ * They used to say "read notes-b.txt and reply with the marker token", and a
+ * marker token is exactly what a `Select-String` finds in one cheap line: one
+ * live run answered all three prompts that way, finished the whole arc in 16
+ * seconds instead of 45, wrote a correct summary.txt — and never crossed the
+ * threshold at all, so nothing compacted and the arc failed with `0 summary
+ * call(s)`. The claim this file makes is about context management, not about
+ * how a model chooses to search, so the search is spelled out and the claim
+ * is left to stand on its own.
  */
 const BUDGET = 8_000
 const THRESHOLD = 0.5
@@ -92,7 +102,15 @@ Write that line first, then the file's real content.
   writeFileSync(join(dir, 'decoy.txt'), 'must never change\n', 'utf8')
 }
 
-const FIRST_PROMPT = 'Read notes-a.txt and reply with only the marker token it contains.'
+/** Every note prompt: the whole file, through the editor, and no cheaper route. */
+function readWholeFile(file: string): string {
+  return (
+    `Using the file editor tool, view the entire contents of ${file} in one call — do not pass view_range, ` +
+    `and do not search the file from the shell. Then reply with only the marker token it contains.`
+  )
+}
+
+const FIRST_PROMPT = readWholeFile('notes-a.txt')
 
 describe.skipIf(!KEY)('S5 live E2E: a long session stays in budget without the log losing anything', () => {
   it('crosses a real context budget, compacts, spills, obeys AGENTS.md, and replays', { timeout: 900_000 }, async () => {
@@ -107,11 +125,24 @@ describe.skipIf(!KEY)('S5 live E2E: a long session stays in budget without the l
 
     // The deployment's own context budget, and a shell tool that shows little
     // inline — both plain composition config, no code and no flags.
+    //
+    // `maxSummaryFailures` is raised because this arc deliberately runs at a
+    // budget where a compaction can be worth nothing: the pressure trigger
+    // fires whenever the surface crosses the threshold, but where the planner's
+    // cut lands is the model's tool shape, and a small shadowed head is
+    // legitimately refused (a summary at least as large as the span it would
+    // replace is not a compaction). Measured over six live runs, 14 of 34
+    // attempts produced nothing while every run still landed at least three.
+    // At the shipped default of 2, two such refusals in a row would switch
+    // automatic compaction off for the remaining turns and this arc would then
+    // assert against a runtime that had correctly given up. The give-up counter
+    // itself is pinned in `compaction-basic/loop.test.ts`; what this arc is for
+    // is that a crossing really compacts and the log keeps everything.
     writeFileSync(
       join(home, 'composition.json'),
       JSON.stringify({
         patches: [
-          { id: 'compaction', config: { budgetTokens: BUDGET, thresholdRatio: THRESHOLD, retainRatio: 0.25, maxTokens: 2048 } },
+          { id: 'compaction', config: { budgetTokens: BUDGET, thresholdRatio: THRESHOLD, retainRatio: 0.25, maxTokens: 2048, maxSummaryFailures: 6 } },
           { id: 'tool-shell', config: { maxOutputChars: 700, tailChars: 150 } },
         ],
       }),
@@ -126,8 +157,8 @@ describe.skipIf(!KEY)('S5 live E2E: a long session stays in budget without the l
     await serve.waitForCompletedTurn(sessionId, 1)
 
     const prompts = [
-      'Now read notes-b.txt and reply with only the marker token it contains.',
-      'Now read notes-c.txt and reply with only the marker token it contains.',
+      readWholeFile('notes-b.txt'),
+      readWholeFile('notes-c.txt'),
       `Run this exact command in the shell: ${GENERATE}\nThen tell me the full text of the line that starts with "row-450:". If the output was too long to show inline, read the saved file to find it.`,
       `Finally, write a file named summary.txt in the workspace that lists the three marker tokens you found, one per line, following this project's own file conventions. Then confirm what you wrote.`,
     ]
@@ -168,7 +199,15 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
 
     // ---- compaction --------------------------------------------------------
     const applied = events.filter((event) => event.type === COMPACTION_APPLIED.type)
-    expect(applied.length, `projected ${meterSession(events, BUDGET).projectedTokens} against a ${BUDGET} budget`).toBeGreaterThanOrEqual(1)
+    // The two ways this can be zero are different failures and the message has
+    // to tell them apart: no summary call at all means the threshold was never
+    // crossed (the model read less than the arc assumes), while summary calls
+    // with nothing applied means every one of them was declined or raced.
+    const summaryCalls = events.filter((event) => event.type === LLM_AUX_CALL.type).length
+    expect(
+      applied.length,
+      `projected ${meterSession(events, BUDGET).projectedTokens} against a ${BUDGET} budget, after ${summaryCalls} summary call(s)`,
+    ).toBeGreaterThanOrEqual(1)
     const record = applied[0]!.data as {
       trigger: string
       budgetTokens: number
