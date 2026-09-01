@@ -101,13 +101,35 @@ export class ServeProcess {
     return this.frames.filter((frame) => frame.event.type === type && (sessionId === undefined || frame.sessionId === sessionId)).map((frame) => frame.event)
   }
 
+  /**
+   * What the session was doing when a wait ran out. A turn that never ends is
+   * almost always parked on a consent nothing is going to answer — an arc whose
+   * `answerApprovals` starts later, or a model that reached for a tool the arc
+   * did not expect it to need — and "timed out waiting for turn 1 to end" says
+   * none of that. The open asks and the tail of the stream do.
+   */
+  private describeStall(): string {
+    const decided = new Set(this.events('approval/decided').map((event) => (event.data as { id: string }).id))
+    const open = this.events('approval/asked')
+      .map((event) => event.data as { id: string; toolName: string; reason?: string })
+      .filter((ask) => !decided.has(ask.id))
+      .map((ask) => `${ask.toolName}${ask.reason === undefined ? '' : ` (${ask.reason})`}`)
+    const calls = this.frames.filter((frame) => frame.event.type === 'tool/call').map((frame) => (frame.event.data as { name: string }).name)
+    return [
+      `open approvals: ${open.length === 0 ? 'none' : open.join(', ')}`,
+      `tool calls: ${calls.length === 0 ? 'none' : calls.join(', ')}`,
+      `last frames: ${this.frames.slice(-8).map((frame) => frame.event.type).join(' -> ')}`,
+      `last status: ${this.statuses.at(-1)?.status ?? 'none'}`,
+    ].join('\n')
+  }
+
   async waitFor<T>(pick: () => T | undefined, what: string, timeoutMs = 180_000): Promise<T> {
     const start = Date.now()
     for (;;) {
       const value = pick()
       if (value !== undefined) return value
-      if (this.child.exitCode !== null) throw new Error(`serve exited while waiting for ${what}\nstderr: ${this.stderr}`)
-      if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}\nstderr: ${this.stderr}`)
+      if (this.child.exitCode !== null) throw new Error(`serve exited while waiting for ${what}\n${this.describeStall()}\nstderr: ${this.stderr}`)
+      if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}\n${this.describeStall()}\nstderr: ${this.stderr}`)
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
   }

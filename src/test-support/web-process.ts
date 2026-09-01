@@ -127,13 +127,29 @@ export class WebClient {
     return this.frames.filter((frame) => frame.event.type === type && (sessionId === undefined || frame.sessionId === sessionId)).map((frame) => frame.event)
   }
 
+  /** What this client had seen when a wait ran out — an unanswered consent is the usual reason a turn never ends. */
+  private describeStall(): string {
+    const decided = new Set(this.events('approval/decided').map((event) => (event.data as { id: string }).id))
+    const open = this.events('approval/asked')
+      .map((event) => event.data as { id: string; toolName: string })
+      .filter((ask) => !decided.has(ask.id))
+      .map((ask) => ask.toolName)
+    const calls = this.frames.filter((frame) => frame.event.type === 'tool/call').map((frame) => (frame.event.data as { name: string }).name)
+    return [
+      `open approvals: ${open.length === 0 ? 'none' : open.join(', ')}`,
+      `tool calls: ${calls.length === 0 ? 'none' : calls.join(', ')}`,
+      `last frames: ${this.frames.slice(-8).map((frame) => frame.event.type).join(' -> ')}`,
+      `last status: ${this.statuses.at(-1)?.status ?? 'none'}`,
+    ].join('\n')
+  }
+
   async waitFor<T>(pick: () => T | undefined, what: string, timeoutMs = 240_000): Promise<T> {
     const start = Date.now()
     for (;;) {
       const value = pick()
       if (value !== undefined) return value
-      if (this.socket.readyState === WebSocket.CLOSED) throw new Error(`the socket closed while waiting for ${what}`)
-      if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`)
+      if (this.socket.readyState === WebSocket.CLOSED) throw new Error(`the socket closed while waiting for ${what}\n${this.describeStall()}`)
+      if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}\n${this.describeStall()}`)
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
   }
