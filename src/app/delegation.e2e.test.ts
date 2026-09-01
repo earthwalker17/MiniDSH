@@ -131,7 +131,13 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     // The child is a DIFFERENT session making its own model calls, so it
     // replays from its own log. One shared cursor used to serve it the parent's
     // next recorded step — every assistant message from the delegation onward
-    // was then a different message, and `assertConsumed` passed on arithmetic.
+    // was then a different message, and `assertConsumed` passed on arithmetic
+    // alone, because the child ate exactly the steps the parent never reached.
+    //
+    // The replay drives ONE turn, so it is measured against ONE turn's
+    // recording: the parent's first, which is the turn the delegation is in.
+    // That is what makes `assertConsumed` an assertion rather than a coincidence.
+    const parentTurnOne = final.events.slice(0, final.events.findIndex((event) => event.type === 'turn/end') + 1)
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     const replayWorkspace = tempDir('minidsh-e2e6d-replay-ws-')
     writeFileSync(join(replayWorkspace, 'two.txt'), 'still nothing\nTHE ANSWER IS PLUM-42\nnor here\n', 'utf8')
@@ -145,7 +151,7 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         prepare: (context) => {
-          replayHandle = installLlmReplay(context, { events: final.events, children: [childEvents] })
+          replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [childEvents] })
         },
       },
       undefined,
