@@ -175,7 +175,16 @@ export class SessionWindow {
    * indistinguishable from an ordinary turn.
    */
   noted(event) {
-    if (this.attached && event.seq > this.cursor) this.cursor = event.seq
+    // On the SAME queue as `apply`, because it moves the same cursor. Advancing
+    // it synchronously raced a repair that was already parked on an await: a
+    // chunk arriving during the round trip pushed the cursor past the very
+    // surface event that had revealed the hole, and `applyOne` then dropped it
+    // as already-seen. A surface event the carrier is forbidden to drop, lost
+    // by the client instead — on exactly the path this method exists for.
+    const advance = () => {
+      if (this.attached && event.seq > this.cursor) this.cursor = event.seq
+    }
+    this.queue = this.queue.then(advance, advance)
   }
 
   /** A live event, applied in arrival order. Already-seen is dropped; a hole is repaired first. */

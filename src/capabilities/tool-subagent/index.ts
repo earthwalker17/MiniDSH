@@ -42,11 +42,11 @@ export interface SubagentConfig {
   /** The subtractive view every child gets over the tools it inherits (the delegation tool itself is always denied). */
   readonly toolFilter?: ToolRestriction | undefined
   /**
-   * A persona for the child, entered AHEAD of whatever persona its inherited
-   * world already gives it. Deliberately not a replacement: the child's world
-   * is its parent's, and an agent preset that registers a `persona` of its own
-   * has already claimed that name in the child's scope — registering a second
-   * one there throws, and it took the whole delegation with it.
+   * Replaces the persona section in the child's world — a scoped section
+   * shadows a same-named global, and the deployment's persona is a global.
+   * Where the child's inherited world has already claimed that name in its own
+   * scope (an agent preset that registers a persona), replacement is not
+   * expressible, so this is added ahead of it instead of failing the delegation.
    */
   readonly persona?: string | undefined
   /** Step ceiling for a child's single turn (default 12). */
@@ -199,11 +199,20 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
       deps.sandbox.open(child.session, { mode: inherited.mode, reason: 'delegation' })
       deps.approval.open(child.session, { policy: 'never', reason: 'delegation' })
       deps.ctx.get(TOOLS).restrict(childCtx, restriction)
-      // Its own name, ordered ahead of `persona`: the world above may already
-      // own that name in this scope (an agent preset with a persona of its
-      // own), and a duplicate registration throws — which used to fail the
-      // whole delegation rather than the section.
-      if (deps.config.persona !== undefined) deps.prompt.section(childCtx, { name: 'subagent', order: -60, text: deps.config.persona })
+      // `persona` first, because a SCOPED section shadows a same-named global
+      // and the deployment persona is a global — shadowing is how this replaces
+      // it, which is what the config says it does. The name is only ever taken
+      // when the world above put its own persona in THIS scope (an agent preset
+      // that registers one), and a duplicate registration throws; that used to
+      // fail the whole delegation. Then, and only then, it composes instead:
+      // its own name, ordered ahead, so the child gets both rather than none.
+      if (deps.config.persona !== undefined) {
+        try {
+          deps.prompt.section(childCtx, { name: 'persona', order: -50, text: deps.config.persona })
+        } catch {
+          deps.prompt.section(childCtx, { name: 'subagent', order: -60, text: deps.config.persona })
+        }
+      }
     },
   })
 

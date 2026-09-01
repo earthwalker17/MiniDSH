@@ -1120,6 +1120,27 @@ describe('protocol: a delegated child is its parent, not a client', () => {
     expect(JSON.stringify(result)).toContain('the answer to the delegated task')
   })
 
+  it('still lets a live child be READ, including the read forms of authority and model', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { client } = await startHost(delegating('the child answer', 'done', held))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    const start = await client.waitFor(() => client.frames('subagent/start', sessionId)[0], 'the delegation to start')
+    const childId = start.event.data.childId as string
+
+    // Both methods are "read or switch". Only the switch is the parent's alone;
+    // refusing the read would contradict the rule the refusal is named for.
+    const authority = await client.result<{ sandbox: string }>('session/authority', { sessionId: childId })
+    expect(authority.sandbox).toBeDefined()
+    const route = await client.result<{ provider: string }>('session/model', { sessionId: childId })
+    expect(route.provider).toBe('scripted')
+
+    release()
+    await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+  })
+
   it('lets a resumed child be driven, and still holds it to its ceiling', async () => {
     const adapter = delegating('the child answer', 'the parent answer').script(assistantText('resumed and answering'))
     const { client } = await startHost(adapter)

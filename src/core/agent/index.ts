@@ -6,10 +6,10 @@
 import { emitEvent, serialEvent, serviceKey, waterfallEvent, type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
 import type { SessionId } from '../ids.ts'
 import { restoreMessage } from '../llm/message.ts'
-import type { Message } from '../llm/types.ts'
+import type { Message, TokenUsage } from '../llm/types.ts'
 import { delegationPin } from '../approval/events.ts'
 import { PERSISTENCE, type StoredSession } from '../persistence/index.ts'
-import { delegationCeiling } from '../sandbox/events.ts'
+import { delegationCeiling, type SandboxMode } from '../sandbox/events.ts'
 import {
   eventKind,
   foldRequestHeader,
@@ -19,6 +19,7 @@ import {
   type EventEnvelope,
   type Session,
   type SessionHeader,
+  type TurnEndReason,
 } from '../session/index.ts'
 import type {
   Agent,
@@ -42,7 +43,6 @@ import type {
 } from './types.ts'
 
 export * from './types.ts'
-export { SUBAGENT_END, SUBAGENT_START } from './delegation.ts'
 
 // ---- events ---------------------------------------------------------------
 
@@ -58,6 +58,40 @@ export const AGENT_PRE_STEP = waterfallEvent<[context: PreStepContext], Promise<
 export const AGENT_REQUEST = waterfallEvent<[context: RequestContext], Promise<RequestContext['config']>>('agent/request')
 export const AGENT_REQUEST_ERROR = waterfallEvent<[context: RequestErrorContext], Promise<RequestErrorAction>>('agent/request-error')
 export const AGENT_TURN_STOPPING = serialEvent<[context: TurnStoppingContext]>('agent/turn-stopping')
+
+// ---- delegation -------------------------------------------------------------
+
+/**
+ * The two log-only records a parent writes about a child it started, in the
+ * PARENT's session; the child's own steps live in the child's own log, where
+ * `sessions show <child>` reads them.
+ *
+ * They live here rather than in the tool that writes them because delegation is
+ * a runtime concept the log records, not one tool's private bookkeeping: the
+ * lineage half is already here (`SessionHeader.delegatedBy`/`delegationDepth`,
+ * and `agents.fork` refusing a boundary below a child's opening stamps). Two
+ * things needed that: `app/present.ts` — the one projection every plain-text
+ * surface shares — was the only app module importing a capability for its
+ * vocabulary, and no capability could name a delegation at all, because a
+ * capability may not import another (`scripts/check-deps.ts`).
+ */
+export const SUBAGENT_START = eventKind<{
+  readonly callId: string
+  readonly childId: string
+  readonly depth: number
+  readonly provider: string
+  readonly model: string
+  readonly sandbox: SandboxMode
+  readonly approval: 'never'
+}>('subagent/start')
+
+/** How the child's turn ended, and what it cost. */
+export const SUBAGENT_END = eventKind<{
+  readonly callId: string
+  readonly childId: string
+  readonly reason: TurnEndReason
+  readonly usage?: TokenUsage
+}>('subagent/end')
 
 // ---- the base route ---------------------------------------------------------
 

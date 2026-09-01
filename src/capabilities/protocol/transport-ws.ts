@@ -258,7 +258,7 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
     peers.add(peer)
     options.onConnection(connection, peer)
 
-    socket.on('data', (chunk: Buffer) => {
+    const onData = (chunk: Buffer): void => {
       if (closed) return
       buffered = Buffer.concat([buffered, chunk])
       const { frames, rest, error } = decodeFrames(buffered, maxMessage)
@@ -320,7 +320,13 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
           options.onMessage(connection, parsed)
         }
       }
-    })
+    }
+    socket.on('data', onData)
+    // Anything that rode in with the handshake is already in `buffered`, and
+    // nothing would decode it until the peer happened to send again — which,
+    // for a client that pipelined its first frame and then waited for a reply,
+    // is never. Decode it now.
+    if (buffered.length > 0) onData(Buffer.alloc(0))
     socket.on('close', () => {
       if (closed) return
       closed = true

@@ -75,6 +75,45 @@ describe('the browser session window', () => {
     expect(window_.events.map((one: Frame) => one.type)).toEqual(log.filter((one) => one.type !== 'assistant/chunk').map((one) => one.type))
   })
 
+  it('counts a trace event that arrives DURING a repair without losing what revealed the hole', async () => {
+    // `noted` moves the same cursor `apply` does, so it has to take the same
+    // queue. Advancing it synchronously raced a repair already parked on an
+    // await: a chunk arriving mid-round-trip pushed the cursor past the very
+    // surface event that had revealed the hole, and it was then dropped as
+    // already-seen — a surface event lost by the client, on exactly the path
+    // this method exists for.
+    const log: Frame[] = [
+      { type: 'user/message', seq: 0, time: 0, data: {}, surfaceOp: { op: 'append' } },
+      { type: 'assistant/chunk', seq: 1, time: 0, data: {} },
+      { type: 'assistant/message', seq: 2, time: 0, data: {}, surfaceOp: { op: 'append' } },
+      { type: 'assistant/chunk', seq: 3, time: 0, data: {} },
+    ]
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const wire = {
+      async request(method: string) {
+        if (method === 'session/attach') {
+          return { header: {}, view: {}, page: { events: [log[0]!], from: 0, to: 0, hasMore: false }, cursor: 0 }
+        }
+        await held // the hole was trace-only; finding that out costs a round trip
+        return { header: {}, events: [] }
+      },
+    }
+    const window_ = new SessionWindow(wire, 's', () => {})
+    await window_.attach()
+
+    const applying = window_.apply(log[2]!) // chunk@1 was dropped by the carrier
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    window_.noted(log[3]!) // arrives while the repair is in flight
+    release()
+    await applying
+
+    expect(window_.events.map((one: Frame) => one.seq)).toEqual([0, 2])
+    expect(window_.cursor).toBe(3)
+  })
+
   it('repairs a real hole, bounded at both ends and without the trace tier', async () => {
     const first = step(0, 3)
     const log = [...first, ...step(first.at(-1)!.seq + 1, 3)]

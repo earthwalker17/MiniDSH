@@ -15,6 +15,7 @@ import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import type { ContentBlock, Message } from '../../core/llm/index.ts'
 import { SANDBOX } from '../../core/sandbox/index.ts'
+import { PROMPT } from '../../core/prompt/index.ts'
 import { matches, TOOL_RESULT, type EventEnvelope, type Session } from '../../core/session/index.ts'
 import { TOOLS } from '../../core/tools/index.ts'
 import { bootComposition } from '../../app/headless.ts'
@@ -89,6 +90,46 @@ function storedEvents(sessionsRoot: string, id: string): EventEnvelope[] {
 }
 
 describe('delegation through the full composition', () => {
+  it('replaces the inherited persona, and composes with one the child’s own world already claimed', async () => {
+    const persona = 'You are a focused search subagent.'
+    // A scoped section shadows a same-named GLOBAL, and the deployment persona
+    // (context-runtime) is a global — so replacement is what normally happens.
+    {
+      const w = await world([{ id: 'tool-subagent', config: { persona } }])
+      scriptDelegation(w.adapter, 'Find it.', 'found')
+      const handle = await w.create()
+      handle.agent.followup(createUserMessage('delegate this'))
+      await handle.agent.whenIdle()
+      const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+      const child = storedEvents(w.sessionsRoot, start.childId)
+      const system = JSON.stringify(child.filter((event) => event.type === 'request/header').map((event) => event.data))
+      expect(system).toContain(persona)
+      expect(system).not.toContain('You are MiniDSH')
+      await handle.dispose()
+    }
+    // But a per-agent preset may already own `persona` in the child's own
+    // layer, where replacement is not expressible. It used to throw and take
+    // the whole delegation with it; now the child gets both, its own first.
+    {
+      const w = await world([{ id: 'tool-subagent', config: { persona } }])
+      scriptDelegation(w.adapter, 'Find it.', 'found')
+      const handle = await w.root.get(AGENTS).create(w.root, {
+        cwd: w.cwd,
+        agentOptions: SCRIPTED,
+        setup: (agentCtx) => void w.root.get(PROMPT).section(agentCtx, { name: 'persona', order: -50, text: 'You are the operator.' }),
+      })
+      handle.agent.followup(createUserMessage('delegate this'))
+      await handle.agent.whenIdle()
+      const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]
+      expect(start, 'the delegation must survive a world that already owns `persona`').toBeDefined()
+      const child = storedEvents(w.sessionsRoot, (start!.data as { childId: string }).childId)
+      const system = JSON.stringify(child.filter((event) => event.type === 'request/header').map((event) => event.data))
+      expect(system).toContain(persona)
+      expect(system).toContain('You are the operator.')
+      await handle.dispose()
+    }
+  })
+
   it('runs a child in its own session under a delegation opening, and hands its answer back as the tool result', async () => {
     const w = await world()
     scriptDelegation(w.adapter, 'Count the files.', 'there are three files')

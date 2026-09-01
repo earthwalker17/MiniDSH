@@ -194,8 +194,6 @@ function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: st
  */
 interface PendingApproval {
   readonly sessionId: string
-  /** A child mid-delegation reaches only clients that attached to it explicitly (§ `receives`). */
-  readonly underParent: boolean
   readonly settle: (outcome: ApprovalOutcome) => void
 }
 
@@ -258,7 +256,11 @@ export class ProtocolHost {
    */
   private settleUnwatchedApprovals(): void {
     for (const [key, pending] of this.pendingApprovals) {
-      if (this.anyReceiver(pending.sessionId, pending.underParent)) continue
+      // Never the attach-only rule: a question can only be parked for a session
+      // that ASKED one, and a child mid-delegation is pinned `never`, so its
+      // requests are refused inside the approval service before any answerer is
+      // consulted. Nothing delegated can be in this table.
+      if (this.anyReceiver(pending.sessionId, false)) continue
       this.pendingApprovals.delete(key)
       pending.settle('unavailable')
     }
@@ -358,7 +360,7 @@ export class ProtocolHost {
     const underParent = this.parentRunning(prompt.agent.id, prompt.agent.session.header) !== undefined
     if (!this.anyReceiver(prompt.agent.id, underParent)) return next()
     return new Promise<ApprovalOutcome>((resolve) => {
-      this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, { sessionId: prompt.agent.id, underParent, settle: resolve })
+      this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, { sessionId: prompt.agent.id, settle: resolve })
     })
   }
 
@@ -619,7 +621,11 @@ export class ProtocolHost {
     const sessionId = requireString(params, 'sessionId', 'session/authority')
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
     if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
-    this.assertDrivable(agent, 'session/authority')
+    // Only a SWITCH is refused on a child its parent is running. With no knobs
+    // this method reads, and reads stay open — a human may watch a child.
+    if (params.sandbox !== undefined || params.approval !== undefined || params.preset !== undefined) {
+      this.assertDrivable(agent, 'session/authority')
+    }
     if (params.sandbox !== undefined && !isSandboxMode(params.sandbox)) {
       throw new RpcFailure(INVALID_PARAMS, `session/authority: "sandbox" must be one of ${SANDBOX_MODES.join(' | ')}`)
     }
@@ -662,7 +668,6 @@ export class ProtocolHost {
     const sessionId = requireString(params, 'sessionId', 'session/model')
     const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
     if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
-    this.assertDrivable(agent, 'session/model')
     const partial: { provider?: string; model?: string; reasoningEffort?: string } = {}
     for (const key of ['provider', 'model', 'reasoningEffort'] as const) {
       const value = params[key]
@@ -671,7 +676,12 @@ export class ProtocolHost {
       partial[key] = value
     }
     this.assertRoutable(partial, 'session/model')
-    if (Object.keys(partial).length > 0) agent.configure(partial)
+    // Only a SWITCH is refused on a child its parent is running: with no fields
+    // this method reads the base route, and reads stay open.
+    if (Object.keys(partial).length > 0) {
+      this.assertDrivable(agent, 'session/model')
+      agent.configure(partial)
+    }
     return agent.options
   }
 

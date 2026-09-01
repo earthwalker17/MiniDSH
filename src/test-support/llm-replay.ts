@@ -213,8 +213,8 @@ class ReplayDispatch {
     const source = this.sources[this.assigned]
     if (!source) {
       throw new Error(
-        `llm-replay: session "${key}" is the ${this.assigned + 1}th to ask for a model, but only ${this.sources.length} recorded log(s) were installed — ` +
-          'a delegated child makes its own calls and needs its own log',
+        `llm-replay: ${this.assigned + 1} sessions have asked for a model, but only ${this.sources.length} recorded log(s) were installed — ` +
+          `session "${key}" has none, and a delegated child makes its own calls and needs its own log`,
       )
     }
     this.assigned += 1
@@ -299,12 +299,14 @@ export function installLlmReplay(
   },
 ): ReplayHandle {
   const logs = [options.events, ...(options.children ?? [])]
-  const sources = logs.map((events) => {
-    const script = deriveReplayScript(events, options.attempts)
-    const auxScript = foldAuxCalls(events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) }))
-    return { script, auxScript, source: new ReplayScript(script, auxScript) }
-  })
-  const shared = new ReplayDispatch(sources.map((one) => one.source))
+  const sources = logs.map(
+    (events) =>
+      new ReplayScript(
+        deriveReplayScript(events, options.attempts),
+        foldAuxCalls(events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) })),
+      ),
+  )
+  const shared = new ReplayDispatch(sources)
   // Every log's routes and windows: a child may take a route its parent never did.
   const windows = new Map<string, number>()
   for (const events of logs) for (const [route, window] of windowsIn(events)) windows.set(route, window)
@@ -316,8 +318,8 @@ export function installLlmReplay(
     dispose: async () => {
       for (const dispose of disposers) await dispose()
     },
-    steps: sources.reduce((total, one) => total + one.script.length, 0),
-    auxCalls: sources.reduce((total, one) => total + one.auxScript.length, 0),
+    steps: sources.reduce((count, one) => count + one.total(), 0),
+    auxCalls: sources.reduce((count, one) => count + one.auxTotal(), 0),
     providers,
     assertConsumed: () => shared.assertConsumed(),
   }
