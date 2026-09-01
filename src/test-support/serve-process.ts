@@ -69,13 +69,32 @@ export class ServeProcess {
     })
   }
 
-  async request<T>(method: string, params?: unknown): Promise<T> {
+  /**
+   * One request, and it is bounded. A reply that never came used to hang the
+   * arc until vitest's own 600 s timeout, which names the whole test and
+   * nothing inside it: `waitFor` had a deadline and this did not, so the one
+   * shape that CAN wait forever was the one shape that said nothing about
+   * where. The deadline is generous (a `session/prompt` that creates a session
+   * boots a whole composition, and `shutdown` disposes every live agent) and
+   * its only job is to turn a silent hang into a named method plus the host's
+   * own stderr.
+   */
+  async request<T>(method: string, params?: unknown, timeoutMs = 120_000): Promise<T> {
     const id = this.nextId++
+    let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<Reply>((resolve) => this.pending.set(id, resolve))
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${method} did not answer in ${timeoutMs} ms\nstderr: ${this.stderr}`)), timeoutMs)
+    })
     this.child.stdin!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) })}\n`)
-    const settled = await reply
-    if (settled.error) throw new Error(`${method} failed: ${settled.error.message}`)
-    return settled.result as T
+    try {
+      const settled = await Promise.race([reply, deadline])
+      if (settled.error) throw new Error(`${method} failed: ${settled.error.message}`)
+      return settled.result as T
+    } finally {
+      clearTimeout(timer)
+      this.pending.delete(id)
+    }
   }
 
   events(type: string, sessionId?: string): EventEnvelope[] {

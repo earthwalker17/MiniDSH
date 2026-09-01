@@ -66,9 +66,14 @@ export interface CompactionBasicConfig {
   /** How many times one step may answer a provider overflow by compacting. */
   readonly maxOverflowRetries?: number | undefined
   /**
-   * Consecutive failed summary calls before the AUTOMATIC triggers give up on a
-   * session. Each attempt replays a whole shadowed span, so a persistently
-   * failing summariser is an expensive request at every step boundary, forever.
+   * Consecutive summaries that produced no compaction before the AUTOMATIC
+   * triggers give up on a session — a call that failed, and equally one whose
+   * summary came back at least as large as the span it would have replaced.
+   * Each attempt replays a whole shadowed span, so a summariser that keeps
+   * producing nothing usable is an expensive request at every step boundary,
+   * forever. A summary lost to a race (a turn started, the agent went away)
+   * neither counts nor clears: the call worked, and nothing was learned about
+   * the summariser.
    * `/compact` is a human asking again and is never disabled.
    */
   readonly maxSummaryFailures?: number | undefined
@@ -262,7 +267,6 @@ class BasicCompaction implements Compaction {
       this.failures.set(agent, (this.failures.get(agent) ?? 0) + 1)
       return { kind: 'nothing-to-do' }
     }
-    this.failures.delete(agent)
 
     // ---- no `await` past this line, or the checks mean nothing -------------
     if (agent.status !== statusBefore) {
@@ -297,6 +301,21 @@ class BasicCompaction implements Compaction {
     const surfaceTokensBefore = live.reduce((sum, seq) => sum + cost(seq), 0)
     const shadowedTokens = plan.shadowedSeqs.reduce((sum, seq) => sum + cost(seq), 0)
     const surfaceTokensAfter = surfaceTokensBefore - shadowedTokens + estimateMessage(message)
+    // A summary at least as large as everything it replaces is not a compaction.
+    // Applying it would pay for a call, hide real history behind a replace, and
+    // leave the surface BIGGER than it found it — there is no reading under
+    // which that helps, and the two numbers that say so are already in hand
+    // here. It happens when the plan's head is small (a surface only just over
+    // budget) and the model answers a short span at length; a live run measured
+    // 4,545 against 4,314. Counted with the summary failures because it is one:
+    // the call succeeded and produced nothing usable, and without the count an
+    // automatic trigger would buy the same useless summary at every step
+    // boundary for the rest of the session.
+    if (surfaceTokensAfter >= surfaceTokensBefore) {
+      this.failures.set(agent, (this.failures.get(agent) ?? 0) + 1)
+      return { kind: 'nothing-to-do' }
+    }
+    this.failures.delete(agent)
     session.append(COMPACTION_APPLIED, {
       trigger,
       budgetTokens: budget,

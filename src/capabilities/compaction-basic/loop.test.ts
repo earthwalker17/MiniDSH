@@ -82,12 +82,15 @@ async function harness(config: CompactionBasicConfig, withAdapter = true): Promi
   return created
 }
 
-function responder(options: { overflowOnCall?: number; failSummary?: boolean } = {}): ScriptedResponse {
+function responder(options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean } = {}): ScriptedResponse {
   let steps = 0
   let calls = 0
   return (request) => {
     if (request.purpose === 'compaction') {
       if (options.failSummary) return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'nope', code: 'SERVER' } } }]
+      // A summariser that answers a short span at length: the call succeeds,
+      // and the "compaction" it offers would leave the surface bigger.
+      if (options.bloatedSummary) return assistantText(`## Primary Request\n- keep going ${'z'.repeat(20_000)}`)
       return assistantText('## Primary Request\n- keep going\n## Next Step\n- finish the job')
     }
     calls += 1
@@ -100,7 +103,7 @@ function responder(options: { overflowOnCall?: number; failSummary?: boolean } =
 }
 
 /** Enough scripted answers that no test runs out of script mid-turn. */
-function arm(test: Harness, options: { overflowOnCall?: number; failSummary?: boolean } = {}): void {
+function arm(test: Harness, options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean } = {}): void {
   const shared = responder(options)
   test.adapter.script(...Array.from({ length: 40 }, () => shared))
 }
@@ -232,6 +235,36 @@ describe('compaction through the real loop', () => {
     expect(attempts).toHaveLength(2)
     expect(attempts.every((event) => (event.data as AuxCallRecord).outcome.kind === 'error')).toBe(true)
     // Every turn still completed: a failing summariser must never fail the work.
+    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
+    expect(ends.every((event) => (event.data as { reason: { kind: string } }).reason.kind === 'completed')).toBe(true)
+  })
+
+  /**
+   * The one outcome a compaction must never have: a surface bigger than it
+   * found. It is reachable whenever the plan's head is small and the model
+   * answers it at length — a live S5 arc measured 4,545 against 4,314 — and by
+   * then the call is already paid for, so the only question left is whether to
+   * hide real history behind a summary that saves nothing.
+   */
+  it('refuses a summary at least as large as the span it would replace, and gives up after enough of them', async () => {
+    const test = await harness({ budgetTokens: 1200, retainRatio: 0.2, thresholdRatio: 0.5, maxSummaryFailures: 2 })
+    const { agent } = await test.create()
+    arm(test, { bloatedSummary: true })
+    const surfaceBefore = agent.session.surfaceSeqs().length
+    await grow(agent, 8)
+
+    // Nothing was applied, and the surface still holds every turn's own nodes.
+    expect(appliedRecords(agent)).toHaveLength(0)
+    expect(agent.session.surfaceSeqs().length).toBeGreaterThan(surfaceBefore)
+    expect(agent.session.events.some((event) => event.surfaceOp?.op === 'replace')).toBe(false)
+
+    // The summary CALLS succeeded — this is not the failing-summariser path —
+    // and the give-up counter still bounded them at `maxSummaryFailures`.
+    const attempts = agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type)
+    expect(attempts).toHaveLength(2)
+    expect(attempts.every((event) => (event.data as AuxCallRecord).outcome.kind === 'text')).toBe(true)
+
+    // And the work itself never suffered for it.
     const ends = agent.session.events.filter((event) => event.type === 'turn/end')
     expect(ends.every((event) => (event.data as { reason: { kind: string } }).reason.kind === 'completed')).toBe(true)
   })
