@@ -106,6 +106,7 @@ function renderTranscript() {
   const log = $('log')
   log.replaceChildren()
   if (!window_) return
+  if (window_.damaged) log.append(el('div', 'row note', '[the stored log is damaged: what follows is the readable prefix, not the whole session]'))
   if (window_.hasMore) {
     // No number: `oldest` is an inclusive lower SEQ bound, not a count, and seq
     // space includes the trace tier a page never carries — so on exactly the
@@ -303,8 +304,12 @@ async function start() {
     onNotification: (method, params) => {
       if (params?.sessionId && params.sessionId !== state.window?.sessionId) return
       if (method === 'session.event') {
-        if (params.event.type === 'assistant/chunk') stream(params.event)
-        else void state.window?.apply(params.event).catch(fail)
+        if (params.event.type === 'assistant/chunk') {
+          stream(params.event)
+          // Seen, not stored: the window must still count it, or the next
+          // event looks like a hole and pays for a repair that returns nothing.
+          state.window?.noted(params.event)
+        } else void state.window?.apply(params.event).catch(fail)
       } else if (method === 'session.view') {
         state.window?.setView(params.view)
       } else if (method === 'session.status') {

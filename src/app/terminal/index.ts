@@ -394,6 +394,9 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       // the backlog replays whatever streamed while we attached (a resumed
       // session may have woken on its restored inbox already).
       const attachment = await client.request<AttachResult>('session/attach', { sessionId })
+      // A readable prefix is not the session: saying nothing renders a
+      // truncated log as if it were whole.
+      if (attachment.damaged) out.write('warning: the stored log is damaged; what follows is its readable prefix\n')
       const transcript = renderHistory(attachment.page.events)
       // Not `page.from`: that is an inclusive lower SEQ bound, not a count, and
       // seq space counts the trace tier a page never carries.

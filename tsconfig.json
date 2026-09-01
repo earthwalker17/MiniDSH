@@ -15,9 +15,10 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "allowImportingTsExtensions": true,
+    "allowJs": true,
     "isolatedModules": true,
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "vitest.config.ts", "vitest.e2e.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.js", "scripts/**/*.ts", "vitest.config.ts", "vitest.e2e.config.ts"]
 }

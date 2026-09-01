@@ -113,10 +113,14 @@ export function pageEvents(events: readonly EventEnvelope[], request: PageReques
         break
       }
     }
-    // The ceiling may only cut where a group ended, so a page never carries
-    // half of one; a group bigger than the ceiling is served whole.
-    if (lastGroupStart !== undefined && end - index >= maxEvents) {
-      cut = lastGroupStart
+    // The ceiling cuts where a group ended, so a page never carries half of
+    // one; a group bigger than the ceiling is served whole. With no group
+    // walked at all the ceiling still binds, at this event's own group start —
+    // otherwise a run with no ARRIVED message in it (a stretch of log-only
+    // facts, a tail of nothing but tool results) had no legal cut anywhere and
+    // the whole log came back, ceiling or not.
+    if (end - index >= maxEvents) {
+      cut = lastGroupStart ?? groupStart(event)
       break
     }
   }

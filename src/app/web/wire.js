@@ -100,6 +100,8 @@ export class SessionWindow {
     this.hasMore = false
     this.header = undefined
     this.view = undefined
+    /** The stored log is a readable prefix, not the whole session. */
+    this.damaged = false
     /** No page yet: an event applied before one would repair from seq 0. */
     this.attached = false
     // Live events are applied one at a time. `apply` awaits a repair, and two
@@ -137,6 +139,10 @@ export class SessionWindow {
     this.cursor = attached.cursor
     this.oldest = attached.page.from
     this.hasMore = attached.page.hasMore
+    // The store holds bytes past what it could read: this transcript is a
+    // readable prefix, not the session. Saying nothing renders a truncated log
+    // as if it were whole.
+    this.damaged = attached.damaged === true
     this.attached = true
     this.onChange()
     return attached
@@ -155,6 +161,21 @@ export class SessionWindow {
   setView(view) {
     this.view = view
     this.onChange()
+  }
+
+  /**
+   * A live event this window does NOT store but has seen — the trace tier,
+   * which is streamed straight into the transcript and never kept.
+   *
+   * The cursor must still advance across it. Without this, every run of chunks
+   * read as a hole: each assistant message arrived at `cursor + 41` and spent a
+   * `session/events` round trip discovering that the range between held nothing
+   * a page carries. The repair machinery ran constantly, so a REAL drop — which
+   * is what a carrier under pressure does to exactly this tier — was
+   * indistinguishable from an ordinary turn.
+   */
+  noted(event) {
+    if (this.attached && event.seq > this.cursor) this.cursor = event.seq
   }
 
   /** A live event, applied in arrival order. Already-seen is dropped; a hole is repaired first. */

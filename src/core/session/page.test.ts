@@ -158,6 +158,32 @@ describe('the page fold', () => {
     expect(messagesIn(page.events)).toBe(4)
   })
 
+  it('binds the ceiling even where no arrived message offers a cut', () => {
+    // The ceiling used to be reachable only at a message-group boundary, and
+    // only an ARRIVED user/assistant message set one — so a range with none
+    // had no legal cut and the whole log came back. Two shapes reach it: a run
+    // of log-only facts, and a tail of nothing but tool results (a surface
+    // event, deliberately not a message, so it never spends the budget).
+    nextSeq = 0
+    const facts = Array.from({ length: 5_000 }, () => event('inbox/spliced'))
+    const page = pageEvents(facts, { throughSeq: head(facts), maxEvents: 100 })
+    expect(page.events.length).toBeLessThanOrEqual(100)
+    expect(page.hasMore).toBe(true)
+
+    nextSeq = 0
+    const results: EventEnvelope[] = [event('user/message', append)]
+    for (let i = 0; i < 2_500; i++) {
+      const call = event('tool/call')
+      results.push(call, event('tool/result', { ...append, sourceEventSeqs: [call.seq] }))
+    }
+    const tail = pageEvents(results, { throughSeq: head(results), maxEvents: 100 })
+    expect(tail.events.length).toBeLessThanOrEqual(101)
+    expect(tail.hasMore).toBe(true)
+    // And it still cites nothing it does not carry: a result is never split
+    // from the call it answers, which is what the group start is for.
+    for (const one of tail.events) expect(groupStart(one)).toBeGreaterThanOrEqual(tail.from)
+  })
+
   it('answers an empty log with an empty page that claims nothing', () => {
     expect(pageEvents([], { throughSeq: -1 })).toEqual({ events: [], from: 0, to: -1, hasMore: false })
   })
