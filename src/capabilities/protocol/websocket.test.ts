@@ -332,3 +332,51 @@ describe('the websocket frame codec', () => {
     expect(frames[0]!.payload.toString('utf8')).toBe('round trip')
   })
 })
+
+describe('the websocket frame codec: what RFC 6455 says a server must refuse', () => {
+  /** A frame with every header field under the caller's control. */
+  function frame(opcode: number, payload: Buffer, options: { fin?: boolean; rsv?: number; masked?: boolean } = {}): Buffer {
+    const { fin = true, rsv = 0, masked = true } = options
+    const key = Buffer.from([0x01, 0x02, 0x03, 0x04])
+    const body = Buffer.from(payload)
+    if (masked) for (let index = 0; index < body.length; index++) body[index] = body[index]! ^ key[index % 4]!
+    const parts: Buffer[] = [Buffer.from([(fin ? 0x80 : 0) | (rsv << 4) | opcode])]
+    if (body.length < 126) parts.push(Buffer.from([(masked ? 0x80 : 0) | body.length]))
+    else {
+      const long = Buffer.alloc(3)
+      long[0] = (masked ? 0x80 : 0) | 126
+      long.writeUInt16BE(body.length, 1)
+      parts.push(long)
+    }
+    if (masked) parts.push(key)
+    parts.push(body)
+    return Buffer.concat(parts)
+  }
+
+  it('fails the connection on a reserved bit, rather than guessing what the peer meant', () => {
+    // No extension is ever negotiated here, so RSV1..3 must be zero (§5.2).
+    const { frames, error } = decodeFrames(frame(0x1, Buffer.from('{}'), { rsv: 4 }), 1024)
+    expect(error).toBe(1002)
+    expect(frames).toHaveLength(0)
+  })
+
+  it('refuses a fragmented control frame, which §5.5 forbids outright', () => {
+    const { error } = decodeFrames(frame(0x9, Buffer.from('x'), { fin: false }), 1024)
+    expect(error).toBe(1002)
+  })
+
+  it('refuses a control frame past 125 bytes, which cannot be framed on the way back', () => {
+    // The echo path clips its pong, but accepting the frame at all left the
+    // decoder reading a stream it and the peer no longer agreed about.
+    const { error } = decodeFrames(frame(0x9, Buffer.alloc(200, 0x70)), 4096)
+    expect(error).toBe(1002)
+  })
+
+  it('still decodes the shapes a browser actually sends', () => {
+    const whole = Buffer.concat([frame(0x1, Buffer.from('{"a":1'), { fin: false }), frame(0x9, Buffer.from('p')), frame(0x0, Buffer.from('}'))])
+    const { frames, error } = decodeFrames(whole, 4096)
+    expect(error).toBeUndefined()
+    expect(frames.map((one) => one.opcode)).toEqual([0x1, 0x9, 0x0])
+    expect(frames[0]!.fin).toBe(false)
+  })
+})

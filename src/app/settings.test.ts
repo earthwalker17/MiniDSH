@@ -55,6 +55,21 @@ describe('resolveSettings', () => {
     expect(resolveSettings({ path, env: {} }).agent).toEqual({ ...defaultAgentOptions(), maxTokens: 2048, temperature: 0.25 })
   })
 
+  it('drops an effort belonging to the route MINIDSH_MODEL replaces, exactly as every other switch does', () => {
+    // An effort id is adapter-owned, so it means nothing across a route change.
+    // A hand-rolled merge here resolved one file plus one env var into two
+    // different routes depending on which surface read it: the CLI kept the
+    // file's DeepSeek effort and carried it onto an Anthropic model, which that
+    // adapter refuses on every step, while the wire dropped it.
+    const path = settingsFile({ agent: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'max' } })
+    const switched = resolveSettings({ path, env: { MINIDSH_MODEL: 'claude-sonnet-5' } })
+    expect(switched.agent.model).toBe('claude-sonnet-5')
+    expect(switched.agent.reasoningEffort).toBeUndefined()
+    // With no route change the file's effort stands.
+    expect(resolveSettings({ path, env: {} }).agent.reasoningEffort).toBe('max')
+    expect(resolveSettings({ path, env: { MINIDSH_MODEL: 'deepseek-v4-pro' } }).agent.reasoningEffort).toBe('max')
+  })
+
   it('splits the store base from what outranks the store, so the file cannot beat the environment', () => {
     const layer = { provider: 'from-file', model: 'from-file' }
     const path = settingsFile({ agent: layer })

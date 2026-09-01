@@ -138,6 +138,9 @@ export function decodeFrames(buffer: Buffer, maxPayload: number): { frames: Deco
     const fin = (first & 0x80) !== 0
     const opcode = first & 0x0f
     const masked = (second & 0x80) !== 0
+    // RFC 6455 §5.2: a server that negotiated no extension MUST fail the
+    // connection on a reserved bit rather than guess what the peer meant.
+    if ((first & 0x70) !== 0) return { frames, rest: buffer.subarray(at), error: CLOSE_PROTOCOL_ERROR }
     let length = second & 0x7f
     let cursor = at + 2
     if (length === 126) {
@@ -152,6 +155,10 @@ export function decodeFrames(buffer: Buffer, maxPayload: number): { frames: Deco
       cursor += 8
     }
     if (length > maxPayload) return { frames, rest: buffer.subarray(at), error: CLOSE_TOO_LARGE }
+    // RFC 6455 §5.5: a control frame carries at most 125 bytes and is never
+    // fragmented. Accepting either left the decoder reading a stream the peer
+    // and this side had stopped agreeing about.
+    if (opcode >= OP_CLOSE && (!fin || length > 125)) return { frames, rest: buffer.subarray(at), error: CLOSE_PROTOCOL_ERROR }
     let mask: Buffer | undefined
     if (masked) {
       if (cursor + 4 > buffer.length) break
@@ -179,7 +186,7 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
   const heartbeatMs = options.heartbeatMs ?? 30_000
   const peers = new Set<{ close: (code?: number, reason?: string) => void; beat: () => void }>()
 
-  const onUpgrade = (request: IncomingMessage, socket: Duplex): void => {
+  const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
     const requestPath = (request.url ?? '/').split('?', 1)[0]
     // Not ours: leave it for another carrier on this server. It is NOT closed
     // here — the app that owns the server closes what nobody claimed, because
@@ -200,7 +207,10 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
     }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`)
 
-    let buffered: Buffer = Buffer.alloc(0)
+    // Whatever arrived in the same read as the handshake. A conformant client
+    // sends nothing before the 101, so this is normally empty — but dropping it
+    // would silently lose a frame rather than fail.
+    let buffered: Buffer = head !== undefined && head.length > 0 ? Buffer.from(head) : Buffer.alloc(0)
     let fragments: Buffer[] = []
     let fragmentBytes = 0
     let fragmentOpcode = OP_CONTINUATION

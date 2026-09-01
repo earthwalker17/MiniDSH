@@ -12,7 +12,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { z } from 'zod'
-import type { AgentOptions } from '../core/agent/index.ts'
+import { mergeAgentOptions, type AgentOptions } from '../core/agent/index.ts'
 import { defaultAgentOptions } from './compose.ts'
 
 /** The `agent` namespace's USER layer: every field optional, because a layer states only overrides. */
@@ -106,19 +106,25 @@ export function resolveSettings(options: ResolveSettingsOptions = {}): ResolvedS
   const builtins = defaultAgentOptions()
   const model = present(env.MINIDSH_MODEL)
   const layer = file.agent ?? {}
+  // Every field the layer may carry travels, or the same file would mean two
+  // different things to the CLI and to the wire.
+  const fromFile: AgentOptions = {
+    provider: layer.provider ?? builtins.provider,
+    model: layer.model ?? builtins.model,
+    ...(layer.reasoningEffort === undefined ? {} : { reasoningEffort: layer.reasoningEffort }),
+    ...(layer.maxSteps === undefined ? {} : { maxSteps: layer.maxSteps }),
+    ...(layer.maxTokens === undefined ? {} : { maxTokens: layer.maxTokens }),
+    ...(layer.temperature === undefined ? {} : { temperature: layer.temperature }),
+  }
   return {
     agentBase: builtins,
     agentOverrides: model === undefined ? {} : { model },
-    agent: {
-      provider: layer.provider ?? builtins.provider,
-      // The environment still wins over the file, as it always has.
-      model: model ?? layer.model ?? builtins.model,
-      // Every field the layer may carry travels, or the same file would mean
-      // two different things to the CLI and to the wire.
-      ...(layer.reasoningEffort === undefined ? {} : { reasoningEffort: layer.reasoningEffort }),
-      ...(layer.maxSteps === undefined ? {} : { maxSteps: layer.maxSteps }),
-      ...(layer.maxTokens === undefined ? {} : { maxTokens: layer.maxTokens }),
-      ...(layer.temperature === undefined ? {} : { temperature: layer.temperature }),
-    },
+    // The environment still wins over the file, as it always has — but through
+    // the SAME merge every other path takes, so it drops an effort the file
+    // named for the route it is replacing. A hand-rolled merge here resolved
+    // one settings.json plus one `MINIDSH_MODEL` into two different routes
+    // depending on which surface read it, and the CLI's carried a DeepSeek
+    // effort id onto an Anthropic model, which that adapter refuses per step.
+    agent: model === undefined ? fromFile : mergeAgentOptions(fromFile, { model }),
   }
 }

@@ -732,6 +732,39 @@ describe('protocol: settings over the wire', () => {
     const reply = await client.call('settings/describe')
     expect(reply.error?.message).toContain('no settings capability')
   })
+
+  it('refuses a settings-written route this host cannot serve, before it becomes a session base', async () => {
+    const { client } = await withStore()
+    // The schema says a provider is a non-empty string and nothing more, and
+    // the browser renders it as free text. Checking only the CALLER's overrides
+    // let this become the durable base route of every new session, whose first
+    // turn then died NO_ADAPTER — and whose every later resume rebuilt from it.
+    await client.result('settings/set', { ns: 'agent', patch: { provider: 'deepsek', model: 'typo' }, expectedRevision: 0 })
+    const refused = await client.call('session/prompt', { text: 'hi' })
+    expect(refused.error?.code).toBe(-32602)
+    expect(refused.error?.message).toContain('no adapter for provider "deepsek"')
+    // And nothing was recorded: the session was never created.
+    const listed = await client.result<{ sessions: unknown[] }>('sessions/list')
+    expect(listed.sessions).toHaveLength(0)
+  })
+
+  it('refuses a working directory named alongside a session that already has one', async () => {
+    const { client } = await startHost(new ScriptedAdapter().script(assistantText('hi')))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
+    // Where a session works is decided once, at creation. Naming one afterwards
+    // used to answer success for a request the host had not honoured — while
+    // the byte-identical shape without a sessionId is refused.
+    for (const params of [{ cwd: '/anywhere' }, { workspaceId: 'w' }, { path: 'sub' }]) {
+      const reply = await client.call('session/prompt', { sessionId, text: 'again', ...params })
+      expect(reply.error?.code, JSON.stringify(params)).toBe(-32602)
+    }
+  })
+
+  it('reports a namespace the caller named wrongly as the caller’s error', async () => {
+    const { client } = await withStore()
+    const reply = await client.call('settings/get', { ns: 'nope' })
+    expect(reply.error?.code).toBe(-32602)
+  })
 })
 
 describe('protocol: workspaces are addressing, never authority', () => {

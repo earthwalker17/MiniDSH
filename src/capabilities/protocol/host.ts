@@ -745,6 +745,13 @@ export class ProtocolHost {
     if (requested !== undefined && typeof requested !== 'string') {
       throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "sessionId" must be a string')
     }
+    // Where a session works is decided once, at creation: the cwd becomes the
+    // immutable root every fence derives from. Naming one alongside an existing
+    // session was silently ignored — a success reply for a request the host did
+    // not honour, where a bad argument on this method is refused everywhere else.
+    if (requested !== undefined && (params.cwd !== undefined || params.workspaceId !== undefined || params.path !== undefined)) {
+      throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd", "workspaceId" and "path" choose where a NEW session works; an existing one keeps the root it was created with')
+    }
     const agents = this.ctx.get(AGENTS)
     const options = readAgentOptions(this.agentDefaults(), params.agentOptions, 'session/prompt')
     // A route to nowhere is refused here, on every path, rather than becoming
@@ -753,6 +760,13 @@ export class ProtocolHost {
     const preset = this.config.agentPreset === undefined ? {} : { agentPreset: this.config.agentPreset }
     const setup = this.config.setup === undefined ? {} : { setup: this.config.setup }
     if (requested === undefined) {
+      // The MERGE is what becomes this session's durable base route, and half
+      // of it comes from the settings store — which a remote client can write,
+      // through a schema that says no more about a provider than that it is a
+      // non-empty string. Checking only the caller's own overrides let a
+      // settings write record a route this host has no adapter for; the first
+      // turn then died `NO_ADAPTER`, and every later resume rebuilt from it.
+      this.assertRoutable(options.full, 'session/prompt')
       const cwd = this.resolveCwd(params)
       const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...preset, ...setup })
       this.owned.set(handle.agent.id, handle)

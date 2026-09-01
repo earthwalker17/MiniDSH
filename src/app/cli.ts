@@ -589,11 +589,17 @@ async function configCommand(args: ParsedArgs): Promise<number> {
         warnings.push(`layer "${layer}" ${verb} authority-sensitive row "${row.id}" (${row.plugin.name})`)
       }
     }
-    // Agent presets are composition too: they mount plugins into an agent's world.
+    // Agent presets are composition too: they mount plugins into an agent's
+    // world, so the same authority check applies. A preset naming
+    // `approval-headless{approve:true}` grants blanket consent to every agent
+    // it composes, and it used to print as an ordinary row.
     if (plan.loaded.agentPresets.size > 0) {
       process.stdout.write(`\nagent presets:\n`)
       for (const [name, spec] of plan.loaded.agentPresets) {
-        process.stdout.write(`  ${name.padEnd(22)} ${spec.rows.map((row) => `${row.id}(${row.plugin})`).join(', ')}\n`)
+        const sensitive = spec.rows.filter((row) => AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin) || AUTHORITY_SENSITIVE.has(row.id))
+        const marks = sensitive.length > 0 ? '  [!]' : ''
+        process.stdout.write(`  ${name.padEnd(22)} ${spec.rows.map((row) => `${row.id}(${row.plugin})`).join(', ')}${marks}\n`)
+        for (const row of sensitive) warnings.push(`agent preset "${name}" mounts authority-sensitive row "${row.id}" (${row.plugin}) into every agent it composes`)
       }
     }
     for (const warning of warnings) process.stderr.write(`warn: ${warning}\n`)

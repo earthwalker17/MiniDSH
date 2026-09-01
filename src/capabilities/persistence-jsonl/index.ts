@@ -435,7 +435,14 @@ class JsonlArchive implements Persistence {
     const opened = this.open.get(session)
     if (opened) {
       try {
-        writeSync(opened.fd, `${JSON.stringify(event)}\n`)
+        // The byte count is checked, not assumed. `writeSync` does not loop,
+        // and a short write (a full disk, an interrupted call) would leave a
+        // fragment the next event appends after — fabricating exactly the
+        // mid-file seq gap the quarantine below exists to prevent, while every
+        // flush kept reporting success and the driver kept paying for steps.
+        const line = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8')
+        const written = writeSync(opened.fd, line)
+        if (written !== line.length) throw new Error(`wrote ${written} of ${line.length} bytes for event ${event.seq}`)
       } catch (error) {
         if (!this.failures.has(session)) this.failures.set(session, error)
         // Quarantine the file: appending a LATER event after a dropped one would
