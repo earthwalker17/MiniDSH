@@ -77,7 +77,22 @@ describe('present: one projection for every plain-text surface', () => {
     expect(audit.some((line) => line.includes('asked       approval-7 bash') )).toBe(true)
     expect(audit).toContain('                    for: bash {"command":"ls -la"}')
     expect(audit.some((line) => line.includes('denied      SANDBOX_ESCALATION_DENIED (bash'))).toBe(true)
-    expect(transcriptLines(session.events)).toEqual(['you> hello there', '→ bash {"command":"ls -la"}'])
+    // History shows what watching would have shown. It used to render three
+    // kinds and hide nine, so paging back over an authority switch, an approval
+    // or a denial showed none of them — which of two things you saw depended on
+    // when you looked. The only differences left are deliberate: conversation
+    // gets more room, and a completed turn needs no line.
+    expect(transcriptLines(session.events)).toEqual([
+      '[sandbox: workspace-write (initial; shell confinement none)]',
+      '[sandbox: danger-full-access (change; unconfined)]',
+      '[approvals: never]',
+      'you> hello there',
+      '→ bash {"command":"ls -la"}',
+      '? approval-7 bash: run under "danger-full-access": need it',
+      '! approval-7 rejected',
+      '✗ SANDBOX_ESCALATION_DENIED',
+    ])
+    expect(transcriptLines([end])).toEqual([])
     await root.dispose()
   })
 })

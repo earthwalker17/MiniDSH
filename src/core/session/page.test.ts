@@ -165,8 +165,8 @@ describe('the page fold', () => {
     // of log-only facts, and a tail of nothing but tool results (a surface
     // event, deliberately not a message, so it never spends the budget).
     nextSeq = 0
-    const facts = Array.from({ length: 5_000 }, () => event('inbox/spliced'))
-    const page = pageEvents(facts, { throughSeq: head(facts), maxEvents: 100 })
+    const logOnly = Array.from({ length: 5_000 }, () => event('inbox/spliced'))
+    const page = pageEvents(logOnly, { throughSeq: head(logOnly), maxEvents: 100 })
     expect(page.events.length).toBeLessThanOrEqual(100)
     expect(page.hasMore).toBe(true)
 

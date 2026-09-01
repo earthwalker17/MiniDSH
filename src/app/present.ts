@@ -77,22 +77,40 @@ export function describeEvent(event: EventEnvelope): string | undefined {
   return undefined
 }
 
-/** A stored log folded into a conversation transcript for an attaching client. */
+/**
+ * A stored log folded into a conversation transcript — what a client renders
+ * for the PAGE it attached to, and what `/history` prints walking backwards.
+ *
+ * It is `describeEvent` with two widenings and one exclusion, not a second
+ * projection: conversation gets more room here than in a live one-liner (a
+ * transcript is read, not watched), and a completed `turn/end` needs no line —
+ * the same exclusion the terminal's live renderer makes. Everything else falls
+ * through, because it did when it happened: this used to render three kinds and
+ * hide nine, so paging back over an authority switch, a denial, a delegation or
+ * a compaction showed none of them, while watching the same session live showed
+ * them all. Which of two things you saw depended on when you looked.
+ */
 export function transcriptLines(events: readonly EventEnvelope[]): string[] {
   const lines: string[] = []
   for (const event of events) {
-    if (matches(event, USER_MESSAGE)) {
-      const message = restoreMessage(event.data.message)
-      const text = messageText(message)
-      if (message.source.kind === 'user' && text.length > 0) lines.push(`you> ${preview(text, 200)}`)
-    } else if (matches(event, ASSISTANT_MESSAGE)) {
-      const text = messageText(restoreMessage(event.data.message))
-      if (text.length > 0) lines.push(preview(text, 400))
-    } else if (matches(event, TOOL_CALL)) {
-      lines.push(`→ ${event.data.name} ${preview(event.data.arguments)}`)
-    }
+    const line = transcriptLine(event)
+    if (line !== undefined) lines.push(line)
   }
   return lines
+}
+
+function transcriptLine(event: EventEnvelope): string | undefined {
+  if (matches(event, USER_MESSAGE)) {
+    const message = restoreMessage(event.data.message)
+    const text = messageText(message)
+    if (message.source.kind === 'user') return text.length > 0 ? `you> ${preview(text, 200)}` : undefined
+  } else if (matches(event, ASSISTANT_MESSAGE)) {
+    const text = messageText(restoreMessage(event.data.message))
+    if (text.length > 0) return preview(text, 400)
+  } else if (matches(event, TURN_END) && event.data.reason.kind === 'completed') {
+    return undefined
+  }
+  return describeEvent(event)
 }
 
 /** Result codes that are a decision of the authority plane, not a tool failure. */
