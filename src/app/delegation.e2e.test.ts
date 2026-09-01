@@ -127,7 +127,11 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     expect(readFileSync(decoy).equals(decoyBytes)).toBe(true)
     expect(existsSync(join(workspace, 'one.txt'))).toBe(true)
 
-    // ---- the parent's log is still its own oracle ---------------------------
+    // ---- both logs replay, each as its own session's oracle -----------------
+    // The child is a DIFFERENT session making its own model calls, so it
+    // replays from its own log. One shared cursor used to serve it the parent's
+    // next recorded step — every assistant message from the delegation onward
+    // was then a different message, and `assertConsumed` passed on arithmetic.
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     const replayWorkspace = tempDir('minidsh-e2e6d-replay-ws-')
     writeFileSync(join(replayWorkspace, 'two.txt'), 'still nothing\nTHE ANSWER IS PLUM-42\nnor here\n', 'utf8')
@@ -141,13 +145,13 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         prepare: (context) => {
-          replayHandle = installLlmReplay(context, { events: final.events })
+          replayHandle = installLlmReplay(context, { events: final.events, children: [childEvents] })
         },
       },
       undefined,
     )
-    // The parent's own steps replayed; the child ran again for real under the
-    // same script, which is why every recorded step is consumed.
+    // Both sessions replayed their own recording, in the order the recording
+    // delegated in, and both were drained.
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
   })

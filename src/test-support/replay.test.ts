@@ -193,3 +193,86 @@ async function replayWithoutRetry(events: Recorded): Promise<void> {
   expect(messageText(handle.agent.session.deriveMessages().at(-1)!)).toBe('recorded answer')
   await handle.dispose()
 }
+
+/**
+ * A log is its own oracle for the agent that WROTE it. A delegated child is a
+ * different session making its own calls through the same seam, so it needs its
+ * own log — and asking for one it was not given must fail loudly rather than
+ * quietly serving it the parent's next recorded step.
+ */
+describe('replay across a delegation', () => {
+  /** Two sessions' worth of calls, as a parent that delegates once produces. */
+  async function twoSessions(): Promise<{ parent: Recorded; child: Recorded }> {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    harness.root.get(TOOLS).register(harness.root, echo)
+    harness.adapter.script(assistantText('the parent answer'))
+    const { agent: parent } = await harness.create()
+    parent.followup(createUserMessage('go'))
+    await parent.whenIdle()
+
+    harness.adapter.script(assistantText('the child answer'))
+    const { agent: child } = await harness.create()
+    child.followup(createUserMessage('go'))
+    await child.whenIdle()
+
+    return { parent: parent.session.events.map((event) => ({ ...event })), child: child.session.events.map((event) => ({ ...event })) }
+  }
+
+  it('refuses to serve one session’s recording to another', async () => {
+    const { parent } = await twoSessions()
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    installLlmReplay(harness.root, { events: parent, provider: 'replay' })
+    const agents = harness.root.get(AGENTS)
+    const first = await agents.create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    first.agent.followup(createUserMessage('go'))
+    await first.agent.whenIdle()
+    expect(messageText(first.agent.session.deriveMessages().at(-1)!)).toBe('the parent answer')
+
+    // A second session with nothing recorded for it. It used to take the
+    // parent's next group; now the failure names what is missing.
+    const second = await agents.create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    second.agent.followup(createUserMessage('go'))
+    await second.agent.whenIdle()
+    const ended = second.agent.session.facts.findLast((event) => event.type === 'turn/end')!
+    expect(JSON.stringify(ended.data)).toContain('needs its own log')
+    await second.dispose()
+    await first.dispose()
+  })
+
+  it('replays each session from its own log, and asserts both were drained', async () => {
+    const { parent, child } = await twoSessions()
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const replay = installLlmReplay(harness.root, { events: parent, children: [child], provider: 'replay' })
+    const agents = harness.root.get(AGENTS)
+    const first = await agents.create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    first.agent.followup(createUserMessage('go'))
+    await first.agent.whenIdle()
+    const second = await agents.create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    second.agent.followup(createUserMessage('go'))
+    await second.agent.whenIdle()
+
+    // Each got what its own recording said, in first-request order.
+    expect(messageText(first.agent.session.deriveMessages().at(-1)!)).toBe('the parent answer')
+    expect(messageText(second.agent.session.deriveMessages().at(-1)!)).toBe('the child answer')
+    replay.assertConsumed()
+    await second.dispose()
+    await first.dispose()
+  })
+
+  it('names which log was left unconsumed', async () => {
+    const { parent, child } = await twoSessions()
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const replay = installLlmReplay(harness.root, { events: parent, children: [child], provider: 'replay' })
+    const only = await harness.root.get(AGENTS).create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    only.agent.followup(createUserMessage('go'))
+    await only.agent.whenIdle()
+    // The child never ran, so its recording is still whole — which is exactly
+    // what a delegation that failed to happen looks like.
+    expect(() => replay.assertConsumed()).toThrow(/log 1/)
+    await only.dispose()
+  })
+})

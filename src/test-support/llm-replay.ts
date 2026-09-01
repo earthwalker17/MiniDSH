@@ -133,7 +133,7 @@ interface AuxGroup {
   readonly chunks: StreamChunk[]
 }
 
-/** The one script every provider facade serves from: log order is the cursor, whatever route a call took. */
+/** One recorded log's script: log order is the cursor, whatever route a call took. */
 class ReplayScript {
   private readonly script: StreamChunk[][]
   private readonly auxScript: AuxGroup[]
@@ -182,12 +182,69 @@ class ReplayScript {
   }
 }
 
+/**
+ * Which recorded log answers which live session.
+ *
+ * A session log is its own oracle only for the agent that wrote it. A
+ * delegated child is a DIFFERENT session making its own model calls through
+ * the same seam, and one shared cursor served it the parent's next recorded
+ * step: from the delegation onward every assistant message in the replayed
+ * parent was a different message, and `assertConsumed` still passed because it
+ * only compares a cursor to a length. The delegation arc's own comment recorded
+ * that as intent.
+ *
+ * Sessions are matched to logs in FIRST-REQUEST order — a replayed child gets a
+ * fresh id, so nothing can be keyed on the recorded one, but the order in which
+ * agents first ask is exactly the order the recording delegated in. A session
+ * that asks with no log left is a loud failure, not a silent reassignment.
+ */
+class ReplayDispatch {
+  private readonly sources: readonly ReplayScript[]
+  private readonly bySession = new Map<string, ReplayScript>()
+  private assigned = 0
+  constructor(sources: readonly ReplayScript[]) {
+    this.sources = sources
+  }
+
+  for(request: LlmRequest): ReplayScript {
+    const key = request.sessionId ?? '<no session>'
+    const known = this.bySession.get(key)
+    if (known) return known
+    const source = this.sources[this.assigned]
+    if (!source) {
+      throw new Error(
+        `llm-replay: session "${key}" is the ${this.assigned + 1}th to ask for a model, but only ${this.sources.length} recorded log(s) were installed — ` +
+          'a delegated child makes its own calls and needs its own log',
+      )
+    }
+    this.assigned += 1
+    this.bySession.set(key, source)
+    return source
+  }
+
+  stream(request: LlmRequest): AsyncIterable<StreamChunk> {
+    return this.for(request).stream(request)
+  }
+
+  assertConsumed(): void {
+    this.sources.forEach((source, index) => {
+      const which = this.sources.length === 1 ? '' : ` (log ${index})`
+      if (source.consumed() !== source.total()) {
+        throw new Error(`llm-replay: replayed ${source.consumed()} of ${source.total()} recorded steps${which}`)
+      }
+      if (source.auxConsumed() !== source.auxTotal()) {
+        throw new Error(`llm-replay: replayed ${source.auxConsumed()} of ${source.auxTotal()} recorded out-of-loop calls${which}`)
+      }
+    })
+  }
+}
+
 class ReplayAdapter implements LlmAdapter {
   readonly provider: string
-  private readonly shared: ReplayScript
+  private readonly shared: ReplayDispatch
   private readonly windows: ReadonlyMap<string, number>
   private readonly fallbackWindow: number
-  constructor(provider: string, shared: ReplayScript, windows: ReadonlyMap<string, number>, fallbackWindow: number) {
+  constructor(provider: string, shared: ReplayDispatch, windows: ReadonlyMap<string, number>, fallbackWindow: number) {
     this.provider = provider
     this.shared = shared
     this.windows = windows
@@ -227,13 +284,31 @@ export interface ReplayHandle {
  */
 export function installLlmReplay(
   owner: Context,
-  options: { events: readonly EventEnvelope[]; provider?: string; providers?: readonly string[]; contextWindow?: number; attempts?: ReplayAttempts },
+  options: {
+    events: readonly EventEnvelope[]
+    /**
+     * The logs of the sessions this one DELEGATED to, in the order it started
+     * them — a child makes its own model calls, and without its own log it
+     * would eat its parent's next recorded step.
+     */
+    children?: readonly (readonly EventEnvelope[])[]
+    provider?: string
+    providers?: readonly string[]
+    contextWindow?: number
+    attempts?: ReplayAttempts
+  },
 ): ReplayHandle {
-  const script = deriveReplayScript(options.events, options.attempts)
-  const auxScript = foldAuxCalls(options.events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) }))
-  const shared = new ReplayScript(script, auxScript)
-  const windows = windowsIn(options.events)
-  const named = options.providers ?? (options.provider === undefined ? providersIn(options.events) : [options.provider])
+  const logs = [options.events, ...(options.children ?? [])]
+  const sources = logs.map((events) => {
+    const script = deriveReplayScript(events, options.attempts)
+    const auxScript = foldAuxCalls(events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) }))
+    return { script, auxScript, source: new ReplayScript(script, auxScript) }
+  })
+  const shared = new ReplayDispatch(sources.map((one) => one.source))
+  // Every log's routes and windows: a child may take a route its parent never did.
+  const windows = new Map<string, number>()
+  for (const events of logs) for (const [route, window] of windowsIn(events)) windows.set(route, window)
+  const named = options.providers ?? (options.provider === undefined ? [...new Set(logs.flatMap((events) => providersIn(events)))] : [options.provider])
   const providers = named.length > 0 ? named : ['deepseek']
   const llm = owner.get(LLM)
   const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, options.contextWindow ?? 1_000_000)))
@@ -241,16 +316,9 @@ export function installLlmReplay(
     dispose: async () => {
       for (const dispose of disposers) await dispose()
     },
-    steps: script.length,
-    auxCalls: auxScript.length,
+    steps: sources.reduce((total, one) => total + one.script.length, 0),
+    auxCalls: sources.reduce((total, one) => total + one.auxScript.length, 0),
     providers,
-    assertConsumed() {
-      if (shared.consumed() !== shared.total()) {
-        throw new Error(`llm-replay: replayed ${shared.consumed()} of ${shared.total()} recorded steps`)
-      }
-      if (shared.auxConsumed() !== shared.auxTotal()) {
-        throw new Error(`llm-replay: replayed ${shared.auxConsumed()} of ${shared.auxTotal()} recorded out-of-loop calls`)
-      }
-    },
+    assertConsumed: () => shared.assertConsumed(),
   }
 }
