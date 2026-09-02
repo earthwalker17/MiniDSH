@@ -36,6 +36,8 @@ export interface BootOptions {
   readonly sessionsRoot: string
   /** Store for oversized tool output; omitted mounts no store (hermetic tests). */
   readonly spillRoot?: string
+  /** Store for image attachments; omitted mounts no store, and a producer of images then refuses (hermetic tests). */
+  readonly attachmentsRoot?: string
   /** The user's global AGENTS.md; omitted reads only the workspace's own files (hermetic tests). */
   readonly globalInstructionsPath?: string
   /** Secret-store path for the credentials row; omitted = env-only (hermetic tests). */
@@ -121,6 +123,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
       sessionsRoot: options.sessionsRoot,
       dialect: options.dialect ?? defaultDialect(),
       ...(options.spillRoot === undefined ? {} : { spillRoot: options.spillRoot }),
+      ...(options.attachmentsRoot === undefined ? {} : { attachmentsRoot: options.attachmentsRoot }),
       ...(options.globalInstructionsPath === undefined ? {} : { globalInstructionsPath: options.globalInstructionsPath }),
       ...(options.credentialsPath === undefined ? {} : { credentialsPath: options.credentialsPath }),
       ...(options.settingsStorePath === undefined ? {} : { settingsStorePath: options.settingsStorePath }),

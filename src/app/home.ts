@@ -20,6 +20,16 @@ export function spillDir(): string {
   return join(resolveHome(), 'spill')
 }
 
+/**
+ * Content-addressed image objects. Under the durable home, like the logs that
+ * reference them and unlike a temp directory: an attachment is CONTENT — a log
+ * names it as something the model saw — so nothing may sweep it, and it must
+ * still resolve after a reboot.
+ */
+export function attachmentsDir(): string {
+  return join(resolveHome(), 'attachments')
+}
+
 /** Declarative composition layer: patch rows + named agent presets. */
 export function compositionPath(): string {
   return join(resolveHome(), 'composition.json')
@@ -47,6 +57,7 @@ export function credentialsPath(): string {
 export interface HomeLayout {
   readonly sessionsRoot: string
   readonly spillRoot: string
+  readonly attachmentsRoot: string
   readonly globalInstructionsPath: string
   readonly credentialsPath: string
   /**
@@ -61,6 +72,7 @@ export function homeLayout(): HomeLayout {
   return {
     sessionsRoot: sessionsDir(),
     spillRoot: spillDir(),
+    attachmentsRoot: attachmentsDir(),
     globalInstructionsPath: globalInstructionsPath(),
     credentialsPath: credentialsPath(),
     settingsStorePath: settingsPath(),

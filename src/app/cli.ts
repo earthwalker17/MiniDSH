@@ -103,6 +103,7 @@ type PresetUse = 'headless' | 'interactive' | 'none'
 function bootFields(plan: BootPlan): {
   sessionsRoot: string
   spillRoot: string
+  attachmentsRoot: string
   globalInstructionsPath: string
   credentialsPath: string
   settingsStorePath: string

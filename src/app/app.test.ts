@@ -128,6 +128,44 @@ describe('headless runner (real composition, scripted model)', () => {
     }
   })
 
+  /**
+   * A cross-capability claim, so it belongs against the FULL composition: the
+   * attachment plane exists wherever MiniDSH runs, but the model-facing tools
+   * that produce images do not, so the shipped tool surface is unchanged. And
+   * the store creates nothing until something is saved — the same discipline
+   * as a session that opened and was abandoned leaving no file behind.
+   */
+  it('ships the attachment service and no new model-facing tool', async () => {
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const attachmentsRoot = tempDir('minidsh-attachments-')
+    const { bootComposition } = await import('./headless.ts')
+    const { ATTACHMENTS } = await import('../core/attachments/index.ts')
+    const { TOOLS } = await import('../core/tools/index.ts')
+    const root = await bootComposition({ sessionsRoot, attachmentsRoot, logger: silent, ...scripted(new ScriptedAdapter()) })
+    try {
+      expect(root.tryGet(ATTACHMENTS)).toBeDefined()
+      // The shell tool is named after the host dialect, so name it that way
+      // rather than pinning one platform.
+      const { defaultDialect } = await import('./compose.ts')
+      expect(root.get(TOOLS).schemas().map((schema) => schema.name).sort()).toEqual([defaultDialect(), 'str_replace_editor', 'subagent'].sort())
+      expect(readdirSync(attachmentsRoot)).toEqual([])
+    } finally {
+      await root.dispose()
+    }
+  })
+
+  it('mounts no attachment service when the deployment names no store', async () => {
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const { bootComposition } = await import('./headless.ts')
+    const { ATTACHMENTS } = await import('../core/attachments/index.ts')
+    const root = await bootComposition({ sessionsRoot, logger: silent, ...scripted(new ScriptedAdapter()) })
+    try {
+      expect(root.tryGet(ATTACHMENTS)).toBeUndefined()
+    } finally {
+      await root.dispose()
+    }
+  })
+
   it('fails loud when a required provider cannot settle', async () => {
     const cwd = tempDir('minidsh-cwd-')
     const sessionsRoot = tempDir('minidsh-sessions-')

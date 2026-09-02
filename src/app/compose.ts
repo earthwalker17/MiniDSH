@@ -29,6 +29,7 @@ import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.
 import { retryPlugin } from '../capabilities/llm-retry/index.ts'
 import { modelRolesPlugin } from '../capabilities/model-roles/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
+import { attachmentsLocalPlugin } from '../capabilities/attachments-local/index.ts'
 import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
 import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructions/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
@@ -73,6 +74,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       fsObservationPolicyPlugin,
       shellStdioPlugin,
       spillLocalPlugin,
+      attachmentsLocalPlugin,
       toolEditorPlugin,
       toolShellPlugin,
       toolSubagentPlugin,
@@ -256,6 +258,8 @@ export interface ComposeOptions {
   readonly sessionsRoot: string
   /** Where oversized tool output is saved; omitted mounts no store, and tools then say what they dropped. */
   readonly spillRoot?: string
+  /** Where image attachments are stored; omitted mounts no store, and a producer of images then refuses. */
+  readonly attachmentsRoot?: string
   /** The user's global AGENTS.md; omitted reads only the workspace's own files. */
   readonly globalInstructionsPath?: string
   readonly dialect: ShellDialect
@@ -314,6 +318,10 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('fs-observation-policy', fsObservationPolicyPlugin))
   rows.push(defineRow('shell', shellStdioPlugin, { dialect: options.dialect }))
   if (options.spillRoot !== undefined) rows.push(defineRow('spill', spillLocalPlugin, { root: options.spillRoot }))
+  // A service row with no model-facing surface: the binary plane exists wherever
+  // MiniDSH runs, while the tools that PRODUCE images stay composition, so the
+  // shipped tool set does not grow.
+  if (options.attachmentsRoot !== undefined) rows.push(defineRow('attachments', attachmentsLocalPlugin, { root: options.attachmentsRoot }))
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))
   rows.push(defineRow('tool-subagent', toolSubagentPlugin, {}))
