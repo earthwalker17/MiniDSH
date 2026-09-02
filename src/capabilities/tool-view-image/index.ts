@@ -29,8 +29,8 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { asAttachmentId, ATTACHMENTS, isImageAdmissionError, type Attachments, type ImageMediaType } from '../../core/attachments/index.ts'
 import { FS, FsError, type Fs, type FsActor } from '../../core/fs/index.ts'
-import { imageDescriptor, collectImageRefs } from '../../core/llm/content.ts'
-import { LLM, type Llm } from '../../core/llm/index.ts'
+import { imageDescriptor } from '../../core/llm/content.ts'
+import { LLM, type ContentBlock, type Llm } from '../../core/llm/index.ts'
 import { foldRequestContext } from '../../core/session/index.ts'
 import { defineTool, TOOLS, type ToolCallView, type ToolContext } from '../../core/tools/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
@@ -92,20 +92,36 @@ function tryLive(llm: Llm, provider: string, model: string): readonly string[] |
  * Images already on the live surface, counted so a request cannot grow past
  * what a provider will serve.
  *
- * Per REQUEST, not per message, and that is the correction that matters: this
- * tool returns one image per result, so a per-message count could never bind.
- * Meanwhile both providers tighten their own per-image limits as a request
- * accumulates images, and Anthropic caps a whole request at 32 MB — so without
- * a cumulative bound, five ordinary calls produce a request that is refused
- * with a code nothing retries and nothing compacts, and the session wedges with
- * every later request failing identically.
+ * Per REQUEST, not per message: this tool returns one image per result, so a
+ * per-message count could never bind, while both providers tighten their own
+ * per-image limits as a request accumulates images and Anthropic caps a whole
+ * request at 32 MB. Without a cumulative bound, a handful of ordinary calls
+ * produce a request refused with a code nothing retries and nothing compacts,
+ * and every later request in the session fails identically.
+ *
+ * It counts OCCURRENCES, not distinct attachments, and that distinction is the
+ * whole bound. `collectImageRefs` dedupes by id — correctly, because the
+ * adapter reads each object's bytes once — but the serializers emit one wire
+ * image per BLOCK. Since the store is content-addressed, viewing the same file
+ * five times yields five blocks carrying one id, so a deduped count sees a
+ * single image while the request carries five full copies. Reproduced before
+ * this was written: the bound said 1, the wire carried 5.
  */
 function imagesOnSurface(agent: Agent): { count: number; bytes: number } {
-  const refs = new Map<string, { bytes: number }>()
-  for (const message of agent.session.deriveMessages()) collectImageRefs(message.content, refs as never)
+  let count = 0
   let bytes = 0
-  for (const ref of refs.values()) bytes += ref.bytes
-  return { count: refs.size, bytes }
+  const walk = (blocks: readonly ContentBlock[]): void => {
+    for (const block of blocks) {
+      if (block.type === 'image') {
+        count++
+        bytes += block.attachment.bytes
+      } else if (block.type === 'tool-result') {
+        walk(block.content)
+      }
+    }
+  }
+  for (const message of agent.session.deriveMessages()) walk(message.content)
+  return { count, bytes }
 }
 
 async function view(args: Input, exec: ToolContext, deps: Deps): Promise<z.infer<typeof OutputSchema>> {

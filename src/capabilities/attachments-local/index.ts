@@ -157,6 +157,14 @@ class LocalAttachments implements Attachments {
     if (input.declaredMediaType !== undefined && declared !== header.mediaType) {
       throw new AttachmentError('IMAGE_TYPE_MISMATCH', `the image was declared ${input.declaredMediaType} but the bytes are ${header.mediaType}`)
     }
+    // A floor as well as a ceiling. A corrupt or partly-written PNG can carry a
+    // zero in its IHDR, and every geometry check below is an upper bound, so a
+    // `0×0` ref would be committed, agree with itself on every later read, price
+    // at 0 tokens, and make every subsequent request in that session fail on
+    // undecodable bytes it can no longer remove from its own surface.
+    if (header.width < 1 || header.height < 1) {
+      throw new AttachmentError('INVALID_IMAGE', `the image header reports ${header.width}×${header.height}`)
+    }
     if (header.width > this.imageLimits.maxImageDimension || header.height > this.imageLimits.maxImageDimension) {
       throw new AttachmentError('IMAGE_DIMENSION_TOO_LARGE', `the image is ${header.width}×${header.height}; this deployment accepts at most ${this.imageLimits.maxImageDimension} on a side`)
     }

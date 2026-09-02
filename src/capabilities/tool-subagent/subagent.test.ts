@@ -342,6 +342,28 @@ describe('a second delegation row', () => {
     expect(verify.description).toContain('verdict')
   })
 
+  /**
+   * The depth cap is meant to be a fact about the child's WORLD, not an error it
+   * discovers by trying. With two delegation rows mounted, denying only the
+   * calling row's own tool left the other one visible at the cap: a grandchild
+   * would see it, call it, and spend a paid step learning what its tool list
+   * should already have told it.
+   */
+  it('hides EVERY delegation tool at the cap, not just the one that was called', async () => {
+    const w = await world([{ insert: [VERIFIER] }, { id: 'tool-subagent', config: { maxDepth: 1 } }])
+    w.adapter.script(assistantToolCall('call-1', 'subagent', { description: 'a task', prompt: 'list your tools' }), assistantText('seen'), assistantText('done'))
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('delegate'))
+    await handle.agent.whenIdle()
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    // The child is at the cap, so neither delegation tool may be in its world.
+    const childCalls = w.adapter.calls.filter((call) => call.sessionId === start.childId)
+    expect(childCalls.length, 'the child never made a request').toBeGreaterThan(0)
+    const names = (childCalls[0]!.tools ?? []).map((tool) => tool.name)
+    expect(names).not.toContain('subagent')
+    expect(names).not.toContain('verify')
+  })
+
   it('resolves its route under its own purpose, so a role can send it elsewhere', async () => {
     const w = await world([
       { insert: [VERIFIER] },

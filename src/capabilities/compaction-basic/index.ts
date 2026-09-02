@@ -48,7 +48,7 @@ import { AuxCallError, LLM, runAuxCall, type Llm } from '../../core/llm/index.ts
 import { createPluginMessage } from '../../core/llm/message.ts'
 import type { LlmRequest, Message } from '../../core/llm/types.ts'
 import { estimateMessage, meterSession } from '../../core/metering/index.ts'
-import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
+import { PROMPT, type AssembledPrompt } from '../../core/prompt/index.ts'
 import { deriveEventMessage, foldRequestContext, USER_MESSAGE } from '../../core/session/index.ts'
 
 export interface CompactionBasicConfig {
@@ -266,6 +266,13 @@ class BasicCompaction implements Compaction {
     // The summary's route decides what the plan may hold, so it is resolved
     // BEFORE the plan and passed to the call that uses it.
     const route = await resolveCallConfig(agent, { purpose: PURPOSE, ...(signal ? { signal } : {}) })
+    // Assembled before the bracket opens, because it can throw — an unknown
+    // prompt variable, two `complete` sections, a throwing `system-prompt/assemble`
+    // listener — and a throw past `compaction/start` would escape `compact()`
+    // with no end appended, leaving an orphan that the log's own vocabulary
+    // defines as a crash, a disposal or a fork boundary on a session that is
+    // healthy and live. It depends on neither the plan nor the route.
+    const assembled = await prompt.assemble(agent)
     const plan = planCompaction(session.facts, session.surfaceSeqs(), {
       budgetTokens: this.planBudget(route, budget),
       retainRatio: this.config.retainRatio,
@@ -290,10 +297,18 @@ class BasicCompaction implements Compaction {
     }
 
     const statusBefore = agent.status
-    const summary = await this.summarise(llm, prompt, agent, plan, route, signal)
+    const summary = await this.summarise(llm, assembled, agent, plan, route, signal)
     if (summary.kind !== 'text') return decline(summary.kind === 'no-messages' ? 'plan-stale' : summary.kind === 'empty' ? 'summary-empty' : summary.kind === 'cancelled' ? 'cancelled' : 'summary-failed')
 
     // ---- no `await` past this line, or the checks mean nothing -------------
+    // The registry check comes FIRST because it is the only one that says
+    // whether an append is legal at all; the other two only choose which decline
+    // reason to record. An agent disposed during the summary is normally
+    // disposed by being cancelled, so its signal is aborted and its status may
+    // have moved — order this behind either of those and the decline is appended
+    // into a session whose descriptor is already closed, which is precisely what
+    // this guard exists to prevent.
+    if (this.ctx.tryGet(AGENTS)?.get(agent.id) !== agent) return { kind: 'nothing-to-do', reason: 'agent-gone' }
     if (agent.status !== statusBefore) {
       // The EXIT race: a turn started during the summary, so this replace can no
       // longer land safely. The work is paid for either way — remember the
@@ -302,12 +317,6 @@ class BasicCompaction implements Compaction {
       return decline('turn-started')
     }
     if (signal?.aborted) return decline('cancelled')
-    // An agent disposed during the summary has already detached its session:
-    // appending here would write into a log nothing is listening to any more,
-    // and the persistence provider has closed its descriptor. So this path
-    // closes NOTHING, and the unpaired start is the record — which is why an
-    // orphan means "the attempt did not close", never "a crash".
-    if (this.ctx.tryGet(AGENTS)?.get(agent.id) !== agent) return { kind: 'nothing-to-do', reason: 'agent-gone' }
     const live = session.surfaceSeqs()
     if (!planIsLive(plan, live)) return decline('plan-stale')
 
@@ -363,7 +372,7 @@ class BasicCompaction implements Compaction {
    */
   private async summarise(
     llm: Llm,
-    prompt: Prompt,
+    assembled: AssembledPrompt,
     agent: Agent,
     plan: CompactionPlan,
     route: CallConfig,
@@ -380,7 +389,6 @@ class BasicCompaction implements Compaction {
     if (messages.length === 0) return { kind: 'no-messages' }
     messages.push(createPluginMessage(PLUGIN, INSTRUCTION, 'compaction-instruction'))
 
-    const assembled = await prompt.assemble(agent)
     // The route was resolved by the caller — the same resolution a loop step
     // takes, with a purpose instead of a position — because the plan had to
     // fit the model that would read it. The record `runAuxCall` writes names

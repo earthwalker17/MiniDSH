@@ -131,6 +131,21 @@ describe('saveImage', () => {
     await dispose()
   })
 
+  /**
+   * A floor, not just a ceiling. Every geometry check is an upper bound, so a
+   * corrupt IHDR carrying a zero would be committed, agree with itself on every
+   * later read, price at 0 tokens, and leave every subsequent request in that
+   * session failing on bytes it can no longer remove from its own surface.
+   */
+  it('refuses a header that reports no pixels, which every upper bound would admit', async () => {
+    const { attachments, dispose } = await store()
+    const zero = quadPng(96)
+    // Rewrite the IHDR width in place; the rest of the file is untouched.
+    zero.writeUInt32BE(0, 16)
+    await expect(attachments.saveImage({ data: zero })).rejects.toMatchObject({ code: 'INVALID_IMAGE' })
+    await dispose()
+  })
+
   it('refuses a file over the byte cap before it looks at the header', async () => {
     const { attachments, dispose } = await store({ maxImageBytes: 100 })
     await expect(attachments.saveImage({ data: quadPng(96) })).rejects.toMatchObject({ code: 'IMAGE_TOO_LARGE' })

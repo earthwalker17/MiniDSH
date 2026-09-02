@@ -189,31 +189,20 @@ export class AnthropicAdapter implements LlmAdapter {
    * empty map means every image serializes as its own stored descriptor.
    */
   buildBody(request: LlmRequest, images: ImageBytes = new Map()): Record<string, unknown> {
+    // Every refusal lives in `validateOptions` and nowhere else. Keeping a
+    // second copy here would mean the next change to a rule — a family that
+    // accepts temperature, a different budget table — has two sites and the
+    // compiler flags neither if only one is edited.
     this.validateOptions(request)
     const entry = this.catalog(request.model)
-    if (request.temperature !== undefined && !entry.sampling) {
-      throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" does not accept a temperature (the API returns 400 for any non-default value)`)
-    }
-    if (request.maxTokens !== undefined && request.maxTokens > entry.maxOutputTokens) {
-      throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" caps output at ${entry.maxOutputTokens} tokens, but the request asks for ${request.maxTokens}`)
-    }
     const maxTokens = this.capFor(entry, request)
     const effort = request.reasoningEffort
     let thinking: Record<string, unknown> = {}
     if (effort !== undefined) {
-      if (!entry.efforts.includes(effort)) {
-        throw new LlmError('UNSUPPORTED_REASONING_EFFORT', `Anthropic model "${request.model}" does not support reasoning effort "${effort}" (one of ${entry.efforts.join(', ')})`)
-      }
       if (entry.thinking === 'adaptive') {
         thinking = effort === 'off' ? { thinking: { type: 'disabled' } } : { output_config: { effort } }
       } else if (effort !== 'off') {
-        const budget = MANUAL_BUDGETS[effort]!
-        // Only an EXPLICIT cap can be too small now: `capFor` sizes an implicit
-        // one to fit. Refuse rather than shrink the budget the caller asked for.
-        if (budget >= maxTokens) {
-          throw new LlmError('UNSUPPORTED_OPTION', `reasoning effort "${effort}" on "${request.model}" needs max_tokens above ${budget}, got ${maxTokens}`)
-        }
-        thinking = { thinking: { type: 'enabled', budget_tokens: budget } }
+        thinking = { thinking: { type: 'enabled', budget_tokens: MANUAL_BUDGETS[effort]! } }
       }
     }
     const tools = serializeTools(request.tools)

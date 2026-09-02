@@ -138,6 +138,18 @@ interface Deps {
 const worldSetups = new WeakMap<Agent, CreateAgentOptions['setup']>()
 
 /**
+ * Every delegation tool this deployment registered, by model-facing name.
+ *
+ * The depth cap is meant to be a fact about the child's WORLD rather than an
+ * error it discovers by trying, and hiding only this row's own tool stopped
+ * being enough the moment a verifier became a second row of the same plugin:
+ * a grandchild at the cap would still see the other row's tool, call it, and
+ * spend a paid step learning what its tool list should already have told it.
+ * Tool registration is deployment-global, so this set is too.
+ */
+const delegationToolNames = new Set<string>()
+
+/**
  * The authority a child opens under, read from the parent BEFORE the first
  * await, then narrowed by this row's own ceiling if it has one.
  *
@@ -210,7 +222,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   // hidden AND unknown, so a depth limit is a fact about the child's world
   // rather than an error it discovers by trying.
   const childMayDelegate = depth + 1 <= deps.config.maxDepth
-  const denied = [...(childMayDelegate ? [] : [deps.toolName]), ...(deps.config.toolFilter?.deny ?? [])]
+  const denied = [...(childMayDelegate ? [] : delegationToolNames), ...(deps.config.toolFilter?.deny ?? [])]
   const restriction: ToolRestriction = {
     ...(deps.config.toolFilter?.allow === undefined ? {} : { allow: [...deps.config.toolFilter.allow, ...(childMayDelegate ? [deps.toolName] : [])] }),
     ...(denied.length > 0 ? { deny: denied } : {}),
@@ -319,6 +331,8 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
   config: configSchema,
   apply(ctx, config) {
     const toolName = config?.toolName ?? DEFAULT_TOOL_NAME
+    delegationToolNames.add(toolName)
+    ctx.effect(() => () => delegationToolNames.delete(toolName), `tool-subagent("${toolName}")`)
     const deps: Deps = {
       ctx,
       sandbox: ctx.get(SANDBOX),

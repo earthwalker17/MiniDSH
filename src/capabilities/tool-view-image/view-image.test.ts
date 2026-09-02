@@ -172,6 +172,28 @@ describe('view_image', () => {
     expect(readFileSync(secret, 'utf8')).toBe('export const answer = 42\n')
   })
 
+  /**
+   * The bound counts OCCURRENCES, and this is the test that says why.
+   *
+   * The store is content-addressed, so viewing one file five times yields five
+   * image blocks carrying ONE id. A bound that counted distinct attachments
+   * would see a single image while the request carried five full base64
+   * copies — reproduced during the review: the bound said 1, the wire carried
+   * 5 — which is exactly the unrecoverable wedge the bound exists to prevent,
+   * since the provider answers a code nothing retries and nothing compacts.
+   */
+  it('bounds a repeat of the SAME image, which content addressing would otherwise make free', async () => {
+    const { harness, cwd, create } = await world()
+    writeFileSync(join(cwd, 'same.png'), quadPng(64))
+    const handle = await create()
+    harness.adapter.script(...[0, 1, 2, 3, 4].map((index) => assistantToolCall(`c${index}`, 'view_image', { path: 'same.png' })), assistantText('done'))
+    handle.agent.followup(createUserMessage('look at it again and again'))
+    await handle.agent.whenIdle()
+    const codes = handle.agent.session.facts.filter((event) => matches(event, TOOL_RESULT)).map((event) => (matches(event, TOOL_RESULT) ? event.data.error?.code : undefined))
+    expect(codes.slice(0, 4), `the first four repeats must be admitted; got ${JSON.stringify(codes)}`).toEqual([undefined, undefined, undefined, undefined])
+    expect(codes[4], 'the fifth copy of one image is still a fifth image on the wire').toBe('TOO_MANY_IMAGES')
+  })
+
   it('bounds how many images one request may carry, because a per-message count never binds', async () => {
     const { harness, cwd, create } = await world()
     // Four distinct images is the shipped per-request cap; the fifth is refused.

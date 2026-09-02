@@ -1,8 +1,10 @@
 /**
  * Local-disk filesystem provider, fenced in process.
  *
- * Reads and writes emit `fs/observed` so the read-before-edit policy can track
- * state; `writeText` enforces the resolved write intent (createIfAbsent /
+ * TEXT reads and writes emit `fs/observed` so the read-before-edit policy can
+ * track state; `readBytes` deliberately does NOT, because a byte read is not a
+ * content observation and an observation is a licence to overwrite — see the
+ * Definition. `writeText` enforces the resolved write intent (createIfAbsent /
  * replaceIfVersion / unconditional) AND the session sandbox policy.
  *
  * The fence is a check in TRUSTED code over a MODEL-CONTROLLED path: the
