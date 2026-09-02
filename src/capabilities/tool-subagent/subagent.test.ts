@@ -19,9 +19,11 @@ import { PROMPT } from '../../core/prompt/index.ts'
 import { matches, TOOL_RESULT, type EventEnvelope, type Session } from '../../core/session/index.ts'
 import { TOOLS } from '../../core/tools/index.ts'
 import { bootComposition } from '../../app/headless.ts'
+import type { Patch } from '../../app/compose.ts'
 import { auditLines, describeEvent } from '../../app/present.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
+import { toolSubagentPlugin } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const SCRIPTED = { provider: 'scripted', model: 'scripted-model' }
@@ -49,7 +51,7 @@ interface World {
   create(): Promise<AgentHandle>
 }
 
-async function world(patches: { id: string; config?: unknown; disabled?: boolean }[] = []): Promise<World> {
+async function world(patches: Patch[] = []): Promise<World> {
   const cwd = tempDir('minidsh-sub-cwd-')
   const sessionsRoot = tempDir('minidsh-sub-sessions-')
   const adapter = new ScriptedAdapter()
@@ -309,6 +311,82 @@ describe('delegation through the full composition', () => {
     // And its own delegation would count from depth 1, not from zero.
     expect(w.root.get(TOOLS).get('subagent', resumed.agent)).toBeDefined()
     await resumed.dispose()
+  })
+})
+
+/**
+ * A second delegation row is how a verifier is expressed: same plugin, its own
+ * tool name, its own purpose, its own ceiling. These pin the three fields that
+ * makes that possible, and the one place they could disagree with each other.
+ */
+describe('a second delegation row', () => {
+  const VERIFIER = {
+    id: 'tool-verifier',
+    // The programmatic layer takes the plugin itself; the disk layer takes its
+    // builtin NAME, and the composition arc is what exercises that path.
+    plugin: toolSubagentPlugin,
+    config: { toolName: 'verify', purpose: 'verifier', sandbox: 'read-only', description: 'Ask a read-only subagent to inspect an artifact and report a verdict.' },
+  }
+
+  it('registers a second tool with its own name and its own description', async () => {
+    const w = await world([{ insert: [VERIFIER] }])
+    const schemas = w.root.get(TOOLS).schemas()
+    const names = schemas.map((schema) => schema.name)
+    expect(names).toContain('subagent')
+    expect(names).toContain('verify')
+    // Without a configurable description the two would be indistinguishable to
+    // a model, and the shared text steers away from verification.
+    const verify = schemas.find((schema) => schema.name === 'verify')!
+    const subagent = schemas.find((schema) => schema.name === 'subagent')!
+    expect(verify.description).not.toBe(subagent.description)
+    expect(verify.description).toContain('verdict')
+  })
+
+  it('resolves its route under its own purpose, so a role can send it elsewhere', async () => {
+    const w = await world([
+      { insert: [VERIFIER] },
+      { id: 'model-roles', config: { roles: { verifier: { provider: 'scripted', model: 'seeing-model' } } } },
+    ])
+    w.adapter.script(assistantToolCall('call-1', 'verify', { description: 'check it', prompt: 'look' }), assistantText('it is red'), assistantText('done'))
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('verify the thing'))
+    await handle.agent.whenIdle()
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { model: string; sandbox: string }
+    expect(start.model).toBe('seeing-model')
+  })
+
+  /**
+   * The row's ceiling can only subtract, and the parent's record has to agree
+   * with the child's own stamp: recording the captured parent mode while
+   * stamping a narrower one would make the audit line a human reads first state
+   * a wider authority than was ever granted.
+   */
+  it('narrows the child below its parent, and records the mode the child actually opened under', async () => {
+    const w = await world([{ insert: [VERIFIER] }, { id: 'sandbox', config: { mode: 'danger-full-access' } }])
+    w.adapter.script(assistantToolCall('call-1', 'verify', { description: 'check it', prompt: 'look' }), assistantText('seen'), assistantText('done'))
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('verify the thing'))
+    await handle.agent.whenIdle()
+
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string; sandbox: string }
+    expect(start.sandbox).toBe('read-only')
+    // The child's own opening stamp says the same thing.
+    const childStamps = storedEvents(w.sessionsRoot, start.childId).filter((event) => event.type === 'sandbox/mode')
+    expect(childStamps[0]!.data).toMatchObject({ mode: 'read-only', reason: 'delegation' })
+    // And the parent's audit line, which is the place that used to be able to lie.
+    expect(auditLines(handle.agent.session.events).join('\n')).toContain('under read-only')
+  })
+
+  it('never widens: a ceiling above the parent leaves the inherited mode alone', async () => {
+    const w = await world([
+      { insert: [{ ...VERIFIER, config: { ...VERIFIER.config, sandbox: 'danger-full-access' } }] },
+      { id: 'sandbox', config: { mode: 'read-only' } },
+    ])
+    w.adapter.script(assistantToolCall('call-1', 'verify', { description: 'check it', prompt: 'look' }), assistantText('seen'), assistantText('done'))
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('verify the thing'))
+    await handle.agent.whenIdle()
+    expect((eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { sandbox: string }).sandbox).toBe('read-only')
   })
 })
 

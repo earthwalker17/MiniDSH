@@ -33,6 +33,17 @@ export function isWider(candidate: SandboxMode, current: SandboxMode): boolean {
   return RANK[candidate] > RANK[current]
 }
 
+/**
+ * The narrower of two modes.
+ *
+ * A composition may fence a delegated child further than its parent (a
+ * verifier that must not write), and this is how: never a widening, so a row
+ * config can only ever subtract authority.
+ */
+export function narrowest(one: SandboxMode, other: SandboxMode): SandboxMode {
+  return RANK[one] <= RANK[other] ? one : other
+}
+
 export interface SandboxStamp {
   readonly mode: SandboxMode
   readonly enforcement: SandboxEnforcement

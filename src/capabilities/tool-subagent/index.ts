@@ -31,7 +31,7 @@ import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, ty
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { messageText, createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
-import { effectiveSandboxMode, SANDBOX, type Sandbox, type SandboxMode } from '../../core/sandbox/index.ts'
+import { effectiveSandboxMode, narrowest, SANDBOX, SANDBOX_MODES, type Sandbox, type SandboxMode } from '../../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, matches, TURN_END, type Session, type TurnEndReason } from '../../core/session/index.ts'
 import { defineTool, TOOLS, type ToolContext, type ToolRestriction } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
@@ -53,6 +53,30 @@ export interface SubagentConfig {
   readonly maxSteps?: number | undefined
   /** Model-facing name (default `subagent`). */
   readonly toolName?: string | undefined
+  /**
+   * Model-facing description. Without one, a second delegation row advertises
+   * the FIRST one's text — two tools a model cannot tell apart, whose shared
+   * description actively steers away from whatever the second was mounted for.
+   */
+  readonly description?: string | undefined
+  /**
+   * The purpose this delegation's route resolves under (default `subagent`),
+   * so a second row can take a different route through `model-roles`.
+   *
+   * A purpose with no matching role passes through SILENTLY to the parent's base
+   * route — that is `model-roles`' contract, and it means the two rows must be
+   * patched together. A verifier row without its role produces a child on the
+   * parent's own model, which then refuses its own image exactly as the parent
+   * did, and answers from the filename instead. Nothing fails; the arc asserts
+   * the binding for that reason.
+   */
+  readonly purpose?: string | undefined
+  /**
+   * A ceiling this row imposes on top of the parent's. It can only NARROW: a
+   * verifier is mounted `read-only` and stays read-only under a
+   * `danger-full-access` parent. Widening is not expressible.
+   */
+  readonly sandbox?: SandboxMode | undefined
 }
 
 const configSchema = z
@@ -62,10 +86,13 @@ const configSchema = z
     persona: z.string().min(1).optional(),
     maxSteps: z.number().int().positive().optional(),
     toolName: z.string().min(1).optional(),
+    description: z.string().min(1).optional(),
+    purpose: z.string().min(1).optional(),
+    sandbox: z.enum(SANDBOX_MODES as [SandboxMode, ...SandboxMode[]]).optional(),
   })
   .optional()
 
-const PURPOSE = 'subagent'
+const DEFAULT_PURPOSE = 'subagent'
 const DEFAULT_TOOL_NAME = 'subagent'
 
 const DESCRIPTION = `Delegate one bounded, self-contained task to a subagent and wait for its answer.
@@ -87,6 +114,8 @@ type Input = z.infer<typeof InputSchema>
 interface ResolvedConfig {
   readonly maxDepth: number
   readonly maxSteps: number
+  readonly purpose: string
+  readonly sandbox?: SandboxMode | undefined
   readonly toolFilter?: ToolRestriction | undefined
   readonly persona?: string | undefined
 }
@@ -108,9 +137,18 @@ interface Deps {
  */
 const worldSetups = new WeakMap<Agent, CreateAgentOptions['setup']>()
 
-/** The authority a child opens under, read from the parent BEFORE the first await. */
-function captureAuthority(parent: Agent, sandbox: Sandbox): { readonly mode: SandboxMode } {
-  return { mode: effectiveSandboxMode(parent.session.facts) ?? sandbox.defaultMode }
+/**
+ * The authority a child opens under, read from the parent BEFORE the first
+ * await, then narrowed by this row's own ceiling if it has one.
+ *
+ * Computed here, once, so the mode the parent's `subagent/start` records is the
+ * mode the child actually opens under. Recording the captured parent mode and
+ * stamping a narrower one would make the parent's audit line — the place a human
+ * looks first — state a wider authority than was ever granted.
+ */
+function captureAuthority(parent: Agent, sandbox: Sandbox, ceiling: SandboxMode | undefined): { readonly mode: SandboxMode } {
+  const inherited = effectiveSandboxMode(parent.session.facts) ?? sandbox.defaultMode
+  return { mode: ceiling === undefined ? inherited : narrowest(inherited, ceiling) }
 }
 
 /** The last non-empty assistant text of a session — what a child answers with. */
@@ -165,8 +203,8 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     throw Object.assign(new Error(`delegation depth ${depth} exceeds the limit of ${deps.config.maxDepth}; do this work yourself`), { code: 'SUBAGENT_DEPTH' })
   }
   // Captured before the first await: a parent switch after this belongs to the parent's future.
-  const inherited = captureAuthority(parent, deps.sandbox)
-  const route = await resolveCallConfig(parent, { purpose: PURPOSE, signal: exec.callSignal })
+  const inherited = captureAuthority(parent, deps.sandbox, deps.config.sandbox)
+  const route = await resolveCallConfig(parent, { purpose: deps.config.purpose, signal: exec.callSignal })
   const agentOptions: AgentOptions = { ...route, maxSteps: deps.config.maxSteps }
   // The child keeps this tool only if it could still use it: at the cap it is
   // hidden AND unknown, so a depth limit is a fact about the child's world
@@ -290,6 +328,8 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
       config: {
         maxDepth: config?.maxDepth ?? 2,
         maxSteps: config?.maxSteps ?? 12,
+        purpose: config?.purpose ?? DEFAULT_PURPOSE,
+        ...(config?.sandbox === undefined ? {} : { sandbox: config.sandbox }),
         ...(config?.toolFilter === undefined ? {} : { toolFilter: config.toolFilter }),
         ...(config?.persona === undefined ? {} : { persona: config.persona }),
       },
@@ -298,7 +338,7 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
       ctx,
       defineTool({
         name: toolName,
-        description: DESCRIPTION,
+        description: config?.description ?? DESCRIPTION,
         input: InputSchema,
         output: z.object({ output: z.string(), childId: z.string() }),
         // The child owns its own clock (its turn, its tools' deadlines); a
