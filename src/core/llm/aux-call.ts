@@ -20,7 +20,7 @@ import { BlockAssembler } from './assembler.ts'
 import type { Llm } from './runtime.ts'
 import { eventKind, matches, type EventEnvelope } from '../session/types.ts'
 import type { Session } from '../session/session.ts'
-import type { LlmFailure, LlmRequest, TokenUsage } from './types.ts'
+import { LlmError, type LlmFailure, type LlmRequest, type TokenUsage } from './types.ts'
 
 export interface AuxCallRecord {
   /** Why the call was made; the same string the request carried. */
@@ -93,7 +93,13 @@ export async function runAuxCall(
     const finish = assembler.finish
     if (finish.kind === 'error' || finish.kind === 'aborted') failure = finish.failure
   } catch (error) {
-    failure = { message: error instanceof Error ? error.message : String(error), code: 'AUX_CALL_FAILED' }
+    // An `LlmError` keeps its own code. Flattening everything to
+    // `AUX_CALL_FAILED` erased the one distinction a caller acts on: a
+    // cancellation and a summariser failure are different facts, and a
+    // compaction that counts the first as the second can disable its own
+    // automatic triggers with no summary having failed.
+    const code = error instanceof LlmError ? error.code : 'AUX_CALL_FAILED'
+    failure = { message: error instanceof Error ? error.message : String(error), code }
   }
 
   if (failure) {

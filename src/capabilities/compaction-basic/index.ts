@@ -33,14 +33,18 @@ import {
 import {
   COMPACTION,
   COMPACTION_APPLIED,
+  COMPACTION_END,
+  COMPACTION_START,
+  foldCompactionFailures,
   planCompaction,
   planIsLive,
   type Compaction,
+  type CompactionDeclineReason,
   type CompactionOutcome,
   type CompactionPlan,
   type CompactionTrigger,
 } from '../../core/compaction/index.ts'
-import { LLM, runAuxCall, type Llm } from '../../core/llm/index.ts'
+import { AuxCallError, LLM, runAuxCall, type Llm } from '../../core/llm/index.ts'
 import { createPluginMessage } from '../../core/llm/message.ts'
 import type { LlmRequest, Message } from '../../core/llm/types.ts'
 import { estimateMessage, meterSession } from '../../core/metering/index.ts'
@@ -94,6 +98,9 @@ const configSchema = z
 const PLUGIN = 'compaction-basic'
 const PURPOSE = 'compaction'
 
+/** What one summary attempt produced. Every arm maps to exactly one decline reason. */
+type SummaryResult = { kind: 'text'; text: string; seq: number } | { kind: 'empty' } | { kind: 'failed' } | { kind: 'cancelled' } | { kind: 'no-messages' }
+
 /**
  * DSH's brief, which is well-shaped for resuming work: what was asked, what
  * matters, what changed, what broke, what is left.
@@ -137,8 +144,6 @@ class BasicCompaction implements Compaction {
   /** Set by `/compact` on a busy agent; consumed by the next pre-step. */
   private readonly requested = new WeakSet<Agent>()
   private readonly overflows = new WeakMap<Agent, { key: string; count: number }>()
-  /** Consecutive summary failures per agent; reset by any success. */
-  private readonly failures = new WeakMap<Agent, number>()
 
   constructor(ctx: Context, config: CompactionBasicConfig | undefined) {
     this.ctx = ctx
@@ -207,9 +212,15 @@ class BasicCompaction implements Compaction {
     return this.requested.has(agent)
   }
 
-  /** Automatic triggers run only while this session's summariser is still working. */
+  /**
+   * Automatic triggers run only while this session's summariser is still
+   * working. The count is a FOLD over the log rather than a counter in memory,
+   * so it is explainable after the fact — and bounded to this lifecycle, so a
+   * resume gets a fresh two attempts instead of inheriting a latch only an
+   * applied compaction could clear.
+   */
   autoUsable(agent: Agent): boolean {
-    return this.config.auto && (this.failures.get(agent) ?? 0) < this.config.maxSummaryFailures
+    return this.config.auto && foldCompactionFailures(agent.session.facts, agent.session.liveStart) < this.config.maxSummaryFailures
   }
 
   /** Bookkeeping so one step cannot answer overflow with compaction forever. */
@@ -261,12 +272,26 @@ class BasicCompaction implements Compaction {
     })
     if (!plan) return { kind: 'nothing-to-do' }
 
+    // The bracket opens once there IS an attempt: after the plan, before the
+    // paid call. Opening it earlier would append a record at every step boundary
+    // of a session under pressure with nothing worth compacting, and "no plan"
+    // is not an attempt.
+    const startSeq = session.append(COMPACTION_START, {
+      trigger,
+      budgetTokens: budget,
+      projectedTokens: projected,
+      plannedStart: plan.start,
+      plannedEnd: plan.end,
+      plannedNodes: plan.shadowedSeqs.length,
+    }).seq
+    const decline = (reason: CompactionDeclineReason): CompactionOutcome => {
+      session.append(COMPACTION_END, { startSeq, outcome: { kind: 'declined', reason } })
+      return { kind: 'nothing-to-do', reason }
+    }
+
     const statusBefore = agent.status
     const summary = await this.summarise(llm, prompt, agent, plan, route, signal)
-    if (summary === undefined) {
-      this.failures.set(agent, (this.failures.get(agent) ?? 0) + 1)
-      return { kind: 'nothing-to-do' }
-    }
+    if (summary.kind !== 'text') return decline(summary.kind === 'no-messages' ? 'plan-stale' : summary.kind === 'empty' ? 'summary-empty' : summary.kind === 'cancelled' ? 'cancelled' : 'summary-failed')
 
     // ---- no `await` past this line, or the checks mean nothing -------------
     if (agent.status !== statusBefore) {
@@ -274,15 +299,17 @@ class BasicCompaction implements Compaction {
       // longer land safely. The work is paid for either way — remember the
       // request so the next step boundary honours it instead of dropping it.
       this.requested.add(agent)
-      return { kind: 'nothing-to-do' }
+      return decline('turn-started')
     }
-    if (signal?.aborted) return { kind: 'nothing-to-do' }
+    if (signal?.aborted) return decline('cancelled')
     // An agent disposed during the summary has already detached its session:
-    // appending here would write three records — including the paid aux call —
-    // into a log nothing is listening to any more.
-    if (this.ctx.tryGet(AGENTS)?.get(agent.id) !== agent) return { kind: 'nothing-to-do' }
+    // appending here would write into a log nothing is listening to any more,
+    // and the persistence provider has closed its descriptor. So this path
+    // closes NOTHING, and the unpaired start is the record — which is why an
+    // orphan means "the attempt did not close", never "a crash".
+    if (this.ctx.tryGet(AGENTS)?.get(agent.id) !== agent) return { kind: 'nothing-to-do', reason: 'agent-gone' }
     const live = session.surfaceSeqs()
-    if (!planIsLive(plan, live)) return { kind: 'nothing-to-do' }
+    if (!planIsLive(plan, live)) return decline('plan-stale')
 
     const message = createPluginMessage(PLUGIN, frame(summary.text), 'summary')
     // Both surface numbers are ESTIMATOR units and include the summary node the
@@ -311,11 +338,7 @@ class BasicCompaction implements Compaction {
     // the call succeeded and produced nothing usable, and without the count an
     // automatic trigger would buy the same useless summary at every step
     // boundary for the rest of the session.
-    if (surfaceTokensAfter >= surfaceTokensBefore) {
-      this.failures.set(agent, (this.failures.get(agent) ?? 0) + 1)
-      return { kind: 'nothing-to-do' }
-    }
-    this.failures.delete(agent)
+    if (surfaceTokensAfter >= surfaceTokensBefore) return decline('summary-not-smaller')
     session.append(COMPACTION_APPLIED, {
       trigger,
       budgetTokens: budget,
@@ -325,8 +348,10 @@ class BasicCompaction implements Compaction {
       shadowedSeqs: [...plan.shadowedSeqs],
       retainedNodes: live.length - plan.shadowedSeqs.length,
       auxCallSeq: summary.seq,
+      startSeq,
     })
     session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'replace', start: plan.start, end: plan.end }, sourceEventSeqs: [...plan.shadowedSeqs] })
+    session.append(COMPACTION_END, { startSeq, outcome: { kind: 'applied' } })
     return { kind: 'compacted', shadowedNodes: plan.shadowedSeqs.length, surfaceTokensBefore, surfaceTokensAfter }
   }
 
@@ -343,7 +368,7 @@ class BasicCompaction implements Compaction {
     plan: CompactionPlan,
     route: CallConfig,
     signal?: AbortSignal,
-  ): Promise<{ text: string; seq: number } | undefined> {
+  ): Promise<SummaryResult> {
     const session = agent.session
     const messages: Message[] = []
     for (const seq of plan.shadowedSeqs) {
@@ -352,7 +377,7 @@ class BasicCompaction implements Compaction {
       const message = node ? deriveEventMessage(node) : null
       if (message) messages.push(message)
     }
-    if (messages.length === 0) return undefined
+    if (messages.length === 0) return { kind: 'no-messages' }
     messages.push(createPluginMessage(PLUGIN, INSTRUCTION, 'compaction-instruction'))
 
     const assembled = await prompt.assemble(agent)
@@ -376,11 +401,16 @@ class BasicCompaction implements Compaction {
       const result = await runAuxCall(llm, session, request, plan.shadowedSeqs)
       // An empty answer (the model called a tool instead of writing prose)
       // is not a summary. The failed call stays in the log; the surface does not move.
-      return result.text.trim().length === 0 ? undefined : { text: result.text, seq: result.seq }
-    } catch {
+      return result.text.trim().length === 0 ? { kind: 'empty' } : { kind: 'text', text: result.text, seq: result.seq }
+    } catch (error) {
       // `runAuxCall` already recorded why. A compaction that cannot summarise
-      // must leave history alone rather than drop it.
-      return undefined
+      // must leave history alone rather than drop it — but it must say WHICH
+      // thing happened, because the give-up counter treats a summariser failure
+      // and a cancellation completely differently. Collapsing them (as returning
+      // `undefined` for both did) would let two interrupted compactions disable
+      // the automatic triggers with no summary having failed at all.
+      const cancelled = signal?.aborted === true || (error instanceof AuxCallError && error.failure.code === 'ABORTED')
+      return { kind: cancelled ? 'cancelled' : 'failed' }
     }
   }
 }

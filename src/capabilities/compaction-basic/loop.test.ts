@@ -14,7 +14,7 @@ import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { AGENTS, agentPlugin, type Agent, type AgentHandle } from '../../core/agent/index.ts'
 import { agentInvariantPlugin } from '../../core/agent/invariant.ts'
 import { approvalPlugin } from '../../core/approval/index.ts'
-import { COMPACTION, COMPACTION_APPLIED } from '../../core/compaction/index.ts'
+import { COMPACTION, foldCompactionFailures, COMPACTION_APPLIED } from '../../core/compaction/index.ts'
 import { invariantsPlugin } from '../../core/invariants/index.ts'
 import { LLM, llmPlugin, LLM_AUX_CALL, type AuxCallRecord } from '../../core/llm/index.ts'
 import { createUserMessage, messageText } from '../../core/llm/message.ts'
@@ -139,9 +139,14 @@ describe('compaction through the real loop', () => {
     for (let seq = 0; seq < before; seq++) expect(agent.session.events[seq]!.seq).toBe(seq)
     expect(agent.session.surfaceSeqs().length).toBeLessThan(nodesBefore)
 
-    const replace = agent.session.events.at(-1)!
+    // The bracket closes AFTER the mutation, so the replace is no longer the
+    // last event; it is the last SURFACE one.
+    const tail = agent.session.events.slice(-2)
+    const replace = tail[0]!
     expect(replace.type).toBe('user/message')
     expect(replace.surfaceOp).toMatchObject({ op: 'replace' })
+    expect(tail[1]!.type).toBe('compaction/end')
+    expect(tail[1]!.data).toMatchObject({ outcome: { kind: 'applied' } })
 
     const data = appliedRecords(agent).at(-1)!.data as { shadowedSeqs: number[]; trigger: string; auxCallSeq: number }
     expect(data.trigger).toBe('explicit')
@@ -175,6 +180,60 @@ describe('compaction through the real loop', () => {
     // has to explain itself.
     const aux = agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type).at(-1)!
     expect((aux.data as AuxCallRecord).outcome.kind).toBe('error')
+  })
+
+  it('brackets every attempt, and names why one produced nothing', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
+    const { agent } = await test.create()
+    arm(test, { failSummary: true })
+    await grow(agent, 6)
+
+    const outcome = await test.root.get(COMPACTION).compactNow(agent)
+    // The reason reaches the caller on the idle path — which is what finally
+    // lets `/compact` say WHICH of the three things happened.
+    expect(outcome).toMatchObject({ kind: 'nothing-to-do', reason: 'summary-failed' })
+
+    const starts = agent.session.events.filter((event) => event.type === 'compaction/start')
+    const ends = agent.session.events.filter((event) => event.type === 'compaction/end')
+    expect(starts).toHaveLength(1)
+    expect(ends).toHaveLength(1)
+    // The start records what was attempted, before anything was bought.
+    expect(starts[0]!.data).toMatchObject({ trigger: 'explicit', budgetTokens: 4000 })
+    expect((starts[0]!.data as { plannedNodes: number }).plannedNodes).toBeGreaterThan(0)
+    // The end names the start it closes, so a reader can pair them.
+    expect(ends[0]!.data).toMatchObject({ startSeq: starts[0]!.seq, outcome: { kind: 'declined', reason: 'summary-failed' } })
+  })
+
+  it('opens no bracket when there is nothing to attempt, so a session under pressure does not flood its log', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
+    const { agent } = await test.create()
+    arm(test)
+    // Two nodes is below the planner's minimum, so there is no plan and no attempt.
+    await grow(agent, 1)
+    expect((await test.root.get(COMPACTION).compactNow(agent)).kind).toBe('nothing-to-do')
+    expect(agent.session.events.filter((event) => event.type === 'compaction/start')).toHaveLength(0)
+  })
+
+  /**
+   * The distinction the outcome union depends on, and it is not decorative: a
+   * cancellation and a summariser failure are counted differently, and until
+   * `summarise` returned a reason both arrived as the same `undefined`. Two
+   * interrupted compactions would have disabled the automatic triggers with
+   * every summary call having succeeded.
+   */
+  it('records a cancelled summary as cancelled, and the fold does not count it', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false, maxSummaryFailures: 2 })
+    const { agent } = await test.create()
+    arm(test, { failSummary: true })
+    await grow(agent, 6)
+
+    const controller = new AbortController()
+    controller.abort()
+    const outcome = await test.root.get(COMPACTION).compactNow(agent, controller.signal)
+    expect(outcome).toMatchObject({ kind: 'nothing-to-do', reason: 'cancelled' })
+    const end = agent.session.events.filter((event) => event.type === 'compaction/end').at(-1)!
+    expect(end.data).toMatchObject({ outcome: { kind: 'declined', reason: 'cancelled' } })
+    expect(foldCompactionFailures(agent.session.facts, agent.session.liveStart)).toBe(0)
   })
 
   it('compacts under pressure before the step, and every request still equals the log', async () => {

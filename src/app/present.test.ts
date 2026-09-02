@@ -30,6 +30,7 @@ describe('present: one projection for every plain-text surface', () => {
       surfaceTokensBefore: 6100,
       surfaceTokensAfter: 1900,
       shadowedSeqs: [2, 3, 4, 5, 6],
+      startSeq: 1,
       retainedNodes: 3,
       auxCallSeq: 7,
     })
