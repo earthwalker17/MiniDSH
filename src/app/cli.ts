@@ -11,7 +11,7 @@
  */
 import { createRoot, describeConfigError, type Logger } from '../kernel/index.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
-import { foldRequestContext } from '../core/session/index.ts'
+import { foldRequestContext, matches, TOOL_RESULT, USER_MESSAGE } from '../core/session/index.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
@@ -24,6 +24,8 @@ import { compose, defaultDialect, type Row } from './compose.ts'
 import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
+import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
+import { collectImageRefs } from '../core/llm/content.ts'
 import { auditLines, describeEvent } from './present.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
@@ -617,15 +619,21 @@ async function configCommand(args: ParsedArgs): Promise<number> {
  * read exactly where `run`/`resume` write — a layer that repoints the store
  * must not split the CLI's read path from its write path.
  */
-async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence) => T): Promise<T> {
+async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence, attachments: Attachments | undefined) => T): Promise<T> {
   const effective = applyLayers(baseRows(plan.home), plan.loaded.layers, (message) => stderrLogger.warn(message))
   const row = effective.rows.find((entry) => entry.plugin.name === 'persistence-jsonl' && entry.disabled !== true)
   const root = createRoot({ logger: stderrLogger })
   if (row) root.plugin(row.plugin, row.config)
   else root.plugin(persistenceJsonlPlugin, { root: plan.home.sessionsRoot })
+  // The attachment row too, for the same reason the persistence row is the
+  // EFFECTIVE one: a reader that resolved object paths for itself could
+  // disagree with the store that wrote them, and an attachment id is
+  // deliberately not a path any consumer may derive.
+  const attachmentRow = effective.rows.find((entry) => entry.plugin.name === 'attachments-local' && entry.disabled !== true)
+  if (attachmentRow) root.plugin(attachmentRow.plugin, attachmentRow.config)
   await root.settle()
   try {
-    return use(root.get(PERSISTENCE))
+    return use(root.get(PERSISTENCE), root.tryGet(ATTACHMENTS))
   } finally {
     await root.dispose()
   }
@@ -648,7 +656,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   if (sub === 'show') {
     const id = args.positional[1]
     if (!id) return usage('usage: minidsh sessions show <id> [--json|--audit]')
-    return withPersistence(plan, (persistence) => {
+    return withPersistence(plan, (persistence, attachments) => {
       const stored = persistence.load(id)
       if (!stored) {
         process.stderr.write(`no session "${id}"\n`)
@@ -681,6 +689,23 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         for (const event of stored.events) {
           const line = describeEvent(event)
           process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line}` : ''}\n`)
+        }
+        // Where the bytes are, for every image this session was shown. The
+        // local-first answer to "let me look at it": the object is on this
+        // disk, so a human opens it with whatever they already use. It is also
+        // the only runtime consumer of `hostPath`, which is what keeps that
+        // method an honest part of the seam rather than a test affordance.
+        if (attachments) {
+          const seen = new Map<string, string>()
+          for (const event of stored.events) {
+            const message = matches(event, TOOL_RESULT) ? event.data.message : matches(event, USER_MESSAGE) ? event.data.message : undefined
+            if (!message) continue
+            for (const ref of collectImageRefs(message.content).values()) {
+              const where = attachments.hostPath(ref)
+              if (where !== undefined) seen.set(ref.id, where)
+            }
+          }
+          for (const [ref, where] of seen) process.stdout.write(`      ${ref.slice(0, 19)}… ${where}\n`)
         }
         if (stored.damaged) process.stderr.write('warning: the stored log is damaged beyond this point\n')
       }

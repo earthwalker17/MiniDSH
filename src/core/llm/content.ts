@@ -83,14 +83,6 @@ export function collectImageRefs(blocks: readonly ContentBlock[], into: Map<stri
   return into
 }
 
-/** True when any block, at any depth, carries an image. */
-export function hasImage(blocks: readonly ContentBlock[]): boolean {
-  for (const block of blocks) {
-    if (block.type === 'image') return true
-    if (block.type === 'tool-result' && hasImage(block.content)) return true
-  }
-  return false
-}
 
 /** One image an adapter is about to send: the reference the log carries, and the bytes for it. */
 export interface ResolvedImage {

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
 import { LLM } from '../core/llm/index.ts'
-import { ScriptedAdapter, assistantText } from '../test-support/scripted-adapter.ts'
+import { ScriptedAdapter, assistantText, assistantToolCall } from '../test-support/scripted-adapter.ts'
 import { main } from './cli.ts'
 import { runTask } from './headless.ts'
 
@@ -177,6 +177,85 @@ describe('headless runner (real composition, scripted model)', () => {
 })
 
 describe('cli surface', () => {
+  /**
+   * The local-first answer to "let me look at the image": the object is on this
+   * disk, so `sessions show` names where. It is also the only runtime consumer
+   * of `Attachments.hostPath`, which is what keeps that method an honest part of
+   * the seam rather than a test affordance — and it reads through the EFFECTIVE
+   * attachments row for the same reason the read path already mounts the
+   * effective persistence row.
+   */
+  it('names where each image in a stored session lives', async () => {
+    const home = tempDir('minidsh-home-')
+    const cwd = tempDir('minidsh-cwd-')
+    const previousHome = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    const { quadPng } = await import('../test-support/images.ts')
+    const { createHash } = await import('node:crypto')
+    const { ATTACHMENTS } = await import('../core/attachments/index.ts')
+    const { bootComposition } = await import('./headless.ts')
+    const { AGENTS } = await import('../core/agent/index.ts')
+    const { createUserMessage } = await import('../core/llm/message.ts')
+    const { imageDescriptor } = await import('../core/llm/content.ts')
+    const { TOOLS, defineTool } = await import('../core/tools/index.ts')
+    const { z } = await import('zod')
+    const png = quadPng(32)
+    const digest = createHash('sha256').update(png).digest('hex')
+
+    const adapter = new ScriptedAdapter()
+    const root = await bootComposition({
+      sessionsRoot: join(home, 'sessions'),
+      attachmentsRoot: join(home, 'attachments'),
+      logger: silent,
+      ...scripted(adapter),
+    })
+    let sessionId = ''
+    try {
+      // A tool that produces an image, so the stored log carries a real ref.
+      const ref = await root.get(ATTACHMENTS).saveImage({ data: png, name: 'quad.png' })
+      root.get(TOOLS).register(
+        root,
+        defineTool({
+          name: 'emit_image',
+          description: 'emit',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean() }),
+          render: () => [{ type: 'image', attachment: ref, text: imageDescriptor(ref) }],
+          execute: () => ({ ok: true }),
+        }),
+      )
+      adapter.script(assistantToolCall('c1', 'emit_image', {}), assistantText('done'))
+      const handle = await root.get(AGENTS).create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+      sessionId = handle.agent.id
+      handle.agent.followup(createUserMessage('go'))
+      await handle.agent.whenIdle()
+      await handle.agent.session.flush()
+      await handle.dispose()
+    } finally {
+      await root.dispose()
+    }
+
+    const chunks: string[] = []
+    const write = process.stdout.write.bind(process.stdout)
+    process.stdout.write = ((text: string) => {
+      chunks.push(text)
+      return true
+    }) as typeof process.stdout.write
+    let code: number
+    try {
+      code = await main(['sessions', 'show', sessionId])
+    } finally {
+      process.stdout.write = write
+      if (previousHome === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previousHome
+    }
+    expect(code).toBe(0)
+    const out = chunks.join('')
+    // The descriptor on the result row, and the path to the bytes beneath it.
+    expect(out).toContain('32×32')
+    expect(out, `no host path in:\n${out}`).toContain(join('attachments', 'v1', 'objects', digest.slice(0, 2), digest))
+  })
+
   it('prints the effective composition with provenance, without a network call', async () => {
     const home = tempDir('minidsh-home-')
     const previousHome = process.env.MINIDSH_HOME

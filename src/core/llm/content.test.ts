@@ -14,7 +14,7 @@ import { asCallId } from '../ids.ts'
 import { estimateImageTokens, estimateMessage } from '../metering/index.ts'
 import { serializeMessages as serializeAnthropic } from '../../capabilities/llm-anthropic/serialize.ts'
 import { serializeMessages as serializeDeepSeek } from '../../capabilities/llm-deepseek/serialize.ts'
-import { blockText, collectImageRefs, contentText, hasImage, imageDescriptor } from './content.ts'
+import { blockText, collectImageRefs, contentText, imageDescriptor } from './content.ts'
 import { createAssistantMessage, createToolResultMessage, createUserMessage, messageText } from './message.ts'
 import type { ContentBlock } from './types.ts'
 
@@ -60,10 +60,9 @@ describe('blockText', () => {
   })
 })
 
-describe('contentText, collectImageRefs, hasImage', () => {
+describe('contentText and collectImageRefs', () => {
   it('walks into a tool result, which is where every image S8 produces lives', () => {
     const nested: ContentBlock = { type: 'tool-result', toolCallId: asCallId('c1'), content: [{ type: 'text', text: 'here' }, IMAGE] }
-    expect(hasImage([nested])).toBe(true)
     expect([...collectImageRefs([nested]).keys()]).toEqual([REF.id])
     // `contentText` deliberately does NOT unwrap a tool result: whoever unwraps it projects its content.
     expect(contentText([nested])).toBe('')
