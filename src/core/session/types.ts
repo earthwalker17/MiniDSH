@@ -10,7 +10,7 @@
  * that project into model history are closed and owned here.
  */
 import type { SessionId } from '../ids.ts'
-import type { Message, TokenUsage } from '../llm/types.ts'
+import type { Message, ModelModality, TokenUsage } from '../llm/types.ts'
 import type { JsonValue } from '../json.ts'
 
 export const SESSION_FORMAT_VERSION = 0
@@ -85,6 +85,15 @@ export interface RequestContextRecord {
   readonly model: string
   /** Maximum combined request and response tokens, when the adapter advertises one. */
   readonly contextWindow?: number
+  /**
+   * What this route can take as input, as its adapter advertises it. Absent
+   * means text only — the same reading the adapter contract gives — and a
+   * producer of non-text content refuses against this, so the log explains its
+   * own refusals. It is also what lets a replay answer a recorded route's
+   * modalities without a live adapter: without it a recorded vision session
+   * would refuse its own image on replay.
+   */
+  readonly inputModalities?: readonly ModelModality[]
 }
 
 // ---- core event kinds -----------------------------------------------------

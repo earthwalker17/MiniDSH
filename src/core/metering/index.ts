@@ -28,6 +28,29 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / CHARS_PER_TOKEN)
 }
 
+/**
+ * What a provider charges for one image, as a function of its geometry.
+ *
+ * Measured, not guessed. Anthropic's `count_tokens` on `claude-haiku-4-5`,
+ * minus an 11-token text baseline: 96²→19, 256²→103, 512²→364, 1024²→1372,
+ * 1568²→1524, 2048²→1524 — that is `⌈w·h/750⌉` with a ceiling where the API
+ * downscales. DeepSeek is bucketed and much cheaper on the same images
+ * (96px→116, 512px→200, 1024px and up→348, over a 7-token baseline), so the
+ * Anthropic curve is the conservative side and is what a provider-neutral
+ * estimator should charge.
+ *
+ * Pure and exported so that anything which later decides whether an image FITS
+ * shares the arithmetic with the meter that priced it — an estimate that
+ * disagrees with what is actually sent is worse than no estimate.
+ */
+export function estimateImageTokens(width: number, height: number): number {
+  const pixels = Math.max(0, width) * Math.max(0, height)
+  return Math.min(Math.ceil(pixels / 750), IMAGE_TOKEN_CEILING)
+}
+
+/** The plateau both measured curves reach; Anthropic's downscale lands at ~1,524. */
+const IMAGE_TOKEN_CEILING = 1600
+
 function estimateBlocks(blocks: readonly ContentBlock[]): number {
   let total = 0
   for (const block of blocks) {
@@ -37,6 +60,13 @@ function estimateBlocks(blocks: readonly ContentBlock[]): number {
         // Reasoning counts: a reasoning-carrying assistant message is echoed
         // back to the provider on every later request (see the adapter).
         total += estimateTokens(block.text)
+        break
+      case 'image':
+        // The descriptor is what a text-only route is sent, but the meter is
+        // provider-neutral and charges the image: over-estimating on a text-only
+        // route can only make compaction fire earlier, which is the safe
+        // direction. ARCHITECTURE § 13 records the asymmetry.
+        total += estimateImageTokens(block.attachment.width, block.attachment.height)
         break
       case 'tool-call':
         total += estimateTokens(block.name) + estimateTokens(block.arguments) + TOOL_CALL_OVERHEAD

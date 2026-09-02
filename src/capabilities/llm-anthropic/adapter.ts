@@ -1,4 +1,4 @@
-import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
+import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
 import { AnthropicTranslator, ANTHROPIC_PROVIDER, errorCode } from './translate.ts'
 import { serializeMessages, serializeTools } from './serialize.ts'
@@ -26,8 +26,17 @@ interface CatalogModel extends ModelInfo {
   readonly defaultEffort?: string
   /** Whether `temperature` is honoured; the 5 family returns 400 for any non-default value. */
   readonly sampling: boolean
+  /**
+   * What the model takes as input. A per-model fact, not a constant: the
+   * adapter used to answer `['text','image']` for every id including ones it
+   * had never heard of, which inverts the seam's own rule — an unknowable
+   * capability was advertised as present, turning a refusal that could have
+   * happened before any I/O into a provider 400.
+   */
+  readonly modalities: readonly ModelModality[]
 }
 
+const TEXT_AND_IMAGE: readonly ModelModality[] = ['text', 'image']
 const ADAPTIVE_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 /** Budgets for a manual-thinking model's effort ids; each must stay below `max_tokens`. */
 const MANUAL_BUDGETS: Readonly<Record<string, number>> = { low: 2048, high: 6144, max: 24_576 }
@@ -38,15 +47,27 @@ const ALIASES: Readonly<Record<string, string>> = { 'claude-haiku-4-5': 'claude-
 /** Verified against the live models overview on 2026-08-30; ids are pinned snapshots. */
 const CATALOG: readonly CatalogModel[] = [
   // Fable 5 refuses `thinking.type: "disabled"`, so `off` is not in its set.
-  { id: 'claude-fable-5', name: 'Claude Fable 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false },
-  { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false },
-  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false },
-  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, thinking: 'manual', efforts: ['off', ...Object.keys(MANUAL_BUDGETS)], defaultEffort: 'off', sampling: true },
+  { id: 'claude-fable-5', name: 'Claude Fable 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, thinking: 'manual', efforts: ['off', ...Object.keys(MANUAL_BUDGETS)], defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
 ]
 
-/** An id the catalog does not know: text and images, a conservative window, the current thinking shape, no sampling. */
+/**
+ * An id the catalog does not know: a conservative window, the current thinking
+ * shape, no sampling — and images, deliberately.
+ *
+ * The permissive side is the right one here and the choice is asymmetric. Every
+ * model Anthropic currently serves accepts images, so a wrong ALLOW costs one
+ * provider 400 that names itself; a wrong REFUSE makes a capability the model
+ * has unreachable, with no override, on any id this table has not caught up
+ * with — and this table demonstrably lags (it was written three days before
+ * `claude-fable-5-1` shipped). The sibling DeepSeek adapter makes the opposite
+ * call for the opposite reason: there, one known id has vision and an unknown
+ * one almost certainly does not.
+ */
 function unlisted(id: string): CatalogModel {
-  return { id, name: id, contextWindow: 200_000, maxOutputTokens: 8192, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, sampling: false }
+  return { id, name: id, contextWindow: 200_000, maxOutputTokens: 8192, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, sampling: false, modalities: TEXT_AND_IMAGE }
 }
 
 export interface AnthropicAdapterOptions {
@@ -94,7 +115,7 @@ export class AnthropicAdapter implements LlmAdapter {
       contextWindow: entry.contextWindow,
       defaultMaxTokens: Math.min(this.options.defaultMaxTokens, entry.maxOutputTokens),
       reasoning: { efforts: entry.efforts, ...(entry.defaultEffort === undefined ? {} : { defaultEffort: entry.defaultEffort }) },
-      inputModalities: ['text', 'image'],
+      inputModalities: entry.modalities,
     }
   }
 

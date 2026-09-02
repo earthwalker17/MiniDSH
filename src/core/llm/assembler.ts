@@ -82,7 +82,12 @@ export class BlockAssembler {
       case 'tool-call':
         if (partial.toolId === undefined || partial.toolName === undefined) return undefined
         return { type: 'tool-call', id: asCallId(partial.toolId), name: partial.toolName, arguments: partial.toolArgs || '{}' }
+      case 'image':
       case 'tool-result':
+        // Neither can arrive from a stream: `validateStream` refuses an
+        // assistant block-start or block-end of either type before the driver
+        // ever sees the chunk. Named here so the union's next variant is a
+        // compile error rather than a silent `undefined`.
         return undefined
     }
   }

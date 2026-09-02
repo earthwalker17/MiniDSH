@@ -1,3 +1,4 @@
+import { contentText } from '../../core/llm/content.ts'
 import type { ContentBlock, Message, ToolSchema } from '../../core/llm/index.ts'
 
 export interface WireMessage {
@@ -13,11 +14,14 @@ export interface WireTool {
   readonly function: { readonly name: string; readonly description: string; readonly parameters: Record<string, unknown> }
 }
 
+/**
+ * The text a run of blocks says. `contentText`, not a `type === 'text'` filter:
+ * an image block carries its own descriptor, and dropping it would put a message
+ * on the wire that the log says had one more thing in it. Identical output to
+ * the filter it replaces for every block kind that is not an image.
+ */
 function textOf(blocks: readonly ContentBlock[]): string {
-  return blocks
-    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-    .map((block) => block.text)
-    .join('')
+  return contentText(blocks)
 }
 
 function reasoningOf(blocks: readonly ContentBlock[]): string {

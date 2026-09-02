@@ -496,6 +496,34 @@ describe('the route as durable facts', () => {
     expect(agent.session.events.filter((event) => event.type === REQUEST_CONTEXT.type)).toHaveLength(1)
   })
 
+  /**
+   * The gate compares the WHOLE record, not a named list of fields.
+   *
+   * With a three-field comparison, a field added to `RequestContextRecord` is
+   * never written on a resumed session whose provider, model and window are
+   * unchanged — so it is inherited as ABSENT for the life of that session. For
+   * `inputModalities` that is not cosmetic: absent means text only, so a session
+   * resumed on a vision route would refuse its own images forever and explain it
+   * with the wrong reason.
+   */
+  it('rewrites request/context when any field of it changes, not only the three it used to compare', async () => {
+    harness = await coreHarness()
+    harness.adapter.script(assistantText('one'), assistantText('two'))
+    const { REQUEST_CONTEXT } = await import('../session/index.ts')
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('first'))
+    await agent.whenIdle()
+    // Same provider, same model, same window — only the modalities move.
+    const resolve = harness.adapter.resolveModel.bind(harness.adapter)
+    harness.adapter.resolveModel = (model: string) => ({ ...resolve(model), inputModalities: ['text', 'image'] as const })
+    agent.followup(createUserMessage('second'))
+    await agent.whenIdle()
+    const records = agent.session.events.filter((event) => event.type === REQUEST_CONTEXT.type).map((event) => event.data)
+    expect(records).toHaveLength(2)
+    expect(records[0]).not.toHaveProperty('inputModalities')
+    expect(records[1]).toMatchObject({ provider: 'scripted', model: 'scripted-model', contextWindow: 100_000, inputModalities: ['text', 'image'] })
+  })
+
   it('configure is one durable switch: logged iff it changes, effective at the next step, and an unnamed effort dies with a route change', async () => {
     harness = await coreHarness()
     harness.adapter.script(assistantText('one'), assistantText('two'))

@@ -166,6 +166,35 @@ describe('LlmRuntime', () => {
   })
 
   /**
+   * An image is user- and tool-side only, and the refusal has to live HERE.
+   *
+   * The driver appends `assistant/chunk` to the log and only then pushes the
+   * chunk to `BlockAssembler`, so a refusal in the assembler would arrive one
+   * line after the durable record it exists to prevent — and would leave a log
+   * that can never be replayed, because the replay script hands the same chunks
+   * back and it would throw again on every run. `validateStream` runs before the
+   * driver sees a chunk at all.
+   */
+  it('refuses an assistant stream that opens an image block, before the driver could record it', async () => {
+    const { root, llm } = await harness()
+    llm.registerAdapter(root, new ScriptedAdapter().script([{ type: 'block-start', index: 0, blockType: 'image' }, { type: 'finish', reason: { kind: 'stop' } }]))
+    await expect(collect(llm.stream(request()))).rejects.toThrowError(/may not open a "image" block/)
+  })
+
+  it('refuses an assistant stream that ends an image block', async () => {
+    const { root, llm } = await harness()
+    const ref = { id: 'sha256:x', mediaType: 'image/png' as const, bytes: 1, width: 1, height: 1 }
+    llm.registerAdapter(
+      root,
+      new ScriptedAdapter().script([
+        { type: 'block-end', index: 0, block: { type: 'image', attachment: ref as never, text: '[image]' } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]),
+    )
+    await expect(collect(llm.stream(request()))).rejects.toThrowError(/may not end a "image" block/)
+  })
+
+  /**
    * A cancellation landing between the request being built and the adapter
    * being entered is invisible to an adapter that only listens for the `abort`
    * event: on an already-aborted signal it never fires. Found live — a turn

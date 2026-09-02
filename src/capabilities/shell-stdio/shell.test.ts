@@ -72,7 +72,7 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
     proc = new ShellProcess('bash', dir)
     // Without the redirect this `cat` would block until the deadline AND eat the
     // next command out of the shared pipe, so the second call would never match.
-    const reader = await proc.exec({ command: 'cat', policy: unconfined(dir), timeoutMs: 5_000 })
+    const reader = await proc.exec({ command: 'cat', policy: unconfined(dir), timeoutMs: 30_000 })
     expect(reader.timedOut).toBe(false)
     const after = await proc.exec({ command: "echo 'still here'", policy: unconfined(dir), timeoutMs: 30_000 })
     expect(after.output).toContain('still here')

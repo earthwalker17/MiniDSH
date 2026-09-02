@@ -28,7 +28,7 @@ import {
 } from '../agent/index.ts'
 import { asCallId, type SessionId } from '../ids.ts'
 import type { JsonValue } from '../json.ts'
-import { BlockAssembler, LLM, type ContentBlock, type Llm, type LlmRequest, type Message } from '../llm/index.ts'
+import { BlockAssembler, LLM, type ContentBlock, type Llm, type LlmRequest, type Message, type ModelModality } from '../llm/index.ts'
 import { createAssistantMessage, createToolResultMessage } from '../llm/message.ts'
 import { PROMPT, type AssembledPrompt, type Prompt } from '../prompt/index.ts'
 import {
@@ -506,15 +506,33 @@ export class ReactLoopAgent implements Agent {
    */
   private recordRoute(config: CallConfig): void {
     let contextWindow: number | undefined
+    let inputModalities: readonly ModelModality[] | undefined
     try {
-      contextWindow = this.deps!.llm.resolveModel(config.provider, config.model).contextWindow
+      const resolved = this.deps!.llm.resolveModel(config.provider, config.model)
+      contextWindow = resolved.contextWindow
+      inputModalities = resolved.inputModalities
     } catch {
-      // An unknown provider: the request itself will say so (NO_ADAPTER); the record then carries no window.
+      // An unknown provider: the request itself will say so (NO_ADAPTER); the
+      // record then carries neither window nor modalities. That matters more for
+      // modalities than for the window — the window has a live-adapter fallback
+      // and absent modalities MEAN text-only — so the whole-record comparison
+      // below is what makes a later successful resolve rewrite the record
+      // instead of the first failure latching a route into "text only" forever.
       contextWindow = undefined
+      inputModalities = undefined
     }
-    const record: RequestContextRecord = { provider: config.provider, model: config.model, ...(contextWindow === undefined ? {} : { contextWindow }) }
+    const record: RequestContextRecord = {
+      provider: config.provider,
+      model: config.model,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(inputModalities === undefined ? {} : { inputModalities: [...inputModalities] }),
+    }
+    // The WHOLE record, not three named fields: a field added to
+    // `RequestContextRecord` must be written on the next step of a resumed
+    // session whose route never changed, or it would be inherited as absent for
+    // the life of that session and the reader would draw the wrong conclusion.
     const last = foldRequestContext(this.session.facts)
-    if (last && last.provider === record.provider && last.model === record.model && last.contextWindow === record.contextWindow) return
+    if (last && JSON.stringify(last) === JSON.stringify(record)) return
     this.session.append(REQUEST_CONTEXT, record)
   }
 

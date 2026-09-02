@@ -12,6 +12,7 @@
  * unsigned reasoning block is dropped, never forged. Empty text is never
  * sent (the API refuses it).
  */
+import { contentText } from '../../core/llm/content.ts'
 import type { ContentBlock, Message, ToolSchema } from '../../core/llm/index.ts'
 import { ANTHROPIC_PROVIDER, type AnthropicReplayBlock } from './translate.ts'
 
@@ -33,11 +34,9 @@ export interface WireTool {
   readonly input_schema: Record<string, unknown>
 }
 
+/** See the DeepSeek serializer: `contentText`, so an image contributes its descriptor rather than vanishing. */
 function textOf(blocks: readonly ContentBlock[]): string {
-  return blocks
-    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-    .map((block) => block.text)
-    .join('')
+  return contentText(blocks)
 }
 
 function parseInput(args: string): unknown {

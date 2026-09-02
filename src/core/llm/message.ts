@@ -1,5 +1,6 @@
 import { asMessageId, newMessageId, type CallId } from '../ids.ts'
 import { deepFreeze } from '../json.ts'
+import { contentText } from './content.ts'
 import type { ContentBlock, Message, MessageSource, ReplayEnvelope } from './types.ts'
 
 /** Builds a frozen message with a fresh id. */
@@ -35,10 +36,14 @@ export function restoreMessage(raw: Message): Message {
   return deepFreeze({ ...raw, id: asMessageId(raw.id), content: raw.content.slice() })
 }
 
-/** Concatenated text of an assistant message (what a headless surface prints). */
+/**
+ * What a message says, as text — what a headless surface prints, what the
+ * terminal renders, and what a delegation answers with.
+ *
+ * It projects through `blockText` rather than filtering for `type === 'text'`,
+ * so an image contributes its descriptor instead of vanishing. For the four
+ * original block kinds the result is byte-identical to the filter it replaces.
+ */
 export function messageText(message: Message): string {
-  return message.content
-    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-    .map((block) => block.text)
-    .join('')
+  return contentText(message.content)
 }

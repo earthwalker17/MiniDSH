@@ -19,7 +19,7 @@
  */
 import type { Context, Disposer } from '../kernel/index.ts'
 import { AGENT_OPTIONS } from '../core/agent/index.ts'
-import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
+import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
 import { foldAuxCalls, LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/aux-call.ts'
 import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, REQUEST_HEADER, type EventEnvelope } from '../core/session/index.ts'
 
@@ -125,6 +125,26 @@ export function windowsIn(events: readonly EventEnvelope[]): Map<string, number>
     }
   }
   return windows
+}
+
+/**
+ * The modalities the log recorded per route.
+ *
+ * Load-bearing, not tidy: a producer of non-text content refuses when the
+ * route's `inputModalities` lacks its kind, and absent means text only. Without
+ * this a replayed vision session would refuse its own recorded image — the tool
+ * would return an error, the attachment would never be written, and the
+ * recorded answer would replay anyway, so `assertConsumed()` would pass on
+ * arithmetic while nothing under test had run.
+ */
+export function modalitiesIn(events: readonly EventEnvelope[]): Map<string, readonly ModelModality[]> {
+  const modalities = new Map<string, readonly ModelModality[]>()
+  for (const event of events) {
+    if (matches(event, REQUEST_CONTEXT) && event.data.inputModalities !== undefined) {
+      modalities.set(`${event.data.provider}/${event.data.model}`, event.data.inputModalities)
+    }
+  }
+  return modalities
 }
 
 /** A recorded out-of-loop call: its purpose travels with its chunks, so a replay can refuse to serve one purpose's record to another's request. */
@@ -243,11 +263,19 @@ class ReplayAdapter implements LlmAdapter {
   readonly provider: string
   private readonly shared: ReplayDispatch
   private readonly windows: ReadonlyMap<string, number>
+  private readonly modalities: ReadonlyMap<string, readonly ModelModality[]>
   private readonly fallbackWindow: number
-  constructor(provider: string, shared: ReplayDispatch, windows: ReadonlyMap<string, number>, fallbackWindow: number) {
+  constructor(
+    provider: string,
+    shared: ReplayDispatch,
+    windows: ReadonlyMap<string, number>,
+    modalities: ReadonlyMap<string, readonly ModelModality[]>,
+    fallbackWindow: number,
+  ) {
     this.provider = provider
     this.shared = shared
     this.windows = windows
+    this.modalities = modalities
     this.fallbackWindow = fallbackWindow
   }
 
@@ -256,10 +284,18 @@ class ReplayAdapter implements LlmAdapter {
   }
 
   resolveModel(model: string): ResolvedModel {
-    // The window the log recorded for this route; a log from before
-    // `request/context` existed falls back to the caller's number.
-    const contextWindow = this.windows.get(`${this.provider}/${model}`) ?? this.fallbackWindow
-    return { contextWindow, defaultMaxTokens: 8192, reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'high' } }
+    // The window and the modalities the log recorded for this route; a log from
+    // before `request/context` existed falls back to the caller's number and to
+    // text only, which is what an absent field has always meant.
+    const route = `${this.provider}/${model}`
+    const contextWindow = this.windows.get(route) ?? this.fallbackWindow
+    const inputModalities = this.modalities.get(route)
+    return {
+      contextWindow,
+      defaultMaxTokens: 8192,
+      reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'high' },
+      ...(inputModalities === undefined ? {} : { inputModalities }),
+    }
   }
 
   listModels(): readonly ModelInfo[] {
@@ -307,13 +343,18 @@ export function installLlmReplay(
       ),
   )
   const shared = new ReplayDispatch(sources)
-  // Every log's routes and windows: a child may take a route its parent never did.
+  // Every log's routes, windows and modalities: a child may take a route its
+  // parent never did — which is exactly what a vision verifier does.
   const windows = new Map<string, number>()
-  for (const events of logs) for (const [route, window] of windowsIn(events)) windows.set(route, window)
+  const modalities = new Map<string, readonly ModelModality[]>()
+  for (const events of logs) {
+    for (const [route, window] of windowsIn(events)) windows.set(route, window)
+    for (const [route, kinds] of modalitiesIn(events)) modalities.set(route, kinds)
+  }
   const named = options.providers ?? (options.provider === undefined ? [...new Set(logs.flatMap((events) => providersIn(events)))] : [options.provider])
   const providers = named.length > 0 ? named : ['deepseek']
   const llm = owner.get(LLM)
-  const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, options.contextWindow ?? 1_000_000)))
+  const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, modalities, options.contextWindow ?? 1_000_000)))
   return {
     dispose: async () => {
       for (const dispose of disposers) await dispose()

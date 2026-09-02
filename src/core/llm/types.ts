@@ -3,6 +3,7 @@
  * lives only in adapters. The `ContentBlock` and `StreamChunk` unions are
  * closed — consumers switch exhaustively.
  */
+import type { AttachmentRef } from '../attachments/index.ts'
 import type { CallId, MessageId, SessionId } from '../ids.ts'
 import type { JsonValue } from '../json.ts'
 
@@ -11,6 +12,18 @@ export type Role = 'system' | 'user' | 'assistant'
 export type ContentBlock =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'reasoning'; readonly text: string }
+  /**
+   * An image the model was shown. It carries a REFERENCE and never bytes — the
+   * bytes live in `ctx.attachments` and are resolved by each adapter at
+   * serialization — plus `text`, the descriptor computed once when the block was
+   * built. The descriptor is what a route that cannot take images is sent, so it
+   * is stored rather than derived: a later change to its wording must not
+   * rewrite what an old log says the model saw.
+   *
+   * User- and tool-side only. No adapter produces one, and `validateStream`
+   * refuses an assistant stream that tries to open one.
+   */
+  | { readonly type: 'image'; readonly attachment: AttachmentRef; readonly text: string }
   | { readonly type: 'tool-call'; readonly id: CallId; readonly name: string; readonly arguments: string }
   | { readonly type: 'tool-result'; readonly toolCallId: CallId; readonly content: readonly ContentBlock[]; readonly isError?: boolean }
 

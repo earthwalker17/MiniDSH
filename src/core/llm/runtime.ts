@@ -154,6 +154,21 @@ const DELTA_BLOCK_TYPE = {
 } as const
 
 /**
+ * The block types an assistant STREAM may open. An image is user- and tool-side
+ * only: nothing here produces one, and a stream that tried would be a bug in an
+ * adapter or a middleware.
+ *
+ * This refusal has to live in the seam and not in `BlockAssembler`, because the
+ * driver appends `assistant/chunk` to the log and only THEN pushes the chunk to
+ * the assembler. A refusal there would arrive one line after the durable record
+ * it exists to prevent — and would leave a log that can never be replayed,
+ * since the replay script hands those same chunks back and the assembler would
+ * throw again on every run. `validateStream` runs before the driver sees a
+ * chunk at all.
+ */
+const STREAMABLE_BLOCK_TYPES: ReadonlySet<ContentBlockType> = new Set<ContentBlockType>(['text', 'reasoning', 'tool-call'])
+
+/**
  * Enforces the stream-protocol invariants on the final stream: a delta may only
  * address an open block of its own type (a first delta implicitly opens one, as
  * delta-only protocols require, but a closed or mistyped block is a violation),
@@ -170,6 +185,9 @@ async function* validateStream(source: AsyncIterable<StreamChunk>): AsyncIterabl
     switch (chunk.type) {
       case 'block-start':
         if (open.has(chunk.index) || closed.has(chunk.index)) throw new LlmError('PROTOCOL_VIOLATION', `block index ${chunk.index} opened twice`)
+        if (!STREAMABLE_BLOCK_TYPES.has(chunk.blockType)) {
+          throw new LlmError('PROTOCOL_VIOLATION', `an assistant stream may not open a "${chunk.blockType}" block`)
+        }
         open.set(chunk.index, chunk.blockType)
         break
       case 'text-delta':
@@ -185,6 +203,9 @@ async function* validateStream(source: AsyncIterable<StreamChunk>): AsyncIterabl
         break
       }
       case 'block-end':
+        if (!STREAMABLE_BLOCK_TYPES.has(chunk.block.type)) {
+          throw new LlmError('PROTOCOL_VIOLATION', `an assistant stream may not end a "${chunk.block.type}" block`)
+        }
         open.delete(chunk.index)
         closed.add(chunk.index)
         break

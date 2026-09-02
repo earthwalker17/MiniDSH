@@ -276,3 +276,59 @@ describe('replay across a delegation', () => {
     await only.dispose()
   })
 })
+
+/**
+ * The route facts a replay answers FROM THE LOG.
+ *
+ * The window has been answered this way since S6. Modalities matter more,
+ * because absent means text only and a producer refuses against that: without
+ * this fold a recorded vision session would refuse its own recorded image on
+ * replay, the tool would return an error, no attachment would be written, and
+ * the recorded answer would replay anyway — `assertConsumed()` passing on
+ * arithmetic while nothing under test had run. That is the S7.5 defect class,
+ * one subsystem over.
+ */
+describe('replay answers a recorded route from the log', () => {
+  const context = (provider: string, model: string, data: Record<string, unknown>) => ({
+    type: 'request/context',
+    seq: 0,
+    time: 0,
+    data: { provider, model, ...data },
+  })
+
+  it('folds the window and the modalities per route, last write winning', async () => {
+    const { modalitiesIn, windowsIn } = await import('./llm-replay.ts')
+    const events = [
+      context('deepseek', 'deepseek-v4-flash', { contextWindow: 1_000_000, inputModalities: ['text'] }),
+      context('deepseek', 'deepseek-v4-flash-vision-exp', { contextWindow: 1_000_000, inputModalities: ['text', 'image'] }),
+    ]
+    expect(windowsIn(events).get('deepseek/deepseek-v4-flash-vision-exp')).toBe(1_000_000)
+    expect(modalitiesIn(events).get('deepseek/deepseek-v4-flash')).toEqual(['text'])
+    expect(modalitiesIn(events).get('deepseek/deepseek-v4-flash-vision-exp')).toEqual(['text', 'image'])
+  })
+
+  it('leaves modalities absent for a log recorded before the field existed, which reads as text only', async () => {
+    const { modalitiesIn } = await import('./llm-replay.ts')
+    expect(modalitiesIn([context('deepseek', 'deepseek-v4-flash', { contextWindow: 1_000_000 })]).size).toBe(0)
+  })
+
+  it('a replayed adapter reports the modalities the recording used, merged across a child log', async () => {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const { LLM } = await import('../core/llm/index.ts')
+    // A provider name the harness has not already claimed for its scripted adapter.
+    const parentLog = [context('recorded', 'text-model', { contextWindow: 50_000, inputModalities: ['text'] })]
+    const childLog = [context('recorded', 'vision-model', { contextWindow: 60_000, inputModalities: ['text', 'image'] })]
+    // Registered under the provider the LOG names, which is what `providersIn`
+    // does for every real caller: the route key is provider/model on both sides.
+    const replay = installLlmReplay(harness.root, { events: parentLog, children: [childLog] })
+    const llm = harness.root.get(LLM)
+    expect(replay.providers).toEqual(['recorded'])
+    expect(llm.resolveModel('recorded', 'text-model').inputModalities).toEqual(['text'])
+    expect(llm.resolveModel('recorded', 'vision-model').inputModalities).toEqual(['text', 'image'])
+    expect(llm.resolveModel('recorded', 'vision-model').contextWindow).toBe(60_000)
+    // A route the log never recorded modalities for stays absent, which reads as text only.
+    expect(llm.resolveModel('recorded', 'never-recorded').inputModalities).toBeUndefined()
+    await replay.dispose()
+  })
+})
