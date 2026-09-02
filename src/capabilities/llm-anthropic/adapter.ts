@@ -1,7 +1,9 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
 import { AnthropicTranslator, ANTHROPIC_PROVIDER, errorCode } from './translate.ts'
-import { serializeMessages, serializeTools } from './serialize.ts'
+import type { Attachments } from '../../core/attachments/index.ts'
+import { resolveRequestImages } from '../../core/llm/content.ts'
+import { serializeMessages, serializeTools, type ImageBytes } from './serialize.ts'
 
 export { ANTHROPIC_PROVIDER }
 export const DEFAULT_BASE_URL = 'https://api.anthropic.com'
@@ -75,6 +77,13 @@ export interface AnthropicAdapterOptions {
   readonly apiKeyRef: string
   /** Called per request, so a rotated key takes effect without a reload. */
   readonly resolveKey: () => string | undefined
+  /**
+   * The mounted attachment store, read per request for the same reason the key
+   * is: a store that appears later must take effect without a reload, and an
+   * adapter that captured one at construction would hold a disposed instance.
+   * Absent is legal and means this deployment stores no attachments.
+   */
+  readonly resolveAttachments?: () => Attachments | undefined
   readonly baseURL: string
   readonly defaultMaxTokens: number
 }
@@ -120,11 +129,47 @@ export class AnthropicAdapter implements LlmAdapter {
   }
 
   /**
+   * Every option refusal, and nothing else — no I/O, no serialization.
+   *
+   * It is split out because resolving an image reads bytes off disk, and doing
+   * that before an option refusal would mean a request with an illegal
+   * temperature spent a disk read before saying so. The seam's rule is that an
+   * option the provider cannot honour is refused before any I/O, and attachment
+   * I/O is I/O. `buildBody` still calls it, so the public method's contract is
+   * unchanged for its direct callers.
+   */
+  validateOptions(request: LlmRequest): void {
+    const entry = this.catalog(request.model)
+    const maxTokens = this.capFor(entry, request)
+    if (request.temperature !== undefined && !entry.sampling) {
+      throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" does not accept a temperature (the API returns 400 for any non-default value)`)
+    }
+    if (request.maxTokens !== undefined && request.maxTokens > entry.maxOutputTokens) {
+      throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" caps output at ${entry.maxOutputTokens} tokens, but the request asks for ${request.maxTokens}`)
+    }
+    const effort = request.reasoningEffort
+    if (effort === undefined) return
+    if (!entry.efforts.includes(effort)) {
+      throw new LlmError('UNSUPPORTED_REASONING_EFFORT', `Anthropic model "${request.model}" does not support reasoning effort "${effort}" (one of ${entry.efforts.join(', ')})`)
+    }
+    if (entry.thinking === 'manual' && effort !== 'off') {
+      const budget = MANUAL_BUDGETS[effort]!
+      // Only an EXPLICIT cap can be too small: `capFor` sizes an implicit one to
+      // fit. Refuse rather than shrink the budget the caller asked for.
+      if (budget >= maxTokens) {
+        throw new LlmError('UNSUPPORTED_OPTION', `reasoning effort "${effort}" on "${request.model}" needs max_tokens above ${budget}, got ${maxTokens}`)
+      }
+    }
+  }
+
+  /**
    * The wire body, or an `LlmError` for an option this model cannot honour —
    * decided BEFORE the key is read or a byte is sent, so the log's request is
-   * the provider's request.
+   * the provider's request. `images` carries whatever the caller resolved; an
+   * empty map means every image serializes as its own stored descriptor.
    */
-  buildBody(request: LlmRequest): Record<string, unknown> {
+  buildBody(request: LlmRequest, images: ImageBytes = new Map()): Record<string, unknown> {
+    this.validateOptions(request)
     const entry = this.catalog(request.model)
     if (request.temperature !== undefined && !entry.sampling) {
       throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" does not accept a temperature (the API returns 400 for any non-default value)`)
@@ -160,7 +205,7 @@ export class AnthropicAdapter implements LlmAdapter {
       // prefix is served from the provider's cache on every later request.
       cache_control: { type: 'ephemeral' },
       ...(request.system && request.system.length > 0 ? { system: request.system } : {}),
-      messages: serializeMessages(request.messages),
+      messages: serializeMessages(request.messages, images),
       ...(tools ? { tools } : {}),
       ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
       ...thinking,
@@ -168,7 +213,18 @@ export class AnthropicAdapter implements LlmAdapter {
   }
 
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
-    const body = this.buildBody(request)
+    // Order matters and the panel that found it was right: options first (no
+    // I/O), then the attachment reads, then serialization. Resolving first would
+    // read megabytes off disk for a request that was going to be refused for an
+    // illegal temperature.
+    this.validateOptions(request)
+    const images = await resolveRequestImages(request.messages, {
+      takesImages: this.catalog(request.model).modalities.includes('image'),
+      attachments: this.options.resolveAttachments?.(),
+      provider: this.provider,
+      model: request.model,
+    })
+    const body = this.buildBody(request, images)
     const apiKey = this.options.resolveKey()
     if (!apiKey || apiKey.trim().length === 0) {
       throw new LlmError('MISSING_CREDENTIAL', `Anthropic API key not set (expected credential ${this.options.apiKeyRef})`)

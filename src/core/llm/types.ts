@@ -187,6 +187,13 @@ export type LlmErrorCode =
   | 'UNSUPPORTED_OPTION'
   | 'UNSUPPORTED_REASONING_EFFORT'
   | 'UNSUPPORTED_CONTENT'
+  /**
+   * History names an attachment whose bytes this host cannot produce. Refuse,
+   * never coerce: substituting the descriptor here would tell the model it was
+   * shown a description when the log says it was shown an image. Deliberately
+   * not retryable — the object will not appear on a second attempt.
+   */
+  | 'ATTACHMENT_UNREADABLE'
   | 'UNKNOWN_MODEL'
   | 'REFUSAL'
 

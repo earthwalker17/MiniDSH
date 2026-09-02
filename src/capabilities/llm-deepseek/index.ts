@@ -6,6 +6,7 @@
 import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, credentialRef } from '../../core/credentials/index.ts'
+import { ATTACHMENTS } from '../../core/attachments/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { DeepSeekAdapter, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS } from './adapter.ts'
 
@@ -38,6 +39,9 @@ export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
     const adapter = new DeepSeekAdapter({
       apiKeyRef: ref,
       resolveKey: () => credentials.resolve(ref),
+      // `tryGet`, not `inject`: an adapter must not REQUIRE an attachment store.
+      // Without one it refuses image content instead of failing to mount.
+      resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
       baseURL: config?.baseURL ?? process.env.DEEPSEEK_BASE_URL ?? DEFAULT_BASE_URL,
       defaultMaxTokens: config?.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })

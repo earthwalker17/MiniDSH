@@ -1,6 +1,8 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
 import { parseSse } from './sse.ts'
 import { DeepSeekTranslator, parseWireChunk } from './translate.ts'
+import type { Attachments } from '../../core/attachments/index.ts'
+import { resolveRequestImages } from '../../core/llm/content.ts'
 import { serializeMessages, serializeTools } from './serialize.ts'
 
 export const DEEPSEEK_PROVIDER = 'deepseek'
@@ -30,6 +32,11 @@ export interface DeepSeekAdapterOptions {
   readonly apiKeyRef: string
   /** Called per request, so a rotated key takes effect without a reload. */
   readonly resolveKey: () => string | undefined
+  /**
+   * The mounted attachment store, read per request for the same reason the key
+   * is. Absent is legal and means this deployment stores no attachments.
+   */
+  readonly resolveAttachments?: () => Attachments | undefined
   readonly baseURL: string
   readonly defaultMaxTokens: number
 }
@@ -59,16 +66,24 @@ export class DeepSeekAdapter implements LlmAdapter {
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
     // Options first, before any I/O: an effort outside the vocabulary is
     // refused rather than handed to a provider that would quietly alias it.
+    // Attachment reads come after, because reading bytes for a request that was
+    // going to be refused anyway is exactly the I/O this rule exists to avoid.
     if (request.reasoningEffort !== undefined && !(EFFORTS as readonly string[]).includes(request.reasoningEffort)) {
       throw new LlmError('UNSUPPORTED_REASONING_EFFORT', `DeepSeek does not support reasoning effort "${request.reasoningEffort}" (one of ${EFFORTS.join(', ')})`)
     }
+    const images = await resolveRequestImages(request.messages, {
+      takesImages: VISION_MODELS.has(request.model),
+      attachments: this.options.resolveAttachments?.(),
+      provider: this.provider,
+      model: request.model,
+    })
     const apiKey = this.options.resolveKey()
     if (!apiKey || apiKey.trim().length === 0) {
       throw new LlmError('MISSING_CREDENTIAL', `DeepSeek API key not set (expected credential ${this.options.apiKeyRef})`)
     }
     const wire = {
       model: request.model,
-      messages: serializeMessages(request.system, request.messages),
+      messages: serializeMessages(request.system, request.messages, images),
       stream: true,
       stream_options: { include_usage: true },
       max_tokens: request.maxTokens ?? this.options.defaultMaxTokens,

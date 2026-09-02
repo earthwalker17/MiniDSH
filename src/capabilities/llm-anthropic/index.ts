@@ -9,6 +9,7 @@
 import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, credentialRef } from '../../core/credentials/index.ts'
+import { ATTACHMENTS } from '../../core/attachments/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { AnthropicAdapter, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS } from './adapter.ts'
 
@@ -39,6 +40,8 @@ export const anthropicPlugin: Plugin<AnthropicConfig | undefined> = {
     const adapter = new AnthropicAdapter({
       apiKeyRef: ref,
       resolveKey: () => credentials.resolve(ref),
+      // See the sibling adapter: an attachment store is optional, never injected.
+      resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
       baseURL: config?.baseURL ?? process.env.ANTHROPIC_BASE_URL ?? DEFAULT_BASE_URL,
       defaultMaxTokens: config?.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
