@@ -66,6 +66,17 @@ class LocalFs implements Fs {
     return { text, version }
   }
 
+  /** Bytes, and deliberately no `fs/observed` — see the Definition. */
+  async readBytes(target: FsTarget, _actor: FsActor): Promise<{ bytes: Uint8Array; version: string }> {
+    let bytes: Uint8Array
+    try {
+      bytes = await readFile(target.path)
+    } catch {
+      throw new FsError('FS_NOT_FOUND', `cannot read "${target.displayPath}"`)
+    }
+    return { bytes, version: versionOf(await stat(target.path)) }
+  }
+
   /** `fs/*` events about an agent's operation are dispatched in that agent's scope. */
   private scopeOf(actor: FsActor): Context {
     return actor.agent?.ctx ?? this.ctx

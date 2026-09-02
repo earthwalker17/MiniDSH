@@ -6,7 +6,6 @@
  * store agrees with its own naming rule — it would pass on a truncated write or
  * on the wrong file entirely.
  */
-import { deflateSync } from 'node:zlib'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -14,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createRoot, type Logger } from '../../kernel/index.ts'
 import { ATTACHMENTS, AttachmentError, asAttachmentId, isImageAdmissionError, type AttachmentRef, type Attachments } from '../../core/attachments/index.ts'
+import { quadPng } from '../../test-support/images.ts'
 import { attachmentsLocalPlugin } from './index.ts'
 import { probeImage, safeDisplayName } from './image.ts'
 
@@ -32,54 +32,6 @@ async function store(config: Record<string, unknown> = {}): Promise<{ attachment
   ctx.plugin(attachmentsLocalPlugin, { root, ...config })
   await ctx.settle()
   return { attachments: ctx.get(ATTACHMENTS), root, dispose: () => ctx.dispose() }
-}
-
-// ---- image builders, so the tests own their own bytes ----------------------
-
-const crcTable = new Int32Array(256)
-for (let n = 0; n < 256; n++) {
-  let c = n
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
-  crcTable[n] = c
-}
-function crc32(buffer: Buffer): number {
-  let c = 0xffffffff
-  for (const byte of buffer) c = crcTable[(c ^ byte) & 0xff]! ^ (c >>> 8)
-  return (c ^ 0xffffffff) >>> 0
-}
-function chunk(type: string, data: Buffer): Buffer {
-  const length = Buffer.alloc(4)
-  length.writeUInt32BE(data.length)
-  const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
-  const crc = Buffer.alloc(4)
-  crc.writeUInt32BE(crc32(body))
-  return Buffer.concat([length, body, crc])
-}
-/** A PNG of `width`×`height` split into four coloured quadrants. */
-export function quadPng(width: number, height = width): Buffer {
-  const raw = Buffer.alloc(height * (1 + width * 3))
-  const colours = [
-    [255, 0, 0],
-    [0, 160, 0],
-    [0, 0, 255],
-    [255, 255, 255],
-  ]
-  let at = 0
-  for (let y = 0; y < height; y++) {
-    raw[at++] = 0
-    for (let x = 0; x < width; x++) {
-      const colour = colours[(y < height / 2 ? 0 : 2) + (x < width / 2 ? 0 : 1)]!
-      raw[at++] = colour[0]!
-      raw[at++] = colour[1]!
-      raw[at++] = colour[2]!
-    }
-  }
-  const ihdr = Buffer.alloc(13)
-  ihdr.writeUInt32BE(width, 0)
-  ihdr.writeUInt32BE(height, 4)
-  ihdr[8] = 8
-  ihdr[9] = 2
-  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))])
 }
 
 const sha256 = (data: Uint8Array): string => createHash('sha256').update(data).digest('hex')

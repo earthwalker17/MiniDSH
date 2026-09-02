@@ -75,6 +75,25 @@ export interface Fs {
   stat(target: FsTarget): Promise<FsInfo | undefined>
   /** Reads a file and emits `fs/observed` so the read-before-edit policy can record it. */
   readText(target: FsTarget, actor: FsActor): Promise<{ text: string; version: string }>
+  /**
+   * Reads a file as bytes — and, unlike `readText`, emits NOTHING.
+   *
+   * That asymmetry is the whole point of the method. `fs-observation-policy`
+   * keys its map by path alone and carries no notion of WHAT was observed, so a
+   * byte read that emitted `fs/observed` would hand out a read-before-edit
+   * token for content the model has never been shown: a model could call an
+   * image tool on `src/app.ts`, have the read emit an observation, have the
+   * tool refuse the bytes as not-an-image, and then blind-overwrite that file
+   * through the editor with a valid version token. The policy's premise — this
+   * edit is safe because the model saw this version's content — would become
+   * false for every path a byte read touched.
+   *
+   * A byte read is not a content observation. It exists here rather than in a
+   * provider so that a model-controlled path still crosses the one seam that
+   * canonicalizes it; reads pass in every sandbox mode, so it grants nothing
+   * `readText` did not.
+   */
+  readBytes(target: FsTarget, actor: FsActor): Promise<{ bytes: Uint8Array; version: string }>
   writeText(target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }>
   listDir(target: FsTarget): Promise<DirEntry[]>
 }

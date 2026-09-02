@@ -30,6 +30,7 @@ import { retryPlugin } from '../capabilities/llm-retry/index.ts'
 import { modelRolesPlugin } from '../capabilities/model-roles/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
 import { attachmentsLocalPlugin } from '../capabilities/attachments-local/index.ts'
+import { toolViewImagePlugin } from '../capabilities/tool-view-image/index.ts'
 import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
 import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructions/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
@@ -78,6 +79,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       toolEditorPlugin,
       toolShellPlugin,
       toolSubagentPlugin,
+      toolViewImagePlugin,
       contextRuntimePlugin,
       workspaceInstructionsPlugin,
       agentPlugin,
