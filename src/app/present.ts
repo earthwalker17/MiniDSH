@@ -11,12 +11,24 @@
  */
 import { AGENT_OPTIONS, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../core/approval/index.ts'
-import { COMPACTION_APPLIED } from '../core/compaction/index.ts'
+import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/compaction/index.ts'
+import { blockText } from '../core/llm/content.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
+import type { ContentBlock } from '../core/llm/index.ts'
 import { formatTokens } from '../core/metering/index.ts'
 import { AUTHORITY_PRESET } from '../core/presets/index.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
+
+/** Every image descriptor a result carries, at any depth. */
+function imagesIn(blocks: readonly ContentBlock[]): string[] {
+  const out: string[] = []
+  for (const block of blocks) {
+    if (block.type === 'image') out.push(blockText(block))
+    else if (block.type === 'tool-result') out.push(...imagesIn(block.content))
+  }
+  return out
+}
 
 export function preview(text: string, max = 80): string {
   const oneLine = text.replace(/\s+/g, ' ').trim()
@@ -35,7 +47,19 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     return message.source.kind === 'user' ? undefined : `· context (${message.source.kind})`
   }
   if (matches(event, TOOL_CALL)) return `→ ${event.data.name} ${preview(event.data.arguments)}`
-  if (matches(event, TOOL_RESULT)) return event.data.error ? `✗ ${event.data.error.code}` : '✓'
+  if (matches(event, TOOL_RESULT)) {
+    if (event.data.error) return `✗ ${event.data.error.code}`
+    // A tool result renders as a checkmark and nothing else — deliberately, a
+    // one-line live projection. An IMAGE is the exception, because it is the
+    // only tool output that is content rather than text, and every image
+    // MiniDSH produces arrives exactly here. Without this the one event a
+    // vision session exists to produce is invisible on every plain-text
+    // surface. It stays in `describeEvent` rather than only in the transcript
+    // so live rendering and history cannot disagree, which is the defect S7.5
+    // spent a session closing.
+    const images = imagesIn(restoreMessage(event.data.message).content)
+    return images.length === 0 ? '✓' : `✓ ${images.join(' ')}`
+  }
   if (matches(event, ASSISTANT_MESSAGE)) {
     const text = messageText(restoreMessage(event.data.message))
     return text.length > 0 ? preview(text, 120) : undefined
@@ -69,6 +93,17 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     const { childId, reason, usage } = event.data
     const cost = usage === undefined ? '' : ` · ${formatTokens(usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0))} in · ${formatTokens(usage.outputTokens)} out`
     return `[subagent ${childId} ${reason.kind}${cost}]`
+  }
+  if (matches(event, COMPACTION_START)) {
+    const { trigger, budgetTokens, plannedNodes } = event.data
+    return `[compacting ${plannedNodes} messages · ${trigger} · budget ${formatTokens(budgetTokens)}]`
+  }
+  if (matches(event, COMPACTION_END)) {
+    // Only the decline needs a line of its own: the applied path already has
+    // `compaction/applied`, which says what it cost. A decline had nothing at
+    // all until now — the reason reached only whichever client happened to be
+    // holding the `/compact` RPC, and an AUTOMATIC decline has no RPC at all.
+    return event.data.outcome.kind === 'applied' ? undefined : `[compaction declined: ${event.data.outcome.reason}]`
   }
   if (matches(event, COMPACTION_APPLIED)) {
     const { shadowedSeqs, trigger, surfaceTokensBefore, surfaceTokensAfter } = event.data
@@ -151,6 +186,10 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       if (covered) lines.push(`                    for: ${covered}`)
     } else if (matches(event, APPROVAL_DECIDED)) {
       lines.push(`${at(event.seq)}  decided     ${event.data.id} ${event.data.outcome}`)
+    } else if (matches(event, COMPACTION_APPLIED)) {
+      // A compaction rewrites what the model can see, which is the kind of act
+      // this view exists for.
+      lines.push(`${at(event.seq)}  compacted   ${event.data.shadowedSeqs.length} messages (${event.data.trigger}; from compaction/start ${event.data.startSeq})`)
     } else if (matches(event, SUBAGENT_START)) {
       // A delegation is an authority act: the child's whole scope is decided here.
       lines.push(`${at(event.seq)}  delegated   ${event.data.childId} under ${event.data.sandbox}, approvals ${event.data.approval} (depth ${event.data.depth})`)

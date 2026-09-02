@@ -97,3 +97,40 @@ describe('present: one projection for every plain-text surface', () => {
     await root.dispose()
   })
 })
+
+/**
+ * One log, one answer. A durable fact no projection renders reaches only
+ * whichever client happened to be holding the RPC that produced it — and an
+ * AUTOMATIC compaction decline has no RPC at all.
+ */
+describe('what S8 added to the projection', () => {
+  const ref = { id: 'sha256:' + 'ab'.repeat(32), mediaType: 'image/png', bytes: 12_700, width: 96, height: 96, name: 'quad.png' }
+
+  it('shows an image in a tool result, which is where every image MiniDSH produces lives', async () => {
+    const { asCallId } = await import('../core/ids.ts')
+    const { createToolResultMessage } = await import('../core/llm/message.ts')
+    const { imageDescriptor } = await import('../core/llm/content.ts')
+    const message = createToolResultMessage(asCallId('c1'), [{ type: 'image', attachment: ref as never, text: imageDescriptor(ref as never) }], false)
+    const event = { type: 'tool/result', seq: 9, time: 0, data: { turn: 1, step: 1, callId: 'c1', message }, surfaceOp: { op: 'append' as const } }
+    const line = describeEvent(event)
+    expect(line).toBe('✓ ' + imageDescriptor(ref as never))
+    // Live and history say the same thing: one projection, not two.
+    expect(transcriptLines([event])).toEqual([line])
+  })
+
+  it('renders a plain tool result exactly as it always did', async () => {
+    const { asCallId } = await import('../core/ids.ts')
+    const { createToolResultMessage } = await import('../core/llm/message.ts')
+    const message = createToolResultMessage(asCallId('c1'), [{ type: 'text', text: 'output' }], false)
+    expect(describeEvent({ type: 'tool/result', seq: 9, time: 0, data: { turn: 1, step: 1, callId: 'c1', message }, surfaceOp: { op: 'append' as const } })).toBe('✓')
+  })
+
+  it('names a compaction decline, which had no line on any surface before', () => {
+    const start = { type: 'compaction/start', seq: 4, time: 0, data: { trigger: 'pressure', budgetTokens: 8000, projectedTokens: 7000, plannedStart: 1, plannedEnd: 3, plannedNodes: 3 } }
+    expect(describeEvent(start)).toBe('[compacting 3 messages · pressure · budget 8k]')
+    const declined = { type: 'compaction/end', seq: 5, time: 0, data: { startSeq: 4, outcome: { kind: 'declined', reason: 'summary-not-smaller' } } }
+    expect(describeEvent(declined)).toBe('[compaction declined: summary-not-smaller]')
+    // The applied path already has `compaction/applied`, which says what it cost.
+    expect(describeEvent({ type: 'compaction/end', seq: 6, time: 0, data: { startSeq: 4, outcome: { kind: 'applied' } } })).toBeUndefined()
+  })
+})

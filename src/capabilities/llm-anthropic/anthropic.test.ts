@@ -242,7 +242,24 @@ describe('Anthropic adapter', () => {
     expect(adapter.resolveModel('claude-fable-5').reasoning.efforts).not.toContain('off')
     expect(adapter.resolveModel('claude-haiku-4-5-20251001')).toMatchObject({ contextWindow: 200_000, reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'off' } })
     expect(adapter.resolveModel('claude-next-99')).toMatchObject({ contextWindow: 200_000 })
-    expect(adapter.listModels().map((model) => model.id)).toEqual(['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'])
+    expect(adapter.listModels().map((model) => model.id)).toEqual(['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'])
+  })
+
+  /**
+   * An exact-id table rots one model at a time, and it rots on the fields that
+   * matter most. Before the family match, `claude-fable-5-1` — a model that had
+   * already shipped — resolved to a 200K window (wrong by five times), an 8192
+   * output cap against its real 128K, and an effort set including `off`, which
+   * the Fable family answers with a 400.
+   */
+  it('gives an unknown id its FAMILY’s facts, so the next dated snapshot lands correctly', () => {
+    expect(adapter.resolveModel('claude-sonnet-5-20261101')).toMatchObject({ contextWindow: 1_000_000, defaultMaxTokens: 8192 })
+    expect(adapter.resolveModel('claude-fable-5-2').reasoning.efforts).not.toContain('off')
+    expect(adapter.resolveModel('claude-haiku-4-5-20990101')).toMatchObject({ contextWindow: 200_000, reasoning: { defaultEffort: 'off' } })
+    // An id no family claims still gets the conservative default, and still
+    // gets images: every model this provider serves takes them, so a wrong
+    // refusal would make a real capability unreachable with no override.
+    expect(adapter.resolveModel('claude-next-99')).toMatchObject({ contextWindow: 200_000, inputModalities: ['text', 'image'] })
   })
 
   it('classifies HTTP failures by status and by the error the body names', () => {

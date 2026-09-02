@@ -46,9 +46,10 @@ const MANUAL_BUDGETS: Readonly<Record<string, number>> = { low: 2048, high: 6144
 /** A dated snapshot answers to its undated alias: `claude-haiku-4-5` IS `claude-haiku-4-5-20251001`. */
 const ALIASES: Readonly<Record<string, string>> = { 'claude-haiku-4-5': 'claude-haiku-4-5-20251001' }
 
-/** Verified against the live models overview on 2026-08-30; ids are pinned snapshots. */
+/** Verified against the live `GET /v1/models` on 2026-09-02; ids are pinned snapshots. */
 const CATALOG: readonly CatalogModel[] = [
   // Fable 5 refuses `thinking.type: "disabled"`, so `off` is not in its set.
+  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-fable-5', name: 'Claude Fable 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
@@ -56,19 +57,38 @@ const CATALOG: readonly CatalogModel[] = [
 ]
 
 /**
- * An id the catalog does not know: a conservative window, the current thinking
- * shape, no sampling — and images, deliberately.
+ * Model families, matched by prefix, so an id this table has not caught up with
+ * inherits the FAMILY's facts rather than a flat default.
  *
- * The permissive side is the right one here and the choice is asymmetric. Every
- * model Anthropic currently serves accepts images, so a wrong ALLOW costs one
- * provider 400 that names itself; a wrong REFUSE makes a capability the model
- * has unreachable, with no override, on any id this table has not caught up
- * with — and this table demonstrably lags (it was written three days before
- * `claude-fable-5-1` shipped). The sibling DeepSeek adapter makes the opposite
- * call for the opposite reason: there, one known id has vision and an unknown
- * one almost certainly does not.
+ * The catalog demonstrably lags: it was verified three days before
+ * `claude-fable-5-1` shipped, and an exact-id miss handed that model a 200K
+ * window — wrong by five times — an output cap of 8192 against its real 128K,
+ * and an effort set including `off`, which the Fable family refuses with a 400.
+ * Adding one row fixes one id; matching the family fixes the class, and the next
+ * dated snapshot of a known family lands correctly on its own.
+ */
+const FAMILIES: readonly { readonly prefix: string; readonly like: string }[] = [
+  { prefix: 'claude-fable-5', like: 'claude-fable-5' },
+  { prefix: 'claude-opus-5', like: 'claude-opus-5' },
+  { prefix: 'claude-sonnet-5', like: 'claude-sonnet-5' },
+  { prefix: 'claude-haiku-4-5', like: 'claude-haiku-4-5-20251001' },
+]
+
+/**
+ * An id no family claims: a conservative window, the current thinking shape, no
+ * sampling — and images, deliberately.
+ *
+ * The permissive side is right here and the choice is asymmetric. Every model
+ * Anthropic currently serves accepts images, so a wrong ALLOW costs one provider
+ * 400 that names itself; a wrong REFUSE makes a capability the model has
+ * unreachable, with no override, on any id this table has not caught up with.
+ * The sibling DeepSeek adapter makes the opposite call for the opposite reason:
+ * there, one known id has vision and an unknown one almost certainly does not.
  */
 function unlisted(id: string): CatalogModel {
+  const family = FAMILIES.find((entry) => id.startsWith(entry.prefix))
+  const known = family ? CATALOG.find((entry) => entry.id === family.like) : undefined
+  if (known) return { ...known, id, name: id }
   return { id, name: id, contextWindow: 200_000, maxOutputTokens: 8192, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, sampling: false, modalities: TEXT_AND_IMAGE }
 }
 

@@ -44,6 +44,24 @@ const messageText = (message) =>
     .map((block) => block.text)
     .join('')
 const preview = (text, max) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`)
+
+/**
+ * Every image descriptor a result carries, at any depth.
+ *
+ * The same line the plain-text projection renders, deliberately: this client is
+ * a different projection, not a second copy of one, and the two are allowed to
+ * differ in FORM — but not in whether an event is visible at all. Every image
+ * MiniDSH produces arrives inside a `tool/result`, so without this the browser
+ * shows a bare checkmark for the one event a vision session exists to produce.
+ */
+const imagesIn = (blocks) => {
+  const out = []
+  for (const block of blocks ?? []) {
+    if (block.type === 'image') out.push(block.text ?? '[image]')
+    else if (block.type === 'tool-result') out.push(...imagesIn(block.content))
+  }
+  return out
+}
 const tokens = (count) => (count < 1000 ? String(count) : `${(count / 1000).toFixed(count < 100_000 ? 1 : 0).replace(/\.0$/, '')}k`)
 
 /**
@@ -72,8 +90,11 @@ function row(event) {
     }
     case 'tool/call':
       return el('div', 'row tool', `→ ${data.name} ${preview(data.arguments ?? '', 160)}`)
-    case 'tool/result':
-      return el('div', `row ${data.error ? 'denied' : 'ok'}`, data.error ? `✗ ${data.error.code}` : '✓')
+    case 'tool/result': {
+      if (data.error) return el('div', 'row denied', `✗ ${data.error.code}`)
+      const images = imagesIn(data.message?.content)
+      return el('div', 'row ok', images.length === 0 ? '✓' : `✓ ${images.join(' ')}`)
+    }
     case 'approval/asked':
       return el('div', 'row note', `? ${data.toolName}${data.reason ? `: ${data.reason}` : ''}`)
     case 'approval/decided':
@@ -88,6 +109,12 @@ function row(event) {
       return data.reason === 'initial'
         ? undefined
         : el('div', 'row note', `[model: ${data.options.provider}/${data.options.model}${data.options.reasoningEffort ? ` · ${data.options.reasoningEffort}` : ''}]`)
+    case 'compaction/start':
+      return el('div', 'row note', `[compacting ${data.plannedNodes ?? 0} messages · ${data.trigger}]`)
+    case 'compaction/end':
+      // The applied path already has its own record; a DECLINE had no line
+      // anywhere, and an automatic one has no RPC result to carry it either.
+      return data.outcome?.kind === 'applied' ? undefined : el('div', 'row note', `[compaction declined: ${data.outcome?.reason}]`)
     case 'compaction/applied':
       return el('div', 'row note', `[compacted ${data.shadowedSeqs?.length ?? 0} messages · ${data.trigger}]`)
     case 'subagent/start':
