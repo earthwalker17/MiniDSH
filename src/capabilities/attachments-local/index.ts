@@ -26,7 +26,7 @@
  * tightening a deployment's policy can never invalidate history a looser one
  * admitted.
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -186,7 +186,6 @@ class LocalAttachments implements Attachments {
     try {
       // Content addressing makes a repeat save idempotent: the object already
       // there IS these bytes, so there is nothing to write and nothing to check.
-      // A concurrent save of the same image therefore cannot conflict.
       if (statSync(target, { throwIfNoEntry: false })?.isFile() === true) return Object.freeze({ id, ...ref })
       this.publish(target, data, sha256)
     } catch (error) {
@@ -209,7 +208,13 @@ class LocalAttachments implements Attachments {
     // 0700 on POSIX; Windows inherits the home's ACL, which is the user's own.
     mkdirSync(staging, { recursive: true, mode: 0o700 })
     mkdirSync(bucket, { recursive: true, mode: 0o700 })
-    const temporary = join(staging, `${sha256}.${process.pid}.part`)
+    // Unique per CALL. Keyed by digest and pid alone, two concurrent saves of
+    // the SAME image inside one process — which `minidsh serve` reaches whenever
+    // two sessions view one file at once — share the staging name: the second
+    // open truncates the first's in-progress write, and then the renames race,
+    // so one caller gets a storage fault for an image that is perfectly valid
+    // and about to be correctly stored.
+    const temporary = join(staging, `${sha256}.${process.pid}.${randomUUID()}.part`)
     let fd: number | undefined
     try {
       fd = openSync(temporary, 'w', 0o600)
@@ -254,7 +259,13 @@ class LocalAttachments implements Attachments {
   }
 
   hostPath(ref: AttachmentRef): string | undefined {
-    return objectPath(this.root, digestFromId(ref))
+    // `undefined`, never a throw: the contract is "where this host keeps it, if
+    // it keeps one", and a ref minted by another store or another layout is
+    // simply not one this store has. Throwing here would abort `sessions show`
+    // mid-transcript on the one log a reader most needs explained. `readImage`
+    // keeps its throw, because there the caller needs the code.
+    const match = ID_PATTERN.exec(ref.id)
+    return match ? objectPath(this.root, match[1]!) : undefined
   }
 }
 

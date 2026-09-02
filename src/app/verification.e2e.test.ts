@@ -228,9 +228,14 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
     for (const colour of QUADRANT_COLOURS) {
       expect(verdict, `verdict.txt was "${verdict.trim()}" and the child answered "${childAnswer ?? '(nothing)'}"; the test drew ${QUADRANT_COLOURS.join(', ')} on ${VISION_MODEL}`).toContain(colour)
     }
-    // In order, and the file the child read is untouched.
-    expect(verdict.indexOf('red')).toBeLessThan(verdict.indexOf('green'))
-    expect(verdict.indexOf('green')).toBeLessThan(verdict.indexOf('blue'))
+    // In the order the test DREW them, which is not the order anything could
+    // guess from the file name. This is the assertion that says bytes reached
+    // the model rather than the descriptor.
+    const positions = QUADRANT_COLOURS.map((colour) => verdict.indexOf(colour))
+    expect(positions, `verdict.txt was "${verdict.trim()}"; the drawn order is ${QUADRANT_COLOURS.join(', ')}`).toEqual([...positions].toSorted((a, b) => a - b))
+    // And the parent wrote what the CHILD said, rather than arriving at the same
+    // line on its own — the claim in this test's own name.
+    expect((childAnswer ?? '').toLowerCase(), `the child said "${childAnswer ?? '(nothing)'}" but verdict.txt holds "${verdict.trim()}"`).toContain(verdict.trim())
     expect(readFileSync(join(workspace, 'quad.png')).equals(png)).toBe(true)
 
     probe([

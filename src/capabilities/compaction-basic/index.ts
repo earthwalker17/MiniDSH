@@ -260,6 +260,14 @@ class BasicCompaction implements Compaction {
     if (!llm || !prompt) return { kind: 'nothing-to-do' }
 
     const session = agent.session
+    // Captured before ANY await. `compactNow` gates on an idle agent, but two
+    // awaits stand between that gate and here — the route resolution and the
+    // prompt assembly, which reads instruction files off disk — and a prompt
+    // submitted during them leaves the agent running with `statusBefore` already
+    // reading `running`, so the post-summary comparison sees no change and the
+    // replace lands mid-step: exactly what this module's header says must never
+    // happen.
+    const statusBefore = agent.status
     const budget = this.budgetFor(agent)
     if (budget <= 0) return { kind: 'nothing-to-do' }
     const projected = meterSession(session.facts, budget).projectedTokens
@@ -296,7 +304,6 @@ class BasicCompaction implements Compaction {
       return { kind: 'nothing-to-do', reason }
     }
 
-    const statusBefore = agent.status
     const summary = await this.summarise(llm, assembled, agent, plan, route, signal)
 
     // ---- no `await` past this line, or the checks mean nothing -------------

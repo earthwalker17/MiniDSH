@@ -74,6 +74,16 @@ function estimateBlocks(blocks: readonly ContentBlock[]): number {
       case 'tool-result':
         total += estimateBlocks(block.content) + MESSAGE_OVERHEAD
         break
+      default: {
+        // `content.ts` claims `blockText` makes the next variant a compile error
+        // rather than a silence, and names "the meter scores it 0" as the first
+        // silence it closed — but that is only true of sites that project
+        // THROUGH `blockText`, and this one keeps its own switch. TypeScript does
+        // not flag a switch that merely omits a union member, so without this the
+        // next variant would price at 0 and move the compaction threshold.
+        const exhaustive: never = block
+        throw new Error(`estimateBlocks: unhandled content block ${JSON.stringify(exhaustive)}`)
+      }
     }
   }
   return total

@@ -33,19 +33,32 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, body, crc])
 }
 
-/** The four quadrant colours, clockwise from top-left, as the model should name them. */
-export const QUADRANT_COLOURS = ['red', 'green', 'blue', 'white'] as const
+/**
+ * The four quadrant colours in draw order — top-left, top-right, bottom-left,
+ * bottom-right — as the model should name them.
+ *
+ * Deliberately NOT red/green/blue/white. That is the canonical RGB triple in
+ * the canonical raster order, and it is the most probable guess for a file
+ * called `quad.png` from a model shown only the descriptor `[image quad.png ·
+ * image/png · 96×96 · …]` and asked for four quadrant colours. An arc whose one
+ * semantic assertion can be satisfied by guessing is an arc that would pass
+ * through a real serialization defect — if `resolveRequestImages` returned an
+ * empty map, or a serializer missed its byte lookup, the child would see the
+ * descriptor, guess the canonical order, and the suite would stay green.
+ * Permuting it makes the answer evidence that bytes arrived.
+ */
+export const QUADRANT_COLOURS = ['blue', 'white', 'red', 'green'] as const
 
 const RGB: readonly (readonly [number, number, number])[] = [
-  [255, 0, 0],
-  [0, 160, 0],
   [0, 0, 255],
   [255, 255, 255],
+  [255, 0, 0],
+  [0, 160, 0],
 ]
 
 /**
- * A PNG split into four equal quadrants: red, green, blue, white — top-left,
- * top-right, bottom-left, bottom-right.
+ * A PNG split into four equal quadrants, in `QUADRANT_COLOURS` order —
+ * top-left, top-right, bottom-left, bottom-right.
  *
  * 96×96 is the size two live probes read correctly on the shipped vision route,
  * which is why the arcs use it: a smaller fixture would make a wrong answer a

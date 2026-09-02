@@ -188,7 +188,12 @@ describe('readImage', () => {
     const { attachments, dispose } = await store()
     const forged: AttachmentRef = { id: asAttachmentId('../../etc/passwd'), mediaType: 'image/png', bytes: 1, width: 1, height: 1 }
     await expect(attachments.readImage(forged)).rejects.toMatchObject({ code: 'INVALID_ATTACHMENT_REF' })
-    expect(() => attachments.hostPath(forged)).toThrowError(AttachmentError)
+    // `hostPath` answers "where this host keeps it, if it keeps one", so a ref
+    // this store did not mint is `undefined` rather than a throw — its consumer
+    // walks every ref in a stored log and must not abort mid-transcript on the
+    // one log a reader most needs explained. `readImage` keeps its throw,
+    // because there the caller needs the code.
+    expect(attachments.hostPath(forged)).toBeUndefined()
     await dispose()
   })
 
