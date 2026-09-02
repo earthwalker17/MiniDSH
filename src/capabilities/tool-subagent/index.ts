@@ -138,16 +138,21 @@ interface Deps {
 const worldSetups = new WeakMap<Agent, CreateAgentOptions['setup']>()
 
 /**
- * Every delegation tool this deployment registered, by model-facing name.
+ * Every delegation tool name currently registered, REF-COUNTED.
  *
  * The depth cap is meant to be a fact about the child's WORLD rather than an
  * error it discovers by trying, and hiding only this row's own tool stopped
  * being enough the moment a verifier became a second row of the same plugin:
  * a grandchild at the cap would still see the other row's tool, call it, and
  * spend a paid step learning what its tool list should already have told it.
- * Tool registration is deployment-global, so this set is too.
+ *
+ * The count, not a set, because this is module state in a process that mounts
+ * many compositions — the test suite alone boots several and disposes them out
+ * of order. With set membership, two compositions each registering `subagent`
+ * make the second `add` a no-op and the FIRST disposal delete the name while
+ * the second is still live, silently un-hiding the tool it was added to hide.
  */
-const delegationToolNames = new Set<string>()
+const delegationToolNames = new Map<string, number>()
 
 /**
  * The authority a child opens under, read from the parent BEFORE the first
@@ -222,7 +227,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   // hidden AND unknown, so a depth limit is a fact about the child's world
   // rather than an error it discovers by trying.
   const childMayDelegate = depth + 1 <= deps.config.maxDepth
-  const denied = [...(childMayDelegate ? [] : delegationToolNames), ...(deps.config.toolFilter?.deny ?? [])]
+  const denied = [...(childMayDelegate ? [] : delegationToolNames.keys()), ...(deps.config.toolFilter?.deny ?? [])]
   const restriction: ToolRestriction = {
     ...(deps.config.toolFilter?.allow === undefined ? {} : { allow: [...deps.config.toolFilter.allow, ...(childMayDelegate ? [deps.toolName] : [])] }),
     ...(denied.length > 0 ? { deny: denied } : {}),
@@ -331,8 +336,15 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
   config: configSchema,
   apply(ctx, config) {
     const toolName = config?.toolName ?? DEFAULT_TOOL_NAME
-    delegationToolNames.add(toolName)
-    ctx.effect(() => () => delegationToolNames.delete(toolName), `tool-subagent("${toolName}")`)
+    delegationToolNames.set(toolName, (delegationToolNames.get(toolName) ?? 0) + 1)
+    ctx.effect(
+      () => () => {
+        const left = (delegationToolNames.get(toolName) ?? 1) - 1
+        if (left > 0) delegationToolNames.set(toolName, left)
+        else delegationToolNames.delete(toolName)
+      },
+      `tool-subagent("${toolName}")`,
+    )
     const deps: Deps = {
       ctx,
       sandbox: ctx.get(SANDBOX),

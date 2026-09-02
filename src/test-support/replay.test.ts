@@ -307,6 +307,26 @@ describe('replay answers a recorded route from the log', () => {
     expect(modalitiesIn(events).get('deepseek/deepseek-v4-flash-vision-exp')).toEqual(['text', 'image'])
   })
 
+  /**
+   * Renaming the seam does not rename the recording. `installLlmReplay({provider})`
+   * registers an adapter under a name the log never used, and both maps are keyed
+   * by the RECORDED route — so without a model-keyed fallback every lookup misses:
+   * the window becomes a default that moves where compaction fires relative to the
+   * recording, and absent modalities read as text-only, which makes a recorded
+   * vision session refuse its own image, write no attachment, replay its recorded
+   * answer anyway, and pass `assertConsumed()` on arithmetic.
+   */
+  it('answers a renamed provider from the log by model, rather than losing the route facts', async () => {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const { LLM } = await import('../core/llm/index.ts')
+    const log = [context('recorded', 'vision-model', { contextWindow: 60_000, inputModalities: ['text', 'image'] })]
+    const replay = installLlmReplay(harness.root, { events: log, provider: 'renamed' })
+    const resolved = harness.root.get(LLM).resolveModel('renamed', 'vision-model')
+    expect(resolved.inputModalities).toEqual(['text', 'image'])
+    expect(resolved.contextWindow).toBe(60_000)
+    await replay.dispose()
+  })
   it('leaves modalities absent for a log recorded before the field existed, which reads as text only', async () => {
     const { modalitiesIn } = await import('./llm-replay.ts')
     expect(modalitiesIn([context('deepseek', 'deepseek-v4-flash', { contextWindow: 1_000_000 })]).size).toBe(0)

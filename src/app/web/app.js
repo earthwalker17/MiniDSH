@@ -38,10 +38,16 @@ const state = {
 
 // ---- rendering -------------------------------------------------------------
 
+/**
+ * What a message says. It mirrors `blockText` rather than filtering for text,
+ * because a message whose only block is an image would otherwise compute `''`
+ * and be dropped by `row()` entirely — no line at all, where every plain-text
+ * surface renders its descriptor. Nothing puts an image in a user message today;
+ * the next producer that does would find the row silently missing here.
+ */
 const messageText = (message) =>
   (message?.content ?? [])
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
+    .map((block) => (block.type === 'text' ? block.text : block.type === 'image' ? (block.text ?? '[image]') : ''))
     .join('')
 const preview = (text, max) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`)
 

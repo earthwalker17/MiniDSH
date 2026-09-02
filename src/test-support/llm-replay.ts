@@ -147,6 +147,13 @@ export function modalitiesIn(events: readonly EventEnvelope[]): Map<string, read
   return modalities
 }
 
+/** The same facts keyed by model alone, for a replay whose provider was renamed. */
+function byModel<T>(routed: ReadonlyMap<string, T>): ReadonlyMap<string, T> {
+  const out = new Map<string, T>()
+  for (const [route, value] of routed) out.set(route.slice(route.indexOf('/') + 1), value)
+  return out
+}
+
 /** A recorded out-of-loop call: its purpose travels with its chunks, so a replay can refuse to serve one purpose's record to another's request. */
 interface AuxGroup {
   readonly purpose: string
@@ -264,6 +271,8 @@ class ReplayAdapter implements LlmAdapter {
   private readonly shared: ReplayDispatch
   private readonly windows: ReadonlyMap<string, number>
   private readonly modalities: ReadonlyMap<string, readonly ModelModality[]>
+  private readonly windowsByModel: ReadonlyMap<string, number>
+  private readonly modalitiesByModel: ReadonlyMap<string, readonly ModelModality[]>
   private readonly fallbackWindow: number
   constructor(
     provider: string,
@@ -276,6 +285,8 @@ class ReplayAdapter implements LlmAdapter {
     this.shared = shared
     this.windows = windows
     this.modalities = modalities
+    this.windowsByModel = byModel(windows)
+    this.modalitiesByModel = byModel(modalities)
     this.fallbackWindow = fallbackWindow
   }
 
@@ -284,12 +295,17 @@ class ReplayAdapter implements LlmAdapter {
   }
 
   resolveModel(model: string): ResolvedModel {
-    // The window and the modalities the log recorded for this route; a log from
-    // before `request/context` existed falls back to the caller's number and to
-    // text only, which is what an absent field has always meant.
+    // The window and the modalities the log recorded for this route — and when
+    // the caller RENAMED the provider (`installLlmReplay({provider})`), by model
+    // alone, because renaming the seam does not rename the recording. Without
+    // that fallback a renamed replay silently loses both: the window becomes a
+    // default that moves where compaction fires relative to the recording, and
+    // absent modalities read as text-only, so a recorded vision session refuses
+    // its own image, writes no attachment, replays its recorded answer anyway,
+    // and `assertConsumed()` passes on arithmetic.
     const route = `${this.provider}/${model}`
-    const contextWindow = this.windows.get(route) ?? this.fallbackWindow
-    const inputModalities = this.modalities.get(route)
+    const contextWindow = this.windows.get(route) ?? this.windowsByModel.get(model) ?? this.fallbackWindow
+    const inputModalities = this.modalities.get(route) ?? this.modalitiesByModel.get(model)
     return {
       contextWindow,
       defaultMaxTokens: 8192,
