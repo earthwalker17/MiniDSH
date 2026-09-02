@@ -107,8 +107,6 @@ describe('what S8 added to the projection', () => {
   const ref = { id: 'sha256:' + 'ab'.repeat(32), mediaType: 'image/png', bytes: 12_700, width: 96, height: 96, name: 'quad.png' }
 
   it('shows an image in a tool result, which is where every image MiniDSH produces lives', async () => {
-    const { asCallId } = await import('../core/ids.ts')
-    const { createToolResultMessage } = await import('../core/llm/message.ts')
     const { imageDescriptor } = await import('../core/llm/content.ts')
     const message = createToolResultMessage(asCallId('c1'), [{ type: 'image', attachment: ref as never, text: imageDescriptor(ref as never) }], false)
     const event = { type: 'tool/result', seq: 9, time: 0, data: { turn: 1, step: 1, callId: 'c1', message }, surfaceOp: { op: 'append' as const } }
@@ -118,9 +116,7 @@ describe('what S8 added to the projection', () => {
     expect(transcriptLines([event])).toEqual([line])
   })
 
-  it('renders a plain tool result exactly as it always did', async () => {
-    const { asCallId } = await import('../core/ids.ts')
-    const { createToolResultMessage } = await import('../core/llm/message.ts')
+  it('renders a plain tool result exactly as it always did', () => {
     const message = createToolResultMessage(asCallId('c1'), [{ type: 'text', text: 'output' }], false)
     expect(describeEvent({ type: 'tool/result', seq: 9, time: 0, data: { turn: 1, step: 1, callId: 'c1', message }, surfaceOp: { op: 'append' as const } })).toBe('✓')
   })

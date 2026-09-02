@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import { AGENT_OPTIONS } from '../core/agent/index.ts'
-import { COMPACTION_APPLIED } from '../core/compaction/index.ts'
+import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/compaction/index.ts'
 import { LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/index.ts'
 import { foldRequestContext, type EventEnvelope } from '../core/session/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
@@ -141,11 +141,15 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
       ['initial', 'deepseek'],
       ['change', 'anthropic'],
     ])
-    const contexts = events.filter((event) => event.type === 'request/context').map((event) => event.data as { provider: string; model: string; contextWindow?: number })
-    // One record per route, each carrying the window that adapter advertises.
+    const contexts = events
+      .filter((event) => event.type === 'request/context')
+      .map((event) => event.data as { provider: string; model: string; contextWindow?: number; inputModalities?: string[] })
+    // One record per route, each carrying the window AND the modalities that
+    // adapter advertises — two genuinely different answers from two providers,
+    // which is what a replay reads back instead of asking a live adapter.
     expect(contexts).toEqual([
-      { provider: 'deepseek', model: 'deepseek-v4-flash', contextWindow: 1_000_000 },
-      { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', contextWindow: 200_000 },
+      { provider: 'deepseek', model: 'deepseek-v4-flash', contextWindow: 1_000_000, inputModalities: ['text'] },
+      { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', contextWindow: 200_000, inputModalities: ['text', 'image'] },
     ])
     expect(foldRequestContext(events)!.provider).toBe('anthropic')
 
@@ -162,13 +166,37 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     const answers = assistantTexts(events).join('\n')
     expect(answers).toContain('CHARLIE-33')
     const last = assistantTexts(events).at(-1)!
-    expect(last).toContain('ALPHA-11')
+    // A compaction stands between the tokens and this answer, and whether its
+    // summary carried them is the model's call. Name what happened, so a
+    // failure here is a diagnosis rather than a re-run.
+    const compactionTrace = events
+      .filter((event) => event.type === COMPACTION_APPLIED.type)
+      .map((event) => (event.data as { shadowedSeqs: number[] }).shadowedSeqs.length)
+    const why = `after ${compactionTrace.length} applied compaction(s) shadowing [${compactionTrace.join(', ')}] node(s)`
+    expect(last, why).toContain('ALPHA-11')
     expect(last).toContain('BRAVO-22')
     expect(last).toContain('CHARLIE-33')
 
     // ---- the role routed the summary ---------------------------------------
+    //
+    // What every compaction ATTEMPT did, which is what this assertion used to
+    // be unable to say. Both failure shapes this arc produces — no compaction
+    // at all, and a summary that dropped the tokens — are the same family:
+    // whether a summary is worth anything is decided by where the planner's cut
+    // lands, and that is the model's tool shape rather than anything the runtime
+    // chooses. Before S8 a failure here named a count and nothing else, and cost
+    // a run to reproduce. Now the log says which of the reasons it was.
+    const attempts = events
+      .filter((event) => event.type === COMPACTION_END.type)
+      .map((event) => {
+        const outcome = (event.data as { outcome: { kind: string; reason?: string } }).outcome
+        return outcome.kind === 'applied' ? 'applied' : `declined:${outcome.reason}`
+      })
     const applied = events.filter((event) => event.type === COMPACTION_APPLIED.type)
-    expect(applied.length, `no compaction under a ${BUDGET} budget`).toBeGreaterThanOrEqual(1)
+    expect(applied.length, `no compaction under a ${BUDGET} budget after ${attempts.length} attempt(s): [${attempts.join(', ')}]`).toBeGreaterThanOrEqual(1)
+    // Every attempt closed: an unpaired start would mean one did not, which is a
+    // crash, a disposal or a fork boundary — none of which happen here.
+    expect(events.filter((event) => event.type === COMPACTION_START.type)).toHaveLength(attempts.length)
     const record = applied[0]!.data as { budgetTokens: number; auxCallSeq: number }
     expect(record.budgetTokens).toBe(BUDGET)
     const aux = events[record.auxCallSeq]!.data as AuxCallRecord
