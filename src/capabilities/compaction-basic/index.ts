@@ -298,17 +298,17 @@ class BasicCompaction implements Compaction {
 
     const statusBefore = agent.status
     const summary = await this.summarise(llm, assembled, agent, plan, route, signal)
-    if (summary.kind !== 'text') return decline(summary.kind === 'no-messages' ? 'plan-stale' : summary.kind === 'empty' ? 'summary-empty' : summary.kind === 'cancelled' ? 'cancelled' : 'summary-failed')
 
     // ---- no `await` past this line, or the checks mean nothing -------------
-    // The registry check comes FIRST because it is the only one that says
-    // whether an append is legal at all; the other two only choose which decline
-    // reason to record. An agent disposed during the summary is normally
-    // disposed by being cancelled, so its signal is aborted and its status may
-    // have moved — order this behind either of those and the decline is appended
-    // into a session whose descriptor is already closed, which is precisely what
-    // this guard exists to prevent.
+    // The registry check comes FIRST — before even the summary’s own outcome —
+    // because it is the only one that says whether an append is LEGAL at all;
+    // every other branch here merely chooses which decline reason to record. An
+    // agent disposed during the summary is normally disposed by being cancelled,
+    // which aborts the aux call and returns `cancelled`, so ordering this behind
+    // the summary check would append into a session whose descriptor is already
+    // closed on exactly the commonest path.
     if (this.ctx.tryGet(AGENTS)?.get(agent.id) !== agent) return { kind: 'nothing-to-do', reason: 'agent-gone' }
+    if (summary.kind !== 'text') return decline(summary.kind === 'no-messages' ? 'plan-stale' : summary.kind === 'empty' ? 'summary-empty' : summary.kind === 'cancelled' ? 'cancelled' : 'summary-failed')
     if (agent.status !== statusBefore) {
       // The EXIT race: a turn started during the summary, so this replace can no
       // longer land safely. The work is paid for either way — remember the
