@@ -130,3 +130,20 @@ describe('what S8 added to the projection', () => {
     expect(describeEvent({ type: 'compaction/end', seq: 6, time: 0, data: { startSeq: 4, outcome: { kind: 'applied' } } })).toBeUndefined()
   })
 })
+
+describe('present: a failed turn says why', () => {
+  it('prints the code and the message of a turn that ended in error, and only the kind otherwise', async () => {
+    const root = createRoot({ logger: silent })
+    root.plugin(sessionPlugin)
+    await root.settle()
+    const session = root.get(SESSIONS).create({ cwd: '/w' })
+    session.append(TURN_START, { turn: 1 })
+    const failed = session.append(TURN_END, { turn: 1, reason: { kind: 'error', code: 'MISSING_CREDENTIAL', message: 'DeepSeek API key not set (expected credential DEEPSEEK_API_KEY)' } })
+    // The keyless first run used to print `[turn error]` with the reason recorded and shown nowhere.
+    expect(describeEvent(failed)).toBe('[turn error: MISSING_CREDENTIAL — DeepSeek API key not set (expected credential DEEPSEEK_API_KEY)]')
+    session.append(TURN_START, { turn: 2 })
+    const cancelled = session.append(TURN_END, { turn: 2, reason: { kind: 'cancelled' } })
+    expect(describeEvent(cancelled)).toBe('[turn cancelled]')
+    await root.dispose()
+  })
+})

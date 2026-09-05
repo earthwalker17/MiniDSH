@@ -64,7 +64,13 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     const text = messageText(restoreMessage(event.data.message))
     return text.length > 0 ? preview(text, 120) : undefined
   }
-  if (matches(event, TURN_END)) return `[turn ${event.data.reason.kind}]`
+  if (matches(event, TURN_END)) {
+    // A failed turn says why. The code and message are durable in the reason;
+    // printing the kind alone left a keyless first run reading `[turn error]`
+    // with "API key not set" recorded and shown nowhere.
+    const reason = event.data.reason
+    return reason.kind === 'error' ? `[turn error: ${reason.code} — ${reason.message}]` : `[turn ${reason.kind}]`
+  }
   if (matches(event, SANDBOX_MODE)) {
     const { mode, enforcement, reason } = event.data
     // Authority is visible where it changes: a surface that hides a widened

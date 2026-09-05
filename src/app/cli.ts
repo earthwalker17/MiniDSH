@@ -21,7 +21,7 @@ import { presetTable } from '../core/presets/index.ts'
 import type { AuthorityPresetsConfig } from '../capabilities/authority-presets/index.ts'
 import type { Context } from '../kernel/index.ts'
 import { compose, defaultDialect, type Row } from './compose.ts'
-import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type NamedLayer } from './config.ts'
+import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type EffectiveComposition, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
@@ -40,13 +40,58 @@ interface ParsedArgs {
   readonly patchFiles: string[]
 }
 
-const VALUE_FLAGS = new Set(['cwd', 'provider', 'model', 'effort', 'max-steps', 'at', 'sandbox', 'ask', 'preset', 'agent-preset', 'port', 'host'])
+/**
+ * Every flag the CLI knows, spelled as the help shows it. A flag whose spelling
+ * carries an argument takes a value; the rest are switches. `--patch <file>` is
+ * accepted by every command and handled by the parser on its own.
+ */
+const FLAGS = {
+  cwd: '--cwd dir',
+  provider: '--provider id',
+  model: '--model id',
+  effort: '--effort id',
+  'max-steps': '--max-steps n',
+  at: '--at seq',
+  sandbox: '--sandbox mode',
+  ask: '--ask ask|never',
+  preset: '--preset name',
+  'agent-preset': '--agent-preset name',
+  port: '--port n',
+  host: '--host addr',
+  patch: '--patch file',
+  approve: '--approve',
+  json: '--json',
+  headless: '--headless',
+  audit: '--audit',
+} as const
+type FlagName = keyof typeof FLAGS
+const VALUE_FLAGS = new Set<string>((Object.keys(FLAGS) as FlagName[]).filter((name) => FLAGS[name].includes(' ')))
+
+/** What each command takes, from which both its usage line and the general help are printed — one table, never two strings. */
+const COMMANDS: Readonly<Record<string, { readonly positional: string; readonly flags: readonly FlagName[] }>> = {
+  run: { positional: '"<task>"', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'preset', 'agent-preset', 'approve', 'json'] },
+  chat: { positional: '["<task>"]', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'agent-preset', 'approve'] },
+  resume: { positional: '<id> ["<task>"]', flags: ['headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'preset', 'agent-preset', 'approve', 'json'] },
+  fork: { positional: '<id> ["<task>"]', flags: ['at', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'preset', 'agent-preset', 'approve', 'json'] },
+  serve: { positional: '', flags: ['cwd', 'sandbox', 'ask', 'agent-preset', 'approve'] },
+  web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'agent-preset', 'approve'] },
+  config: { positional: '', flags: ['sandbox', 'ask', 'json'] },
+  sessions: { positional: 'list | show <id>', flags: ['json', 'audit'] },
+}
+
+function usageFor(command: string): string {
+  const spec = COMMANDS[command]!
+  const flags = spec.flags.map((name) => `[${FLAGS[name]}]`).join(' ')
+  return `minidsh ${command}${spec.positional ? ` ${spec.positional}` : ''}${flags ? ` ${flags}` : ''}`
+}
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
   const flags = new Map<string, string | true>()
   const patchFiles: string[] = []
-  const command = argv[0] ?? 'help'
+  const first = argv[0]
+  // `--help`/`-h` are the help command, and help is never a usage error.
+  const command = first === undefined || first === '--help' || first === '-h' ? 'help' : first
   for (let i = 1; i < argv.length; i++) {
     const token = argv[i]!
     if (token.startsWith('--')) {
@@ -90,6 +135,16 @@ interface BootPlan {
   readonly settings: ResolvedSettings
   readonly loaded: LoadedConfig
   readonly authority: AuthorityFlags
+  /**
+   * The rows a boot would mount, layered once here so `--preset` validation,
+   * `config` and `sessions` read the same composition a boot does. A command
+   * that boots lets `bootComposition` print the layer warnings; one that does
+   * not prints `warnings` itself.
+   */
+  readonly effective: EffectiveComposition
+  /** Ids of the built-in rows, so a touched row can be told from an inserted one. */
+  readonly baseIds: ReadonlySet<string>
+  readonly warnings: readonly string[]
   /** `--preset`, validated against the effective presets row (headless commands only). */
   readonly preset?: string
   /** `--agent-preset`, resolved to a setup for the agent scope. */
@@ -100,6 +155,9 @@ interface BootPlan {
 
 /** How a command treats `--preset`: applied as a durable switch, refused in favour of `/preset`, or not a flag at all. */
 type PresetUse = 'headless' | 'interactive' | 'none'
+
+/** Whether `--sandbox`/`--ask` mean anything to a command; one that only reads stored logs refuses them rather than ignoring them. */
+type AuthorityUse = 'accepted' | 'refused'
 
 /** The boot options every app entry shares, from one plan. */
 function bootFields(plan: BootPlan): {
@@ -129,9 +187,19 @@ function baseRows(home: HomeLayout, authority: AuthorityFlags = {}): Row[] {
  * `settings: 'optional'` is for commands that only read stored logs: a broken
  * settings.json must not stand between a user and `sessions show --audit`.
  */
-async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'required' | 'optional' = 'required'): Promise<BootPlan | string> {
+async function prepareBoot(
+  args: ParsedArgs,
+  presets: PresetUse,
+  settingsUse: 'required' | 'optional' = 'required',
+  authorityUse: AuthorityUse = 'accepted',
+): Promise<BootPlan | string> {
   const authority = authorityFlags(args)
   if (typeof authority === 'string') return authority
+  if (authorityUse === 'refused') {
+    for (const name of ['sandbox', 'ask'] as const) {
+      if (args.flags.get(name) !== undefined) return `--${name} is not a flag of "${args.command}"`
+    }
+  }
   const loadedSettings = loadSettings()
   if (typeof loadedSettings === 'string' && settingsUse === 'required') return loadedSettings
   if (typeof loadedSettings === 'string') stderrLogger.warn(loadedSettings)
@@ -139,9 +207,19 @@ async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'r
   const loaded = await loadConfigLayers(args.patchFiles)
   if (typeof loaded === 'string') return loaded
   const home = homeLayout()
+  // Layered ONCE: every later reader of the effective composition — `--preset`
+  // validation, `config`, `sessions` — reads this, so none can disagree.
+  const base = baseRows(home, authority)
+  const warnings: string[] = []
+  let effective: EffectiveComposition
+  try {
+    effective = applyLayers(base, loaded.layers, (message) => void warnings.push(message))
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
   // A command that cannot apply a preset says so before it looks one up.
   if (args.flags.get('preset') !== undefined && presets === 'none') return `--preset is not a flag of "${args.command}"`
-  const preset = presetFlag(args, authority, home, loaded.layers)
+  const preset = presetFlag(args, authority, effective)
   if (typeof preset === 'object') return preset.error
   if (preset !== undefined && presets === 'interactive') return '--preset works with --headless; in the interactive terminal use /preset'
   const agentSetup = await agentPresetFlag(args, loaded)
@@ -151,6 +229,9 @@ async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'r
     settings,
     loaded,
     authority,
+    effective,
+    baseIds: new Set(base.map((row) => row.id)),
+    warnings,
     ...(preset === undefined ? {} : { preset }),
     ...(agentSetup === undefined ? {} : { agentSetup }),
     ...(typeof args.flags.get('agent-preset') === 'string' ? { agentPreset: args.flags.get('agent-preset') as string } : {}),
@@ -236,7 +317,7 @@ async function agentPresetFlag(args: ParsedArgs, loaded: LoadedConfig): Promise<
  * table) — a typo boots nothing and litters no session file. Returns the
  * validated name, an error, or undefined when the flag is absent.
  */
-function presetFlag(args: ParsedArgs, authority: AuthorityFlags, home: HomeLayout, configLayers: readonly NamedLayer[]): string | { error: string } | undefined {
+function presetFlag(args: ParsedArgs, authority: AuthorityFlags, effective: EffectiveComposition): string | { error: string } | undefined {
   const raw = args.flags.get('preset')
   if (raw === undefined) return undefined
   if (typeof raw !== 'string' || raw.trim().length === 0) return { error: '--preset expects a preset name' }
@@ -244,7 +325,6 @@ function presetFlag(args: ParsedArgs, authority: AuthorityFlags, home: HomeLayou
     return { error: '--preset replaces --sandbox/--ask; give one or the other' }
   }
   try {
-    const effective = applyLayers(baseRows(home, authority), [...configLayers], () => {})
     // Match the CAPABILITY, not the built-in row id: a composition may supply
     // it under any id, and the runtime resolves PRESETS by service key.
     const row = effective.rows.find((entry) => entry.plugin.name === 'authority-presets' && entry.disabled !== true)
@@ -312,9 +392,7 @@ function reportError(error: unknown): number {
 
 async function runCommand(args: ParsedArgs): Promise<number> {
   const task = args.positional.join(' ').trim()
-  if (task.length === 0) {
-    return usage('usage: minidsh run "<task>" [--cwd dir] [--provider id] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--approve] [--json]')
-  }
+  if (task.length === 0) return usage(`usage: ${usageFor('run')}`)
   const plan = await prepareBoot(args, 'headless')
   if (typeof plan === 'string') return usage(plan)
   const json = args.flags.get('json') === true
@@ -350,11 +428,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   const id = args.positional[0]
   const task = args.positional.slice(1).join(' ').trim()
   const headless = args.flags.get('headless') === true
-  if (!id || (headless && task.length === 0)) {
-    return usage(
-      `usage: minidsh ${kind} <id> ["<task>"]${kind === 'fork' ? ' [--at seq]' : ''} [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--approve] [--json]`,
-    )
-  }
+  if (!id || (headless && task.length === 0)) return usage(`usage: ${usageFor(kind)}`)
   const atRaw = args.flags.get('at')
   const boundary = typeof atRaw === 'string' ? Number(atRaw) : undefined
   // A typo'd --at must not silently fork at the log head.
@@ -482,35 +556,17 @@ async function webCommand(args: ParsedArgs): Promise<number> {
 }
 
 /**
- * Built-in rows a config layer can widen authority or blind the runtime
- * through — including the effect boundaries themselves: the fence lives in
- * the fs provider and the refusal in the shell provider, so replacing either
- * row with a module-loaded provider is replacing the boundary.
- */
-const AUTHORITY_SENSITIVE = new Set([
-  'sandbox',
-  'approval',
-  'approval-headless',
-  'authority-presets',
-  'invariants',
-  'session-invariant',
-  'authority-invariant',
-  'agent-invariant',
-  'loop-invariant',
-  'fs',
-  'shell',
-  'tool-shell',
-  'tool-editor',
-  'tool-subagent',
-  'spill',
-])
-
-/**
- * The same check by CAPABILITY, because a layer's `insert` picks its own row
- * id: an inserted `approval-headless {approve: true}` answers every escalation
- * for the whole deployment, and keying on id alone would print it as an
- * ordinary row. Configuration may do this — it is the deployment — but never
- * silently.
+ * The plugins a config layer can widen authority, blind the runtime or silence
+ * the record through: the authority knobs and their answerers, the invariants,
+ * the effect boundaries themselves (the fence lives in the fs provider and the
+ * refusal in the shell provider, so replacing either row with a module-loaded
+ * provider is replacing the boundary), the tools that reach them, the stores
+ * whose replacement silences or reroutes the durable record (persistence,
+ * spill), and the credential store, whose replacement runs loaded code on
+ * every secret resolve. Keyed by CAPABILITY because a layer's `insert` picks
+ * its own row id; the built-in ids need no second list, since every built-in
+ * row's plugin is here. Configuration may do all of this — it is the
+ * deployment — but never silently.
  */
 const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'core-sandbox',
@@ -529,6 +585,8 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'tool-editor',
   'tool-subagent',
   'spill-local',
+  'persistence-jsonl',
+  'credentials-local',
 ])
 
 /**
@@ -540,7 +598,8 @@ async function configCommand(args: ParsedArgs): Promise<number> {
   const plan = await prepareBoot(args, 'none')
   if (typeof plan === 'string') return usage(plan)
   try {
-    const effective = applyLayers(baseRows(plan.home, plan.authority), plan.loaded.layers, (message) => process.stderr.write(`warn: ${message}\n`))
+    const effective = plan.effective
+    for (const warning of plan.warnings) process.stderr.write(`warn: ${warning}\n`)
     const touched = (id: string): string => effective.provenance.get(id) ?? 'built-in'
     if (args.flags.get('json') === true) {
       const rows = effective.rows.map((row) => {
@@ -582,13 +641,13 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     }
     for (const row of effective.rows) {
       const layer = touched(row.id)
-      const sensitive = layer !== 'built-in' && (AUTHORITY_SENSITIVE.has(row.id) || AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin.name))
+      const sensitive = layer !== 'built-in' && AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin.name)
       const marks = [row.disabled === true ? 'disabled' : undefined, sensitive ? '!' : undefined].filter((mark) => mark !== undefined)
       process.stdout.write(`  ${row.id.padEnd(22)} ${row.plugin.name.padEnd(28)} ${layer}${marks.length > 0 ? `  [${marks.join(' ')}]` : ''}\n`)
       if (sensitive) {
         // A built-in row a layer touched was modified (or disabled); a row the
         // layer brought in was added.
-        const verb = row.disabled === true ? 'DISABLED' : AUTHORITY_SENSITIVE.has(row.id) ? 'modified' : 'added'
+        const verb = row.disabled === true ? 'DISABLED' : plan.baseIds.has(row.id) ? 'modified' : 'added'
         warnings.push(`layer "${layer}" ${verb} authority-sensitive row "${row.id}" (${row.plugin.name})`)
       }
     }
@@ -599,7 +658,7 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     if (plan.loaded.agentPresets.size > 0) {
       process.stdout.write(`\nagent presets:\n`)
       for (const [name, spec] of plan.loaded.agentPresets) {
-        const sensitive = spec.rows.filter((row) => AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin) || AUTHORITY_SENSITIVE.has(row.id))
+        const sensitive = spec.rows.filter((row) => AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin))
         const marks = sensitive.length > 0 ? '  [!]' : ''
         process.stdout.write(`  ${name.padEnd(22)} ${spec.rows.map((row) => `${row.id}(${row.plugin})`).join(', ')}${marks}\n`)
         for (const row of sensitive) warnings.push(`agent preset "${name}" mounts authority-sensitive row "${row.id}" (${row.plugin}) into every agent it composes`)
@@ -620,7 +679,8 @@ async function configCommand(args: ParsedArgs): Promise<number> {
  * must not split the CLI's read path from its write path.
  */
 async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence, attachments: Attachments | undefined) => T): Promise<T> {
-  const effective = applyLayers(baseRows(plan.home), plan.loaded.layers, (message) => stderrLogger.warn(message))
+  const effective = plan.effective
+  for (const warning of plan.warnings) stderrLogger.warn(warning)
   const row = effective.rows.find((entry) => entry.plugin.name === 'persistence-jsonl' && entry.disabled !== true)
   const root = createRoot({ logger: stderrLogger })
   if (row) root.plugin(row.plugin, row.config)
@@ -641,7 +701,9 @@ async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence
 
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
-  const plan = await prepareBoot(args, 'none', 'optional')
+  // A reader of stored logs: a broken settings file is a warning, and an
+  // authority flag is a usage error rather than something to accept and ignore.
+  const plan = await prepareBoot(args, 'none', 'optional', 'refused')
   if (typeof plan === 'string') return usage(plan)
   if (sub === 'list') {
     return withPersistence(plan, (persistence) => {
@@ -655,7 +717,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   }
   if (sub === 'show') {
     const id = args.positional[1]
-    if (!id) return usage('usage: minidsh sessions show <id> [--json|--audit]')
+    if (!id) return usage(`usage: ${usageFor('sessions')}`)
     return withPersistence(plan, (persistence, attachments) => {
       const stored = persistence.load(id)
       if (!stored) {
@@ -712,7 +774,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
       return 0
     })
   }
-  return usage('usage: minidsh sessions <list|show>')
+  return usage(`usage: ${usageFor('sessions')}`)
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -736,20 +798,16 @@ export async function main(argv: readonly string[]): Promise<number> {
       return sessionsCommand(args)
     default:
       process.stdout.write(
-        'MiniDSH — usage:\n' +
-          '  minidsh run "<task>" [--cwd dir] [--provider id] [--model id] [--effort id] [--max-steps n] [--sandbox mode] [--ask ask|never] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
-          '  minidsh chat ["<task>"] [--cwd dir] [--provider id] [--model id] [--effort id] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
-          '  minidsh resume <id> ["<task>"] [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
-          '  minidsh fork <id> ["<task>"] [--at seq] [--headless] [--provider id] [--model id] [--effort id] [--max-steps n] [--preset name] [--agent-preset name] [--approve] [--json]\n' +
-          '  minidsh serve [--cwd dir] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
-          '  minidsh web [--cwd dir] [--port n] [--host addr] [--sandbox mode] [--ask ask|never] [--agent-preset name] [--approve]\n' +
-          '  minidsh config [--json]\n' +
-          '  minidsh sessions list\n' +
-          '  minidsh sessions show <id> [--json|--audit]\n' +
-          '\nconfig:    ~/.minidsh/composition.json + settings.json layer over the built-ins;\n' +
-          '           --patch <file> (repeatable) layers after them on any command\n' +
-          'authority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)\n' +
-          '           --ask ask|never; --approve grants every request in a headless run\n',
+        [
+          'MiniDSH — usage:',
+          ...Object.keys(COMMANDS).map((command) => `  ${usageFor(command)}`),
+          '',
+          'config:    ~/.minidsh/composition.json + settings.json layer over the built-ins;',
+          '           --patch <file> (repeatable) layers after them on any command',
+          'authority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)',
+          '           --ask ask|never; --approve grants every request in a headless run',
+          '',
+        ].join('\n'),
       )
       return args.command === 'help' ? 0 : 2
   }

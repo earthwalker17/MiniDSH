@@ -390,3 +390,31 @@ describe('what the review found', () => {
     expect(header.agentPreset).toBe('reviewer')
   })
 })
+
+describe('the CLI front door', () => {
+  const quiet = async (run: () => Promise<number>): Promise<number> => {
+    const out = process.stdout.write.bind(process.stdout)
+    const err = process.stderr.write.bind(process.stderr)
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      return await run()
+    } finally {
+      process.stdout.write = out
+      process.stderr.write = err
+    }
+  }
+
+  it('treats --help and -h as help, which is never a usage error', async () => {
+    expect(await quiet(() => main(['--help']))).toBe(0)
+    expect(await quiet(() => main(['-h']))).toBe(0)
+    expect(await quiet(() => main([]))).toBe(0)
+    // An unknown command still prints the help and fails.
+    expect(await quiet(() => main(['frobnicate']))).toBe(2)
+  })
+
+  it('refuses an authority flag on a command that only reads stored logs, instead of accepting and ignoring it', async () => {
+    expect(await quiet(() => main(['sessions', 'list', '--sandbox', 'read-only']))).toBe(2)
+    expect(await quiet(() => main(['sessions', 'list', '--ask', 'never']))).toBe(2)
+  })
+})
