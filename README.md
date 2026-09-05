@@ -29,7 +29,7 @@ pnpm minidsh sessions show <session-id> --audit  # what this session was allowed
 pnpm minidsh --help
 ```
 
-In the terminal: `y`/`N` answers an approval; `/sandbox <mode>`, `/ask <ask|never>` and `/preset <name>` switch authority; `/model [<provider>/]<model> [effort]` switches the route; `/compact` shrinks context; `/history` pages back; `/cancel` stops the running turn; `/exit` quits; Ctrl+C cancels, then exits.
+In the terminal: `y`/`N` answers an approval; `/sandbox <mode>`, `/ask <ask|never>` and `/preset <name>` switch authority; `/model [<provider>/]<model> [effort]` switches the route; `/compact` shrinks context; `/history` pages back; `/sessions` lists what is stored, by name; `/cancel` stops the running turn; `/exit` quits; Ctrl+C cancels, then exits.
 
 Session logs live under `~/.minidsh/sessions` (override the home with `MINIDSH_HOME`); a session is stored the moment it records its first prompt, so a `chat` opened and closed leaves nothing behind. Logs accumulate: nothing in the harness deletes one, and a log with no `.lock` beside it can be removed by hand. A `composition.json` row with a key its plugin does not know fails boot naming the row rather than taking a default silently.
 

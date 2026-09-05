@@ -445,6 +445,35 @@ describe('the CLI front door', () => {
     expect(columns[3]).toBe('teach the parser about trailing commas')
   })
 
+  /**
+   * One version, not two: the flag, the `initialize` handshake and the
+   * terminal banner all read the same string, which is `package.json`'s.
+   */
+  it('answers --version anywhere, before help, from the one place that knows', async () => {
+    const lines: string[] = []
+    const out = process.stdout.write.bind(process.stdout)
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      lines.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    try {
+      expect(await main(['--version'])).toBe(0)
+      expect(await main(['-v'])).toBe(0)
+      // On a command too, for the same reason `-h` is: it must never start a
+      // paid run, and it must not be a usage error on a command that does not
+      // list it as a flag.
+      expect(await main(['run', '--version'])).toBe(0)
+      expect(await main(['sessions', 'list', '--version'])).toBe(0)
+    } finally {
+      process.stdout.write = out
+    }
+    const { VERSION } = await import('./version.ts')
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }
+    expect(VERSION).toBe(pkg.version)
+    expect(lines).toHaveLength(4)
+    for (const line of lines) expect(line).toBe(`minidsh ${pkg.version}` + String.fromCharCode(10))
+  })
+
   it('treats --help and -h as help, which is never a usage error', async () => {
     expect(await quiet(() => main(['--help']))).toBe(0)
     expect(await quiet(() => main(['-h']))).toBe(0)

@@ -31,11 +31,15 @@ import type {
   PageResult,
   PromptResult,
   SessionView,
+  SessionsListResult,
 } from '../../capabilities/protocol/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
 import { renderHistory, TerminalRenderer } from './render.ts'
+
+/** How many sessions `/sessions` prints. A terminal has one screen; the CLI's own listing has all of them. */
+const SESSIONS_SHOWN = 20
 
 export interface TerminalOptions extends BootOptions {
   readonly cwd: string
@@ -208,6 +212,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       await switchModel(line)
       return
     }
+    if (command === '/sessions') {
+      await listSessions()
+      return
+    }
     // Before the catch-all, not after it: `/cancel` sat below the unknown-command
     // branch and could never run.
     if (command === '/cancel') {
@@ -257,6 +265,30 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       if (older.page.hasMore) out.write('… earlier events remain (/history again)\n')
       if (transcript) out.write(transcript)
       history = { cursor: history.cursor, oldest: older.page.from, hasMore: older.page.hasMore }
+    } catch (error) {
+      printError(error)
+    }
+    if (status === 'idle') prompt()
+  }
+
+  /**
+   * What else is here, by name. A terminal cannot switch sessions in place —
+   * that is a capability, not a listing — so this ends with the command that
+   * opens one, and bounds itself: a store with hundreds of sessions must not
+   * scroll a conversation off the screen to show them.
+   */
+  async function listSessions(): Promise<void> {
+    try {
+      const { sessions } = await client.request<SessionsListResult>('sessions/list')
+      if (sessions.length === 0) out.write('no sessions yet\n')
+      for (const session of sessions.slice(0, SESSIONS_SHOWN)) {
+        const marks = [session.id === sessionId ? 'this one' : undefined, session.live ? 'live' : undefined, session.delegatedBy ? 'child' : undefined]
+          .filter(Boolean)
+          .join(', ')
+        out.write(`${session.id}  ${new Date(session.createdAt).toISOString()}  ${session.title ?? '(unnamed)'}${marks ? `  [${marks}]` : ''}\n`)
+      }
+      if (sessions.length > SESSIONS_SHOWN) out.write(`… and ${sessions.length - SESSIONS_SHOWN} older (minidsh sessions list shows them all)\n`)
+      if (sessions.length > 0) out.write('open one with: minidsh resume <id>\n')
     } catch (error) {
       printError(error)
     }
@@ -382,7 +414,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const model = overrides.model ?? init.defaultAgentOptions.model
     const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
     const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
-    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /exit quits, Ctrl+C cancels)\n`)
+    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /exit quits, Ctrl+C cancels)\n`)
 
     if (attaching) {
       const agents = host.root.get(AGENTS)

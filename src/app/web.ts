@@ -24,6 +24,7 @@ import { extname, join } from 'node:path'
 import type { Context } from '../kernel/index.ts'
 import { protocolPlugin, upgradeWasHandled, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
+import { VERSION } from './version.ts'
 import { bootComposition, type BootOptions } from './headless.ts'
 
 export interface WebOptions extends BootOptions {
@@ -186,6 +187,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   })
 
   const protocolConfig: ProtocolConfig = {
+    serverVersion: VERSION,
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),

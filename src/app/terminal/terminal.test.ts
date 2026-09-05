@@ -296,6 +296,45 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     driver.type('/exit')
     expect(await exitCode).toBe(0)
   })
+
+  it('lists the sessions by name, marks the open one, and says how to open another', async () => {
+    const sessionsRoot = tempDir('minidsh-term-sessions-')
+    const cwd = tempDir('minidsh-term-cwd-')
+    const stored = await runTask({
+      task: 'teach the parser about trailing commas',
+      cwd,
+      model: 'scripted-model',
+      provider: 'scripted',
+      sessionsRoot,
+      ...scriptedBoot(new ScriptedAdapter().script(assistantText('done'))),
+    })
+    expect(stored.exitCode).toBe(0)
+
+    const driver = terminalDriver()
+    const exitCode = runTerminal({
+      cwd,
+      sessionsRoot,
+      ...scriptedBoot(new ScriptedAdapter().script(assistantText('hello'), assistantText('hello again'))),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    await driver.see('you> ')
+    driver.type('start a fresh one')
+    await driver.see('hello')
+
+    driver.type('/sessions')
+    await driver.see('open one with: minidsh resume')
+    const listing = driver.text()
+    // The stored session by NAME, not by id alone — the point of the command.
+    expect(listing).toContain('teach the parser about trailing commas')
+    expect(listing).toContain('start a fresh one')
+    // …and the one you are in says so, so a list of two is not a guess.
+    expect(listing).toContain('start a fresh one  [this one, live]')
+    expect(listing).toContain(stored.sessionId)
+
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
 })
 
 describe('terminal authority', () => {

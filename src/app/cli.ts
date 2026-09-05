@@ -31,6 +31,7 @@ import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
 import { startWebHost } from './web.ts'
 import { runTerminal } from './terminal/index.ts'
+import { VERSION } from './version.ts'
 
 interface ParsedArgs {
   readonly command: string
@@ -88,6 +89,7 @@ function usageFor(command: string): string {
 }
 
 const isHelp = (token: string | undefined): boolean => token === '--help' || token === '-h'
+const isVersion = (token: string | undefined): boolean => token === '--version' || token === '-v'
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
@@ -97,6 +99,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   // `--help`/`-h` ANYWHERE make this the help command, and help is never a
   // usage error. Anywhere, because `minidsh run -h` used to start a paid run
   // whose task was "-h".
+  // Before help, and anywhere, for the reason help is anywhere: `minidsh run
+  // -h` used to start a paid run whose task was "-h", and `--version` on a
+  // command that does not list it would otherwise be a usage error.
+  if (argv.some(isVersion)) return { command: 'version', positional, flags, patchFiles }
   if (first === undefined || argv.some(isHelp)) {
     const helpFor = first !== undefined && !isHelp(first) && first in COMMANDS ? first : undefined
     return { command: 'help', ...(helpFor === undefined ? {} : { helpFor }), positional, flags, patchFiles }
@@ -819,6 +825,9 @@ export async function main(argv: readonly string[]): Promise<number> {
       return configCommand(args)
     case 'sessions':
       return sessionsCommand(args)
+    case 'version':
+      process.stdout.write(`minidsh ${VERSION}\n`)
+      return 0
     default:
       if (args.helpFor !== undefined) {
         process.stdout.write(`usage: ${usageFor(args.helpFor)}\n`)
@@ -828,6 +837,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         [
           'MiniDSH — usage:',
           ...Object.keys(COMMANDS).map((command) => `  ${usageFor(command)}`),
+          '  minidsh --version',
           '',
           'config:    ~/.minidsh/composition.json + settings.json layer over the built-ins;',
           '           --patch <file> (repeatable) layers after them on any command',

@@ -7,6 +7,7 @@
 import type { Context } from '../kernel/index.ts'
 import { protocolPlugin, type Carrier, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
+import { VERSION } from './version.ts'
 import { bootComposition, type BootOptions } from './headless.ts'
 
 export interface ServeOptions extends BootOptions {
@@ -38,6 +39,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     resolveClosed = resolve
   })
   const protocolConfig: ProtocolConfig = {
+    serverVersion: VERSION,
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
