@@ -16,8 +16,10 @@
  *    at package level (agent ↔ sandbox, session ↔ llm, …); what keeps that
  *    sound is that each package's vocabulary (`events.ts`, `types.ts`) sits
  *    below its service, so no FILE's value imports ever close a loop. That was
- *    a convention until S8.5; this rule pins it. Type-only imports are erased
- *    and do not count.
+ *    a convention until S8.5; this rule pins it. Only `import type` /
+ *    `export type` statements and `import('./x').T` type positions are
+ *    erased and do not count — an inline `{ type A }` specifier keeps the
+ *    import and evaluates the module under Node's type stripping.
  *
  * Test files are exempt (they mount real compositions across layers).
  */

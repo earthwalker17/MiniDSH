@@ -7,30 +7,36 @@
 
 export interface ImportRef {
   readonly spec: string
-  /** `import type …` / `export type …` / a brace list whose every entry is `type X`: erased at runtime, so not a cycle. */
+  /**
+   * Erased at runtime, so not an edge. Under `verbatimModuleSyntax` — which is
+   * what Node's native type stripping implements — ONLY `import type …` and
+   * `export type …` statements are dropped whole. A brace list of inline
+   * `type` specifiers (`import { type A } from './x'`) is kept as
+   * `import {} from './x'`, and `./x` is still evaluated: that is a value edge.
+   */
   readonly typeOnly: boolean
 }
 
 /**
+ * One import/export statement's clause, which may span lines inside its
+ * braces but never runs into the next statement: the tempered `(?!…)` stops
+ * the lazy scan at a line that begins another `import`/`export`.
+ */
+const STATEMENT = /(?:^|\n)[ \t]*(import|export)\s+((?:(?!\n[ \t]*(?:import|export)\s)[^'"])*?)from\s*['"](\.[^'"]+)['"]/g
+
+/**
  * Every relative import a source file makes: `import … from './x'`,
- * `export … from './x'`, `import './x'`, `import('./x')` and `import('./x').T`.
+ * `export … from './x'`, `import './x'`, and `import('./x')` in expression
+ * position. `import('./x').T` is a type position (a member access on the
+ * namespace type), erased at runtime, and is not counted.
  */
 export function collectImports(source: string): ImportRef[] {
   const refs: ImportRef[] = []
-  for (const match of source.matchAll(/(?:^|\n)\s*(import|export)\s+([^'"]*?)from\s*['"](\.[^'"]+)['"]/g)) {
-    const clause = match[2]!.trim()
-    const braces = clause.match(/\{([^}]*)\}/)
-    const allTyped =
-      braces !== null &&
-      braces[1]!
-        .split(',')
-        .map((entry) => entry.trim())
-        .filter((entry) => entry.length > 0)
-        .every((entry) => entry.startsWith('type '))
-    refs.push({ spec: match[3]!, typeOnly: clause.startsWith('type ') || allTyped })
+  for (const match of source.matchAll(STATEMENT)) {
+    refs.push({ spec: match[3]!, typeOnly: match[2]!.trimStart().startsWith('type ') })
   }
   for (const match of source.matchAll(/import\s+['"](\.[^'"]+)['"]/g)) refs.push({ spec: match[1]!, typeOnly: false })
-  for (const match of source.matchAll(/import\(\s*['"](\.[^'"]+)['"]\s*\)/g)) refs.push({ spec: match[1]!, typeOnly: false })
+  for (const match of source.matchAll(/import\(\s*['"](\.[^'"]+)['"]\s*\)(?!\s*\.)/g)) refs.push({ spec: match[1]!, typeOnly: false })
   return refs
 }
 

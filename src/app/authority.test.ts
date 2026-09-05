@@ -276,6 +276,8 @@ describe('what a delegated child is told', () => {
       const top = await root.get(AGENTS).create(root, { cwd, agentOptions: options })
       const topPrompt = await root.get(PROMPT).assemble(top.agent)
       expect(topPrompt.system).toContain('Approvals: ask.')
+      // The clause after the pinned prefix promises an approval STEP, never a person: a headless run has no answerer.
+      expect(topPrompt.system).toContain('Approvals: ask. An action outside the sandbox needs an approval before it runs; a request that is refused, or that nobody answers, means the action did not run.')
       expect(topPrompt.system).not.toContain('delegated subagent')
 
       const child = await root.get(AGENTS).create(root, {

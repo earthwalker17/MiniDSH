@@ -39,6 +39,8 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 /** One persistent shell child. Commands are serialized and framed by a per-session marker. */
 export class ShellProcess implements ShellSession {
   private child: ChildProcessWithoutNullStreams | undefined
+  /** True from a spawn until its first command answered: a child that dies before that never worked at all. */
+  private fresh = false
   private buffer = ''
   private readonly markerBase = `__DSH_${crypto.randomUUID().replace(/-/g, '')}__`
   /** Per-command nonce: a stale marker from a killed command can never match the next one. */
@@ -128,6 +130,7 @@ export class ShellProcess implements ShellSession {
     // as an exit; it must not surface as an unhandled event.
     child.on('error', () => {})
     child.stdin.write(initLine(this.dialect))
+    this.fresh = true
     return child
   }
 
@@ -151,6 +154,7 @@ export class ShellProcess implements ShellSession {
       if (match) {
         const output = this.buffer.slice(0, this.buffer.indexOf(marker))
         this.buffer = ''
+        this.fresh = false
         const exitCode = Number(match[1])
         return this.finalize(output, { exitCode, timedOut: false, reset: false }, sandbox)
       }
@@ -158,8 +162,21 @@ export class ShellProcess implements ShellSession {
       // instead of polling until the deadline.
       if (child.exitCode !== null || child.killed) {
         const output = this.buffer
+        const code = child.exitCode
         this.child = undefined
         this.buffer = ''
+        // A child that spawned and died before answering its FIRST command
+        // never worked: a broken shim, a wrapper that exits at startup, a
+        // build that rejects `-Command -`. That is the same fact as a failed
+        // spawn and gets the same coded refusal — never an empty output.
+        if (this.fresh) {
+          this.fresh = false
+          const remedy = this.dialect === 'pwsh' ? 'install PowerShell 7 (pwsh)' : 'install bash'
+          throw new ShellError(
+            'SHELL_UNAVAILABLE',
+            `the shell "${this.shellPath ?? this.dialect}" exited (code ${code ?? 'unknown'}) before it answered its first command${output.trim().length > 0 ? `: ${output.trim().slice(0, 200)}` : ''}; ${remedy}, or point the shell row's shellPath at a working one`,
+          )
+        }
         return this.finalize(output, { timedOut: false, reset: true }, sandbox)
       }
       if (request.signal?.aborted) return this.finalize(this.buffer, { timedOut: false, reset: await this.reset() }, sandbox)

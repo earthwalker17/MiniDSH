@@ -100,3 +100,16 @@ describe('a shell binary that is not there', () => {
     })
   })
 })
+
+describe('a shell binary that starts and dies at once', () => {
+  it('is the same refusal as a missing one, never a command that printed nothing', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    // node rejects the shell's own flags (--noprofile / -NoLogo) and exits at
+    // startup: a spawn that succeeds and a child that never answers.
+    proc = new ShellProcess(dialect, dir, { shellPath: process.execPath })
+    await expect(proc.exec({ command: echoCmd('hello'), policy: unconfined(dir), timeoutMs: 30_000 })).rejects.toMatchObject({
+      code: 'SHELL_UNAVAILABLE',
+      message: expect.stringContaining('before it answered its first command'),
+    })
+  })
+})

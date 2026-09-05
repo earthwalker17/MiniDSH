@@ -192,7 +192,7 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
       render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
     })
     const driver = terminalDriver()
-    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'touchy', {}), assistantText('tool went through'))
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'touchy', {}), assistantToolCall('c2', 'touchy', {}), assistantText('tool went through'))
     const exitCode = runTerminal({
       cwd: tempDir('minidsh-term-cwd-'),
       sessionsRoot: tempDir('minidsh-term-sessions-'),
@@ -206,6 +206,10 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     await driver.see('you> ')
     driver.type('use the tool')
     await driver.see('approve touchy (careful)? [y/N] ')
+    driver.type('y')
+    await driver.see('! approval-')
+    // A second ask in the same session: the prompt again, the tip not.
+    await waitFor(() => driver.text().split('approve touchy (careful)? [y/N] ').length >= 3, 'the second approval prompt')
     driver.type('y')
     await driver.see('tool went through')
     // The prompt IS the ask's rendering: no second `? approval-…` line precedes it.

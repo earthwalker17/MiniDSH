@@ -7,6 +7,7 @@
  */
 import type { AgentOptions } from '../../core/agent/index.ts'
 import type { ApprovalPolicy, OpenApproval } from '../../core/approval/index.ts'
+import type { CompactionDeclineReason } from '../../core/compaction/index.ts'
 import type { ProviderInfo } from '../../core/llm/index.ts'
 import type { ContextMetrics } from '../../core/metering/index.ts'
 import type { SandboxEnforcement, SandboxMode } from '../../core/sandbox/index.ts'
@@ -281,11 +282,16 @@ export interface CompactParams {
   readonly sessionId: string
 }
 
-/** `scheduled`: the agent was mid-turn, so compaction runs at its next step boundary. */
+/**
+ * `scheduled`: the agent was mid-turn, so compaction runs at its next step
+ * boundary. `nothing-to-do` carries the decline reason whenever an attempt was
+ * actually made (the same closed union `compaction/end` records), so the client
+ * that asked learns why on the idle path without watching the log.
+ */
 export type CompactResult =
   | { readonly kind: 'compacted'; readonly shadowedNodes: number; readonly surfaceTokensBefore: number; readonly surfaceTokensAfter: number }
   | { readonly kind: 'scheduled' }
-  | { readonly kind: 'nothing-to-do' }
+  | { readonly kind: 'nothing-to-do'; readonly reason?: CompactionDeclineReason }
 
 
 export interface ApprovalAnswerParams {

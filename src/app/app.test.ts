@@ -417,4 +417,52 @@ describe('the CLI front door', () => {
     expect(await quiet(() => main(['sessions', 'list', '--sandbox', 'read-only']))).toBe(2)
     expect(await quiet(() => main(['sessions', 'list', '--ask', 'never']))).toBe(2)
   })
+
+  it('is help after a command too, and never a paid run with the task "-h"', async () => {
+    expect(await quiet(() => main(['run', '--help']))).toBe(0)
+    expect(await quiet(() => main(['run', '-h']))).toBe(0)
+    expect(await quiet(() => main(['chat', '--help']))).toBe(0)
+    expect(await quiet(() => main(['web', '-h']))).toBe(0)
+  })
+
+  it('refuses a flag a command does not list, for every command in the table', async () => {
+    // `resume <id> --at 12` used to resume at the log head silently; `chat --json` printed a terminal.
+    for (const command of ['run', 'chat', 'resume', 'fork', 'serve', 'web', 'config', 'sessions']) {
+      expect(await quiet(() => main([command, 'x', '--frobnicate']))).toBe(2)
+    }
+    expect(await quiet(() => main(['resume', 'some-id', '--at', '12']))).toBe(2)
+    expect(await quiet(() => main(['chat', '--json']))).toBe(2)
+  })
+
+  it('prints a layer warning exactly once, and a malformed layer is a usage error', async () => {
+    const home = tempDir('minidsh-home-')
+    const previous = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    const lines: string[] = []
+    const out = process.stdout.write.bind(process.stdout)
+    const err = process.stderr.write.bind(process.stderr)
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      lines.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      writeFileSync(join(home, 'composition.json'), JSON.stringify({ patches: [{ id: 'ghost', disabled: true }] }), 'utf8')
+      expect(await main(['config'])).toBe(0)
+      expect(lines.filter((line) => line.includes('unknown row id "ghost"'))).toHaveLength(1)
+      lines.length = 0
+      expect(await main(['sessions', 'list'])).toBe(0)
+      expect(lines.filter((line) => line.includes('unknown row id "ghost"'))).toHaveLength(1)
+      // A duplicate id is half-patchable, so the layer is refused before anything boots.
+      writeFileSync(join(home, 'composition.json'), JSON.stringify({ patches: [{ insert: [{ id: 'sandbox', plugin: 'core-sandbox' }] }] }), 'utf8')
+      lines.length = 0
+      expect(await main(['config'])).toBe(2)
+      expect(lines.join('')).toContain('duplicate row id "sandbox"')
+    } finally {
+      process.stdout.write = out
+      process.stderr.write = err
+      if (previous === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previous
+    }
+  })
 })

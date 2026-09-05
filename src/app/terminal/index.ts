@@ -220,10 +220,13 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       return
     }
     try {
+      // `auto`: the HOST decides steer-vs-followup against the live agent in
+      // the tick it delivers. Choosing here from the observed status raced
+      // turn-end — a line typed in the tick after `turn/end` became a fresh
+      // turn's prompt instead of steering the one that was still running.
       const result = await client.request<PromptResult>('session/prompt', {
         text: line,
-        ...(sessionId === undefined ? { agentOptions: overrides } : { sessionId }),
-        ...(status === 'running' ? { mode: 'steer' } : {}),
+        ...(sessionId === undefined ? { agentOptions: overrides } : { sessionId, mode: 'auto' }),
       })
       sessionId = result.sessionId
     } catch (error) {

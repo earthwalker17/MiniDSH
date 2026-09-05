@@ -34,6 +34,8 @@ import { runTerminal } from './terminal/index.ts'
 
 interface ParsedArgs {
   readonly command: string
+  /** The command whose usage `help` should print, when `--help`/`-h` followed one. */
+  readonly helpFor?: string
   readonly positional: string[]
   readonly flags: Map<string, string | true>
   /** `--patch <file>` is repeatable; the flags map is last-wins, so it collects here. */
@@ -85,13 +87,21 @@ function usageFor(command: string): string {
   return `minidsh ${command}${spec.positional ? ` ${spec.positional}` : ''}${flags ? ` ${flags}` : ''}`
 }
 
+const isHelp = (token: string | undefined): boolean => token === '--help' || token === '-h'
+
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
   const flags = new Map<string, string | true>()
   const patchFiles: string[] = []
   const first = argv[0]
-  // `--help`/`-h` are the help command, and help is never a usage error.
-  const command = first === undefined || first === '--help' || first === '-h' ? 'help' : first
+  // `--help`/`-h` ANYWHERE make this the help command, and help is never a
+  // usage error. Anywhere, because `minidsh run -h` used to start a paid run
+  // whose task was "-h".
+  if (first === undefined || argv.some(isHelp)) {
+    const helpFor = first !== undefined && !isHelp(first) && first in COMMANDS ? first : undefined
+    return { command: 'help', ...(helpFor === undefined ? {} : { helpFor }), positional, flags, patchFiles }
+  }
+  const command = first
   for (let i = 1; i < argv.length; i++) {
     const token = argv[i]!
     if (token.startsWith('--')) {
@@ -156,8 +166,20 @@ interface BootPlan {
 /** How a command treats `--preset`: applied as a durable switch, refused in favour of `/preset`, or not a flag at all. */
 type PresetUse = 'headless' | 'interactive' | 'none'
 
-/** Whether `--sandbox`/`--ask` mean anything to a command; one that only reads stored logs refuses them rather than ignoring them. */
-type AuthorityUse = 'accepted' | 'refused'
+/**
+ * A flag a command does not list is refused, not ignored: `resume <id> --at 12`
+ * used to resume at the log head with no message, and `chat --json` printed a
+ * terminal. `--patch` is every command's. The table that prints the usage is
+ * the table that decides.
+ */
+function refuseUnknownFlags(args: ParsedArgs): string | undefined {
+  const spec = COMMANDS[args.command]
+  if (!spec) return undefined
+  for (const name of args.flags.keys()) {
+    if (!(spec.flags as readonly string[]).includes(name)) return `--${name} is not a flag of "${args.command}"`
+  }
+  return undefined
+}
 
 /** The boot options every app entry shares, from one plan. */
 function bootFields(plan: BootPlan): {
@@ -187,19 +209,11 @@ function baseRows(home: HomeLayout, authority: AuthorityFlags = {}): Row[] {
  * `settings: 'optional'` is for commands that only read stored logs: a broken
  * settings.json must not stand between a user and `sessions show --audit`.
  */
-async function prepareBoot(
-  args: ParsedArgs,
-  presets: PresetUse,
-  settingsUse: 'required' | 'optional' = 'required',
-  authorityUse: AuthorityUse = 'accepted',
-): Promise<BootPlan | string> {
+async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'required' | 'optional' = 'required'): Promise<BootPlan | string> {
+  const unknown = refuseUnknownFlags(args)
+  if (unknown !== undefined) return unknown
   const authority = authorityFlags(args)
   if (typeof authority === 'string') return authority
-  if (authorityUse === 'refused') {
-    for (const name of ['sandbox', 'ask'] as const) {
-      if (args.flags.get(name) !== undefined) return `--${name} is not a flag of "${args.command}"`
-    }
-  }
   const loadedSettings = loadSettings()
   if (typeof loadedSettings === 'string' && settingsUse === 'required') return loadedSettings
   if (typeof loadedSettings === 'string') stderrLogger.warn(loadedSettings)
@@ -701,9 +715,10 @@ async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence
 
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
-  // A reader of stored logs: a broken settings file is a warning, and an
-  // authority flag is a usage error rather than something to accept and ignore.
-  const plan = await prepareBoot(args, 'none', 'optional', 'refused')
+  // A reader of stored logs: a broken settings file is a warning here, because
+  // reading a log must not depend on it. Its flag table lists no authority
+  // flag, so `--sandbox` is a usage error rather than something ignored.
+  const plan = await prepareBoot(args, 'none', 'optional')
   if (typeof plan === 'string') return usage(plan)
   if (sub === 'list') {
     return withPersistence(plan, (persistence) => {
@@ -797,6 +812,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     case 'sessions':
       return sessionsCommand(args)
     default:
+      if (args.helpFor !== undefined) {
+        process.stdout.write(`usage: ${usageFor(args.helpFor)}\n`)
+        return 0
+      }
       process.stdout.write(
         [
           'MiniDSH — usage:',
