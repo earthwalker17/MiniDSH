@@ -13,7 +13,7 @@ Goal: make a stored session findable and a long one watchable, which is the last
 
 Upstream's `permission.defaultPreset` setting is deliberately NOT mirrored: settings never own authority here, and the deployment default for new sessions is the sandbox/approval row config a `composition.json` patch already sets.
 
-Verification: `pnpm check`; the eight arcs; a real-browser pass for item 3; a bounded diff review. Nothing here needs a new live arc — the `web` arc already drives a real socket, and titles are asserted from a stored log.
+Verification: **first, the two closing arc passes S9 owed** (its account hit `402 Insufficient Balance` after one green pass — top it up before starting); then `pnpm check`, the eight arcs, a real-browser pass for item 3, and a bounded diff review whose agent count is fixed before it launches (CLAUDE.md §8). Nothing here needs a new live arc — the `web` arc already drives a real socket, and titles are asserted from a stored log.
 
 ## 2. Macro route (dependency-ordered; sessions are approximate)
 
