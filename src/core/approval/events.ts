@@ -55,7 +55,10 @@ export function openingApprovalPolicy(events: readonly EventEnvelope[], liveStar
   let seeded: ApprovalPolicy | undefined
   for (const event of events) {
     if (!matches(event, APPROVAL_POLICY)) continue
-    if (event.seq >= liveStart) return event.data.policy
+    if (event.seq >= liveStart) {
+      if (event.data.reason !== 'change') return event.data.policy
+      break
+    }
     seeded = event.data.policy
   }
   return seeded

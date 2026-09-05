@@ -217,6 +217,9 @@ function read(args: Input, agent: Agent | undefined, deps: Deps): Output {
     toSeq: entries[entries.length - 1]!.seq,
     messages: entries,
     estimatedTokens: tokens,
+    // Advisory, and deliberately optimistic: the durable fold will charge this
+    // call by the RESULT, which carries this tool's own framing on top of the
+    // span. The next call recomputes from the log rather than from this number.
     remainingSessionTokens: Math.max(0, remaining - tokens),
   }
 }

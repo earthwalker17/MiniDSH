@@ -33,6 +33,7 @@ import { APPROVAL, APPROVAL_POLICY, openingApprovalPolicy, type ApprovalPolicy }
 import { createPluginMessage } from '../../core/llm/message.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import { openingSandboxStamp, SANDBOX, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
+import type { SessionId } from '../../core/ids.ts'
 import { matches, SESSION_EVENT, type Session } from '../../core/session/index.ts'
 import { SHELL } from '../../core/shell/index.ts'
 
@@ -130,7 +131,7 @@ function approvalLines(ctx: Context, agent: Agent | undefined): string[] {
  */
 class SwitchNotes {
   private readonly ctx: Context
-  private readonly pending = new Map<string, { session: Session; sandbox?: SandboxMode; approval?: ApprovalPolicy }>()
+  private readonly pending = new Map<SessionId, { session: Session; sandbox?: SandboxMode; approval?: ApprovalPolicy }>()
   private scheduled = false
 
   constructor(ctx: Context) {
@@ -147,17 +148,33 @@ class SwitchNotes {
   private drain(): void {
     this.scheduled = false
     const agents = this.ctx.tryGet(AGENTS)
-    for (const [id, change] of this.pending) {
-      const agent = agents?.get(id as Agent['id'])
-      if (!agent) continue
-      const lines: string[] = []
-      if (change.sandbox !== undefined) {
-        lines.push(`Sandbox mode is now "${change.sandbox}". ${modeEffect(change.sandbox, change.session.header.cwd)}`)
+    try {
+      for (const [id, change] of this.pending) {
+        const agent = agents?.get(id)
+        if (!agent) continue
+        const lines: string[] = []
+        if (change.sandbox !== undefined) {
+          lines.push(`Sandbox mode is now "${change.sandbox}". ${modeEffect(change.sandbox, change.session.header.cwd)}`)
+        }
+        if (change.approval !== undefined) lines.push(`Approvals are now "${change.approval}". ${policyEffect(change.approval)}`)
+        // Each agent on its own: an inject that throws (an invariant rejecting
+        // the splice, a session whose store is gone) must not cost every other
+        // agent its note, and must not escape into the microtask queue, where an
+        // uncaught exception is the process rather than one lost message.
+        if (lines.length > 0) {
+          try {
+            agent.inject(createPluginMessage(PLUGIN, lines.join('\n')))
+          } catch {
+            // The switch is recorded either way; the note is the only casualty.
+          }
+        }
       }
-      if (change.approval !== undefined) lines.push(`Approvals are now "${change.approval}". ${policyEffect(change.approval)}`)
-      if (lines.length > 0) agent.inject(createPluginMessage(PLUGIN, lines.join('\n')))
+    } finally {
+      // Cleared whatever happened: a pending entry that survived a throw would
+      // be re-announced by the next switch, telling the model about a change it
+      // was already told about.
+      this.pending.clear()
     }
-    this.pending.clear()
   }
 }
 

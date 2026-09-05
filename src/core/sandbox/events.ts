@@ -70,24 +70,33 @@ export function effectiveSandboxMode(events: readonly EventEnvelope[]): SandboxM
 }
 
 /**
- * The stamp THIS lifecycle opened under: the first one it wrote itself, and
+ * The stamp THIS lifecycle opened under: the OPENING one it wrote itself, and
  * otherwise the last one its seed recorded.
  *
  * The distinction matters for anything that must be stable for a lifecycle and
  * still true — the prompt's runtime-context block is the one consumer. The
  * log's FIRST stamp is what the session it was resumed from started with, so
  * reading that told a session resumed after a switch to `read-only` that it was
- * `workspace-write`. The first stamp at or after `liveStart` is this
- * lifecycle's own opening (a fresh session's `initial`, a child's `delegation`,
- * or the `resume` a host that enforces differently writes at pickup), and a
- * later `change` never moves it — which is what keeps the cached prefix intact
- * across a mid-session switch.
+ * `workspace-write`.
+ *
+ * `reason !== 'change'` is what makes it an OPENING rather than just the first
+ * one this lifecycle happened to write. A fresh session writes `initial` at
+ * creation and a child writes `delegation`, so for them the first stamp at or
+ * after `liveStart` is already the opening — but a resumed or forked session
+ * whose host enforces identically writes NOTHING at pickup, and there the first
+ * stamp at or after `liveStart` is the next `setMode`. Taking that one moved
+ * the section mid-lifecycle, which is the one thing it may not do: the cached
+ * prompt prefix is keyed on it, and a probe caught the forked case rendering
+ * `workspace-write` before a switch and `read-only` after.
  */
 export function openingSandboxStamp(events: readonly EventEnvelope[], liveStart = 0): SandboxStamp | undefined {
   let seeded: SandboxStamp | undefined
   for (const event of events) {
     if (!matches(event, SANDBOX_MODE)) continue
-    if (event.seq >= liveStart) return event.data
+    if (event.seq >= liveStart) {
+      if (event.data.reason !== 'change') return event.data
+      break
+    }
     seeded = event.data
   }
   return seeded

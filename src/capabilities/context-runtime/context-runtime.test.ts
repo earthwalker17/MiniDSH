@@ -149,6 +149,61 @@ describe('the runtime-context section', () => {
     expect(system).toContain('Sandbox: read-only')
     expect(system).toContain('Approvals: never')
   })
+
+  it('stays byte-identical across a switch on a FORKED session, which wrote no opening stamp of its own', async () => {
+    // A fresh session writes `initial` at creation, so its opening is the first
+    // stamp of its own lifecycle. A fork whose host enforces identically writes
+    // NOTHING at pickup — so the first stamp at or after `liveStart` is the next
+    // `setMode`, and taking that one moved the section mid-lifecycle. The
+    // stability test that existed only covered a fresh agent and passed anyway.
+    const test = await harness('none')
+    const { agent } = await test.create()
+    const forked = await test.fork(agent)
+    expect(forked.agent.session.facts.filter((event) => event.type === 'sandbox/mode' && event.seq >= forked.agent.session.liveStart)).toHaveLength(0)
+
+    const before = (await test.root.get(PROMPT).assemble(forked.agent)).system
+    test.root.get(SANDBOX).setMode(forked.agent.session, 'read-only')
+    test.root.get(APPROVAL).setPolicy(forked.agent.session, 'never')
+    const after = (await test.root.get(PROMPT).assemble(forked.agent)).system
+    expect(after).toBe(before)
+    expect(after).toContain('Sandbox: workspace-write')
+  })
+
+  it('a RESUMED lifecycle states the mode it is under, where reading the log’s first stamp told it the opposite', async () => {
+    // The defect this closes, exactly: a session switched to `read-only` and
+    // then picked up again writes NO new stamp (nothing changed), so the log's
+    // first stamp is still the `initial` of the session it was resumed from.
+    // `authorityLines` read that one, and told a read-only lifecycle it was
+    // workspace-write — the widest of the two, and the wrong direction to be
+    // wrong in for a sentence the model plans against.
+    const first = await harness('none')
+    const original = await first.create()
+    first.root.get(SANDBOX).setMode(original.agent.session, 'read-only')
+    first.root.get(APPROVAL).setPolicy(original.agent.session, 'never')
+    const seed = original.agent.session.forkSeed()
+    const id = original.agent.id
+
+    const test = await harness('none')
+    const resumed = await test.root.get(AGENTS).create(test.root, {
+      cwd: process.cwd(),
+      sessionId: id,
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      seed,
+      origin: 'resumed',
+    })
+    // The premise, pinned: the log's FIRST stamp says workspace-write, which is
+    // what the old `facts.find(...)` returned and what the model was told.
+    const stamps = resumed.agent.session.events.filter((event) => event.type === 'sandbox/mode')
+    expect((stamps[0]!.data as { mode: string }).mode).toBe('workspace-write')
+    // Nothing changed on pickup, so no stamp of this lifecycle's own exists…
+    expect(stamps.filter((event) => event.seq >= resumed.agent.session.liveStart)).toHaveLength(0)
+    // …and the section still has to say what this lifecycle is actually under.
+    const system = (await test.root.get(PROMPT).assemble(resumed.agent)).system
+    expect(system).toContain('Sandbox: read-only')
+    expect(system).toContain('Approvals: never')
+    expect(system).not.toContain('Sandbox: workspace-write')
+    await resumed.dispose()
+  })
 })
 
 describe('a switch reaches the model as a message', () => {
