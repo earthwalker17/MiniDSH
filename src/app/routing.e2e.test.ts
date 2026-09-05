@@ -187,6 +187,11 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     const why =
       `after ${compactionTrace.length} applied compaction(s) shadowing [${compactionTrace.join(', ')}] node(s); ` +
       `${carried} of ${summaries.length} summary node(s) carried ALPHA-11; history_read ${offered ? 'offered' : 'NOT offered'}, called ${recalls}x`
+    // Printed on every run, not only on a failing one. This arc's flake rate is
+    // a number the route to V1 reports rather than hides, and a passing run is
+    // where you learn whether it passed because the summary carried the token or
+    // because the model went back for it — which a green tick cannot say.
+    console.log(`[routing] ${why}`)
     expect(last, why).toContain('ALPHA-11')
     expect(last).toContain('BRAVO-22')
     expect(last).toContain('CHARLIE-33')
