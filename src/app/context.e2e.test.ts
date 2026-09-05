@@ -28,7 +28,7 @@ import type { Logger } from '../kernel/index.ts'
 import { COMPACTION_APPLIED } from '../core/compaction/index.ts'
 import { LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/index.ts'
 import { meterSession } from '../core/metering/index.ts'
-import { foldSurfaceSeqs, type EventEnvelope } from '../core/session/index.ts'
+import { foldSurfaceSeqs, REQUEST_HEADER, type EventEnvelope } from '../core/session/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
@@ -237,6 +237,26 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
     }
     // Nothing was rewritten or renumbered.
     expect(events.every((event, index) => event.seq === index)).toBe(true)
+
+    // ---- the shadowed range is addressable ---------------------------------
+    //
+    // The summary the model reads names the seqs it replaced and the tool that
+    // reads them back, so a fact the summary dropped is recoverable instead of
+    // being a turn the model answers with "I have no context from earlier".
+    const summaryText = JSON.stringify((replace.data as { message: { content: { type: string; text?: string }[] } }).message.content)
+    expect(summaryText).toContain('Log seqs')
+    expect(summaryText).toContain('history_read')
+    // And it cost nothing before it could do anything: the tool is absent from
+    // every request built before the first applied compaction and present after.
+    const headerTools = (event: EventEnvelope): string[] =>
+      ((event.data as { header: { tools: { name: string }[] } }).header.tools ?? []).map((tool) => tool.name)
+    const headers = events.filter((event) => event.type === REQUEST_HEADER.type)
+    const firstHeader = headers[0]!
+    expect(firstHeader.seq).toBeLessThan(applied[0]!.seq)
+    expect(headerTools(firstHeader)).not.toContain('history_read')
+    const afterCompaction = headers.filter((event) => event.seq > applied[0]!.seq)
+    expect(afterCompaction.length, 'no request was built after the compaction').toBeGreaterThan(0)
+    expect(headerTools(afterCompaction[0]!)).toContain('history_read')
     // The rules are never DUPLICATED in what the model sees. Re-entry happens
     // at the next step boundary, so a compaction in the final step of the final
     // turn legitimately leaves them shadowed — there is no later request for
