@@ -124,14 +124,16 @@ describe('sandbox mode: durable, folded, recorded when it changes', () => {
     expect(sandbox.resolve({ session: agent.session }).mode).toBe('read-only')
   })
 
-  it('tells the model about a switch through a durable injected message, never a rewritten prompt', async () => {
+  it('records a switch and writes no prose about it: what the model is told is a capability’s business', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()
     harness.root.get(SANDBOX).setMode(agent.session, 'read-only')
-    const inbox = agent.session.events.filter((event) => event.type === 'inbox/spliced')
-    const note = inbox.map((event) => JSON.stringify(event.data)).join(' ')
-    expect(note).toContain('read-only')
-    expect(note).toContain('core-sandbox')
+    await Promise.resolve()
+    // The switch IS its event. `context-runtime` turns that event into a
+    // message (see its own test); a core-only composition composes no English
+    // and reaches for no agent registry to deliver it.
+    expect(agent.session.events.filter((event) => event.type === 'inbox/spliced')).toHaveLength(0)
+    expect(agent.session.events.filter((event) => event.type === 'sandbox/mode')).toHaveLength(2)
   })
 
   it('a resumed session keeps its own recorded mode instead of falling back to the deployment default', async () => {

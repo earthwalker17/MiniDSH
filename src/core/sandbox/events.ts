@@ -70,6 +70,30 @@ export function effectiveSandboxMode(events: readonly EventEnvelope[]): SandboxM
 }
 
 /**
+ * The stamp THIS lifecycle opened under: the first one it wrote itself, and
+ * otherwise the last one its seed recorded.
+ *
+ * The distinction matters for anything that must be stable for a lifecycle and
+ * still true — the prompt's runtime-context block is the one consumer. The
+ * log's FIRST stamp is what the session it was resumed from started with, so
+ * reading that told a session resumed after a switch to `read-only` that it was
+ * `workspace-write`. The first stamp at or after `liveStart` is this
+ * lifecycle's own opening (a fresh session's `initial`, a child's `delegation`,
+ * or the `resume` a host that enforces differently writes at pickup), and a
+ * later `change` never moves it — which is what keeps the cached prefix intact
+ * across a mid-session switch.
+ */
+export function openingSandboxStamp(events: readonly EventEnvelope[], liveStart = 0): SandboxStamp | undefined {
+  let seeded: SandboxStamp | undefined
+  for (const event of events) {
+    if (!matches(event, SANDBOX_MODE)) continue
+    if (event.seq >= liveStart) return event.data
+    seeded = event.data
+  }
+  return seeded
+}
+
+/**
  * The delegation ceiling: the mode a delegated child opened under, when its
  * FIRST stamp says so. Nothing in that session — a switch, an escalation, a
  * forged stamp — may ever be wider. Absent for a session that is not a child.

@@ -16,8 +16,6 @@
 import { z } from 'zod'
 import { serviceKey, type Context, type Plugin } from '../../kernel/index.ts'
 import { AGENT_CREATED } from '../agent/events.ts'
-import { AGENTS } from '../agent/index.ts'
-import { createPluginMessage } from '../llm/message.ts'
 import type { Session } from '../session/index.ts'
 import { SHELL } from '../shell/index.ts'
 import {
@@ -195,21 +193,18 @@ class SandboxService implements Sandbox {
     // was recorded: a session that has not acted yet is under the default, and
     // "switching" to it is not a switch.
     const previous = recorded?.mode ?? this.defaultMode
-    // Record what the session started under BEFORE recording the change, so the
-    // first stamp is immutably the opening authority. Anything that renders it
-    // (the prompt's runtime-context block) then stays byte-identical for the
-    // session's whole life, and the audit reads "started X, then changed to Y".
+    // Record what the session started under BEFORE recording the change, so this
+    // lifecycle's opening stamp is immutably the opening authority. Anything
+    // that renders it (the prompt's runtime-context block) then stays
+    // byte-identical for the lifecycle, and the audit reads "started X, then
+    // changed to Y".
     if (!recorded) this.record(session, previous)
     this.record(session, mode)
-    if (previous === mode) return mode
-    const note =
-      `Sandbox mode is now "${mode}". ` +
-      (mode === 'read-only'
-        ? 'File modifications are refused by policy in this session.'
-        : mode === 'danger-full-access'
-          ? 'Writes are no longer confined to the workspace.'
-          : `Writes are confined to ${this.rootFor(session)}.`)
-    this.ctx.tryGet(AGENTS)?.get(session.id)?.inject(createPluginMessage('core-sandbox', note))
+    // A switch IS its event, and that is all this seam owes. What the MODEL is
+    // told about one is prose about context, not a property of the authority
+    // plane: `context-runtime` writes it, off the `sandbox/mode{change}` this
+    // just recorded. Composing that sentence here meant a core seam holding
+    // English and reaching for `ctx.agents` to deliver it.
     return mode
   }
 

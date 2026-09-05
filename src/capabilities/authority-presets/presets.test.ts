@@ -72,7 +72,14 @@ describe('applying a preset in a real composition', () => {
     expect(intentAt).toBeGreaterThanOrEqual(0)
     // The knob events follow the intent; their content is the setters' truth.
     // (The opening stamps were written at creation, so each knob logs one change.)
-    expect(kinds.slice(intentAt)).toEqual(['authority/preset', 'sandbox/mode', 'inbox/spliced', 'approval/policy'])
+    expect(kinds.slice(intentAt)).toEqual(['authority/preset', 'sandbox/mode', 'approval/policy'])
+    // A preset moves both knobs, and the model hears about it ONCE — the note is
+    // written by `context-runtime` off these events and coalesced per agent.
+    await Promise.resolve()
+    await Promise.resolve()
+    const spliced = session.events.filter((event) => event.type === 'inbox/spliced')
+    expect(spliced).toHaveLength(1)
+    expect(JSON.stringify(spliced[0]!.data)).toContain('danger-full-access')
     expect(presets.selectForSession(session)).toBe('danger-full-access')
     expect(root!.get(SANDBOX).resolve({ session }).mode).toBe('danger-full-access')
 

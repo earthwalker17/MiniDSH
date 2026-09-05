@@ -50,6 +50,17 @@ export function effectiveApprovalPolicy(events: readonly EventEnvelope[]): Appro
   return undefined
 }
 
+/** The policy THIS lifecycle opened under — same rule as `openingSandboxStamp`, and for the same consumer. */
+export function openingApprovalPolicy(events: readonly EventEnvelope[], liveStart = 0): ApprovalPolicy | undefined {
+  let seeded: ApprovalPolicy | undefined
+  for (const event of events) {
+    if (!matches(event, APPROVAL_POLICY)) continue
+    if (event.seq >= liveStart) return event.data.policy
+    seeded = event.data.policy
+  }
+  return seeded
+}
+
 /** An approval asked and not yet decided — everything an answerer needs to render the question. */
 export interface OpenApproval {
   readonly id: string
