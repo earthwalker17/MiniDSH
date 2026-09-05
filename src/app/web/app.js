@@ -227,8 +227,12 @@ function prependRows(events) {
     if (node) fragment.append(node)
   }
   rows.prepend(fragment)
-  log.scrollTop = top + (log.scrollHeight - before)
+  // Hidden BEFORE the height is read, not after: the button sits above the
+  // rows, so on the last page — the one that flips `hasMore` — removing it
+  // afterwards takes its height off the content above the reader and undoes
+  // the compensation just written.
   $('more').hidden = !state.window?.hasMore
+  log.scrollTop = top + (log.scrollHeight - before)
 }
 
 function renderView() {
@@ -317,13 +321,23 @@ const notice = (text) => flash(text, 'notice')
 
 async function openSession(sessionId) {
   if (state.window && state.window.sessionId !== sessionId) await state.wire.request('session/detach', { sessionId: state.window.sessionId }).catch(() => undefined)
-  state.window = new SessionWindow(state.wire, sessionId, renderAll)
-  state.status = undefined
-  await state.window.attach()
+  // The header moves with the window, BEFORE the attach that can fail: a
+  // rejected attach (the host is down, and nothing in the sidebar says so)
+  // would otherwise leave the previous session's id above a window that is
+  // already this one, and the reconnect then paints this session's transcript
+  // under that name.
   $('session-id').textContent = sessionId
-  // Cleared here and filled by the listing below: showing the previous
-  // session's name over this one's transcript is worse than showing none.
   nameSession(undefined)
+  state.status = undefined
+  // Its own identity, so a change from a window this client has moved on from
+  // cannot paint into the transcript that replaced it — a backward page still
+  // in flight when `new` is clicked used to render the old session's rows into
+  // an empty "new session".
+  const opened = new SessionWindow(state.wire, sessionId, (change) => {
+    if (state.window === opened) renderAll(change)
+  })
+  state.window = opened
+  await opened.attach()
   await refreshSessions()
 }
 

@@ -16,6 +16,17 @@ export function newSessionId(prefix = 'session'): SessionId {
   return `${prefix}-${crypto.randomUUID()}` as SessionId
 }
 
+/**
+ * Exactly what `newSessionId` produces, anchored at both ends.
+ *
+ * It is here rather than inlined by its reader because it is a fact about the
+ * MINT, not about any one consumer: a store that deletes files must be able to
+ * recognise the names it generated and nothing else, and a prefix test is not
+ * that recognition. Nothing is required to use it — a store that cannot match
+ * an id simply leaves the file alone, which is the safe direction.
+ */
+export const SESSION_ID_PATTERN = /^[a-z]+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export function newMessageId(): MessageId {
   return `msg-${crypto.randomUUID()}` as MessageId
 }

@@ -114,6 +114,8 @@ export class SessionWindow {
     this.damaged = false
     /** No page yet: an event applied before one would repair from seq 0. */
     this.attached = false
+    /** A backward page is in flight; a second request would fetch the same range. */
+    this.paging = false
     // Live events are applied one at a time. `apply` awaits a repair, and two
     // events arriving around that await would otherwise interleave: the second
     // would see the pre-repair cursor, push itself past the hole, and the
@@ -158,14 +160,26 @@ export class SessionWindow {
     return attached
   }
 
-  /** One page further back, anchored to the cut this window attached on. */
+  /**
+   * One page further back, anchored to the cut this window attached on.
+   *
+   * One at a time: a cold session's page is a whole-file parse on the host, so
+   * two clicks land inside one round trip easily, and both would read the same
+   * `oldest`, fetch the same range and prepend it twice — the same seqs
+   * rendered twice and `events` no longer in seq order.
+   */
   async older() {
-    if (!this.hasMore) return
-    const { page } = await this.wire.request('session/page', { sessionId: this.sessionId, throughSeq: this.cursor, beforeSeq: this.oldest })
-    this.events = [...page.events, ...this.events]
-    this.oldest = page.from
-    this.hasMore = page.hasMore
-    this.onChange({ kind: 'prepend', events: page.events })
+    if (!this.hasMore || this.paging) return
+    this.paging = true
+    try {
+      const { page } = await this.wire.request('session/page', { sessionId: this.sessionId, throughSeq: this.cursor, beforeSeq: this.oldest })
+      this.events = [...page.events, ...this.events]
+      this.oldest = page.from
+      this.hasMore = page.hasMore
+      this.onChange({ kind: 'prepend', events: page.events })
+    } finally {
+      this.paging = false
+    }
   }
 
   setView(view) {

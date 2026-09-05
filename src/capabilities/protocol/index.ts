@@ -88,7 +88,8 @@ export interface ProtocolConfig {
   readonly defaultAgentOptions: AgentOptions
   /** What outranks the settings store for this process (e.g. `MINIDSH_MODEL`). */
   readonly agentOverrides?: Partial<AgentOptions>
-  readonly serverVersion?: string
+  /** Required, so a second version string cannot drift into existence beside `package.json`'s. */
+  readonly serverVersion: string
   /** Per-agent world for every agent this surface creates or resumes (the app builds it from a named preset). */
   readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, recorded in each session's header so a resume can compose the same world. */
@@ -126,7 +127,7 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
       workspaces,
       defaultAgentOptions: config.defaultAgentOptions,
       ...(config.agentOverrides === undefined ? {} : { agentOverrides: config.agentOverrides }),
-      serverVersion: config.serverVersion ?? '0.1.0',
+      serverVersion: config.serverVersion,
       // A stream carrier's client IS this process's reason to run: when the
       // last one hangs up, the host is done. A socket says otherwise — nobody
       // being connected right now is the normal state of a served host.

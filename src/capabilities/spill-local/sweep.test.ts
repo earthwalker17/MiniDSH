@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
+import { newSessionId } from '../../core/ids.ts'
 import { SPILL } from '../../core/spill/index.ts'
 import { spillLocalPlugin } from './index.ts'
 
@@ -38,6 +39,16 @@ function tempDir(prefix: string): string {
 /** Writes a file and back-dates it, so age is a fact of the filesystem rather than of a clock the test controls. */
 function aged(path: string, ageDays: number): string {
   writeFileSync(path, 'x', 'utf8')
+  return backdate(path, ageDays)
+}
+
+/** A directory, back-dated the same way — its OWN age is what decides whether an empty one is pruned. */
+function agedDir(path: string, ageDays: number): string {
+  mkdirSync(path)
+  return backdate(path, ageDays)
+}
+
+function backdate(path: string, ageDays: number): string {
   const when = (Date.now() - ageDays * DAY_MS) / 1000
   utimesSync(path, when, when)
   return path
@@ -60,7 +71,7 @@ async function swept(spillRoot: string, cleanupPeriodDays?: number): Promise<voi
 describe('the retention sweep', () => {
   it('removes a file older than the cutoff and keeps a young one', async () => {
     const spillRoot = tempDir('minidsh-sweep-')
-    const dir = join(spillRoot, 'session-1')
+    const dir = join(spillRoot, String(newSessionId()))
     mkdirSync(dir)
     const old = aged(join(dir, 'call-1-shell.txt'), 40)
     const young = aged(join(dir, 'call-3-shell.txt'), 1)
@@ -84,7 +95,7 @@ describe('the retention sweep', () => {
       [1, false],
     ] as const) {
       const spillRoot = tempDir('minidsh-sweep-')
-      const dir = join(spillRoot, 'session-1')
+      const dir = join(spillRoot, String(newSessionId()))
       mkdirSync(dir)
       const file = join(dir, 'call-1-shell.txt')
       writeFileSync(file, 'x', 'utf8')
@@ -108,19 +119,66 @@ describe('the retention sweep', () => {
 
   it('prunes a session directory it emptied, and never the root', async () => {
     const spillRoot = tempDir('minidsh-sweep-')
-    const emptied = join(spillRoot, 'session-1')
-    const kept = join(spillRoot, 'session-2')
+    const emptied = join(spillRoot, String(newSessionId()))
+    const kept = join(spillRoot, String(newSessionId()))
     mkdirSync(emptied)
     mkdirSync(kept)
     aged(join(emptied, 'call-1-shell.txt'), 40)
     aged(join(kept, 'call-1-shell.txt'), 40)
     aged(join(kept, 'call-2-shell.txt'), 1)
+    // Back-dated AFTER the writes, because a write bumps a directory's mtime —
+    // which is exactly why that mtime is a fair reading of "last touched".
+    backdate(emptied, 40)
+    backdate(kept, 40)
 
     await swept(spillRoot, 30)
 
     expect(existsSync(emptied)).toBe(false)
     expect(readdirSync(kept)).toEqual(['call-2-shell.txt'])
     expect(existsSync(spillRoot)).toBe(true)
+  })
+
+  /**
+   * A young empty directory is a session another process has just created and
+   * not yet written into. Pruning it makes that write fail ENOENT, and the tool
+   * result silently loses its spill file.
+   */
+  it('leaves an empty session directory alone until it too is old', async () => {
+    const spillRoot = tempDir('minidsh-sweep-')
+    const fresh = join(spillRoot, String(newSessionId()))
+    mkdirSync(fresh)
+    const stale = agedDir(join(spillRoot, String(newSessionId())), 40)
+
+    await swept(spillRoot, 30)
+
+    expect(existsSync(fresh)).toBe(true)
+    expect(existsSync(stale)).toBe(false)
+  })
+
+  /**
+   * The predicate's whole job. A first version matched "anything in the
+   * alphabet", which would have taken a backup a person put under the store.
+   */
+  it('never takes a file a person put here, however old', async () => {
+    const spillRoot = tempDir('minidsh-sweep-')
+    const backup = join(spillRoot, 'backup')
+    mkdirSync(backup)
+    const readme = aged(join(backup, 'README.txt'), 400)
+    // A directory that DOES look like a session, holding a file that does not.
+    const session = join(spillRoot, String(newSessionId()))
+    mkdirSync(session)
+    const golden = aged(join(session, 'golden.txt'), 400)
+    const generated = aged(join(session, 'call-1-shell.txt'), 400)
+    backdate(backup, 400)
+    backdate(session, 400)
+
+    await swept(spillRoot, 30)
+
+    expect(existsSync(backup)).toBe(true)
+    expect(existsSync(readme)).toBe(true)
+    expect(existsSync(golden)).toBe(true)
+    // …and what this writer DID generate is still collected.
+    expect(existsSync(generated)).toBe(false)
   })
 
   it('touches nothing this writer could not have written', async () => {
@@ -133,7 +191,7 @@ describe('the retention sweep', () => {
     mkdirSync(foreignDir)
     const inForeignDir = aged(join(foreignDir, 'call-1-shell.txt'), 40)
 
-    const dir = join(spillRoot, 'session-1')
+    const dir = join(spillRoot, String(newSessionId()))
     mkdirSync(dir)
     // Right age, wrong shape: not a `.txt`, and a leading dot.
     const notTxt = aged(join(dir, 'call-1-shell.log'), 40)
@@ -156,12 +214,12 @@ describe('the retention sweep', () => {
     const spillRoot = tempDir('minidsh-sweep-')
     const outside = tempDir('minidsh-sweep-outside-')
     const treasure = aged(join(outside, 'call-1-shell.txt'), 40)
-    const dir = join(spillRoot, 'session-1')
+    const dir = join(spillRoot, String(newSessionId()))
     mkdirSync(dir)
 
     // Windows refuses both link kinds without Developer Mode or elevation; the
     // rule is the same one either would prove, so take whichever is available.
-    let linkedDir: string | undefined = join(spillRoot, 'session-2')
+    let linkedDir: string | undefined = join(spillRoot, String(newSessionId()))
     try {
       symlinkSync(outside, linkedDir, 'junction')
     } catch {
@@ -186,7 +244,7 @@ describe('the retention sweep', () => {
 
   it('sweeps nothing when the period is zero', async () => {
     const spillRoot = tempDir('minidsh-sweep-')
-    const dir = join(spillRoot, 'session-1')
+    const dir = join(spillRoot, String(newSessionId()))
     mkdirSync(dir)
     const ancient = aged(join(dir, 'call-1-shell.txt'), 4000)
 

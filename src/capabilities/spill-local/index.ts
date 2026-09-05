@@ -19,6 +19,7 @@ import { lstat, readdir, rmdir, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
+import { SESSION_ID_PATTERN } from '../../core/ids.ts'
 import { SPILL, type Spill, type SpillRef, type SpillRequest } from '../../core/spill/index.ts'
 
 export interface SpillLocalConfig {
@@ -48,14 +49,20 @@ function safeName(value: string): string {
 
 /**
  * The sweep deletes only what THIS writer could have generated, matched by
- * exact shape rather than by prefix: `safeName`'s alphabet, its no-leading-dot
- * rule and its 64-character bound, anchored at both ends. A directory a person
- * put here by hand, a backup, a test fixture — none of them match, and none of
- * them are touched.
+ * exact shape and never by prefix.
+ *
+ * A directory is a `safeName`'d session id, and a session id is minted in one
+ * place, so this is that mint's own pattern rather than "anything in the
+ * alphabet" — which is what a first version tried, and it would have deleted
+ * `spill/backup/README.txt` for a user who put one there. A file is
+ * `<safeName(callId)>-<safeName(label)>.txt`, so it has TWO bounded segments
+ * and a separator between them; the bound and the leading-character rule are
+ * `safeName`'s own. A name this cannot recognise is left alone, which is the
+ * safe direction to fail in.
  */
-const SWEPT_DIR = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/
-/** `<safeName(callId)>-<safeName(label)>.txt`: two bounded segments and a separator. */
-const SWEPT_FILE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,128}\.txt$/
+const SWEPT_DIR = SESSION_ID_PATTERN
+const SEGMENT = '[A-Za-z0-9_][A-Za-z0-9._-]{0,63}'
+const SWEPT_FILE = new RegExp(`^${SEGMENT}-${SEGMENT}\\.txt$`)
 
 /**
  * One best-effort pass over the store, started at load.
@@ -80,14 +87,17 @@ async function sweep(root: string, cutoff: number): Promise<void> {
   for (const name of names) {
     if (!SWEPT_DIR.test(name)) continue
     const dir = join(root, name)
+    let directoryMtimeMs: number
     try {
       // `lstat`, not the dirent's type: a symlink to a directory must be
       // skipped here rather than descended into somebody else's tree.
-      if (!(await lstat(dir)).isDirectory()) continue
+      const stat = await lstat(dir)
+      if (!stat.isDirectory()) continue
+      directoryMtimeMs = stat.mtimeMs
     } catch {
       continue
     }
-    await sweepSession(dir, cutoff)
+    await sweepSession(dir, cutoff, directoryMtimeMs)
   }
 }
 
@@ -100,7 +110,7 @@ async function sweep(root: string, cutoff: number): Promise<void> {
  */
 const SWEEP_CONCURRENCY = 8
 
-async function sweepSession(dir: string, cutoff: number): Promise<void> {
+async function sweepSession(dir: string, cutoff: number, directoryMtimeMs: number): Promise<void> {
   let names: string[]
   try {
     names = await readdir(dir)
@@ -126,6 +136,13 @@ async function sweepSession(dir: string, cutoff: number): Promise<void> {
     await Promise.all(candidates.slice(at, at + SWEEP_CONCURRENCY).map(expire))
   }
   if (remaining > 0) return
+  // The directory's OWN age decides too, read before anything was deleted
+  // (deleting bumps it). Without this an empty directory is pruned whatever
+  // its age, and two processes on one home have a window: one has just
+  // `mkdir`ed a session directory and not yet written into it, and the other's
+  // sweep removes it — the write then fails ENOENT and that tool result
+  // silently loses its spill file.
+  if (directoryMtimeMs >= cutoff) return
   try {
     // Non-recursive by construction: `ENOTEMPTY` if a writer raced in, which is
     // the outcome we want in that race.

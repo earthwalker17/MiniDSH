@@ -99,7 +99,16 @@ function shorten(text: string): string {
 function titleOf(event: EventEnvelope): string | undefined {
   if (!matches(event, USER_MESSAGE)) return undefined
   if (event.data.message?.source?.kind !== 'user') return undefined
-  const text = clean(messageText(event.data.message))
+  let text: string
+  try {
+    text = clean(messageText(event.data.message))
+  } catch {
+    // A stored log is untyped JSON on the way back in, and `blockText`'s
+    // exhaustiveness default is a THROW — correct for a typed value, fatal for
+    // a hand-edited or newer-format line. A session that cannot be named must
+    // still be listed, so this is where that stops.
+    return undefined
+  }
   return text.length === 0 ? undefined : shorten(text)
 }
 
@@ -140,5 +149,15 @@ export function scanSessionTitle(events: Iterable<EventEnvelope>): SessionTitleS
  */
 export function foldSessionTitle(events: Iterable<EventEnvelope>): string | undefined {
   const state = scanSessionTitle(events)
-  return state.recorded?.title ?? state.fallback?.title
+  const recorded = state.recorded?.title
+  // Cleaned on the way OUT, not only on the way in. Two surfaces print this
+  // into a terminal and one into a tab-separated row, and a recorded title is
+  // whatever the log says — this writer's, a later writer's, or a hand-edited
+  // line. Bounding and stripping it here is what makes "a title has no tabs"
+  // true of the record and not only of the derivation.
+  if (typeof recorded === 'string') {
+    const cleaned = clean(recorded)
+    if (cleaned.length > 0) return shorten(cleaned)
+  }
+  return state.fallback?.title
 }

@@ -281,7 +281,13 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     try {
       const { sessions } = await client.request<SessionsListResult>('sessions/list')
       if (sessions.length === 0) out.write('no sessions yet\n')
-      for (const session of sessions.slice(0, SESSIONS_SHOWN)) {
+      const shown = sessions.slice(0, SESSIONS_SHOWN)
+      // A resumed session keeps its original `createdAt`, so the one you are
+      // actually in can sit below the cut — and it is the last row this command
+      // may drop. It joins the list rather than replacing a row.
+      const open = sessions.find((session) => session.id === sessionId)
+      if (open && !shown.includes(open)) shown.push(open)
+      for (const session of shown) {
         const marks = [session.id === sessionId ? 'this one' : undefined, session.live ? 'live' : undefined, session.delegatedBy ? 'child' : undefined]
           .filter(Boolean)
           .join(', ')

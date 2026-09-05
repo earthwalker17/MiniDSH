@@ -95,6 +95,35 @@ describe('a session title', () => {
     expect(state.fallback).toEqual({ title: 'the original prompt', messageSeqs: [0] })
   })
 
+  it('cleans a RECORDED title too, not only a derived one', () => {
+    seq = 0
+    // A record is whatever the log says — this writer's, a later writer's, or a
+    // hand-edited line. Two surfaces print it into a terminal and one into a
+    // tab-separated row, so the escape and the tab may not survive the read.
+    const hostile = `${String.fromCharCode(27)}[2K pwned${String.fromCharCode(9)}second-column`
+    const title = foldSessionTitle([prompt('the real prompt'), event(SESSION_TITLE.type, { title: hostile, messageSeqs: [], source: { kind: 'user' } })])!
+    expect(title).not.toContain(String.fromCharCode(27))
+    expect(title).not.toContain(String.fromCharCode(9))
+    expect(title).toContain('pwned')
+    // A record that cleans to nothing falls through to the derivation rather
+    // than naming the session with an empty string.
+    expect(foldSessionTitle([prompt('the real prompt'), event(SESSION_TITLE.type, { title: '   ', messageSeqs: [], source: { kind: 'user' } })])).toBe('the real prompt')
+  })
+
+  it('never throws on a message shape it does not know', () => {
+    seq = 0
+    // Stored logs come back as untyped JSON, and `blockText`'s exhaustiveness
+    // default is a THROW. A session that cannot be named must still be listed:
+    // the caller here is a directory listing, and a throw there loses the whole
+    // session, not just its name.
+    for (const message of [null, 'oops', { content: 'oops', source: { kind: 'user' } }, { content: [{ type: 'audio' }], source: { kind: 'user' } }]) {
+      expect(() => foldSessionTitle([event(USER_MESSAGE.type, { message })])).not.toThrow()
+    }
+    expect(foldSessionTitle([event(USER_MESSAGE.type, { message: { content: [{ type: 'audio' }], source: { kind: 'user' } } }), prompt('the good one')])).toBe(
+      'the good one',
+    )
+  })
+
   it('has nothing to say about a session nobody has prompted', () => {
     seq = 0
     expect(foldSessionTitle([])).toBeUndefined()

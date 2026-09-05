@@ -232,6 +232,33 @@ describe('persistence-jsonl: names in a listing', () => {
     expect(listed.get('recorded')).toBe('what it is really about')
   })
 
+  it('lists a session whose name cannot be computed, rather than losing the session', async () => {
+    const { sessions, base } = await mount()
+    sessions.create({ cwd: '/w', id: asSessionId('good'), createdAt: 1000 })
+    appendTurn(sessions, 'good', 1)
+    // Three stored logs with valid headers and a first message this version
+    // cannot project: a null payload, a string where blocks belong, and a block
+    // kind from some later format. Before the title fold they listed fine; a
+    // throw inside the listing would drop them from every surface at once, and
+    // `minidsh resume <id>` on a session nobody can see is the only way back.
+    for (const [id, message] of [
+      ['broken-null', null],
+      ['broken-string', { content: 'oops', source: { kind: 'user' } }],
+      ['broken-block', { content: [{ type: 'audio', url: 'x' }], source: { kind: 'user' } }],
+    ] as const) {
+      const header = { kind: 'session', version: 0, id, createdAt: 2000, cwd: '/w' }
+      const event = { type: 'user/message', seq: 0, time: 1, data: { message }, surfaceOp: { op: 'append' } }
+      appendFileSync(join(base, `${id}.jsonl`), `${JSON.stringify(header)}
+${JSON.stringify(event)}
+`)
+    }
+
+    const listed = root!.get(PERSISTENCE).list()
+    expect(listed.map((one) => String(one.header.id)).toSorted()).toEqual(['broken-block', 'broken-null', 'broken-string', 'good'])
+    for (const one of listed) if (String(one.header.id).startsWith('broken')) expect(one.title).toBeUndefined()
+    expect(listed.find((one) => String(one.header.id) === 'good')?.title).toBe('prompt 1')
+  })
+
   it('lists a session whose first prompt is bigger than the prefix, without a name and without a stall', async () => {
     const { sessions } = await mount()
     sessions.create({ cwd: '/w', id: asSessionId('huge'), createdAt: 3000 })

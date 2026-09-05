@@ -245,3 +245,39 @@ describe('what the window says it did', () => {
     expect(changes).toEqual([{ kind: 'prepend', seqs: [4] }])
   })
 })
+
+describe('paging backwards, twice', () => {
+  it('fetches one page per click, however many clicks land inside one round trip', async () => {
+    let inFlight = 0
+    let requests = 0
+    const changes: string[] = []
+    const wire = {
+      request: (method: string) => {
+        if (method !== 'session/page') throw new Error(`unexpected ${method}`)
+        requests++
+        inFlight++
+        // A cold session's page is a whole-file parse on the host; two clicks
+        // fit inside one comfortably.
+        return new Promise((resolve) =>
+          setTimeout(() => {
+            inFlight--
+            resolve({ page: { events: [{ type: 'user/message', seq: 4, time: 0, data: {} }], from: 4, to: 4, hasMore: true } })
+          }, 20),
+        )
+      },
+    }
+    const window_ = new SessionWindow(wire as never, 's', (change: { kind: string }) => changes.push(change.kind))
+    window_.attached = true
+    window_.hasMore = true
+    window_.oldest = 5
+    window_.cursor = 9
+
+    await Promise.all([window_.older(), window_.older(), window_.older()])
+
+    expect(requests).toBe(1)
+    expect(inFlight).toBe(0)
+    expect(changes).toEqual(['prepend'])
+    // The page's seqs appear once, so `events` is still in seq order.
+    expect(window_.events.map((one) => one.seq)).toEqual([4])
+  })
+})
