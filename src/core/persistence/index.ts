@@ -21,11 +21,22 @@ export interface StoredSession {
   readonly damaged?: true
 }
 
+/** What a listing knows about a stored session without reading it: its header, and what to call it. */
+export interface StoredSessionSummary {
+  readonly header: SessionHeader
+  /**
+   * The session's name — the recorded `session/title`, else what its first
+   * prompt says. DERIVED, never stored on the header, and absent when the
+   * store's bounded prefix read did not reach far enough to find either.
+   */
+  readonly title?: string
+}
+
 export interface Persistence {
   /** The stored session, or undefined if the store has no such id. */
   load(id: string): StoredSession | undefined
-  /** Stored session headers, newest first. */
-  list(): SessionHeader[]
+  /** Stored session summaries, newest first. */
+  list(): StoredSessionSummary[]
 }
 
 export const PERSISTENCE = serviceKey<Persistence>('persistence')

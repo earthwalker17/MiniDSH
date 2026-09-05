@@ -11,7 +11,7 @@
  */
 import { createRoot, describeConfigError, type Logger } from '../kernel/index.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
-import { foldRequestContext, matches, TOOL_RESULT, USER_MESSAGE } from '../core/session/index.ts'
+import { foldRequestContext, foldSessionTitle, matches, TOOL_RESULT, USER_MESSAGE } from '../core/session/index.ts'
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
@@ -722,10 +722,13 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   if (typeof plan === 'string') return usage(plan)
   if (sub === 'list') {
     return withPersistence(plan, (persistence) => {
-      for (const header of persistence.list()) {
+      for (const { header, title } of persistence.list()) {
         // Lineage is durable: a delegated child says whose work it was doing.
         const lineage = header.delegatedBy === undefined ? '' : `\t↳ delegated by ${header.delegatedBy} (depth ${header.delegationDepth ?? 1})`
-        process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}${lineage}\n`)
+        // The name last, so the three columns that were here before keep their
+        // positions for anything already cutting this output apart. A title has
+        // no tabs by construction: the fold collapses whitespace.
+        process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\t${title ?? ''}${lineage}\n`)
       }
       return 0
     })
@@ -748,6 +751,11 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         if (stored.damaged) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, damaged: true })}\n`)
       } else {
         process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        // The whole log is in hand here, so this is the recorded title or the
+        // derivation over everything — never the bounded-prefix answer a
+        // listing settles for.
+        const title = foldSessionTitle(stored.events)
+        if (title !== undefined) process.stdout.write(`title: ${title}\n`)
         if (stored.header.delegatedBy !== undefined) {
           process.stdout.write(`delegated by ${stored.header.delegatedBy} (depth ${stored.header.delegationDepth ?? 1})\n`)
         }

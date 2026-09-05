@@ -210,6 +210,9 @@ async function openSession(sessionId) {
   state.status = undefined
   await state.window.attach()
   $('session-id').textContent = sessionId
+  // Cleared here and filled by the listing below: showing the previous
+  // session's name over this one's transcript is worse than showing none.
+  nameSession(undefined)
   await refreshSessions()
 }
 
@@ -224,12 +227,24 @@ async function refreshSessions() {
   list.replaceChildren()
   for (const session of sessions) {
     const item = el('button', `session${session.id === state.window?.sessionId ? ' current' : ''}`)
-    item.append(el('span', 'name', session.id.replace(/^session-/, '').slice(0, 8)), el('span', 'when', new Date(session.createdAt).toLocaleString()))
+    const short = session.id.replace(/^session-/, '').slice(0, 8)
+    // The name first, the id demoted beside the date: a list of ids is a list
+    // nobody can pick from, and the id still has to be here because it is what
+    // `minidsh resume` takes.
+    item.append(el('span', 'name', session.title ?? short), el('span', 'when', `${short} · ${new Date(session.createdAt).toLocaleString()}`))
+    item.title = session.title ? `${session.title}\n${session.id}\n${session.cwd}` : `${session.id}\n${session.cwd}`
     if (session.live) item.append(el('span', 'live', 'live'))
     if (session.delegatedBy) item.append(el('span', 'tag', 'child'))
     item.addEventListener('click', () => void openSession(session.id).catch(fail))
     list.append(item)
+    if (session.id === state.window?.sessionId) nameSession(session.title)
   }
+}
+
+/** The open session's name, in the header and in the tab — one window per session, so the tab can say which. */
+function nameSession(title) {
+  $('session-name').textContent = title ?? ''
+  document.title = title ? `${title} — MiniDSH` : 'MiniDSH'
 }
 
 async function send() {
@@ -364,6 +379,7 @@ async function start() {
   $('new').addEventListener('click', () => {
     state.window = undefined
     $('session-id').textContent = 'new session'
+    nameSession(undefined)
     renderAll()
   })
   $('cancel').addEventListener('click', () => {

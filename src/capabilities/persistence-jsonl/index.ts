@@ -27,13 +27,14 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { PERSISTENCE, type Persistence, type StoredSession } from '../../core/persistence/index.ts'
+import { PERSISTENCE, type Persistence, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
 import {
   SESSION_CREATED,
   SESSION_DISPOSED,
   SESSION_EVENT,
   SESSION_FLUSH,
   SESSION_FORMAT_VERSION,
+  foldSessionTitle,
   type EventEnvelope,
   type Session,
   type SessionHeader,
@@ -165,41 +166,82 @@ function holderIsDead(holder: LeaseHolder): boolean {
 
 /** The header line is small by construction; a bounded read is all a listing needs. */
 const HEADER_READ_BYTES = 64 * 1024
+/**
+ * How far past the header a listing will look for a name. A session opens with
+ * its header, the four facts creation stamps, the turn and then the prompt —
+ * about eight lines — and the title lands directly after that prompt. The bound
+ * is what keeps a listing from parsing a chunk-heavy log line by line if that
+ * shape ever changes.
+ */
+const TITLE_SCAN_LINES = 32
 
-/** Line 1 of a stored log without reading the log: a bounded prefix read. */
-function readHeaderLine(file: string): string | undefined {
+/**
+ * The bounded prefix of a stored log: line 1 and the complete lines after it,
+ * out of ONE read.
+ *
+ * This costs nothing that listing did not already pay. The buffer was always
+ * 64 KiB; only the first newline was ever used and the rest thrown away, so a
+ * title comes out of bytes already in hand — no second syscall, no second seek.
+ * A log whose first prompt is bigger than the buffer simply has no complete
+ * line to give, and its session lists without a name.
+ */
+function readPrefixLines(file: string, limit: number): string[] {
   const fd = openSync(file, 'r')
   try {
     const buffer = Buffer.alloc(HEADER_READ_BYTES)
     const length = readSync(fd, buffer, 0, buffer.length, 0)
-    const newline = buffer.subarray(0, length).indexOf(0x0a)
-    return newline === -1 ? undefined : buffer.subarray(0, newline).toString('utf8')
+    const lines: string[] = []
+    let from = 0
+    while (lines.length < limit) {
+      const newline = buffer.indexOf(0x0a, from)
+      // Past the read, or a final line the buffer cut in half: not a line yet.
+      if (newline === -1 || newline >= length) break
+      lines.push(buffer.subarray(from, newline).toString('utf8'))
+      from = newline + 1
+    }
+    return lines
   } finally {
     closeSync(fd)
   }
 }
 
-/** Stored session headers (line 1 of each `*.jsonl`), newest first; unreadable files skipped. */
-function listStoredHeaders(root: string): SessionHeader[] {
+/** The events of a prefix, parsed lazily so a fold that finds its answer early stops the parsing. */
+function* prefixEvents(lines: readonly string[]): Generator<EventEnvelope> {
+  for (const line of lines.slice(1)) {
+    let parsed: EventEnvelope
+    try {
+      parsed = JSON.parse(line) as EventEnvelope
+    } catch {
+      return
+    }
+    if (typeof parsed?.type !== 'string' || typeof parsed.seq !== 'number') return
+    yield parsed
+  }
+}
+
+/** Stored session summaries (the header and the name), newest first; unreadable files skipped. */
+function listStoredHeaders(root: string): StoredSessionSummary[] {
   let names: string[]
   try {
     names = readdirSync(root).filter((name) => name.endsWith('.jsonl'))
   } catch {
     return []
   }
-  const headers: SessionHeader[] = []
+  const summaries: StoredSessionSummary[] = []
   for (const name of names) {
     try {
-      const first = readHeaderLine(join(root, name))
+      const lines = readPrefixLines(join(root, name), TITLE_SCAN_LINES)
+      const first = lines[0]
       if (!first) continue
       const parsed = JSON.parse(first) as Partial<HeaderLine>
       if (parsed.kind !== 'session' || typeof parsed.id !== 'string' || typeof parsed.createdAt !== 'number') continue
-      headers.push(parsed as SessionHeader)
+      const title = foldSessionTitle(prefixEvents(lines))
+      summaries.push({ header: parsed as SessionHeader, ...(title === undefined ? {} : { title }) })
     } catch {
       // Skip an unreadable file.
     }
   }
-  return headers.toSorted((a, b) => b.createdAt - a.createdAt)
+  return summaries.toSorted((a, b) => b.header.createdAt - a.header.createdAt)
 }
 
 /** A materialized or attached session: the file and the descriptor every append goes through. */
@@ -496,7 +538,7 @@ class JsonlArchive implements Persistence {
     return { header: scan.header, events: scan.events, ...(scan.tail === 'invalid' ? { damaged: true as const } : {}) }
   }
 
-  list(): SessionHeader[] {
+  list(): StoredSessionSummary[] {
     return listStoredHeaders(this.root)
   }
 }

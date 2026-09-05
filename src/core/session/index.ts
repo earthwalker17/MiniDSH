@@ -2,6 +2,16 @@
 export * from './types.ts'
 export { Session, SessionForkError, sliceForkSeed, type SessionHost } from './session.ts'
 export { deriveEventMessage, foldLastAssistantText, foldLastTurnEnd, foldRequestContext, foldRequestHeader, foldSurfaceSeqs, Surface } from './surface.ts'
+export {
+  SESSION_TITLE,
+  TITLE_MAX_CHARS,
+  TITLE_MAX_WORDS,
+  foldSessionTitle,
+  scanSessionTitle,
+  type SessionTitleRecord,
+  type SessionTitleSource,
+  type SessionTitleState,
+} from './title.ts'
 export { repairInterruptedTail } from './repair.ts'
 export {
   DEFAULT_PAGE_MESSAGES,

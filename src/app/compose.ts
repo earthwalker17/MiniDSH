@@ -14,6 +14,7 @@ import { promptPlugin } from '../core/prompt/index.ts'
 import { sandboxPlugin, type SandboxMode } from '../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
+import { sessionTitlePlugin } from '../capabilities/session-title/index.ts'
 import { toolsPlugin } from '../core/tools/index.ts'
 import { approvalHeadlessPlugin } from '../capabilities/approval-headless/index.ts'
 import { authorityPresetsPlugin } from '../capabilities/authority-presets/index.ts'
@@ -57,6 +58,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       invariantsPlugin,
       sessionPlugin,
       sessionInvariantPlugin,
+      sessionTitlePlugin,
       credentialsLocalPlugin,
       settingsLocalPlugin,
       llmPlugin,
@@ -299,6 +301,10 @@ export function compose(options: ComposeOptions): Row[] {
   if (withInvariants) rows.push(defineRow('invariants', invariantsPlugin, {}))
   rows.push(defineRow('session', sessionPlugin))
   if (withInvariants) rows.push(defineRow('session-invariant', sessionInvariantPlugin))
+  // Beside the session, because it writes one log-only fact about it and
+  // nothing else. Disabling this row costs a stored session its recorded
+  // name, not its name: the fold still derives one from the first prompt.
+  rows.push(defineRow('session-title', sessionTitlePlugin))
   rows.push(defineRow('credentials', credentialsLocalPlugin, options.credentialsPath === undefined ? {} : { path: options.credentialsPath }))
   // Omitted mounts nothing, so a hermetic test has no settings service and the
   // protocol falls back to the values its config carries.

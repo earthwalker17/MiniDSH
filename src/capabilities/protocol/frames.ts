@@ -86,6 +86,13 @@ export interface SessionSummary {
   readonly id: string
   readonly createdAt: number
   readonly cwd: string
+  /**
+   * What to call it: the session's recorded `session/title`, else what its
+   * first prompt says. Derived, never on the header — and absent for a session
+   * nobody has prompted yet, or one whose first prompt is bigger than the
+   * bounded prefix a stored listing reads.
+   */
+  readonly title?: string
   /** The workspace whose root contains `cwd`, when one does. Derived, never stored. */
   readonly workspaceId?: string
   /** An agent is running this session right now. */

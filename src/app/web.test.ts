@@ -198,7 +198,11 @@ describe('the web surface, driven as a browser drives it', () => {
     expect(init.serverInfo.name).toBe('minidsh')
     expect(init.workspaces).toHaveLength(1)
 
-    const { sessionId } = await call<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: init.workspaces[0]!.id })
+    const { sessionId } = await call<{ sessionId: string }>('session/prompt', {
+      text: 'check the socket end to end',
+      agentOptions: SCRIPTED,
+      workspaceId: init.workspaces[0]!.id,
+    })
     const deadline = Date.now() + 5000
     while (!notifications.some((one) => one.method === 'session.event' && (one.params.event as { type: string }).type === 'turn/end')) {
       if (Date.now() > deadline) throw new Error('the turn never ended')

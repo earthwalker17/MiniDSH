@@ -850,6 +850,19 @@ describe('protocol: workspaces are addressing, never authority', () => {
     const filtered = await client.result<{ sessions: { id: string }[] }>('sessions/list', { workspaceId: beta.id })
     expect(filtered.sessions.map((one) => one.id)).toEqual([theirs.sessionId])
   })
+
+  it('names each session by what was asked of it, so a list is readable without ids', async () => {
+    const { client } = await withWorkspaces()
+    const first = await client.result<{ sessionId: string }>('session/prompt', { text: 'rename the widget factory', agentOptions: SCRIPTED })
+    await client.waitForIdle(first.sessionId)
+    const second = await client.result<{ sessionId: string }>('session/prompt', { text: 'why is the build slow', agentOptions: SCRIPTED })
+    await client.waitForIdle(second.sessionId)
+
+    const listed = await client.result<{ sessions: { id: string; title?: string }[] }>('sessions/list')
+    const byId = new Map(listed.sessions.map((one) => [one.id, one.title]))
+    expect(byId.get(first.sessionId)).toBe('rename the widget factory')
+    expect(byId.get(second.sessionId)).toBe('why is the build slow')
+  })
 })
 
 describe('protocol: more than one client', () => {

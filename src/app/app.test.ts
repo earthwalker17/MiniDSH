@@ -411,6 +411,40 @@ describe('the CLI front door', () => {
     }
   }
 
+  /**
+   * The one place a person meets a stored session without already knowing its
+   * id. Nothing asserted this output before S10; the name is why it is worth
+   * asserting now.
+   */
+  it('names each stored session in a listing, beside its id', async () => {
+    const home = tempDir('minidsh-home-')
+    const cwd = tempDir('minidsh-cwd-')
+    const previous = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    const adapter = new ScriptedAdapter()
+    adapter.script(assistantText('done'))
+    const lines: string[] = []
+    const out = process.stdout.write.bind(process.stdout)
+    try {
+      await runTask({ task: 'teach the parser about trailing commas', cwd, model: 'scripted-model', sessionsRoot: join(home, 'sessions'), logger: silent, ...scripted(adapter) })
+      process.stdout.write = ((chunk: string | Uint8Array) => {
+        lines.push(String(chunk))
+        return true
+      }) as typeof process.stdout.write
+      expect(await main(['sessions', 'list'])).toBe(0)
+    } finally {
+      process.stdout.write = out
+      if (previous === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previous
+    }
+    const [row] = lines.join('').trimEnd().split(String.fromCharCode(10))
+    const columns = row!.split(String.fromCharCode(9))
+    // id, when, cwd, name — the three that were here before keep their places.
+    expect(columns).toHaveLength(4)
+    expect(columns[0]).toMatch(/^session-/)
+    expect(columns[3]).toBe('teach the parser about trailing commas')
+  })
+
   it('treats --help and -h as help, which is never a usage error', async () => {
     expect(await quiet(() => main(['--help']))).toBe(0)
     expect(await quiet(() => main(['-h']))).toBe(0)

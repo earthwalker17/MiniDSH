@@ -33,7 +33,7 @@ import { asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { meterSession } from '../../core/metering/index.ts'
-import { PERSISTENCE } from '../../core/persistence/index.ts'
+import { PERSISTENCE, type StoredSessionSummary } from '../../core/persistence/index.ts'
 import { SETTINGS, SettingsError, type Settings } from '../../core/settings/index.ts'
 import type { JsonValue } from '../../core/json.ts'
 import { AUTHORITY_PRESET, PRESETS } from '../../core/presets/index.ts'
@@ -42,6 +42,7 @@ import {
   ASSISTANT_MESSAGE,
   REQUEST_CONTEXT,
   SESSIONS,
+  foldSessionTitle,
   TRACE_TYPES,
   foldRequestContext,
   matches,
@@ -447,14 +448,25 @@ export class ProtocolHost {
     if (workspaceId !== undefined && typeof workspaceId !== 'string') {
       throw new RpcFailure(INVALID_PARAMS, 'sessions/list: "workspaceId" must be a string')
     }
-    const live = new Map(this.ctx.get(SESSIONS).list().map((session) => [String(session.id), session.header]))
+    // A live session's title is folded from its facts rather than from the
+    // store's bounded prefix: it is in hand, it is current, and a session that
+    // has not materialized yet has no file to read a prefix out of.
+    const live = new Map(
+      this.ctx
+        .get(SESSIONS)
+        .list()
+        .map((session) => {
+          const title = foldSessionTitle(session.facts)
+          return [String(session.id), { header: session.header, ...(title === undefined ? {} : { title }) } satisfies StoredSessionSummary] as const
+        }),
+    )
     const stored = this.ctx.tryGet(PERSISTENCE)?.list() ?? []
-    const headers = new Map(stored.map((header) => [String(header.id), header]))
+    const summaries = new Map(stored.map((summary) => [String(summary.header.id), summary]))
     // A live session that has not recorded a conversation fact yet has no file,
     // so the union is what "every session" means.
-    for (const [id, header] of live) headers.set(id, header)
+    for (const [id, summary] of live) summaries.set(id, summary)
     const sessions: SessionSummary[] = []
-    for (const header of headers.values()) {
+    for (const { header, title } of summaries.values()) {
       const workspace = this.workspaceOf(header.cwd)
       if (workspaceId !== undefined && workspace?.id !== workspaceId) continue
       sessions.push({
@@ -462,6 +474,7 @@ export class ProtocolHost {
         createdAt: header.createdAt,
         cwd: header.cwd,
         live: live.has(String(header.id)),
+        ...(title === undefined ? {} : { title }),
         ...(workspace === undefined ? {} : { workspaceId: workspace.id }),
         ...(header.parentId === undefined ? {} : { parentId: String(header.parentId) }),
         ...(header.delegatedBy === undefined ? {} : { delegatedBy: String(header.delegatedBy) }),

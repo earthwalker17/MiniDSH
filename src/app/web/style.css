@@ -294,3 +294,12 @@ footer {
   justify-content: flex-end;
   margin-top: 12px;
 }
+
+/* The open session's name, beside the id it is easier to read than. */
+header .name {
+  font-weight: 600;
+  max-width: 32ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

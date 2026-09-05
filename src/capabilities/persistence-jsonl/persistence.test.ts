@@ -6,7 +6,7 @@ import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
-import { SESSIONS, TURN_END, TURN_START, USER_MESSAGE, type Sessions } from '../../core/session/index.ts'
+import { SESSIONS, SESSION_TITLE, TURN_END, TURN_START, USER_MESSAGE, foldSessionTitle, type Sessions } from '../../core/session/index.ts'
 import { sessionPlugin } from '../../core/session/index.ts'
 import { persistenceJsonlPlugin } from './index.ts'
 
@@ -207,9 +207,43 @@ describe('persistence-jsonl: the read Definition', () => {
     // A stray .jsonl whose first line is valid JSON but no session header.
     appendFileSync(join(base, 'notes.jsonl'), '{"type":"turn/start","seq":0,"time":1,"data":{}}\n')
     const persistence = root!.get(PERSISTENCE)
-    expect(persistence.list().map((header) => header.id)).toEqual(['newer', 'older'])
+    expect(persistence.list().map((summary) => summary.header.id)).toEqual(['newer', 'older'])
     expect(persistence.load('missing')).toBeUndefined()
     expect(persistence.load('notes')).toBeUndefined()
     expect(persistence.load('older')!.events).toHaveLength(3)
+  })
+})
+
+describe('persistence-jsonl: names in a listing', () => {
+  it('reads a name out of the bounded prefix — the recorded one, else the first prompt', async () => {
+    const { sessions } = await mount()
+    sessions.create({ cwd: '/w', id: asSessionId('derived'), createdAt: 1000 })
+    appendTurn(sessions, 'derived', 1)
+
+    sessions.create({ cwd: '/w', id: asSessionId('recorded'), createdAt: 2000 })
+    const recorded = sessions.get(asSessionId('recorded'))!
+    recorded.append(USER_MESSAGE, { message: createUserMessage('the first prompt') }, { surfaceOp: { op: 'append' } })
+    recorded.append(SESSION_TITLE, { title: 'what it is really about', messageSeqs: [0], source: { kind: 'user' } })
+
+    const listed = new Map(root!.get(PERSISTENCE).list().map((summary) => [String(summary.header.id), summary.title]))
+    // Nothing wrote a title for this one, and it still lists under a name.
+    expect(listed.get('derived')).toBe('prompt 1')
+    // …and where one was recorded, the record wins.
+    expect(listed.get('recorded')).toBe('what it is really about')
+  })
+
+  it('lists a session whose first prompt is bigger than the prefix, without a name and without a stall', async () => {
+    const { sessions } = await mount()
+    sessions.create({ cwd: '/w', id: asSessionId('huge'), createdAt: 3000 })
+    const session = sessions.get(asSessionId('huge'))!
+    // One line past the 64 KiB the listing reads: there is no COMPLETE line
+    // after the header to parse, so the prefix yields nothing to name it by.
+    session.append(USER_MESSAGE, { message: createUserMessage('x'.repeat(80_000)) }, { surfaceOp: { op: 'append' } })
+
+    const [summary] = root!.get(PERSISTENCE).list()
+    expect(String(summary!.header.id)).toBe('huge')
+    expect(summary!.title).toBeUndefined()
+    // The whole log still reads, so `sessions show` names it where a listing cannot.
+    expect(foldSessionTitle(root!.get(PERSISTENCE).load('huge')!.events)).toBe(`${'x'.repeat(79)}…`)
   })
 })
