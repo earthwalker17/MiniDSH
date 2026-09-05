@@ -224,9 +224,9 @@ describe('bounded recall of shadowed history', () => {
   })
 
   it('spends a session budget the log itself records, so a fork inherits what was already read', async () => {
-    // This span renders at 825 estimated tokens, measured; the budget sits just
-    // above it, so the first call lands and nothing after it can.
-    const BUDGET = 840
+    // This span's BODY renders at 855 estimated tokens, measured; the budget
+    // sits just above it, so the first call lands and nothing after it can.
+    const BUDGET = 870
     const test = await harness(COMPACT, { maxSessionTokens: BUDGET })
     const { agent } = await test.create()
     await grow(agent, 6)
@@ -265,6 +265,63 @@ describe('bounded recall of shadowed history', () => {
     const shadowed = appliedRecords(agent).flatMap((event) => (matches(event, COMPACTION_APPLIED) ? [...event.data.shadowedSeqs] : []))
     expect(shadowed).toContain(recall.seq)
     expect(foldRecall(agent.session).admissible.has(recall.seq)).toBe(false)
+  })
+})
+
+describe('what the budget measures, and what it may read', () => {
+  it('charges only what came back: a refusal returned nothing and costs nothing', async () => {
+    // Measured before the fix: two refusals moved the spend from 0 to 74 while
+    // nothing was read — and the refusal text is itself what tells the model to
+    // retry narrower, so the advice this tool gives drained the budget it
+    // advises about, until every further call answered HISTORY_BUDGET.
+    const test = await harness(COMPACT, { maxCallTokens: 5 })
+    const { agent } = await test.create()
+    await grow(agent, 6)
+    await test.root.get(COMPACTION).compactNow(agent)
+    expect(foldRecall(agent.session).spent).toBe(0)
+
+    const first = await callTool(test, agent, 'refuse-1', 'history_read', shadowedRange(agent))
+    expect(matches(first, TOOL_RESULT) ? first.data.error?.code : undefined).toBe('HISTORY_TOO_LARGE')
+    expect(foldRecall(agent.session).spent).toBe(0)
+    const second = await callTool(test, agent, 'refuse-2', 'history_read', shadowedRange(agent))
+    expect(matches(second, TOOL_RESULT) ? second.data.error?.code : undefined).toBe('HISTORY_TOO_LARGE')
+    expect(foldRecall(agent.session).spent).toBe(0)
+  })
+
+  it('never offers back a message the model can still see', async () => {
+    // A fork boundary may fall between `compaction/applied` and the replace that
+    // realized it. That child holds the record naming the span while every node
+    // of it is still live; recall used to hand back a verbatim second copy.
+    const test = await harness(COMPACT)
+    const { agent } = await test.create()
+    await grow(agent, 6)
+    await test.root.get(COMPACTION).compactNow(agent)
+    const appliedSeq = appliedRecords(agent)[0]!.seq
+
+    const forked = await test.root.get(AGENTS).fork(test.root, agent.session, appliedSeq)
+    const live = new Set(forked.agent.session.surfaceSeqs())
+    const shadowed = appliedRecords(agent).flatMap((event) => (matches(event, COMPACTION_APPLIED) ? [...event.data.shadowedSeqs] : []))
+    // The premise: the record survived the cut and every node it names is live.
+    expect(shadowed.every((seq) => live.has(seq))).toBe(true)
+    expect(foldRecall(forked.agent.session).admissible.size).toBe(0)
+    // And with nothing to read back, the tool is never offered.
+    expect(test.root.get(TOOLS).schemas(forked.agent).map((schema) => schema.name)).not.toContain('history_read')
+    await forked.dispose()
+  })
+
+  it('bounds what it actually emits, not the span it read it from', async () => {
+    // The header reports the count, so it cannot be inside it; everything else
+    // the call returns is. Measured before the fix: a call reporting ~1720
+    // tokens emitted ~1814.
+    const test = await harness(COMPACT)
+    const { agent } = await test.create()
+    await grow(agent, 6)
+    await test.root.get(COMPACTION).compactNow(agent)
+    const result = await callTool(test, agent, 'measure', 'history_read', shadowedRange(agent))
+    const text = resultContent(result)
+    const reported = Number(/~(\d+) tokens/.exec(text)![1])
+    const body = text.slice(text.indexOf(']\n\n') + 3)
+    expect(Math.ceil(body.length / 4)).toBe(reported)
   })
 })
 

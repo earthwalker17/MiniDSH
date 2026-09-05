@@ -55,6 +55,8 @@ type Input = z.infer<typeof InputSchema>
 const OutputSchema = z.object({
   fromSeq: z.number(),
   toSeq: z.number(),
+  /** Exactly the text `render` emits under the header, so measured IS returned. */
+  body: z.string(),
   messages: z.array(z.object({ seq: z.number(), role: z.string(), text: z.string() })),
   estimatedTokens: z.number(),
   remainingSessionTokens: z.number(),
@@ -141,24 +143,41 @@ export function foldRecall(session: Session, toolName: string = NAME): RecallSta
     } else if (matches(event, TOOL_CALL)) {
       if (event.data.name === toolName) ownCalls.add(event.data.callId)
     } else if (matches(event, TOOL_RESULT) && ownCalls.has(event.data.callId)) {
+      // Only what was RETURNED is charged. A refusal returned nothing, and the
+      // refusal text is itself what tells the model to retry with a narrower
+      // range — charging for it made the advice this tool gives drain the
+      // budget it is advising about (measured: two refusals, 74 tokens spent,
+      // nothing read).
+      if (event.data.error) continue
       const message = deriveEventMessage(event)
       if (message) spent += estimateMessage(message)
     }
   }
-  // A recall result is not itself recallable: reading one back would re-inject a
-  // copy of a span already paid for, and charge for it twice.
+  // Only what the model CANNOT see. A shadowed seq is normally off the surface
+  // by construction, but a fork boundary may fall between `compaction/applied`
+  // and the replace that realized it (ARCHITECTURE §13): that child holds the
+  // record naming the span while every node of it is still live, and recall
+  // would hand back a verbatim second copy and charge for it.
+  const live = new Set(session.surfaceSeqs())
   const admissible = new Set<number>()
   for (const seq of shadowed) {
+    if (live.has(seq)) continue
     const node = session.events[seq]
+    // A recall result is not itself recallable: reading one back would re-inject
+    // a copy of a span already paid for, and charge for it twice.
     if (node && matches(node, TOOL_RESULT) && ownCalls.has(node.data.callId)) continue
     admissible.add(seq)
   }
   return { admissible, spent }
 }
 
-/** True once this session has a compaction to read back — the moment the tool earns its schema. */
+/**
+ * True once this session has something to read back — which is not the same as
+ * "has compacted": a fork that kept the applied record but not the replace has
+ * the record and nothing shadowed.
+ */
 export function hasShadowedHistory(session: Session): boolean {
-  return session.facts.some((event) => matches(event, COMPACTION_APPLIED))
+  return foldRecall(session).admissible.size > 0
 }
 
 interface Deps {
@@ -201,10 +220,13 @@ function read(args: Input, agent: Agent | undefined, deps: Deps): Output {
     )
   }
 
-  // Charged on what is actually returned, in the same units the durable fold
-  // will measure the result in — the fold reads the tool/result message and so
-  // adds this tool's own framing, which is the safe direction to be wrong in.
-  const tokens = entries.reduce((sum, entry) => sum + estimateTokens(entry.text), 0)
+  // Charged on the BODY this call will actually emit, not on the raw span:
+  // measuring the entry texts alone let a call bounded at 1500 return 1814
+  // tokens of content, and told the model it had more budget left than it did.
+  // Only the header line is outside the count, and it cannot be inside it — it
+  // reports the count.
+  const body = entries.map((entry) => `#${entry.seq} ${entry.role}\n${entry.text}`).join('\n\n')
+  const tokens = estimateTokens(body)
   const cap = Math.min(deps.maxCallTokens, remaining)
   if (tokens > cap) {
     throw coded(
@@ -215,19 +237,21 @@ function read(args: Input, agent: Agent | undefined, deps: Deps): Output {
   return {
     fromSeq: entries[0]!.seq,
     toSeq: entries[entries.length - 1]!.seq,
+    body,
     messages: entries,
     estimatedTokens: tokens,
-    // Advisory, and deliberately optimistic: the durable fold will charge this
-    // call by the RESULT, which carries this tool's own framing on top of the
-    // span. The next call recomputes from the log rather than from this number.
+    // Short of the durable fold's charge by one header line and the message
+    // framing — a small constant now, where it used to be a per-message prefix.
+    // The next call recomputes from the log rather than from this number.
     remainingSessionTokens: Math.max(0, remaining - tokens),
   }
 }
 
 function renderRecall(value: Output): string {
   const head = `[history ${value.fromSeq}–${value.toSeq} · ${value.messages.length} message(s) · ~${value.estimatedTokens} tokens · ~${value.remainingSessionTokens} of this session's recall budget left]`
-  const body = value.messages.map((entry) => `#${entry.seq} ${entry.role}\n${entry.text}`)
-  return [head, ...body].join('\n\n')
+  // `body` is the string the budget was measured against, carried on the value
+  // rather than rebuilt here: measured and emitted can then not drift apart.
+  return `${head}\n\n${value.body}`
 }
 
 /**

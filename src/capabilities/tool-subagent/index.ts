@@ -33,7 +33,7 @@ import { createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
 import { effectiveSandboxMode, narrowest, SANDBOX, SANDBOX_MODES, type Sandbox, type SandboxMode } from '../../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, foldLastAssistantText, foldLastTurnEnd, matches, type Session, type TurnEndReason } from '../../core/session/index.ts'
-import { defineTool, DELEGATION_TOOL, TOOLS, type ToolContext, type ToolRestriction, type Tools } from '../../core/tools/index.ts'
+import { defineTool, DELEGATION_TOOL, RECALL_TOOL, TOOLS, type ToolContext, type ToolRestriction, type Tools } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
 
 export interface SubagentConfig {
@@ -147,9 +147,13 @@ interface Deps {
  * child inherits: a scoped registration is never inherited (`core/scope.ts`).
  */
 function delegationToolNames(tools: Tools): string[] {
+  return taggedToolNames(tools, DELEGATION_TOOL)
+}
+
+function taggedToolNames(tools: Tools, tag: string): string[] {
   return tools
     .list()
-    .filter((definition) => definition.tags?.includes(DELEGATION_TOOL))
+    .filter((definition) => definition.tags?.includes(tag))
     .map((definition) => definition.name)
 }
 
@@ -212,9 +216,24 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   // hidden AND unknown, so a depth limit is a fact about the child's world
   // rather than an error it discovers by trying.
   const childMayDelegate = depth + 1 <= deps.config.maxDepth
-  const denied = [...(childMayDelegate ? [] : delegationToolNames(deps.ctx.get(TOOLS))), ...(deps.config.toolFilter?.deny ?? [])]
+  const tools = deps.ctx.get(TOOLS)
+  const denied = [...(childMayDelegate ? [] : delegationToolNames(tools)), ...(deps.config.toolFilter?.deny ?? [])]
+  // A recall tool survives an `allow` filter, for the same reason the delegation
+  // tool does when the child may still delegate: the filter says what WORK the
+  // child is scoped to, and reading back its own shadowed history is not work
+  // it was scoped away from — it is the child's own context. Without this, a
+  // child under `allow` that compacts is handed a durable summary naming a tool
+  // its schemas do not contain, and spends a step learning that.
   const restriction: ToolRestriction = {
-    ...(deps.config.toolFilter?.allow === undefined ? {} : { allow: [...deps.config.toolFilter.allow, ...(childMayDelegate ? [deps.toolName] : [])] }),
+    ...(deps.config.toolFilter?.allow === undefined
+      ? {}
+      : {
+          allow: [
+            ...deps.config.toolFilter.allow,
+            ...(childMayDelegate ? [deps.toolName] : []),
+            ...taggedToolNames(tools, RECALL_TOOL),
+          ],
+        }),
     ...(denied.length > 0 ? { deny: denied } : {}),
   }
   // The parent's WORLD — the inheritable half of what it was composed from,
