@@ -3,7 +3,6 @@ import type { CallId } from '../ids.ts'
 import type { JsonValue } from '../json.ts'
 import type { Agent } from '../agent/types.ts'
 import type { ContentBlock, Message, ToolSchema } from '../llm/types.ts'
-import type { ToolCallView } from './presentation.ts'
 
 /** Immutable identity of one tool call through the pipeline. */
 export interface ToolExecution {
@@ -51,7 +50,6 @@ export interface ToolDefinition<Args = unknown, Value extends JsonValue = JsonVa
   readonly output: z.ZodType<Value>
   render(args: Args, value: Value): ContentBlock[]
   execute(args: Args, exec: ToolContext): Value | Promise<Value>
-  presentCall?(args: Args): ToolCallView
   /**
    * Wall-clock budget for the body, counted from AFTER the gate — a human
    * deliberating over an approval never spends a tool's deadline. Omitted

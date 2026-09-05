@@ -11,11 +11,10 @@ import { AGENTS, mergeAgentOptions, type AgentHandle, type AgentOptions } from '
 import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
 import { SANDBOX, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
-import { messageText } from '../core/llm/message.ts'
 import { PRESETS } from '../core/presets/index.ts'
 import { SETTINGS } from '../core/settings/index.ts'
 import type { JsonValue } from '../core/json.ts'
-import { ASSISTANT_MESSAGE, matches, SESSION_EVENT, TURN_END, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
+import { foldLastAssistantText, foldLastTurnEnd, SESSION_EVENT, type SessionEventFrame } from '../core/session/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { compose, COMPOSITION, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
 import { applyLayers, type NamedLayer } from './config.ts'
@@ -205,11 +204,12 @@ async function drive(handle: AgentHandle, task: string | undefined): Promise<Tas
     }
     await handle.agent.session.flush()
     const events = handle.agent.session.facts
+    const reason = foldLastTurnEnd(events)?.kind ?? 'unknown'
     return {
-      exitCode: foldReason(events) === 'completed' ? 0 : 1,
+      exitCode: reason === 'completed' ? 0 : 1,
       sessionId: asSessionId(handle.agent.id),
-      text: foldFinalText(events),
-      reason: foldReason(events),
+      text: foldLastAssistantText(events),
+      reason,
     }
   } finally {
     await handle.dispose()
@@ -285,23 +285,4 @@ export async function forkTask(options: ContinueOptions, onEvent?: EventListener
   } finally {
     await root.dispose()
   }
-}
-
-function foldFinalText(events: readonly EventEnvelope[]): string {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]!
-    if (matches(event, ASSISTANT_MESSAGE)) {
-      const text = messageText(event.data.message)
-      if (text.length > 0) return text
-    }
-  }
-  return ''
-}
-
-function foldReason(events: readonly EventEnvelope[]): string {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]!
-    if (matches(event, TURN_END)) return event.data.reason.kind
-  }
-  return 'unknown'
 }

@@ -1,7 +1,7 @@
 /** The session subsystem: the append-only log, its surface, and the store seam. */
 export * from './types.ts'
 export { Session, SessionForkError, sliceForkSeed, type SessionHost } from './session.ts'
-export { deriveEventMessage, foldRequestContext, foldRequestHeader, foldSurfaceSeqs, Surface } from './surface.ts'
+export { deriveEventMessage, foldLastAssistantText, foldLastTurnEnd, foldRequestContext, foldRequestHeader, foldSurfaceSeqs, Surface } from './surface.ts'
 export { repairInterruptedTail } from './repair.ts'
 export {
   DEFAULT_PAGE_MESSAGES,

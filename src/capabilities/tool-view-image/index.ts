@@ -32,7 +32,7 @@ import { FS, FsError, type Fs, type FsActor } from '../../core/fs/index.ts'
 import { imageDescriptor } from '../../core/llm/content.ts'
 import { LLM, type ContentBlock, type Llm } from '../../core/llm/index.ts'
 import { foldRequestContext } from '../../core/session/index.ts'
-import { defineTool, TOOLS, type ToolCallView, type ToolContext } from '../../core/tools/index.ts'
+import { defineTool, TOOLS, type ToolContext } from '../../core/tools/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 
 const DESCRIPTION = `Look at an image file in the workspace.
@@ -193,7 +193,6 @@ export const toolViewImagePlugin: Plugin = {
         description: DESCRIPTION,
         input: InputSchema,
         output: OutputSchema,
-        presentCall: (args): ToolCallView => ({ card: 'generic', title: `view image ${args.path}`, kind: 'read', locations: [{ path: args.path }] }),
         // The block the model actually sees: the reference, and the descriptor
         // that stands in for it wherever the bytes cannot go.
         render: (_args, value) => [

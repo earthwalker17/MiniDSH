@@ -15,7 +15,8 @@
  */
 import { z } from 'zod'
 import { serviceKey, type Context, type Plugin } from '../../kernel/index.ts'
-import { AGENT_CREATED, AGENTS } from '../agent/index.ts'
+import { AGENT_CREATED } from '../agent/events.ts'
+import { AGENTS } from '../agent/index.ts'
 import { createPluginMessage } from '../llm/message.ts'
 import type { Session } from '../session/index.ts'
 import { SHELL } from '../shell/index.ts'

@@ -29,10 +29,10 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, type AgentOptions, type CreateAgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
-import { messageText, createUserMessage } from '../../core/llm/message.ts'
+import { createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
 import { effectiveSandboxMode, narrowest, SANDBOX, SANDBOX_MODES, type Sandbox, type SandboxMode } from '../../core/sandbox/index.ts'
-import { ASSISTANT_MESSAGE, matches, TURN_END, type Session, type TurnEndReason } from '../../core/session/index.ts'
+import { ASSISTANT_MESSAGE, foldLastAssistantText, foldLastTurnEnd, matches, type Session, type TurnEndReason } from '../../core/session/index.ts'
 import { defineTool, TOOLS, type ToolContext, type ToolRestriction } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
 
@@ -168,23 +168,9 @@ function captureAuthority(parent: Agent, sandbox: Sandbox, ceiling: SandboxMode 
   return { mode: ceiling === undefined ? inherited : narrowest(inherited, ceiling) }
 }
 
-/** The last non-empty assistant text of a session — what a child answers with. */
-function finalText(session: Session): string {
-  for (let i = session.facts.length - 1; i >= 0; i--) {
-    const event = session.facts[i]!
-    if (!matches(event, ASSISTANT_MESSAGE)) continue
-    const text = messageText(event.data.message)
-    if (text.length > 0) return text
-  }
-  return ''
-}
-
+/** How the child's turn ended; a child whose log holds no turn at all is its own error. */
 function finalReason(session: Session): TurnEndReason {
-  for (let i = session.facts.length - 1; i >= 0; i--) {
-    const event = session.facts[i]!
-    if (matches(event, TURN_END)) return event.data.reason
-  }
-  return { kind: 'error', code: 'NO_TURN', message: 'the subagent never ran a turn' }
+  return foldLastTurnEnd(session.facts) ?? { kind: 'error', code: 'NO_TURN', message: 'the subagent never ran a turn' }
 }
 
 /** Everything the child's own log priced, summed — the parent's record of what the delegation cost. */
@@ -314,7 +300,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     const reason: TurnEndReason = lost
       ? { kind: 'error', code: 'DURABILITY_LOST', message: lost instanceof Error ? lost.message : String(lost) }
       : finalReason(child.session)
-    const output = finalText(child.session)
+    const output = foldLastAssistantText(child.session.facts)
     const usage = childUsage(child.session)
     parent.session.append(SUBAGENT_END, { callId: exec.callId, childId: child.id, reason, ...(usage === undefined ? {} : { usage }) })
     if (reason.kind !== 'completed') {
@@ -371,7 +357,6 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
         // registry deadline here would kill a child mid-effect and leave its
         // log open, and the caller's cancellation already reaches it.
         timeoutMs: null,
-        presentCall: (args) => ({ card: 'generic', title: args.description, kind: 'other' }),
         render: (_args, value) => [{ type: 'text', text: value.output.length > 0 ? value.output : '(the subagent produced no text)' }],
         execute: (args, exec) => delegate(args, exec, deps),
       }),

@@ -1,9 +1,8 @@
-/** The tool registry, guarded execution pipeline, and render-intent vocabulary. */
+/** The tool registry and its guarded execution pipeline. */
 import type { JsonValue } from '../json.ts'
 import type { ToolDefinition } from './types.ts'
 
 export * from './types.ts'
-export * from './presentation.ts'
 export {
   TOOLS,
   TOOLS_PRE_EXECUTE,

@@ -27,6 +27,7 @@ import {
   AGENTS,
   resolveCallConfig,
   type Agent,
+  type Agents,
   type CallConfig,
   type RequestErrorAction,
 } from '../../core/agent/index.ts'
@@ -48,7 +49,7 @@ import { AuxCallError, LLM, runAuxCall, type Llm } from '../../core/llm/index.ts
 import { createPluginMessage } from '../../core/llm/message.ts'
 import type { LlmRequest, Message } from '../../core/llm/types.ts'
 import { estimateMessage, meterSession } from '../../core/metering/index.ts'
-import { PROMPT, type AssembledPrompt } from '../../core/prompt/index.ts'
+import { PROMPT, type AssembledPrompt, type Prompt } from '../../core/prompt/index.ts'
 import { deriveEventMessage, foldRequestContext, USER_MESSAGE } from '../../core/session/index.ts'
 
 export interface CompactionBasicConfig {
@@ -129,7 +130,10 @@ ${summary}`
 }
 
 class BasicCompaction implements Compaction {
-  private readonly ctx: Context
+  /** Declared dependencies, read once: every trigger below is an `agent/*` listener, so none of these is optional. */
+  private readonly llm: Llm
+  private readonly prompt: Prompt
+  private readonly agents: Agents
   private readonly config: {
     readonly thresholdRatio: number
     readonly retainRatio: number
@@ -146,7 +150,9 @@ class BasicCompaction implements Compaction {
   private readonly overflows = new WeakMap<Agent, { key: string; count: number }>()
 
   constructor(ctx: Context, config: CompactionBasicConfig | undefined) {
-    this.ctx = ctx
+    this.llm = ctx.get(LLM)
+    this.prompt = ctx.get(PROMPT)
+    this.agents = ctx.get(AGENTS)
     this.config = {
       thresholdRatio: config?.thresholdRatio ?? 0.8,
       retainRatio: config?.retainRatio ?? 0.16,
@@ -181,10 +187,8 @@ class BasicCompaction implements Compaction {
   }
 
   private windowOf(provider: string, model: string): number {
-    const llm = this.ctx.tryGet(LLM)
-    if (!llm) return 0
     try {
-      return llm.resolveModel(provider, model).contextWindow
+      return this.llm.resolveModel(provider, model).contextWindow
     } catch {
       return 0
     }
@@ -255,10 +259,6 @@ class BasicCompaction implements Compaction {
   }
 
   private async compact(agent: Agent, trigger: CompactionTrigger, signal?: AbortSignal): Promise<CompactionOutcome> {
-    const llm = this.ctx.tryGet(LLM)
-    const prompt = this.ctx.tryGet(PROMPT)
-    if (!llm || !prompt) return { kind: 'nothing-to-do' }
-
     const session = agent.session
     // Captured before ANY await. `compactNow` gates on an idle agent, but two
     // awaits stand between that gate and here — the route resolution and the
@@ -280,7 +280,7 @@ class BasicCompaction implements Compaction {
     // with no end appended, leaving an orphan that the log's own vocabulary
     // defines as a crash, a disposal or a fork boundary on a session that is
     // healthy and live. It depends on neither the plan nor the route.
-    const assembled = await prompt.assemble(agent)
+    const assembled = await this.prompt.assemble(agent)
     const plan = planCompaction(session.facts, session.surfaceSeqs(), {
       budgetTokens: this.planBudget(route, budget),
       retainRatio: this.config.retainRatio,
@@ -304,7 +304,7 @@ class BasicCompaction implements Compaction {
       return { kind: 'nothing-to-do', reason }
     }
 
-    const summary = await this.summarise(llm, assembled, agent, plan, route, signal)
+    const summary = await this.summarise(assembled, agent, plan, route, signal)
 
     // ---- no `await` past this line, or the checks mean nothing -------------
     // The registry check comes FIRST — before even the summary’s own outcome —
@@ -314,7 +314,7 @@ class BasicCompaction implements Compaction {
     // which aborts the aux call and returns `cancelled`, so ordering this behind
     // the summary check would append into a session whose descriptor is already
     // closed on exactly the commonest path.
-    if (this.ctx.tryGet(AGENTS)?.get(agent.id) !== agent) return { kind: 'nothing-to-do', reason: 'agent-gone' }
+    if (this.agents.get(agent.id) !== agent) return { kind: 'nothing-to-do', reason: 'agent-gone' }
     if (summary.kind !== 'text') return decline(summary.kind === 'no-messages' ? 'plan-stale' : summary.kind === 'empty' ? 'summary-empty' : summary.kind === 'cancelled' ? 'cancelled' : 'summary-failed')
     if (agent.status !== statusBefore) {
       // The EXIT race: a turn started during the summary, so this replace can no
@@ -377,14 +377,7 @@ class BasicCompaction implements Compaction {
    * to the prefix of the requests the loop has been sending, so the provider
    * serves most of it from cache.
    */
-  private async summarise(
-    llm: Llm,
-    assembled: AssembledPrompt,
-    agent: Agent,
-    plan: CompactionPlan,
-    route: CallConfig,
-    signal?: AbortSignal,
-  ): Promise<SummaryResult> {
+  private async summarise(assembled: AssembledPrompt, agent: Agent, plan: CompactionPlan, route: CallConfig, signal?: AbortSignal): Promise<SummaryResult> {
     const session = agent.session
     const messages: Message[] = []
     for (const seq of plan.shadowedSeqs) {
@@ -413,7 +406,7 @@ class BasicCompaction implements Compaction {
       sessionId: session.id,
     }
     try {
-      const result = await runAuxCall(llm, session, request, plan.shadowedSeqs)
+      const result = await runAuxCall(this.llm, session, request, plan.shadowedSeqs)
       // An empty answer (the model called a tool instead of writing prose)
       // is not a summary. The failed call stays in the log; the surface does not move.
       return result.text.trim().length === 0 ? { kind: 'empty' } : { kind: 'text', text: result.text, seq: result.seq }
@@ -433,7 +426,7 @@ class BasicCompaction implements Compaction {
 /** Provides `ctx.compaction` and mounts the automatic triggers. */
 export const compactionBasicPlugin: Plugin<CompactionBasicConfig | undefined> = {
   name: 'compaction-basic',
-  inject: [LLM, PROMPT],
+  inject: [LLM, PROMPT, AGENTS],
   config: configSchema,
   apply(ctx, config) {
     const engine = new BasicCompaction(ctx, config)

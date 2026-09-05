@@ -9,7 +9,7 @@
  * log — the hash covers them.
  */
 import type { Plugin } from '../../kernel/index.ts'
-import { AGENT_CREATED } from '../../core/agent/index.ts'
+import { AGENT_CREATED } from '../../core/agent/events.ts'
 import { eventKind, matches, type EventEnvelope } from '../../core/session/index.ts'
 
 export interface CompositionAppliedRow {

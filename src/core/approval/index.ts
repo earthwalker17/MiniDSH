@@ -10,7 +10,7 @@
  */
 import { z } from 'zod'
 import { serviceKey, waterfallEvent, type Plugin } from '../../kernel/index.ts'
-import { AGENT_CREATED } from '../agent/index.ts'
+import { AGENT_CREATED } from '../agent/events.ts'
 import type { Agent } from '../agent/types.ts'
 import type { CallId } from '../ids.ts'
 import type { Session } from '../session/index.ts'

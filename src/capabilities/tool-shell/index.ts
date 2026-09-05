@@ -16,7 +16,7 @@ import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { isWider, SANDBOX, SANDBOX_MODES, SandboxError, type Sandbox, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL } from '../../core/shell/index.ts'
 import { excerptWithSpill, excerptWithoutSpill, SPILL } from '../../core/spill/index.ts'
-import { defineTool, TOOLS, type ToolCallView, type ToolContext } from '../../core/tools/index.ts'
+import { defineTool, TOOLS, type ToolContext } from '../../core/tools/index.ts'
 
 export interface ShellToolConfig {
   readonly timeoutMs?: number | undefined
@@ -97,7 +97,6 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
     // consent — and a grant landing after TOOL_TIMEOUT ran the command on a
     // call the model had already been told was over.
     timeoutMs: null,
-    presentCall: (args): ToolCallView => ({ card: 'terminal', title: args.command }),
     render: (_args, value) => {
       const suffix = value.exitCode !== null && value.exitCode !== 0 ? `\n[exit code: ${value.exitCode}]` : ''
       return [{ type: 'text', text: (value.output.length > 0 ? value.output : '(no output)') + suffix }]

@@ -6,7 +6,7 @@
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { FS, FS_EDIT_INTENT, FsError, type Fs, type FsActor, type FsObservation, type FsTarget } from '../../core/fs/index.ts'
-import { defineTool, TOOLS, type ToolCallView } from '../../core/tools/index.ts'
+import { defineTool, TOOLS } from '../../core/tools/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 
 const DESCRIPTION = `Custom editing tool for viewing, creating and editing files.
@@ -75,12 +75,6 @@ function buildEditor(ctx: Context, maxOutputChars: number) {
     input: InputSchema,
     output: OutputSchema,
     render: (_args, value) => [{ type: 'text', text: value.text }],
-    presentCall: (args): ToolCallView => {
-      if (args.command === 'view') return { card: 'generic', title: `view ${args.path}`, kind: 'read', locations: [{ path: args.path }] }
-      if (args.command === 'create') return { card: 'diff', title: `create ${args.path}`, path: args.path }
-      if (args.command === 'str_replace') return { card: 'diff', title: `edit ${args.path}`, path: args.path }
-      return { card: 'generic', title: `insert into ${args.path}`, kind: 'edit', locations: [{ path: args.path }] }
-    },
     execute: async (args: Input, exec) => {
       const actor: FsActor = exec.agent ? { agent: exec.agent } : {}
       const target = fs.resolve(args.path, cwdOf(exec.agent))

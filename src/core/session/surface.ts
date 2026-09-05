@@ -1,4 +1,4 @@
-import { restoreMessage } from '../llm/message.ts'
+import { messageText, restoreMessage } from '../llm/message.ts'
 import type { Message } from '../llm/types.ts'
 import {
   ASSISTANT_MESSAGE,
@@ -7,11 +7,37 @@ import {
   REQUEST_HEADER,
   SURFACE_TYPES,
   TOOL_RESULT,
+  TURN_END,
   USER_MESSAGE,
   type EventEnvelope,
   type RequestContextRecord,
   type RequestHeader,
+  type TurnEndReason,
 } from './types.ts'
+
+/**
+ * The last non-empty assistant text in a log — what a headless run prints and
+ * what a delegated child answers with. One fold, because the two surfaces that
+ * need it sit in layers that may not import each other.
+ */
+export function foldLastAssistantText(events: readonly EventEnvelope[]): string {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!
+    if (!matches(event, ASSISTANT_MESSAGE)) continue
+    const text = messageText(restoreMessage(event.data.message))
+    if (text.length > 0) return text
+  }
+  return ''
+}
+
+/** How the last turn ended, or `undefined` for a log that never ran one. */
+export function foldLastTurnEnd(events: readonly EventEnvelope[]): TurnEndReason | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!
+    if (matches(event, TURN_END)) return event.data.reason
+  }
+  return undefined
+}
 
 /**
  * THE per-node projection rule, shared by the store and the reconstruction

@@ -1,6 +1,6 @@
 import type { Plugin } from '../../kernel/index.ts'
 import { INVARIANTS, type InvariantInstaller } from '../invariants/index.ts'
-import { AGENT_STATUS } from './index.ts'
+import { AGENT_STATUS } from './events.ts'
 import type { Agent, AgentStatus } from './types.ts'
 
 /** `agent/status` never repeats a value — a no-op transition signals a driver bug. */

@@ -3,13 +3,13 @@
  * inbox, and the whole `agent/*` event vocabulary. This package has NO
  * dependency on the loop, so the driver behind the factory is replaceable.
  */
-import { emitEvent, serialEvent, serviceKey, waterfallEvent, type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
+import { serviceKey, type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
 import type { SessionId } from '../ids.ts'
 import { restoreMessage } from '../llm/message.ts'
-import type { Message, TokenUsage } from '../llm/types.ts'
+import type { Message } from '../llm/types.ts'
 import { delegationPin } from '../approval/events.ts'
 import { PERSISTENCE, type StoredSession } from '../persistence/index.ts'
-import { delegationCeiling, type SandboxMode } from '../sandbox/events.ts'
+import { delegationCeiling } from '../sandbox/events.ts'
 import {
   eventKind,
   foldRequestHeader,
@@ -19,99 +19,27 @@ import {
   type EventEnvelope,
   type Session,
   type SessionHeader,
-  type TurnEndReason,
 } from '../session/index.ts'
+import { AGENT_CREATED, AGENT_DISPOSED, AGENT_REQUEST, foldAgentOptions } from './events.ts'
 import type {
   Agent,
   AgentFactory,
   AgentHandle,
   AgentOptions,
-  AgentOptionsReason,
-  AgentStatus,
   CallConfig,
   CancelCause,
   CreateAgentOptions,
   ForkAgentOptions,
   InboxTarget,
-  PreStepContext,
-  PreStepDecision,
   RequestContext,
-  RequestErrorAction,
-  RequestErrorContext,
   ResumeAgentOptions,
-  TurnStoppingContext,
 } from './types.ts'
 
 export * from './types.ts'
-
-// ---- events ---------------------------------------------------------------
-
-export const AGENT_CREATED = emitEvent<[agent: Agent]>('agent/created')
-export const AGENT_DISPOSED = emitEvent<[agent: Agent]>('agent/disposed')
-export const AGENT_STATUS = emitEvent<[agent: Agent, status: AgentStatus]>('agent/status')
-export const AGENT_ERROR = emitEvent<[agent: Agent, error: unknown]>('agent/error')
-export const AGENT_INBOX_INSERTED = emitEvent<[agent: Agent, message: Message, target: InboxTarget]>('agent/inbox/inserted')
-export const AGENT_INBOX_CLAIMED = emitEvent<[agent: Agent, message: Message]>('agent/inbox/claimed')
-export const AGENT_INBOX_DISCARDED = emitEvent<[agent: Agent, message: Message]>('agent/inbox/discarded')
-
-export const AGENT_PRE_STEP = waterfallEvent<[context: PreStepContext], Promise<PreStepDecision>>('agent/pre-step')
-export const AGENT_REQUEST = waterfallEvent<[context: RequestContext], Promise<RequestContext['config']>>('agent/request')
-export const AGENT_REQUEST_ERROR = waterfallEvent<[context: RequestErrorContext], Promise<RequestErrorAction>>('agent/request-error')
-export const AGENT_TURN_STOPPING = serialEvent<[context: TurnStoppingContext]>('agent/turn-stopping')
-
-// ---- delegation -------------------------------------------------------------
-
-/**
- * The two log-only records a parent writes about a child it started, in the
- * PARENT's session; the child's own steps live in the child's own log, where
- * `sessions show <child>` reads them.
- *
- * They live here rather than in the tool that writes them because delegation is
- * a runtime concept the log records, not one tool's private bookkeeping: the
- * lineage half is already here (`SessionHeader.delegatedBy`/`delegationDepth`,
- * and `agents.fork` refusing a boundary below a child's opening stamps). Two
- * things needed that: `app/present.ts` — the one projection every plain-text
- * surface shares — was the only app module importing a capability for its
- * vocabulary, and no capability could name a delegation at all, because a
- * capability may not import another (`scripts/check-deps.ts`).
- */
-export const SUBAGENT_START = eventKind<{
-  readonly callId: string
-  readonly childId: string
-  readonly depth: number
-  readonly provider: string
-  readonly model: string
-  readonly sandbox: SandboxMode
-  readonly approval: 'never'
-}>('subagent/start')
-
-/** How the child's turn ended, and what it cost. */
-export const SUBAGENT_END = eventKind<{
-  readonly callId: string
-  readonly childId: string
-  readonly reason: TurnEndReason
-  readonly usage?: TokenUsage
-}>('subagent/end')
-
-// ---- the base route ---------------------------------------------------------
-
-/**
- * Log-only, folded by `findLast`: the BASE route and limits an agent runs
- * from. Written at creation (`initial`), by `Agent.configure` (`change`), and
- * by an override at resume (`resume`) — the same discipline as the authority
- * knobs. The effective per-request route lives in `request/header` and
- * `request/context`; this record is what a resume rebuilds from, so a role
- * that rewrote the last request can never become the base.
- */
-export const AGENT_OPTIONS = eventKind<{ options: AgentOptions; reason: AgentOptionsReason }>('agent/options')
-
-export function foldAgentOptions(events: readonly EventEnvelope[]): AgentOptions | undefined {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]!
-    if (matches(event, AGENT_OPTIONS)) return event.data.options
-  }
-  return undefined
-}
+// The vocabulary lives below the service (`events.ts`), like the sandbox and
+// approval vocabularies, so a core service can name an agent event without
+// importing this registry; every caller keeps importing it from here.
+export * from './events.ts'
 
 /** Canonical form for equality and for the log: optional fields absent, never `undefined`. */
 export function canonicalAgentOptions(options: AgentOptions): AgentOptions {
