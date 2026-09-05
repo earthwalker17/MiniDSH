@@ -17,7 +17,8 @@ import type { ContentBlock, Message } from '../../core/llm/index.ts'
 import { SANDBOX } from '../../core/sandbox/index.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import { matches, TOOL_RESULT, type EventEnvelope, type Session } from '../../core/session/index.ts'
-import { TOOLS } from '../../core/tools/index.ts'
+import { defineTool, TOOLS } from '../../core/tools/index.ts'
+import { z } from 'zod'
 import { bootComposition } from '../../app/headless.ts'
 import type { Patch } from '../../app/compose.ts'
 import { auditLines, describeEvent } from '../../app/present.ts'
@@ -363,6 +364,59 @@ describe('a second delegation row', () => {
     const names = (childCalls[0]!.tools ?? []).map((tool) => tool.name)
     expect(names).not.toContain('subagent')
     expect(names).not.toContain('verify')
+  })
+
+  /**
+   * The defect the ref-counted module map caused, and the reason the deny set
+   * is now a tag read through one registry.
+   *
+   * Two compositions in one process. B mounts a delegation row named `verify`;
+   * A has an ordinary tool of that name and no second delegation row at all.
+   * With a process-global name map, B's mount put `verify` into it, and A's
+   * child at the cap lost a tool A had every right to. Nothing in A's own
+   * composition said so, and nothing in A's tests could see it.
+   */
+  it('never denies a child a tool another composition in this process happens to have named the same', async () => {
+    const collide: Patch = {
+      insert: [
+        {
+          id: 'plain-verify',
+          plugin: {
+            name: 'plain-verify',
+            inject: [TOOLS],
+            apply: (ctx: Context) =>
+              void ctx.get(TOOLS).register(
+                ctx,
+                defineTool({
+                  name: 'verify',
+                  description: 'An ordinary tool that happens to be called verify.',
+                  input: z.object({}),
+                  output: z.object({ ok: z.boolean() }),
+                  render: () => [{ type: 'text', text: 'ok' }],
+                  execute: () => ({ ok: true }),
+                }),
+              ),
+          },
+        },
+      ],
+    }
+    // A: the ordinary `verify`, one delegation row, children at the cap.
+    const a = await world([collide, { id: 'tool-subagent', config: { maxDepth: 1 } }])
+    // B: live at the same time, with a DELEGATION tool of that name.
+    await world([{ insert: [VERIFIER] }])
+
+    a.adapter.script(assistantToolCall('call-1', 'subagent', { description: 'a task', prompt: 'list your tools' }), assistantText('seen'), assistantText('done'))
+    const handle = await a.create()
+    handle.agent.followup(createUserMessage('delegate'))
+    await handle.agent.whenIdle()
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    const childCalls = a.adapter.calls.filter((call) => call.sessionId === start.childId)
+    expect(childCalls.length, 'the child never made a request').toBeGreaterThan(0)
+    const names = (childCalls[0]!.tools ?? []).map((tool) => tool.name)
+    // At the cap, so A's own delegation tool is gone…
+    expect(names).not.toContain('subagent')
+    // …and B's row cannot reach across and take A's ordinary tool with it.
+    expect(names).toContain('verify')
   })
 
   it('resolves its route under its own purpose, so a role can send it elsewhere', async () => {
