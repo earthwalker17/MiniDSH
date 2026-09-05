@@ -50,7 +50,8 @@ import { createPluginMessage } from '../../core/llm/message.ts'
 import type { LlmRequest, Message } from '../../core/llm/types.ts'
 import { estimateMessage, meterSession } from '../../core/metering/index.ts'
 import { PROMPT, type AssembledPrompt, type Prompt } from '../../core/prompt/index.ts'
-import { deriveEventMessage, foldRequestContext, USER_MESSAGE } from '../../core/session/index.ts'
+import { deriveEventMessage, foldRequestContext, matches, USER_MESSAGE, type Session } from '../../core/session/index.ts'
+import { RECALL_TOOL, TOOLS } from '../../core/tools/index.ts'
 
 export interface CompactionBasicConfig {
   /** Compact when the projected request reaches this fraction of the budget. */
@@ -121,16 +122,53 @@ Write a summary in Markdown with exactly these sections, using terse bullets. In
 
 If an earlier summary appears above, merge its content rather than copying it verbatim. Reply with the summary only.`
 
-function frame(summary: string): string {
+/**
+ * The code-written frame around a model-written summary.
+ *
+ * The second line is what makes the replace ADDRESSABLE. The log keeps every
+ * node a summary shadowed and always has; without their seqs the model has a
+ * summary it cannot check and no way to ask about what it lost. It names the
+ * union across the whole session rather than this attempt's own span, because
+ * a second compaction shadows the first summary — the note carrying the first
+ * range included. The seqs are not contiguous (the span is contiguous in
+ * SURFACE order, and log-only facts sit between), which is why it names a count
+ * as well and why the recall tool intersects rather than trusting the range.
+ *
+ * The recall sentence appears only when this deployment actually mounted a tool
+ * tagged `RECALL_TOOL`: a durable node must not promise an affordance the
+ * composition does not have.
+ */
+function frame(summary: string, shadowed: { readonly from: number; readonly to: number; readonly count: number }, recallTool: string | undefined): string {
+  const recall =
+    recallTool === undefined
+      ? ''
+      : ` Read a range of them back with \`${recallTool}\` when this summary is missing a specific fact you need; it is budgeted, so ask for the narrowest range that answers your question.`
   return `<system-reminder>
 The earlier part of this conversation was replaced by the summary below to stay within the context window. The full history remains in the session log; only what you can see has changed. Continue the work from here.
+Log seqs ${shadowed.from}–${shadowed.to} (${shadowed.count} messages) are what the summaries replaced.${recall}
 </system-reminder>
 
 ${summary}`
 }
 
+/** The name of the recall tool this deployment mounted, if it mounted one. */
+function recallToolName(ctx: Context): string | undefined {
+  return ctx.tryGet(TOOLS)?.list().find((definition) => definition.tags?.includes(RECALL_TOOL))?.name
+}
+
+/** Every seq any applied compaction in this session has shadowed, this attempt's plan included. */
+function shadowedSoFar(session: Session, plan: CompactionPlan): { readonly from: number; readonly to: number; readonly count: number } {
+  const seqs = new Set<number>(plan.shadowedSeqs)
+  for (const event of session.facts) {
+    if (matches(event, COMPACTION_APPLIED)) for (const seq of event.data.shadowedSeqs) seqs.add(seq)
+  }
+  const sorted = [...seqs].toSorted((a, b) => a - b)
+  return { from: sorted[0]!, to: sorted[sorted.length - 1]!, count: sorted.length }
+}
+
 class BasicCompaction implements Compaction {
   /** Declared dependencies, read once: every trigger below is an `agent/*` listener, so none of these is optional. */
+  private readonly ctx: Context
   private readonly llm: Llm
   private readonly prompt: Prompt
   private readonly agents: Agents
@@ -150,6 +188,7 @@ class BasicCompaction implements Compaction {
   private readonly overflows = new WeakMap<Agent, { key: string; count: number }>()
 
   constructor(ctx: Context, config: CompactionBasicConfig | undefined) {
+    this.ctx = ctx
     this.llm = ctx.get(LLM)
     this.prompt = ctx.get(PROMPT)
     this.agents = ctx.get(AGENTS)
@@ -327,7 +366,7 @@ class BasicCompaction implements Compaction {
     const live = session.surfaceSeqs()
     if (!planIsLive(plan, live)) return decline('plan-stale')
 
-    const message = createPluginMessage(PLUGIN, frame(summary.text), 'summary')
+    const message = createPluginMessage(PLUGIN, frame(summary.text, shadowedSoFar(session, plan), recallToolName(this.ctx)), 'summary')
     // Both surface numbers are ESTIMATOR units and include the summary node the
     // replace is about to insert. They are measured from the LIVE surface here,
     // not from the plan: on the explicit path an idle agent may have completed a

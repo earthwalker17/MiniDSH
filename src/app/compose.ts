@@ -36,6 +36,7 @@ import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructi
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { toolShellPlugin } from '../capabilities/tool-shell/index.ts'
 import { toolSubagentPlugin } from '../capabilities/tool-subagent/index.ts'
+import { toolHistoryPlugin } from '../capabilities/tool-history/index.ts'
 
 export interface Row {
   readonly id: string
@@ -79,6 +80,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       toolEditorPlugin,
       toolShellPlugin,
       toolSubagentPlugin,
+      toolHistoryPlugin,
       toolViewImagePlugin,
       contextRuntimePlugin,
       workspaceInstructionsPlugin,
@@ -337,6 +339,9 @@ export function compose(options: ComposeOptions): Row[] {
     }),
   )
   rows.push(defineRow('compaction', compactionBasicPlugin, {}))
+  // Beside compaction, because it only ever reads what a compaction shadowed.
+  // It costs an agent nothing until that agent's first applied compaction.
+  rows.push(defineRow('tool-history', toolHistoryPlugin, {}))
   rows.push(defineRow('agent', agentPlugin))
   if (withInvariants) rows.push(defineRow('agent-invariant', agentInvariantPlugin))
   rows.push(defineRow('loop', loopPlugin))

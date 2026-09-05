@@ -147,7 +147,13 @@ describe('headless runner (real composition, scripted model)', () => {
       // The shell tool is named after the host dialect, so name it that way
       // rather than pinning one platform.
       const { defaultDialect } = await import('./compose.ts')
-      expect(root.get(TOOLS).schemas().map((schema) => schema.name).toSorted()).toEqual([defaultDialect(), 'str_replace_editor', 'subagent'].toSorted())
+      // `history_read` is registered in the globals so a compaction summary can
+      // name it, and hidden from every agent until that agent's first applied
+      // compaction — so what an agent is OFFERED is the shorter list, asserted
+      // in the recall capability's own tests.
+      expect(root.get(TOOLS).schemas().map((schema) => schema.name).toSorted()).toEqual(
+        [defaultDialect(), 'str_replace_editor', 'subagent', 'history_read'].toSorted(),
+      )
       expect(readdirSync(attachmentsRoot)).toEqual([])
     } finally {
       await root.dispose()
