@@ -39,6 +39,22 @@ export interface ToolResult {
 }
 
 /**
+ * Non-model-facing tool annotations.
+ *
+ * How one capability recognises a KIND of tool another registered without
+ * importing it (capabilities never import each other) and without hard-coding a
+ * name a deployment is free to change. Two exist: the delegation depth cap hides
+ * every delegation tool at the cap, whichever row registered it, and a
+ * compaction summary names the recall tool a deployment mounted, if it mounted
+ * one. Both used to be process-global maps or would have been a literal string
+ * crossing a capability boundary.
+ */
+/** A tool that starts a delegated child agent. */
+export const DELEGATION_TOOL = 'delegation'
+/** A tool that reads back history a compaction shadowed. */
+export const RECALL_TOOL = 'recall'
+
+/**
  * A tool definition. The body returns the canonical value; `render` projects
  * it into model-facing content. Only `{name, description, parameters}` ever
  * reaches the model.
@@ -57,6 +73,13 @@ export interface ToolDefinition<Args = unknown, Value extends JsonValue = JsonVa
    * lifetime). Cooperative: the derived signal notifies, it does not kill.
    */
   readonly timeoutMs?: number | null
+  /**
+   * What KIND of tool this is, for the runtime — never for the model, which
+   * only ever sees `{name, description, parameters}`. See `DELEGATION_TOOL` and
+   * `RECALL_TOOL`; a tag is read through the registry, so what a tag means is
+   * scoped to the deployment that registered it.
+   */
+  readonly tags?: readonly string[]
 }
 
 export type AnyToolDefinition = ToolDefinition<never, JsonValue>

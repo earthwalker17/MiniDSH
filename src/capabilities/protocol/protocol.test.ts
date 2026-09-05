@@ -112,7 +112,7 @@ async function startHost(
     sessionsRoot?: string
     prepare?: (root: Context) => void
     approve?: boolean
-    agentSetup?: (agentCtx: Context) => void
+    agentWorld?: (agentCtx: Context) => void
     agentPreset?: string
     /** Extra clients on their own stream carriers — the multi-client shape, with no socket needed. */
     extraClients?: number
@@ -130,7 +130,7 @@ async function startHost(
     sessionsRoot,
     logger: silent,
     ...(extra?.approve === undefined ? {} : { approve: extra.approve }),
-    ...(extra?.agentSetup === undefined ? {} : { agentSetup: extra.agentSetup }),
+    ...(extra?.agentWorld === undefined ? {} : { agentWorld: extra.agentWorld }),
     ...(extra?.agentPreset === undefined ? {} : { agentPreset: extra.agentPreset }),
     ...(extra?.settingsStorePath === undefined ? {} : { settingsStorePath: extra.settingsStorePath }),
     ...(extra?.agentDefaults === undefined ? {} : { agentDefaults: extra.agentDefaults }),
@@ -445,11 +445,11 @@ describe('protocol: the authority control plane', () => {
     expect(reply.error?.code).toBe(-32602)
   })
 
-  it('applies the configured per-agent setup to every agent the surface creates', async () => {
+  it('applies the configured per-agent world to every agent the surface creates', async () => {
     const adapter = new ScriptedAdapter().script(assistantText('hi'))
     const marker = serviceKey<number>('proto-preset-marker')
     const { host, client } = await startHost(adapter, {
-      agentSetup: (agentCtx) => void agentCtx.provide(marker, 7),
+      agentWorld: (agentCtx) => void agentCtx.provide(marker, 7),
     })
     const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
     await client.waitForIdle(sessionId)
@@ -521,7 +521,7 @@ describe('what the review found', () => {
 
   it('records the preset a surface composed its agents from', async () => {
     const adapter = new ScriptedAdapter().script(assistantText('hi'))
-    const { host, client } = await startHost(adapter, { agentSetup: () => {}, agentPreset: 'reviewer' })
+    const { host, client } = await startHost(adapter, { agentWorld: () => {}, agentPreset: 'reviewer' })
     const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
     await client.waitForIdle(sessionId)
     const agent = host.root.get(AGENTS).get(asSessionId(sessionId))!

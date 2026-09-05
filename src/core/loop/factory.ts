@@ -37,7 +37,7 @@ class LoopFactory implements AgentFactory {
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
       ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }),
     })
-    const agent = new ReactLoopAgent(session, options.agentOptions, options.setup)
+    const agent = new ReactLoopAgent(session, options.agentOptions, options.world)
     // The scope resolves services through the loop context and is keyed by the agent itself.
     const scope = this.ctx.child({ scope: agent, label: `agent:${session.id}` })
     agent.attach(scope)
@@ -69,6 +69,12 @@ class LoopFactory implements AgentFactory {
     const dispose = (): Promise<void> => (lifetime.task ??= run())
 
     try {
+      // The inheritable world first, then what this agent alone needs: a
+      // delegated child composes its parent's world and only then narrows it,
+      // and a stamp written by the narrowing must land after whatever the world
+      // put in the scope. Each is a rollback point of its own.
+      if (options.world) await options.world(scope, agent)
+      if (options.signal?.aborted) throw new Error(`agent ${session.id}: creation aborted during setup`)
       if (options.setup) await options.setup(scope, agent)
       // Publication is atomic: what setup mounted is active (or creation fails) before the agent is visible.
       const report = await scope.settle((plugin) => plugin.scope === agent)

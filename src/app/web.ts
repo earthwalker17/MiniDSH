@@ -36,7 +36,7 @@ export interface WebOptions extends BootOptions {
   readonly port?: number
   /** The launch token; generated when absent. */
   readonly token?: string
-  readonly agentSetup?: (agentCtx: Context) => void | Promise<void>
+  readonly agentWorld?: (agentCtx: Context) => void | Promise<void>
   readonly agentPreset?: string
 }
 
@@ -200,7 +200,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
         authorize: (request) => (!sameAuthority(request, authorities) ? 403 : authorized(request) ? true : 401),
       },
     ],
-    ...(options.agentSetup === undefined ? {} : { setup: options.agentSetup }),
+    ...(options.agentWorld === undefined ? {} : { world: options.agentWorld }),
     ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
   }
   // Same two refusals `serve` makes: this row carries live streams and a live

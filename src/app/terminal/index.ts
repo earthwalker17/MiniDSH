@@ -51,7 +51,7 @@ export interface TerminalOptions extends BootOptions {
   readonly reasoningEffort?: string
   readonly maxSteps?: number
   /** Per-agent world for every agent this surface creates or attaches (built from a named agent preset). */
-  readonly agentSetup?: (agentCtx: Context) => void | Promise<void>
+  readonly agentWorld?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, recorded in the header of a session this surface creates. */
   readonly agentPreset?: string
   /** Injected for tests; defaults to process stdin/stdout. */
@@ -389,7 +389,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       const continueOptions = {
         agentOptions: overrides,
         defaults: init.defaultAgentOptions,
-        ...(options.agentSetup === undefined ? {} : { setup: options.agentSetup }),
+        ...(options.agentWorld === undefined ? {} : { world: options.agentWorld }),
       }
       const handle =
         options.resumeId !== undefined

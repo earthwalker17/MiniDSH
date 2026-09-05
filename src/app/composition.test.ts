@@ -22,7 +22,7 @@ import { TOOLS } from '../core/tools/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
 import { COMPOSITION, defineRow } from './compose.ts'
-import { agentPresetSetup } from './config.ts'
+import { agentPresetWorld } from './config.ts'
 import { bootComposition, runTask } from './headless.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -105,7 +105,7 @@ describe('agent presets: a world visible to that agent alone', () => {
   it('mounts preset rows on the agent scope, invisible to the root and to other agents', async () => {
     const ctx = await boot()
     const marker = serviceKey<number>('reviewer-marker')
-    const setup = agentPresetSetup([defineRow('reviewer-marker', { name: 'reviewer-marker', apply: (pluginCtx) => void pluginCtx.provide(marker, 42) })])
+    const setup = agentPresetWorld([defineRow('reviewer-marker', { name: 'reviewer-marker', apply: (pluginCtx) => void pluginCtx.provide(marker, 42) })])
     handle = await ctx.get(AGENTS).create(ctx, {
       cwd: tempDir('minidsh-cwd-'),
       agentOptions: { provider: 'scripted', model: 'scripted-model' },
@@ -144,7 +144,7 @@ describe('agent presets: a world visible to that agent alone', () => {
         model: 'scripted-model',
         sessionsRoot: tempDir('minidsh-comp-'),
         logger: silent,
-        setup: agentPresetSetup([defineRow('wide-open', { name: 'wide-open', apply: (pluginCtx) => void pluginCtx.provide(SANDBOX, wideOpen) })]),
+        world: agentPresetWorld([defineRow('wide-open', { name: 'wide-open', apply: (pluginCtx) => void pluginCtx.provide(SANDBOX, wideOpen) })]),
         ...scripted(adapter),
       },
       (frame) => void events.push(frame.event),

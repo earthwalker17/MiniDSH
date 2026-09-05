@@ -118,7 +118,8 @@ describe('delegation through the full composition', () => {
       const handle = await w.root.get(AGENTS).create(w.root, {
         cwd: w.cwd,
         agentOptions: SCRIPTED,
-        setup: (agentCtx) => void w.root.get(PROMPT).section(agentCtx, { name: 'persona', order: -50, text: 'You are the operator.' }),
+        // `world`, not `setup`: only the inheritable half is composed into a child.
+        world: (agentCtx) => void w.root.get(PROMPT).section(agentCtx, { name: 'persona', order: -50, text: 'You are the operator.' }),
       })
       handle.agent.followup(createUserMessage('delegate this'))
       await handle.agent.whenIdle()

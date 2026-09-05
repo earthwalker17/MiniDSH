@@ -286,7 +286,7 @@ class AgentRegistry implements Agents {
       ...(stored.header.delegationDepth === undefined ? {} : { delegationDepth: stored.header.delegationDepth }),
       ...(stored.header.agentPreset === undefined ? {} : { agentPreset: stored.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `session "${id}"`),
-      ...(options.setup === undefined ? {} : { setup: options.setup }),
+      ...(options.world === undefined ? {} : { world: options.world }),
     })
   }
 
@@ -316,7 +316,7 @@ class AgentRegistry implements Agents {
       ...(src.header.delegationDepth === undefined ? {} : { delegationDepth: src.header.delegationDepth }),
       ...(src.header.agentPreset === undefined ? {} : { agentPreset: src.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `fork of "${src.parentId}"`),
-      ...(options.setup === undefined ? {} : { setup: options.setup }),
+      ...(options.world === undefined ? {} : { world: options.world }),
     })
   }
 

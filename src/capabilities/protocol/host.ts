@@ -124,8 +124,8 @@ export interface ProtocolServerConfig {
   readonly agentOverrides?: Partial<AgentOptions>
   readonly serverVersion: string
   /** Applied to every agent this surface creates or resumes. */
-  readonly setup?: (agentCtx: Context) => void | Promise<void>
-  /** The name of the preset `setup` composes, recorded in each session's header. */
+  readonly world?: (agentCtx: Context) => void | Promise<void>
+  /** The name of the preset `world` composes, recorded in each session's header. */
   readonly agentPreset?: string
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
@@ -768,7 +768,7 @@ export class ProtocolHost {
     // this session's recorded base and failing at its first paid step.
     this.assertRoutable(options.partial, 'session/prompt')
     const preset = this.config.agentPreset === undefined ? {} : { agentPreset: this.config.agentPreset }
-    const setup = this.config.setup === undefined ? {} : { setup: this.config.setup }
+    const world = this.config.world === undefined ? {} : { world: this.config.world }
     if (requested === undefined) {
       // The MERGE is what becomes this session's durable base route, and half
       // of it comes from the settings store — which a remote client can write,
@@ -778,7 +778,7 @@ export class ProtocolHost {
       // turn then died `NO_ADAPTER`, and every later resume rebuilt from it.
       this.assertRoutable(options.full, 'session/prompt')
       const cwd = this.resolveCwd(params)
-      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...preset, ...setup })
+      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...preset, ...world })
       this.owned.set(handle.agent.id, handle)
       return handle.agent
     }
@@ -793,7 +793,7 @@ export class ProtocolHost {
     let inflight = this.resuming.get(requested)
     if (!inflight) {
       inflight = agents
-        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.agentDefaults(), ...setup })
+        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.agentDefaults(), ...world })
         .then((handle) => {
           this.owned.set(handle.agent.id, handle)
           return handle.agent

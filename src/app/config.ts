@@ -130,7 +130,7 @@ export async function toRow(row: DiskRow, baseDir: string): Promise<Row> {
  * in the scope shadows only for scope-mounted plugins, so a preset
  * structurally cannot widen enforcement (asserted by test).
  */
-export function agentPresetSetup(rows: readonly Row[]): (agentCtx: Context) => void {
+export function agentPresetWorld(rows: readonly Row[]): (agentCtx: Context) => void {
   return (agentCtx) => {
     for (const row of rows) {
       if (row.disabled) continue

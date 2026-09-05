@@ -20,7 +20,7 @@ export interface ServeOptions extends BootOptions {
   /** Every way clients reach this host. Omitted, it is one stream carrier over `input`/`output`. */
   readonly carriers?: readonly Carrier[]
   /** Per-agent world for every agent the protocol surface creates or resumes (built from a named agent preset). */
-  readonly agentSetup?: (agentCtx: Context) => void | Promise<void>
+  readonly agentWorld?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, so each session's header records the world it was composed from. */
   readonly agentPreset?: string
 }
@@ -43,7 +43,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
     ...(options.agentOverrides === undefined ? {} : { agentOverrides: options.agentOverrides }),
     onClose: () => resolveClosed(),
-    ...(options.agentSetup === undefined ? {} : { setup: options.agentSetup }),
+    ...(options.agentWorld === undefined ? {} : { world: options.agentWorld }),
     ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     ...(options.input === undefined ? {} : { input: options.input }),
     ...(options.output === undefined ? {} : { output: options.output }),

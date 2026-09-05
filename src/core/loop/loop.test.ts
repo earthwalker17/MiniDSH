@@ -589,19 +589,19 @@ describe('creation under a signal, and the world a child can join', () => {
     ).rejects.toThrowError(/before it began/)
   })
 
-  it('exposes the setup it was composed with, and records lineage and preset in its header', async () => {
+  it('exposes the inheritable world it was composed with, and records lineage and preset in its header', async () => {
     harness = await coreHarness()
     const { asSessionId } = await import('../ids.ts')
-    const setup = (): void => {}
+    const world = (): void => {}
     const handle = await harness.root.get(AGENTS).create(harness.root, {
       cwd: process.cwd(),
       agentOptions: { provider: 'scripted', model: 'scripted-model' },
-      setup,
+      world,
       delegatedBy: asSessionId('session-parent'),
       delegationDepth: 1,
       agentPreset: 'reviewer',
     })
-    expect(handle.agent.setup).toBe(setup)
+    expect(handle.agent.world).toBe(world)
     expect(handle.agent.session.header).toMatchObject({ delegatedBy: 'session-parent', delegationDepth: 1, agentPreset: 'reviewer' })
     expect(handle.agent.session.header).not.toHaveProperty('parentId')
     await handle.dispose()

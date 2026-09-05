@@ -78,7 +78,7 @@ export interface TaskOptions extends BootOptions {
   /** Authority preset applied as a durable switch (validated by the service; exclusive with sandbox/approvalPolicy at the CLI). */
   readonly preset?: string
   /** Per-agent world: runs on the agent scope during creation (the factory's scoped settle is the fail-loud gate). */
-  readonly setup?: (agentCtx: Context) => void | Promise<void>
+  readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name that world was composed from, recorded in the session header. */
   readonly agentPreset?: string
 }
@@ -97,7 +97,7 @@ export interface ContinueOptions extends BootOptions {
   /** Authority preset applied as a durable switch on the continued session. */
   readonly preset?: string
   /** Per-agent world for the continued lifecycle. */
-  readonly setup?: (agentCtx: Context) => void | Promise<void>
+  readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name that world was composed from; a resumed session keeps the one its header already records. */
   readonly agentPreset?: string
 }
@@ -233,7 +233,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
     const handle = await root.get(AGENTS).create(root, {
       cwd: options.cwd,
       agentOptions,
-      ...(options.setup === undefined ? {} : { setup: options.setup }),
+      ...(options.world === undefined ? {} : { world: options.world }),
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     })
     applyAuthority(root, handle, options)
@@ -247,7 +247,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
 function continueArgs(options: ContinueOptions): {
   agentOptions: Partial<AgentOptions>
   defaults: AgentOptions
-  setup?: (agentCtx: Context) => void | Promise<void>
+  world?: (agentCtx: Context) => void | Promise<void>
 } {
   return {
     agentOptions: {
@@ -259,7 +259,7 @@ function continueArgs(options: ContinueOptions): {
     // The defaults tier: the stored log's folded request/header beats these,
     // so a settings-layer model can never rewrite what a session recorded.
     defaults: options.agentDefaults ?? defaultAgentOptions(),
-    ...(options.setup === undefined ? {} : { setup: options.setup }),
+    ...(options.world === undefined ? {} : { world: options.world }),
   }
 }
 

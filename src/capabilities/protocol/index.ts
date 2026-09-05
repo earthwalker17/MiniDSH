@@ -90,7 +90,7 @@ export interface ProtocolConfig {
   readonly agentOverrides?: Partial<AgentOptions>
   readonly serverVersion?: string
   /** Per-agent world for every agent this surface creates or resumes (the app builds it from a named preset). */
-  readonly setup?: (agentCtx: Context) => void | Promise<void>
+  readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, recorded in each session's header so a resume can compose the same world. */
   readonly agentPreset?: string
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
@@ -131,7 +131,7 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
       // last one hangs up, the host is done. A socket says otherwise — nobody
       // being connected right now is the normal state of a served host.
       closeWithLastClient: carriers.every((carrier) => carrier.kind === 'stream'),
-      ...(config.setup === undefined ? {} : { setup: config.setup }),
+      ...(config.world === undefined ? {} : { world: config.world }),
       ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }),
       ...(config.onClose === undefined ? {} : { onClose: config.onClose }),
     })

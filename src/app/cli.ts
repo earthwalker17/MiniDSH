@@ -21,7 +21,7 @@ import { presetTable } from '../core/presets/index.ts'
 import type { AuthorityPresetsConfig } from '../capabilities/authority-presets/index.ts'
 import type { Context } from '../kernel/index.ts'
 import { compose, defaultDialect, type Row } from './compose.ts'
-import { agentPresetSetup, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type EffectiveComposition, type NamedLayer } from './config.ts'
+import { agentPresetWorld, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type EffectiveComposition, type NamedLayer } from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
@@ -158,7 +158,7 @@ interface BootPlan {
   /** `--preset`, validated against the effective presets row (headless commands only). */
   readonly preset?: string
   /** `--agent-preset`, resolved to a setup for the agent scope. */
-  readonly agentSetup?: (agentCtx: Context) => void
+  readonly agentWorld?: (agentCtx: Context) => void
   /** The name that setup came from, recorded in each session's header. */
   readonly agentPreset?: string
 }
@@ -236,8 +236,8 @@ async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'r
   const preset = presetFlag(args, authority, effective)
   if (typeof preset === 'object') return preset.error
   if (preset !== undefined && presets === 'interactive') return '--preset works with --headless; in the interactive terminal use /preset'
-  const agentSetup = await agentPresetFlag(args, loaded)
-  if (typeof agentSetup === 'object') return agentSetup.error
+  const agentWorld = await agentPresetFlag(args, loaded)
+  if (typeof agentWorld === 'object') return agentWorld.error
   return {
     home,
     settings,
@@ -247,7 +247,7 @@ async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'r
     baseIds: new Set(base.map((row) => row.id)),
     warnings,
     ...(preset === undefined ? {} : { preset }),
-    ...(agentSetup === undefined ? {} : { agentSetup }),
+    ...(agentWorld === undefined ? {} : { agentWorld }),
     ...(typeof args.flags.get('agent-preset') === 'string' ? { agentPreset: args.flags.get('agent-preset') as string } : {}),
   }
 }
@@ -319,7 +319,7 @@ async function agentPresetFlag(args: ParsedArgs, loaded: LoadedConfig): Promise<
   try {
     const rows: Row[] = []
     for (const row of spec.rows) rows.push(await toRow(row, spec.baseDir))
-    return agentPresetSetup(rows)
+    return agentPresetWorld(rows)
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }
   }
@@ -421,7 +421,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(flags.reasoningEffort === undefined ? {} : { reasoningEffort: flags.reasoningEffort }),
         ...(flags.maxSteps === undefined ? {} : { maxSteps: flags.maxSteps }),
         ...(plan.preset === undefined ? {} : { preset: plan.preset }),
-        ...(plan.agentSetup === undefined ? {} : { setup: plan.agentSetup }),
+        ...(plan.agentWorld === undefined ? {} : { world: plan.agentWorld }),
         ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
         approve: args.flags.get('approve') === true,
         ...bootFields(plan),
@@ -459,7 +459,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
       return await runTerminal({
         cwd: process.cwd(),
         ...bootFields(plan),
-        ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+        ...(plan.agentWorld === undefined ? {} : { agentWorld: plan.agentWorld }),
         ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
@@ -478,7 +478,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     task,
     ...bootFields(plan),
     ...(plan.preset === undefined ? {} : { preset: plan.preset }),
-    ...(plan.agentSetup === undefined ? {} : { setup: plan.agentSetup }),
+    ...(plan.agentWorld === undefined ? {} : { world: plan.agentWorld }),
     ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
     ...modelFlags(args),
     ...at,
@@ -501,7 +501,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
     return await runTerminal({
       cwd: cwdFlag(args),
       ...bootFields(plan),
-      ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+      ...(plan.agentWorld === undefined ? {} : { agentWorld: plan.agentWorld }),
       ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
@@ -520,7 +520,7 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
     const host = await startProtocolHost({
       cwd: cwdFlag(args),
       ...bootFields(plan),
-      ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+      ...(plan.agentWorld === undefined ? {} : { agentWorld: plan.agentWorld }),
       ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
       approve: args.flags.get('approve') === true,
     })
@@ -551,7 +551,7 @@ async function webCommand(args: ParsedArgs): Promise<number> {
     const web = await startWebHost({
       cwd: cwdFlag(args),
       ...bootFields(plan),
-      ...(plan.agentSetup === undefined ? {} : { agentSetup: plan.agentSetup }),
+      ...(plan.agentWorld === undefined ? {} : { agentWorld: plan.agentWorld }),
       ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
       approve: args.flags.get('approve') === true,
       ...(port === undefined ? {} : { port: Number(port) }),

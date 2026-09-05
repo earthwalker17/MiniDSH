@@ -56,11 +56,14 @@ export interface Agent {
    */
   configure(options: Partial<AgentOptions>): AgentOptions
   /**
-   * The composer of this agent's world (the `setup` it was created with), so
-   * a creator of a child can compose the SAME world into the child's scope
-   * before adding what the child alone needs (DSH's `composeFrom`).
+   * The composer of this agent's world — the INHERITABLE half of what it was
+   * created with, so a creator of a child can compose the SAME world into the
+   * child's scope before adding what the child alone needs (DSH's
+   * `composeFrom`). Deliberately not `setup`: a delegated child's `setup` is
+   * the narrowing closure that stamped its authority, and a grandchild
+   * composing THAT would re-open a ceiling that is already open.
    */
-  readonly setup: CreateAgentOptions['setup']
+  readonly world: CreateAgentOptions['world']
   /** Low-level delivery; `followup`/`steer`/`inject` are the presets. */
   send(message: Message, target: InboxTarget, wakeup: boolean): void
   followup(message: Message): void
@@ -96,12 +99,27 @@ export interface CreateAgentOptions {
    */
   readonly signal?: AbortSignal
   /**
-   * Composes the agent's local world before publication: registrations and
-   * plugins mounted through `agentCtx` are visible to this agent alone and
-   * unwind with it. Creation fails (and rolls back) if setup throws or a
-   * mounted plugin cannot activate. Services are read by the plugins mounted
-   * here (which declare `inject`) or via `tryGet`; `agentCtx.get` is limited
-   * to what the loop itself injects.
+   * The INHERITABLE composer of this agent's world: the deployment's named
+   * agent preset, the surface's per-agent rows — whatever a child of this
+   * agent should also be composed from. Stored as `Agent.world` and run FIRST,
+   * before `setup`.
+   *
+   * It is a separate slot from `setup` rather than a default for it, because
+   * the difference is not stylistic: a delegated child is created with its
+   * parent's `world` and its OWN narrowing `setup`, and a grandchild must
+   * inherit the first and never the second. Collapsing them into one field —
+   * or defaulting `world` to `setup` — is how a grandchild ends up re-running
+   * its parent's authority stamps one generation late.
+   */
+  readonly world?: (agentCtx: Context, agent: Agent) => void | Promise<void>
+  /**
+   * Composes what THIS agent alone needs, before publication and after
+   * `world`: registrations and plugins mounted through `agentCtx` are visible
+   * to this agent alone and unwind with it. Never inherited by a child.
+   * Creation fails (and rolls back) if it throws or a mounted plugin cannot
+   * activate. Services are read by the plugins mounted here (which declare
+   * `inject`) or via `tryGet`; `agentCtx.get` is limited to what the loop
+   * itself injects.
    *
    * `agent` is the UNPUBLISHED agent (it is also `agentCtx.scope`): its
    * session is appendable here, which is how a creator seeds durable facts a
@@ -125,7 +143,8 @@ export interface AgentFactory {
 export interface ResumeAgentOptions {
   readonly agentOptions?: Partial<AgentOptions>
   readonly defaults?: AgentOptions
-  readonly setup?: CreateAgentOptions['setup']
+  /** The continued lifecycle's world — inheritable, exactly as at creation. */
+  readonly world?: CreateAgentOptions['world']
 }
 
 export interface ForkAgentOptions extends ResumeAgentOptions {

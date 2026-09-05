@@ -27,13 +27,13 @@
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, type AgentOptions, type CreateAgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
 import { effectiveSandboxMode, narrowest, SANDBOX, SANDBOX_MODES, type Sandbox, type SandboxMode } from '../../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, foldLastAssistantText, foldLastTurnEnd, matches, type Session, type TurnEndReason } from '../../core/session/index.ts'
-import { defineTool, TOOLS, type ToolContext, type ToolRestriction } from '../../core/tools/index.ts'
+import { defineTool, DELEGATION_TOOL, TOOLS, type ToolContext, type ToolRestriction, type Tools } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
 
 export interface SubagentConfig {
@@ -130,15 +130,7 @@ interface Deps {
 }
 
 /**
- * The WORLD an agent was composed from, remembered per agent so a child
- * composes what its parent's world IS, not the delegation wrapper the parent
- * happens to be stored with. Without this, a grandchild would re-run its
- * grandparent's opening stamps and collide with its own.
- */
-const worldSetups = new WeakMap<Agent, CreateAgentOptions['setup']>()
-
-/**
- * Every delegation tool name currently registered, REF-COUNTED.
+ * Every delegation tool this DEPLOYMENT registered, read from its own registry.
  *
  * The depth cap is meant to be a fact about the child's WORLD rather than an
  * error it discovers by trying, and hiding only this row's own tool stopped
@@ -146,13 +138,20 @@ const worldSetups = new WeakMap<Agent, CreateAgentOptions['setup']>()
  * a grandchild at the cap would still see the other row's tool, call it, and
  * spend a paid step learning what its tool list should already have told it.
  *
- * The count, not a set, because this is module state in a process that mounts
- * many compositions — the test suite alone boots several and disposes them out
- * of order. With set membership, two compositions each registering `subagent`
- * make the second `add` a no-op and the FIRST disposal delete the name while
- * the second is still live, silently un-hiding the tool it was added to hide.
+ * This used to be a ref-counted module map, which is process state in a process
+ * that mounts many compositions: a row named `verify` in one composition denied
+ * a tool of that name to another composition's children, and the count existed
+ * only so out-of-order disposal could not un-hide a name a live composition had
+ * added. A tag read through `TOOLS` is scoped to one registry by construction,
+ * so both problems are gone. Unscoped, because the globals are exactly what a
+ * child inherits: a scoped registration is never inherited (`core/scope.ts`).
  */
-const delegationToolNames = new Map<string, number>()
+function delegationToolNames(tools: Tools): string[] {
+  return tools
+    .list()
+    .filter((definition) => definition.tags?.includes(DELEGATION_TOOL))
+    .map((definition) => definition.name)
+}
 
 /**
  * The authority a child opens under, read from the parent BEFORE the first
@@ -213,17 +212,16 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   // hidden AND unknown, so a depth limit is a fact about the child's world
   // rather than an error it discovers by trying.
   const childMayDelegate = depth + 1 <= deps.config.maxDepth
-  const denied = [...(childMayDelegate ? [] : delegationToolNames.keys()), ...(deps.config.toolFilter?.deny ?? [])]
+  const denied = [...(childMayDelegate ? [] : delegationToolNames(deps.ctx.get(TOOLS))), ...(deps.config.toolFilter?.deny ?? [])]
   const restriction: ToolRestriction = {
     ...(deps.config.toolFilter?.allow === undefined ? {} : { allow: [...deps.config.toolFilter.allow, ...(childMayDelegate ? [deps.toolName] : [])] }),
     ...(denied.length > 0 ? { deny: denied } : {}),
   }
-  // The parent's WORLD, never the delegation closure it is stored with. `has`,
-  // not `??`: a recorded world of `undefined` (a parent created with no setup
-  // at all) is a real answer, and falling through would compose the parent's
-  // delegation wrapper into the child — re-opening authority that is already
-  // open, one generation late.
-  const world = worldSetups.has(parent) ? worldSetups.get(parent) : parent.setup
+  // The parent's WORLD — the inheritable half of what it was composed from,
+  // which the registry keeps separate from the narrowing `setup` below. A child
+  // is created with both; a grandchild inherits only this one, so nobody
+  // re-runs a generation's authority stamps one generation late.
+  const world = parent.world
 
   const handle = await deps.ctx.get(AGENTS).create(parent.ctx, {
     cwd: parent.session.header.cwd,
@@ -232,11 +230,12 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     delegationDepth: depth,
     ...(parent.session.header.agentPreset === undefined ? {} : { agentPreset: parent.session.header.agentPreset }),
     signal: exec.callSignal,
-    setup: async (childCtx, child) => {
-      // The child's world is its parent's, then narrowed: same preset, same
-      // tools minus the filter, its own persona, and an authority that opens
-      // as a ceiling before a single effect can run.
-      await world?.(childCtx, child)
+    // The factory runs `world` first and this second: the child's world is its
+    // parent's, then narrowed — same preset, same tools minus the filter, its
+    // own persona, and an authority that opens as a ceiling before a single
+    // effect can run.
+    ...(world === undefined ? {} : { world }),
+    setup: (childCtx, child) => {
       deps.sandbox.open(child.session, { mode: inherited.mode, reason: 'delegation' })
       deps.approval.open(child.session, { policy: 'never', reason: 'delegation' })
       deps.ctx.get(TOOLS).restrict(childCtx, restriction)
@@ -258,7 +257,6 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   })
 
   const child = handle.agent
-  worldSetups.set(child, world)
   // A cancelled parent call cancels the child: its turn ends `cancelled`, its
   // log stays whole, and the tool answers with whatever it had.
   const onAbort = (): void => child.cancel({ kind: 'parent' })
@@ -322,15 +320,6 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
   config: configSchema,
   apply(ctx, config) {
     const toolName = config?.toolName ?? DEFAULT_TOOL_NAME
-    delegationToolNames.set(toolName, (delegationToolNames.get(toolName) ?? 0) + 1)
-    ctx.effect(
-      () => () => {
-        const left = (delegationToolNames.get(toolName) ?? 1) - 1
-        if (left > 0) delegationToolNames.set(toolName, left)
-        else delegationToolNames.delete(toolName)
-      },
-      `tool-subagent("${toolName}")`,
-    )
     const deps: Deps = {
       ctx,
       sandbox: ctx.get(SANDBOX),
@@ -357,6 +346,9 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
         // registry deadline here would kill a child mid-effect and leave its
         // log open, and the caller's cancellation already reaches it.
         timeoutMs: null,
+        // Not model-facing: how the depth cap recognises every delegation tool
+        // in this deployment, including a second row of this same plugin.
+        tags: [DELEGATION_TOOL],
         render: (_args, value) => [{ type: 'text', text: value.output.length > 0 ? value.output : '(the subagent produced no text)' }],
         execute: (args, exec) => delegate(args, exec, deps),
       }),
