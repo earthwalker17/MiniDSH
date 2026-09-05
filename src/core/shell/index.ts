@@ -18,6 +18,22 @@ import { serviceKey } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
 import type { SandboxEnforcement, SandboxExecutionPolicy, SandboxMode } from '../sandbox/index.ts'
 
+export type ShellErrorCode = 'SHELL_UNAVAILABLE'
+
+/**
+ * The shell world could not do what was asked of it at all — its binary is
+ * not on this host. Coded like `SandboxError`, so a tool result names the
+ * fact and the remedy instead of reading as a command that printed nothing.
+ */
+export class ShellError extends Error {
+  readonly code: ShellErrorCode
+  constructor(code: ShellErrorCode, message: string) {
+    super(message)
+    this.name = 'ShellError'
+    this.code = code
+  }
+}
+
 export interface ShellExecRequest {
   readonly command: string
   /** The per-call authority stamp; resolved by the caller from `ctx.sandbox`. */

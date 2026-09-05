@@ -59,7 +59,15 @@ function approvalLines(ctx: Context, agent: Agent | undefined): string[] {
   if (!approval) return []
   const first = agent?.session.facts.find((event) => matches(event, APPROVAL_POLICY))
   const policy: ApprovalPolicy = first ? first.data.policy : approval.defaultPolicy
-  const lines = [policy === 'ask' ? '- Approvals: ask. An action outside the sandbox is put to the user before it runs.' : '- Approvals: never. Nothing is put to the user; an action that would need approval is refused.']
+  // Under `ask` the line promises an approval step, not a person: a headless
+  // run has no answerer, and there every request settles `unavailable`. The
+  // prefix is pinned by a test and byte-stable; the clause after it says what
+  // every composition can actually deliver.
+  const lines = [
+    policy === 'ask'
+      ? '- Approvals: ask. An action outside the sandbox needs an approval before it runs; a request that is refused, or that nobody answers, means the action did not run.'
+      : '- Approvals: never. Nothing is put to the user; an action that would need approval is refused.',
+  ]
   if (agent?.session.header.delegatedBy !== undefined) {
     lines.push(
       '- You are a delegated subagent. Your authority was fixed when you were started and cannot be widened from inside this session:',

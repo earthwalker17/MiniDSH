@@ -86,3 +86,17 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
     expect(result.exitCode).not.toBe(0)
   })
 })
+
+describe('a shell binary that is not there', () => {
+  it('refuses with SHELL_UNAVAILABLE naming the binary and the remedy, never a command that printed nothing', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess(dialect, dir, { shellPath: 'minidsh-no-such-shell-binary' })
+    // A stock Windows has powershell.exe 5.1 and no pwsh: the spawn fails one
+    // tick after it returns, and this used to be read as an exited child whose
+    // output was empty.
+    await expect(proc.exec({ command: echoCmd('hello'), policy: unconfined(dir), timeoutMs: 30_000 })).rejects.toMatchObject({
+      code: 'SHELL_UNAVAILABLE',
+      message: expect.stringContaining('minidsh-no-such-shell-binary'),
+    })
+  })
+})

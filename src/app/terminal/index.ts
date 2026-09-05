@@ -97,8 +97,14 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     out.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
   }
 
+  /** Said once: the session-scoped answer to being asked per call, at the moment it is first needed. */
+  let tipped = false
   const askApproval = (data: { id: string; toolName: string; reason?: string }): void => {
     pendingApproval = { id: data.id, toolName: data.toolName }
+    if (!tipped) {
+      tipped = true
+      out.write('tip: approvals are one-shot; /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops these prompts\n')
+    }
     out.write(`approve ${data.toolName}${data.reason ? ` (${data.reason})` : ''}? [y/N] `)
   }
 

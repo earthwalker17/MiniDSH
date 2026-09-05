@@ -211,6 +211,9 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     // The prompt IS the ask's rendering: no second `? approval-…` line precedes it.
     expect(driver.text()).not.toContain('? approval-')
     expect(driver.text()).toContain('! approval-')
+    // The first ask carries the one tip that names the session-scoped answer, once.
+    expect(driver.text().split('tip: approvals are one-shot')).toHaveLength(2)
+    expect(driver.text().indexOf('tip: approvals')).toBeLessThan(driver.text().indexOf('approve touchy'))
     driver.type('/exit')
     expect(await exitCode).toBe(0)
   })

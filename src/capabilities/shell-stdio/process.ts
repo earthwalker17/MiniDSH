@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { SandboxError, type SandboxEnforcement, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
-import type { ShellExecRequest, ShellRunResult, ShellSession } from '../../core/shell/index.ts'
+import { ShellError, type ShellExecRequest, type ShellRunResult, type ShellSession } from '../../core/shell/index.ts'
 
 export type ShellDialect = 'bash' | 'pwsh'
 
@@ -87,7 +87,19 @@ export class ShellProcess implements ShellSession {
     return enforcement
   }
 
-  private ensureChild(): ChildProcessWithoutNullStreams {
+  /**
+   * The live child, spawned on first use — and CONFIRMED spawned before a byte
+   * is written to it. A missing binary (no `pwsh` on a stock Windows, which
+   * ships only PowerShell 5.1) surfaces as an `error` event one tick after
+   * `spawn` returns; swallowing it left the poll loop reading a dead child as
+   * "exited", so every approved command answered `(no output)` and nothing ever
+   * named the cause. A refusal with a code is the honest answer, exactly as a
+   * confined policy this world cannot enforce is refused rather than run
+   * unconfined — and deliberately NOT a silent fallback to `powershell.exe`:
+   * the prompt and the tool description say `pwsh`, and a 5.1 child under
+   * those words would be a lie the model cannot detect.
+   */
+  private async ensureChild(): Promise<ChildProcessWithoutNullStreams> {
     if (this.child && this.child.exitCode === null && !this.child.killed) return this.child
     const { cmd, args } = shellCommand(this.dialect, this.shellPath)
     const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -99,9 +111,23 @@ export class ShellProcess implements ShellSession {
     }
     child.stdout.on('data', append)
     child.stderr.on('data', append)
+    this.child = child
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', () => resolve())
+        child.once('error', (error: NodeJS.ErrnoException) => {
+          const remedy = this.dialect === 'pwsh' ? 'install PowerShell 7 (pwsh)' : 'install bash'
+          reject(new ShellError('SHELL_UNAVAILABLE', `the shell "${cmd}" could not be started (${error.code ?? error.message}); ${remedy}, or point the shell row's shellPath at it`))
+        })
+      })
+    } catch (error) {
+      if (this.child === child) this.child = undefined
+      throw error
+    }
+    // A later error (a child dying mid-command) is what the poll loop reads
+    // as an exit; it must not surface as an unhandled event.
     child.on('error', () => {})
     child.stdin.write(initLine(this.dialect))
-    this.child = child
     return child
   }
 
@@ -112,7 +138,7 @@ export class ShellProcess implements ShellSession {
     // An already-cancelled call dispatches nothing: the poll loop would kill
     // the child a tick later, but by then the command had been written.
     if (request.signal?.aborted) return { output: '', timedOut: false, truncated: false, reset: false, aborted: true, sandbox }
-    const child = this.ensureChild()
+    const child = await this.ensureChild()
     this.buffer = ''
     const marker = `${this.markerBase}${++this.commandSeq}`
     const base64 = Buffer.from(request.command, 'utf8').toString('base64')
