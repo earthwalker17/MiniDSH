@@ -73,10 +73,11 @@ Keep simple work simple. For low-risk local tasks, use the shortest clear soluti
 ## 8. Sub-agents and Dynamic Workflows
 Use sub-agents for bounded research, independent inspection, parallelizable implementation, test analysis, and review when this protects the main context.
 The parent agent remains the architectural decision-maker and integrator.
-Keep the number of sub-agents bounded. Do not spawn dozens of agents that could exhaust a session's limit in minutes.
-Never use per-finding fan-out. Do not spawn one agent per file, failure, review finding, or trivial task.
-Each delegated task needs a narrow scope, explicit boundaries, and a compact expected return. Prefer bounded reviewers or small fixed panels over recursive swarms.
+**Fix the agent count before the run, and never let it grow during one.** A workflow's total must be readable off its script without knowing a single result. A stage whose WIDTH comes from a previous stage's output is forbidden however small each agent looks — that is what "no per-finding fan-out" means operationally, and one agent per file, failure, finding, candidate or trivial task is the shape that turns a four-agent plan into fifty. A review of N dimensions is N agents, not N × findings × verifiers. S9 wrote that multiplication and reached 46 before it was killed; the prohibition alone had been in this file since S8.5 and did not hold, because nothing made the script state a number. State the ceiling in the plan before launching (a dozen is generous, twenty is a lot), and where a stage cannot be sized in advance, do it in the parent instead.
+**Verify and synthesize in the parent.** Adversarial checking is this agent reading the code, not another tier of agents; a finding worth keeping is one the parent can ground in a file and a line and, where it matters, reproduce. Prefer bounded reviewers or small fixed panels over recursive swarms.
+Each delegated task needs a narrow scope, explicit boundaries, and a compact expected return.
 If delegation materially increases token use without increasing output quality, stop and simplify.
+A killed workflow can leave files behind in the repository: check `git status` before continuing.
 Never link this repository's `node_modules` into a worktree or scratch directory: a later recursive delete of that directory follows the link and destroys the real dependency tree. It has happened twice. A worktree that needs dependencies runs its own `pnpm install`; there is no build step, so `git show <rev>:<path>` usually removes the need for a worktree at all. `.claude/hooks/guard-repo.mjs` enforces this.
 
 ## 9. Persistent Memory

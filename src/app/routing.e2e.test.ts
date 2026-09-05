@@ -172,7 +172,21 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     const compactionTrace = events
       .filter((event) => event.type === COMPACTION_APPLIED.type)
       .map((event) => (event.data as { shadowedSeqs: number[] }).shadowedSeqs.length)
-    const why = `after ${compactionTrace.length} applied compaction(s) shadowing [${compactionTrace.join(', ')}] node(s)`
+    // Three facts decide which failure this is, and none of them was visible
+    // before: whether a summary carried the token forward, whether the model was
+    // offered the tool that reads the span back, and whether it used it. Without
+    // them a failure here is "the model lost a marker" and nothing more.
+    const summaries = events
+      .filter((event) => event.type === 'user/message' && JSON.stringify(event.data).includes('system-reminder'))
+      .map((event) => JSON.stringify(event.data))
+    const carried = summaries.filter((text) => text.includes('ALPHA-11')).length
+    const offered = events.some(
+      (event) => event.type === 'request/header' && ((event.data as { header: { tools?: { name: string }[] } }).header.tools ?? []).some((tool) => tool.name === 'history_read'),
+    )
+    const recalls = events.filter((event) => event.type === 'tool/call' && (event.data as { name: string }).name === 'history_read').length
+    const why =
+      `after ${compactionTrace.length} applied compaction(s) shadowing [${compactionTrace.join(', ')}] node(s); ` +
+      `${carried} of ${summaries.length} summary node(s) carried ALPHA-11; history_read ${offered ? 'offered' : 'NOT offered'}, called ${recalls}x`
     expect(last, why).toContain('ALPHA-11')
     expect(last).toContain('BRAVO-22')
     expect(last).toContain('CHARLIE-33')
