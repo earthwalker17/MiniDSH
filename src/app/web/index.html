@@ -46,7 +46,17 @@
         <button id="deny">deny</button>
       </div>
 
-      <div id="log" class="log"></div>
+      <div id="log" class="log">
+        <div id="damaged" class="row note" hidden>[the stored log is damaged: what follows is the readable prefix, not the whole session]</div>
+        <!-- No number on the button: `oldest` is an inclusive lower SEQ bound, not a
+             count, and seq space includes the trace tier a page never carries — so on
+             exactly the chunk-heavy sessions paging exists for, a count overstated it by
+             two orders of magnitude. One click fetches one more page either way. -->
+        <button id="more" class="more" hidden>load earlier events</button>
+        <!-- `display: contents`, so the rows stay the flex items of `.log` and keep its
+             gap, while being addressable as one group to append to, prepend to and clear. -->
+        <div id="rows"></div>
+      </div>
 
       <footer>
         <textarea id="prompt" rows="3" placeholder="say something — Enter sends, Shift+Enter is a newline"></textarea>

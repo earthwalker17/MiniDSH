@@ -88,6 +88,16 @@ export class Wire {
  * One session's window: a page of history, a cursor, and the live tail applied
  * on top of it. Everything about ordering and gaps lives here so the view can
  * be a pure function of `events`.
+ *
+ * It reports WHAT changed, not merely that something did. The transcript is the
+ * seq-ordered log, and an append-only log admits exactly four shapes: a fresh
+ * page replaces the window, a live event or a repaired range extends it at the
+ * tail, a backward page extends it at the head, and a view push touches no row
+ * at all. A renderer told which of those happened can keep the DOM it already
+ * built; one told only "something changed" has to rebuild to be correct.
+ *
+ * `onChange` receives `{kind: 'reset'}` | `{kind: 'append', events}` |
+ * `{kind: 'prepend', events}` | `{kind: 'view'}`.
  */
 export class SessionWindow {
   constructor(wire, sessionId, onChange) {
@@ -144,7 +154,7 @@ export class SessionWindow {
     // as if it were whole.
     this.damaged = attached.damaged === true
     this.attached = true
-    this.onChange()
+    this.onChange({ kind: 'reset' })
     return attached
   }
 
@@ -155,12 +165,12 @@ export class SessionWindow {
     this.events = [...page.events, ...this.events]
     this.oldest = page.from
     this.hasMore = page.hasMore
-    this.onChange()
+    this.onChange({ kind: 'prepend', events: page.events })
   }
 
   setView(view) {
     this.view = view
-    this.onChange()
+    this.onChange({ kind: 'view' })
   }
 
   /**
@@ -207,7 +217,7 @@ export class SessionWindow {
     if (event.seq <= this.cursor) return
     this.events.push(event)
     this.cursor = event.seq
-    this.onChange()
+    this.onChange({ kind: 'append', events: [event] })
   }
 
   /**
@@ -225,12 +235,16 @@ export class SessionWindow {
         omitTrace: true,
       })
       if (events.length === 0) break
+      const applied = []
       for (const event of events) {
         if (event.seq <= this.cursor) continue
         this.events.push(event)
         this.cursor = event.seq
+        applied.push(event)
       }
-      this.onChange()
+      // A repaired range is an APPEND like any other: it lands above everything
+      // already rendered, in seq order, beneath the cursor that revealed it.
+      this.onChange({ kind: 'append', events: applied })
     }
   }
 }

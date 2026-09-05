@@ -24,7 +24,16 @@ const state = {
   wire: undefined,
   init: undefined,
   window: undefined,
+  /** The growing assistant row, while text is streaming into it. */
   streaming: undefined,
+  /** The "… thinking" row, while a reasoning route is between prompt and first token. */
+  thinking: undefined,
+  /**
+   * Every row streamed since the last durable assistant message — usually one,
+   * two when a retried attempt abandoned its partial text. They are removed
+   * when the message that replaces them arrives, so nothing else has to.
+   */
+  streamRows: [],
   pendingApproval: undefined,
   workspaceId: undefined,
   /**
@@ -134,27 +143,92 @@ function row(event) {
   }
 }
 
-function renderTranscript() {
-  const window_ = state.window
+/**
+ * Within this of the bottom counts as "reading the tail", so the transcript
+ * follows. Further up means the reader went looking for something, and yanking
+ * them back is the defect this number exists to avoid.
+ */
+const STICK_SLACK_PX = 40
+
+const atBottom = () => {
   const log = $('log')
-  log.replaceChildren()
-  if (!window_) return
-  if (window_.damaged) log.append(el('div', 'row note', '[the stored log is damaged: what follows is the readable prefix, not the whole session]'))
-  if (window_.hasMore) {
-    // No number: `oldest` is an inclusive lower SEQ bound, not a count, and seq
-    // space includes the trace tier a page never carries — so on exactly the
-    // chunk-heavy sessions paging exists for it overstated by two orders of
-    // magnitude. One click fetches one more page either way.
-    const more = el('button', 'more', 'load earlier events')
-    more.addEventListener('click', () => void window_.older().catch(fail))
-    log.append(more)
-  }
-  for (const event of window_.events) {
-    const node = row(event)
-    if (node) log.append(node)
-  }
-  state.streaming = undefined
+  return log.scrollHeight - log.scrollTop - log.clientHeight <= STICK_SLACK_PX
+}
+
+/**
+ * Scroll ownership is sampled just BEFORE each mutation and never stored.
+ *
+ * The reference implementation needs a ledger of its own scroll writes to tell
+ * them from the reader's, because it keeps bottom-ownership as state driven by
+ * scroll events. Nothing here listens to a scroll event at all, so there is
+ * nothing to confuse: the question "was the reader at the bottom a moment ago"
+ * is answered by reading the geometry a moment ago.
+ *
+ * That only stays true if the write happens in the same tick as the sample. A
+ * first version deferred it to an animation frame, which reads better and is
+ * wrong: a delta arriving between the sample and the frame measures a deficit
+ * this code created and has not paid back yet, so a reader following at the
+ * bottom is dropped mid-answer. One synchronous write per delta is what the
+ * old code did, and the streaming path was never where the cost was.
+ */
+function toBottom() {
+  const log = $('log')
   log.scrollTop = log.scrollHeight
+}
+
+/** Drops any partially streamed rows: the durable message replaces them, and a failed attempt leaves none. */
+function dropStreamRows() {
+  for (const node of state.streamRows.splice(0)) node.remove()
+  state.streaming = undefined
+  state.thinking = undefined
+}
+
+/** A fresh page replaces the window, so it replaces the rows. Everything else extends them. */
+function resetTranscript() {
+  const window_ = state.window
+  $('rows').replaceChildren()
+  dropStreamRows()
+  $('damaged').hidden = !window_?.damaged
+  $('more').hidden = !window_?.hasMore
+  if (!window_) return
+  appendRows(window_.events)
+  toBottom()
+}
+
+function appendRows(events) {
+  const stick = atBottom()
+  const rows = $('rows')
+  for (const event of events) {
+    // A committed assistant message is what the streamed rows were previewing.
+    if (event.type === 'assistant/message' || event.type === 'turn/end') dropStreamRows()
+    const node = row(event)
+    if (node) rows.append(node)
+  }
+  if (stick) toBottom()
+}
+
+/**
+ * An older page goes in at the head, and the reader stays where they were.
+ *
+ * The height delta is exact here because the prepend is the only mutation in
+ * this frame — nothing else resizes, and no image loads late into a row. That
+ * is why this needs no anchor element: with one mutation, "how much taller did
+ * the content get above me" and "which row was I looking at" are the same
+ * answer.
+ */
+function prependRows(events) {
+  const log = $('log')
+  const rows = $('rows')
+  const before = log.scrollHeight
+  const top = log.scrollTop
+  const fragment = document.createDocumentFragment()
+  for (const event of events) {
+    const node = row(event)
+    if (node) fragment.append(node)
+  }
+  rows.prepend(fragment)
+  log.scrollTop = top + (log.scrollHeight - before)
+  $('more').hidden = !state.window?.hasMore
 }
 
 function renderView() {
@@ -179,30 +253,67 @@ function renderView() {
   if (open) $('approval-text').textContent = `allow ${open.toolName}${open.reason ? ` — ${open.reason}` : ''}?`
 }
 
-/** Live text goes straight into a growing row, so the answer types itself out. */
+/**
+ * Live text goes straight into a growing row, so the answer types itself out.
+ *
+ * The rows live in `state.streamRows` rather than being rebuilt away: the
+ * durable `assistant/message` that replaces them is what removes them, so a
+ * `tool/call` or a view push arriving mid-stream no longer wipes the answer a
+ * reader is in the middle of.
+ */
 function stream(event) {
   const chunk = event.data?.chunk
   if (!chunk) return
+  if (chunk.type === 'reasoning-delta') {
+    // The same decision the terminal already made, in a different form: a
+    // reasoning route can think for a long time, and a surface that shows
+    // nothing while it does looks broken rather than busy.
+    if (!state.thinking) {
+      // Sampled BEFORE the append, like every other mutation here: appending
+      // the row is itself what would make the answer wrong afterwards.
+      const stick = atBottom()
+      state.thinking = el('div', 'row note thinking', '… thinking')
+      state.streamRows.push(state.thinking)
+      $('rows').append(state.thinking)
+      if (stick) toBottom()
+    }
+    return
+  }
   if (chunk.type === 'text-delta') {
+    const stick = atBottom()
     if (!state.streaming) {
       state.streaming = el('div', 'row assistant streaming')
       state.streaming.append(el('div', 'who', 'assistant'), el('div', 'body', ''))
-      $('log').append(state.streaming)
+      state.streamRows.push(state.streaming)
+      $('rows').append(state.streaming)
     }
     state.streaming.querySelector('.body').textContent += chunk.text
-    $('log').scrollTop = $('log').scrollHeight
+    // A reader who scrolled away STAYS away. This was the loudest defect the
+    // real-browser pass found: parked 200 px down a long transcript, the first
+    // delta of the next answer threw the view to the bottom and held it there.
+    if (stick) toBottom()
   } else if (chunk.type === 'finish') {
+    // The row STAYS until its durable message lands; clearing the handle only
+    // means the next attempt opens a row of its own instead of appending to a
+    // finished one.
     state.streaming = undefined
+    state.thinking = undefined
   }
 }
 
 // ---- session plumbing ------------------------------------------------------
 
-const fail = (error) => {
-  $('error').textContent = String(error?.message ?? error)
-  $('error').hidden = false
-  setTimeout(() => void ($('error').hidden = true), 6000)
+function flash(text, kind) {
+  const node = $('error')
+  node.className = `banner ${kind}`
+  node.textContent = text
+  node.hidden = false
+  setTimeout(() => void (node.hidden = true), 6000)
 }
+
+const fail = (error) => flash(String(error?.message ?? error), 'error')
+/** An ordinary outcome worth saying out loud. A command that answers nothing reads as a broken button. */
+const notice = (text) => flash(text, 'notice')
 
 async function openSession(sessionId) {
   if (state.window && state.window.sessionId !== sessionId) await state.wire.request('session/detach', { sessionId: state.window.sessionId }).catch(() => undefined)
@@ -216,8 +327,16 @@ async function openSession(sessionId) {
   await refreshSessions()
 }
 
-function renderAll() {
-  renderTranscript()
+/**
+ * One dispatch over what the window says it did. A `view` push moves the pills
+ * and nothing else — it used to rebuild the entire transcript, which is how a
+ * mid-turn status update could delete a half-streamed answer.
+ */
+function renderAll(change) {
+  const kind = change?.kind ?? 'reset'
+  if (kind === 'reset') resetTranscript()
+  else if (kind === 'append') appendRows(change.events)
+  else if (kind === 'prepend') prependRows(change.events)
   renderView()
 }
 
@@ -357,7 +476,14 @@ async function start() {
           // Seen, not stored: the window must still count it, or the next
           // event looks like a hole and pays for a repair that returns nothing.
           state.window?.noted(params.event)
-        } else void state.window?.apply(params.event).catch(fail)
+        } else {
+          // A session is named a moment AFTER it is created: `session/prompt`
+          // answers before the driver has entered the prompt, so the listing
+          // this client just refreshed had nothing to name it by. The title's
+          // own event is when a name exists, and it arrives once per session.
+          if (params.event.type === 'session/title') void refreshSessions().catch(fail)
+          void state.window?.apply(params.event).catch(fail)
+        }
       } else if (method === 'session.view') {
         state.window?.setView(params.view)
       } else if (method === 'session.status') {
@@ -376,18 +502,41 @@ async function start() {
     }
   })
   $('send').addEventListener('click', () => void send())
+  $('more').addEventListener('click', () => void state.window?.older().catch(fail))
   $('new').addEventListener('click', () => {
+    // Detach FIRST. Dropping the window locally left this connection watching
+    // the old session with nothing to show it: the host still counted it as an
+    // answerer for that session's approvals, and would park a question no
+    // window here could ever display — the hazard `onOpen`'s own comment names.
+    const previous = state.window?.sessionId
+    if (previous) void state.wire.request('session/detach', { sessionId: previous }).catch(() => undefined)
     state.window = undefined
     $('session-id').textContent = 'new session'
     nameSession(undefined)
-    renderAll()
+    renderAll({ kind: 'reset' })
+    void refreshSessions().catch(fail)
   })
   $('cancel').addEventListener('click', () => {
     // Another client's queued prompts are not this one's to discard.
     if (state.window) void state.wire.request('session/cancel', { sessionId: state.window.sessionId, keepQueued: true }).catch(fail)
   })
   $('compact').addEventListener('click', () => {
-    if (state.window) void state.wire.request('session/compact', { sessionId: state.window.sessionId }).catch(fail)
+    if (!state.window) return
+    // The same three outcomes the terminal reports, in the same words. Two of
+    // them write no durable event at all, so a browser that only rendered the
+    // log showed nothing whatever for a click that had worked.
+    void state.wire
+      .request('session/compact', { sessionId: state.window.sessionId })
+      .then((result) => {
+        if (result.kind === 'compacted') {
+          notice(`compacted ${result.shadowedNodes} messages (~${tokens(result.surfaceTokensBefore)} → ~${tokens(result.surfaceTokensAfter)})`)
+        } else if (result.kind === 'scheduled') {
+          notice('the turn is still running; compaction will run before its next step')
+        } else {
+          notice('nothing worth compacting yet')
+        }
+      })
+      .catch(fail)
   })
   $('workspace').addEventListener('change', (event) => {
     state.workspaceId = event.target.value || undefined

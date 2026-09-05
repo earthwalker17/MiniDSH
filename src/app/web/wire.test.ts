@@ -184,3 +184,64 @@ describe('the browser session window', () => {
     expect(window_.damaged).toBe(true)
   })
 })
+
+/**
+ * WHICH change each mutation reports. The renderer keeps its DOM on the
+ * strength of these labels, so a mutation that reported the wrong one — or
+ * reported `reset` for everything, as this class used to — would put the
+ * transcript back to rebuilding without any test noticing.
+ */
+describe('what the window says it did', () => {
+  function recording(log: Frame[], cursor?: number) {
+    const changes: { kind: string; seqs?: number[] }[] = []
+    const wire = scriptedWire(log, cursor)
+    const window_ = new SessionWindow(wire as never, 's', (change: { kind: string; events?: Frame[] }) =>
+      changes.push({ kind: change.kind, ...(change.events === undefined ? {} : { seqs: change.events.map((one) => one.seq) }) }),
+    )
+    return { changes, window: window_, wire }
+  }
+
+  it('calls an attach a reset, a live event an append, and a view push neither', async () => {
+    const { changes, window: window_ } = recording([], -1)
+    await window_.attach()
+    expect(changes).toEqual([{ kind: 'reset' }])
+
+    changes.length = 0
+    await window_.apply({ type: 'user/message', seq: 0, time: 0, data: {}, surfaceOp: { op: 'append' } })
+    expect(changes).toEqual([{ kind: 'append', seqs: [0] }])
+
+    changes.length = 0
+    window_.setView({ status: 'running' })
+    // A status push moves the pills. It used to rebuild the whole transcript,
+    // which is how a mid-turn update could delete a half-streamed answer.
+    expect(changes).toEqual([{ kind: 'view' }])
+  })
+
+  it('calls a repaired range one append, and a backward page a prepend', async () => {
+    const log = step(0, 3)
+    const { changes, window: window_, wire } = recording(log, -1)
+    await window_.attach()
+    changes.length = 0
+
+    // A hole: the last event of the step arrives while nothing between it and
+    // the cursor was ever delivered.
+    const last = log.at(-1)!
+    await window_.apply(last)
+    // One append for the repaired range, then one for the event that revealed
+    // it — never a reset, which would have thrown away everything above.
+    expect(changes.map((one) => one.kind)).toEqual(['append', 'append'])
+    expect(changes.at(-1)!.seqs).toEqual([last.seq])
+    // The repair is trace-free, so the run of chunks is not in what it reports.
+    expect(changes[0]!.seqs).not.toContain(3)
+
+    changes.length = 0
+    window_.hasMore = true
+    window_.oldest = 5
+    wire.request = ((method: string) => {
+      if (method !== 'session/page') throw new Error(`unexpected ${method}`)
+      return Promise.resolve({ page: { events: [{ type: 'user/message', seq: 4, time: 0, data: {} }], from: 4, to: 4, hasMore: false } })
+    }) as never
+    await window_.older()
+    expect(changes).toEqual([{ kind: 'prepend', seqs: [4] }])
+  })
+})
