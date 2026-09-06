@@ -9,7 +9,7 @@
  *   delegation   the parent delegates a bounded search; the child completes
  *                it in its own session and its answer reaches the parent
  *   the ceiling  the child opens under `read-only` + `never` with
- *                `reason: 'delegation'`, its shell escalation is refused
+ *                `reason: 'delegation'`, its shell escalation is refused (on a host that cannot confine; on one that can, the child simply runs under its read-only ceiling and asks for nothing)
  *                without anyone being asked, and a wire attempt to widen the
  *                child is refused too
  *   the world    the parent then writes the file the child could not have

@@ -33,9 +33,16 @@ jobs:
       - name: Refuse to pass having run nothing
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$DEEPSEEK_API_KEY" ]; then
             echo "DEEPSEEK_API_KEY is unset: every arc would self-skip and this job would be a green lie."
+            exit 1
+          fi
+          # The routing arc needs both, and self-skips on either — so checking
+          # only the first would let seven arcs stand in for eight.
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY is unset: the routing arc would self-skip and this job would report eight arcs having run seven."
             exit 1
           fi
 
@@ -54,7 +61,12 @@ jobs:
           cache: true
           require-lockfile: true
 
-      - run: pnpm test:e2e ${{ inputs.filter }}
+      # FILTER goes through the environment, never interpolated into the script:
+      # `${{ inputs.filter }}` is expanded before bash parses the line, so a
+      # dispatch could otherwise append a second command to a step holding both
+      # API keys. Unquoted on use so a blank filter expands to nothing.
+      - run: pnpm test:e2e $FILTER
         env:
+          FILTER: ${{ inputs.filter }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

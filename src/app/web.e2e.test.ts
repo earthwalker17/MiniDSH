@@ -14,7 +14,7 @@
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
@@ -70,7 +70,11 @@ const PROMPTS = [
 describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket', () => {
   it('two clients, one session, a real approval, backward paging, and a reconnect mid-turn', { timeout: 600_000 }, async () => {
     const workspace = tempDir('minidsh-web-e2e-ws-')
-    const outside = tempDir('minidsh-web-e2e-out-')
+    // NOT under os.tmpdir(): a confined host masks it with an ephemeral tmpfs,
+    // so the write would fail as a missing directory — no denial the backend
+    // recognises, no escalation guidance, and no consent for this arc to answer.
+    const outside = mkdtempSync(join(homedir(), '.minidsh-web-out-'))
+    dirs.push(outside)
     const home = tempDir('minidsh-web-e2e-home-')
     const decoy = join(workspace, 'decoy.txt')
     writeFileSync(decoy, 'must never change\n', 'utf8')

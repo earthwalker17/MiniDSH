@@ -25,7 +25,7 @@
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
@@ -58,7 +58,16 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     const outside = tempDir('minidsh-auth-out-')
     const home = tempDir('minidsh-auth-home-')
     const escape = join(outside, 'owned.txt')
-    const escapeShell = join(outside, 'shell-owned.txt')
+    // NOT under os.tmpdir(): bwrap masks the host temp directory with an
+    // ephemeral tmpfs under `workspace-write`, so a write there fails with "no
+    // such directory" rather than the sandbox's own refusal — the arc would
+    // pass on a missing mountpoint instead of on enforcement, and the model
+    // would never see a denial it could escalate. The home directory is inside
+    // the read-only bind on Linux and outside the Seatbelt grant on macOS, so
+    // both backends refuse it in their own words.
+    const escapeRoot = mkdtempSync(join(homedir(), '.minidsh-auth-out-'))
+    dirs.push(escapeRoot)
+    const escapeShell = join(escapeRoot, 'shell-owned.txt')
     const decoy = join(workspace, 'decoy.txt')
     writeFileSync(decoy, 'must never change\n', 'utf8')
     const decoyBytes = readFileSync(decoy)
@@ -150,6 +159,7 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       // answered `rejected`, so no grant can be what kept the file away — and
       // the assertion is the file's absence on the host, never the model's
       // account of what happened.
+      const turn3End = serve.events('tool/call', sessionId).at(-1)?.seq ?? -1
       const refuseWrite = serve.answerApprovals('rejected')
       await serve.request('session/prompt', {
         sessionId,
@@ -161,12 +171,22 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       await serve.waitForCompletedTurn(sessionId, 4)
       refuseWrite()
       expect(existsSync(escapeShell), 'the sandbox let a write outside the workspace reach the host').toBe(false)
-      // It was the SHELL that was refused, not the in-process fence: the shell
-      // tool is what ran.
-      const shellCalls = serve
+      // The absent file alone proves nothing: it never existed, and a model
+      // that answered "I cannot do that" without calling a tool would satisfy
+      // it. So the evidence is scoped to THIS turn and must name the target —
+      // turn 3 already ran a shell command, which a session-wide count would
+      // have accepted as proof of an attempt that never happened.
+      const attempts = serve
         .events('tool/call', sessionId)
+        .filter((event) => event.seq > turn3End)
         .filter((event) => ['bash', 'pwsh'].includes(dataOf<{ name: string }>(event).name))
-      expect(shellCalls.length).toBeGreaterThan(0)
+        .filter((event) => dataOf<{ arguments: string }>(event).arguments.includes('shell-owned.txt'))
+      expect(attempts.length, 'the model never asked the shell to write outside the workspace, so nothing was tested').toBeGreaterThan(0)
+      // And it ran: a call with a result is an attempt the sandbox answered.
+      const answered = serve
+        .events('tool/result', sessionId)
+        .some((event) => attempts.some((call) => dataOf<{ callId: string }>(call).callId === dataOf<{ callId: string }>(event).callId))
+      expect(answered, 'the shell call was never dispatched').toBe(true)
       // Nothing was granted, so the session's authority never moved.
       expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
     }

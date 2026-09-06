@@ -46,6 +46,7 @@ describe('the bwrap profile', () => {
       '--proc',
       '/proc',
       '--die-with-parent',
+      '--new-session',
     ])
   })
 
@@ -58,9 +59,12 @@ describe('the bwrap profile', () => {
     expect(args.indexOf('--tmpfs')).toBeLessThan(args.indexOf('--bind'))
   })
 
-  it('never drops --unshare-pid, which is what stops a procfs magic link leaving the bind', () => {
+  it('never drops the two flags that close an escape needing no write at all', () => {
     for (const mode of ['read-only', 'workspace-write'] as const) {
+      // A procfs magic link out of the read-only bind...
       expect(bwrapArgs(policyFor(mode, '/ws'))).toContain('--unshare-pid')
+      // ...and TIOCSTI into the terminal that started the harness.
+      expect(bwrapArgs(policyFor(mode, '/ws'))).toContain('--new-session')
     }
   })
 
@@ -132,6 +136,9 @@ function tempDir(prefix: string): string {
   dirs.push(dir)
   return dir
 }
+
+/** One spelling of a line break, so no escape has to survive a code edit. */
+const NEWLINE = String.fromCharCode(10)
 
 const writeInto = (path: string): string => `echo confined > ${JSON.stringify(path)}`
 
@@ -255,6 +262,38 @@ describe.skipIf(!installed)(`OS confinement on ${process.platform}`, () => {
 })
 
 describe.skipIf(!installed || process.platform !== 'linux')('the bwrap ceiling', () => {
+  it('points TMPDIR at the writable temp the profile actually granted', async () => {
+    const ws = tempDir('minidsh-confine-ws-')
+    shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
+    // A host whose TMPDIR is outside the ceiling (pam_tmpdir, TMPDIR=$HOME/tmp)
+    // would otherwise send every mktemp and every spooled here-document at a
+    // path the sandbox correctly refuses, while the private tmpfs it was given
+    // went unused. Nothing is widened: this is the mount the profile made.
+    const result = await shell.exec({
+      command: 'echo "$TMPDIR"; f=$(mktemp) && echo "$f" && echo ok > "$f" && cat "$f"',
+      policy: policyFor('workspace-write', ws),
+      timeoutMs: 30_000,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(result.output).toContain('/tmp')
+    expect(result.output).toContain('ok')
+    // And it went nowhere on the host: the ceiling still describes every host
+    // file that can change.
+    const leaked = result.output
+      .split(NEWLINE)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith('/tmp/'))
+    for (const path of leaked) expect(existsSync(path), `${path} reached the host`).toBe(false)
+  })
+
+  it('grants no writable temp under read-only, because read-only means none', () => {
+    const confinement = selectConfinement('auto')
+    expect(confinement.envFor(policyFor('read-only', '/ws'))).toBeUndefined()
+    expect(confinement.envFor(policyFor('workspace-write', '/ws'))).toEqual({ TMPDIR: '/tmp' })
+    // Not confined at all: the caller's own environment, untouched.
+    expect(confinement.envFor(policyFor('danger-full-access', '/ws'))).toBeUndefined()
+  })
+
   it('gives the sandbox a PRIVATE /tmp: the write succeeds and the host temp directory is untouched', async () => {
     const ws = tempDir('minidsh-confine-ws-')
     const canary = join(tmpdir(), 'minidsh-confine-tmpfs-canary.txt')

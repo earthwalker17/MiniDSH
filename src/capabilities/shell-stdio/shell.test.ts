@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -84,6 +84,55 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
     proc = new ShellProcess(dialect, dir)
     const result = await proc.exec({ command: failCmd(), policy: unconfined(dir), timeoutMs: 30_000 })
     expect(result.exitCode).not.toBe(0)
+  })
+})
+
+/**
+ * The two things a one-shot grant promises, on the host where they are
+ * EASIEST to get wrong: one that confines nothing.
+ *
+ * Both of these were live defects. The throwaway child was taken only when the
+ * granted policy's world differed from the live child's — and on a host with
+ * no backend every world is the same one, so the escalated command ran in the
+ * session's own shell and its `cd` persisted, while the tool told the model
+ * the opposite. And the throwaway was stored nowhere, so disposing the agent
+ * reaped the persistent child and left the escalated one — the command running
+ * under the widest authority the session ever granted — alive behind it.
+ */
+describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
+  it('runs beside the persistent shell and leaves its state alone', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-'))
+    mkdirSync(join(dir, 'sub'))
+    proc = new ShellProcess(dialect, dir)
+    const policy = unconfined(dir)
+    const cd = dialect === 'pwsh' ? 'Set-Location sub' : 'cd sub'
+    await proc.exec({ command: cd, policy, timeoutMs: 30_000 })
+
+    const granted = await proc.exec({ command: dialect === 'pwsh' ? 'Set-Location ..' : 'cd ..', policy, oneShot: true, timeoutMs: 30_000 })
+    expect(granted.exitCode).toBe(0)
+
+    // The grant covered one call, so it moved nothing here.
+    const after = await proc.exec({ command: pwdCmd(), policy, timeoutMs: 30_000 })
+    expect(after.output.toLowerCase()).toContain('sub')
+  })
+
+  it('is reaped by dispose, so nothing outlives the scope that ran it', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-'))
+    const marker = join(dir, 'late.txt')
+    const shell = new ShellProcess(dialect, dir)
+    // A backslash is not an escape inside a PowerShell double-quoted string, and
+    // a temp path holds no quote, so one spelling serves both dialects.
+    const slow =
+      dialect === 'pwsh'
+        ? `Start-Sleep -Seconds 3; Set-Content -Path ${JSON.stringify(marker)} -Value late`
+        : `sleep 3; echo late > ${JSON.stringify(marker)}`
+    const running = shell.exec({ command: slow, policy: unconfined(dir), oneShot: true, timeoutMs: 30_000 }).catch(() => undefined)
+    // Let the child get going, then end the scope under it.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await shell.dispose()
+    await running
+    await new Promise((resolve) => setTimeout(resolve, 3_500))
+    expect(existsSync(marker), 'an escalated command outlived the shell that ran it').toBe(false)
   })
 })
 

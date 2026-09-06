@@ -14,7 +14,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import type { SandboxEnforcement, SandboxExecutionPolicy } from '../../../core/sandbox/index.ts'
-import { BWRAP_BIN, BWRAP_DENIALS, BWRAP_RUNNER_FAILURES, bwrapArgs } from './bwrap.ts'
+import { BWRAP_BIN, BWRAP_DENIALS, BWRAP_RUNNER_FAILURES, bwrapArgs, bwrapTempDir } from './bwrap.ts'
 import { SEATBELT_BIN, SEATBELT_DENIALS, SEATBELT_RUNNER_FAILURES, seatbeltArgs } from './seatbelt.ts'
 
 export type ConfinementId = 'none' | 'bwrap' | 'seatbelt'
@@ -39,6 +39,20 @@ export interface Confinement {
   readonly runnerFailureSignatures: readonly string[]
   /** The confined argv, or the argv unchanged when this mode needs no confinement. */
   wrap(cmd: string, args: readonly string[], policy: SandboxExecutionPolicy): { cmd: string; args: string[] }
+  /**
+   * Environment the confined child needs in order to USE what the profile
+   * granted it, or `undefined` to inherit unchanged.
+   *
+   * The one entry so far is `TMPDIR`, and it is not a convenience: a shell
+   * inherits whatever temp directory the harness was started with, and under a
+   * profile that grants only the workspace, that path is outside the ceiling.
+   * bwrap gives the sandbox a private writable `/tmp` — but a host with
+   * `TMPDIR=$HOME/tmp` (pam_tmpdir, or a macOS session, where launchd always
+   * sets one) sends every `mktemp`, every compiler intermediate and every
+   * spooled here-document at a path the sandbox correctly refuses. Pointing
+   * TMPDIR at what the profile already granted widens nothing.
+   */
+  envFor(policy: SandboxExecutionPolicy): Readonly<Record<string, string>> | undefined
 }
 
 /** The honest answer on a host with no backend: enforce nothing, and say so. */
@@ -48,6 +62,7 @@ export const NO_CONFINEMENT: Confinement = {
   denialSignatures: [],
   runnerFailureSignatures: [],
   wrap: (cmd, args) => ({ cmd, args: [...args] }),
+  envFor: () => undefined,
 }
 
 interface Dialect {
@@ -56,11 +71,16 @@ interface Dialect {
   readonly profile: (policy: SandboxExecutionPolicy) => string[]
   readonly denials: readonly string[]
   readonly runnerFailures: readonly string[]
+  /** A writable temp directory this dialect's profile provides, if it provides one. */
+  readonly tempDir: (policy: SandboxExecutionPolicy) => string | undefined
 }
 
 const DIALECTS: Readonly<Record<Exclude<ConfinementId, 'none'>, Dialect>> = {
-  bwrap: { id: 'bwrap', bin: BWRAP_BIN, profile: bwrapArgs, denials: BWRAP_DENIALS, runnerFailures: BWRAP_RUNNER_FAILURES },
-  seatbelt: { id: 'seatbelt', bin: SEATBELT_BIN, profile: seatbeltArgs, denials: SEATBELT_DENIALS, runnerFailures: SEATBELT_RUNNER_FAILURES },
+  bwrap: { id: 'bwrap', bin: BWRAP_BIN, profile: bwrapArgs, denials: BWRAP_DENIALS, runnerFailures: BWRAP_RUNNER_FAILURES, tempDir: bwrapTempDir },
+  // Seatbelt provides none: it does not change the filesystem VIEW, so there is
+  // nowhere private to point at and granting the host's real temp area would
+  // widen the ceiling. Recorded as a limitation rather than papered over.
+  seatbelt: { id: 'seatbelt', bin: SEATBELT_BIN, profile: seatbeltArgs, denials: SEATBELT_DENIALS, runnerFailures: SEATBELT_RUNNER_FAILURES, tempDir: () => undefined },
 }
 
 /** One candidate per platform. Windows has none, and §13 says why. */
@@ -110,6 +130,11 @@ function build(dialect: Dialect): Confinement {
       // allow-list would confine it to nothing.
       if (policy.mode === 'danger-full-access') return { cmd, args: [...args] }
       return { cmd: dialect.bin, args: [...dialect.profile(policy), '--', cmd, ...args] }
+    },
+    envFor(policy) {
+      if (policy.mode === 'danger-full-access') return undefined
+      const temp = dialect.tempDir(policy)
+      return temp === undefined ? undefined : { TMPDIR: temp }
     },
   }
 }

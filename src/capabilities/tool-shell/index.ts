@@ -141,8 +141,13 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
         if (result.aborted) throw Object.assign(new Error('command not dispatched: the call was cancelled'), { code: 'ABORTED_BEFORE_DISPATCH' })
         // "The shell died" must never read as "the command printed nothing":
         // a reset without a timeout means the child exited under the command.
+        // A one-shot command times out without touching the persistent shell,
+        // so saying "the shell was reset" would tell the model its working
+        // directory and environment are gone when they are intact.
         const notice = result.timedOut
-          ? `\n[timed out after ${timeoutMs}ms; the shell was reset]`
+          ? result.reset
+            ? `\n[timed out after ${timeoutMs}ms; the shell was reset]`
+            : `\n[timed out after ${timeoutMs}ms; this session's shell was not affected]`
           : result.reset
             ? '\n[the shell exited before the command finished; a fresh shell serves the next call]'
             : result.restarted === true

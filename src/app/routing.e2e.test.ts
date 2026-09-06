@@ -44,12 +44,15 @@ const silent: Logger = { warn: () => {}, error: () => {} }
  * request (measured: the runtime-context section gains two lines and the shell
  * tool's guidance changes), and at 6,000 the threshold sits at 3,000 with
  * roughly one turn of headroom left after a compaction — so those 48 tokens
- * took the arc from 2 applied compactions to 3 or 4, and `assertConsumed()`
- * requires the REPLAY to reproduce every recorded out-of-loop call. Measured
- * at this budget: 1 of 3 runs passed. Compaction is this arc's vehicle, not
- * its subject: what it exists to prove is that a route switch is one durable
- * fact, that a role can send the summary somewhere else, and that the mixed
- * log replays. It still asserts at least one applied compaction.
+ * cost it headroom, and `assertConsumed()` requires the REPLAY to reproduce
+ * every recorded out-of-loop call. The larger cause was the prompts, which
+ * named no tool: measured at 6,000 with them, 1 of 3 runs passed and all three
+ * failed in the replay; at 6,400 with the editor named, 3 of 4.
+ *
+ * Compaction is this arc's vehicle, not its subject: what it exists to prove
+ * is that a route switch is one durable fact, that a role can send the summary
+ * somewhere else, and that the mixed log replays. It still asserts at least
+ * one applied compaction.
  */
 const BUDGET = 6_400
 
