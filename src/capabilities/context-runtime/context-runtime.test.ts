@@ -28,6 +28,7 @@ const silent: Logger = { warn: () => {}, error: () => {} }
 /** A shell world whose confinement answer can change under a live agent. */
 class SwitchableShell implements Shell {
   readonly dialect = 'bash' as const
+  readonly denialSignatures: readonly string[] = []
   enforcement: SandboxEnforcement
   constructor(enforcement: SandboxEnforcement) {
     this.enforcement = enforcement

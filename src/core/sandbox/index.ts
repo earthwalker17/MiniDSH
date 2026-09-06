@@ -59,14 +59,26 @@ export class SandboxError extends Error {
 }
 
 /**
- * The one allow-list. Every fence derives its roots here so two execution
- * worlds can never disagree about what `workspace-write` means.
+ * The one allow-list, and a CEILING rather than an equality: every family
+ * derives its roots here, and a family may grant LESS than this, never more.
+ * So the invariant both of them keep is "no host file outside these roots is
+ * modified", not "these roots are writable everywhere".
  *
- * A deliberate divergence from DSH: DSH also grants `/tmp` and `os.tmpdir()`
- * so its CONFINED shell keeps working with redirects into temp. MiniDSH ships
- * no confined shell, so no such asymmetry can arise — and granting the
- * platform temp root would hand the editor write authority it has no use for.
- * A backend that needs temp writability adds it here, once, for both families.
+ * The distinction is what lets a confinement backend be stricter than the
+ * declared set without lying about the mode. `shell-stdio`'s bwrap profile
+ * mounts an ephemeral tmpfs over `/tmp` and `/dev`: a command may write there
+ * and nothing it writes reaches the host or the editor, so the ceiling still
+ * describes every host file that can change. DSH pins the same rule with the
+ * same mechanism.
+ *
+ * A deliberate divergence from DSH: DSH's shared list also grants `/tmp` and
+ * `os.tmpdir()` (its Seatbelt profile and its in-process fence honour that;
+ * its own bwrap backend does not). MiniDSH grants neither, because the temp
+ * root is where MiniDSH puts every workspace it tests with — granting it
+ * would make the containment check vacuous for a session whose cwd is under
+ * it, which is every live arc and any real `minidsh chat --cwd /tmp/scratch`.
+ * The cost is recorded in ARCHITECTURE §13: a tool that needs a writable
+ * `$TMPDIR` gets the tmpfs on Linux and an escalation on macOS.
  */
 export function writableRoots(policy: SandboxExecutionPolicy): readonly string[] {
   if (policy.mode !== 'workspace-write') return []

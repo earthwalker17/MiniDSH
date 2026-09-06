@@ -32,6 +32,8 @@ class ShellStdioProvider implements Shell {
     this.config = config
   }
 
+  readonly denialSignatures: readonly string[] = []
+
   /**
    * A piped child shell is not confined: this provider enforces nothing, so a
    * confined command refuses rather than running unconfined. Real enforcement
