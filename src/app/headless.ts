@@ -20,7 +20,7 @@ import { compose, COMPOSITION, defaultAgentOptions, defaultDialect, defineRow, m
 import { applyLayers, type NamedLayer } from './config.ts'
 import { agentSettingsSchema } from './settings.ts'
 import { compositionRecordPlugin } from '../capabilities/composition-record/index.ts'
-import type { ShellDialect } from '../capabilities/shell-stdio/index.ts'
+import type { ConfinementChoice, ShellDialect } from '../capabilities/shell-stdio/index.ts'
 
 export interface BootOptions {
   readonly approve?: boolean
@@ -44,6 +44,8 @@ export interface BootOptions {
   /** The settings document the runtime store reads and writes; omitted mounts no settings service. */
   readonly settingsStorePath?: string
   readonly dialect?: ShellDialect
+  /** Which confinement mechanism wraps the shell; `none` pins a test to a host with no backend. */
+  readonly confinement?: ConfinementChoice
   /** The programmatic app/test layer, applied before any disk layer. */
   readonly patches?: readonly Patch[]
   /** Disk layers (home composition.json, `--patch` files), applied in order after `patches`. */
@@ -121,6 +123,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     ...compose({
       sessionsRoot: options.sessionsRoot,
       dialect: options.dialect ?? defaultDialect(),
+      ...(options.confinement === undefined ? {} : { confinement: options.confinement }),
       ...(options.spillRoot === undefined ? {} : { spillRoot: options.spillRoot }),
       ...(options.attachmentsRoot === undefined ? {} : { attachmentsRoot: options.attachmentsRoot }),
       ...(options.globalInstructionsPath === undefined ? {} : { globalInstructionsPath: options.globalInstructionsPath }),

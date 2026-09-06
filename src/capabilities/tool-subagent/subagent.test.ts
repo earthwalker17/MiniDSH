@@ -52,11 +52,16 @@ interface World {
   create(): Promise<AgentHandle>
 }
 
+
+/** A stamp's recorded shape must not depend on whether this machine can confine a shell. */
+const UNCONFINED = { confinement: 'none' } as const
+
 async function world(patches: Patch[] = []): Promise<World> {
   const cwd = tempDir('minidsh-sub-cwd-')
   const sessionsRoot = tempDir('minidsh-sub-sessions-')
   const adapter = new ScriptedAdapter()
   const root = await bootComposition({
+    ...UNCONFINED,
     sessionsRoot,
     // Everything a real run has except the network: the fs fence, the shell,
     // the approval seam, the invariants — and the subagent tool.

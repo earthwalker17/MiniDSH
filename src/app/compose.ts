@@ -29,7 +29,7 @@ import { fsObservationPolicyPlugin } from '../capabilities/fs-observation-policy
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { retryPlugin } from '../capabilities/llm-retry/index.ts'
 import { modelRolesPlugin } from '../capabilities/model-roles/index.ts'
-import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
+import { shellStdioPlugin, type ConfinementChoice, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
 import { attachmentsLocalPlugin } from '../capabilities/attachments-local/index.ts'
 import { toolViewImagePlugin } from '../capabilities/tool-view-image/index.ts'
 import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
@@ -269,6 +269,12 @@ export interface ComposeOptions {
   /** The user's global AGENTS.md; omitted reads only the workspace's own files. */
   readonly globalInstructionsPath?: string
   readonly dialect: ShellDialect
+  /**
+   * Which OS confinement mechanism wraps the shell (default `auto`: pick by
+   * platform and probe it). A test about a host with no backend passes `none`
+   * so it does not depend on the machine it runs on.
+   */
+  readonly confinement?: ConfinementChoice
   /** Secret-store path for `credentials-local`; omitted = env-only resolution. */
   readonly credentialsPath?: string
   /** The settings document the store reads and writes; omitted mounts no settings service. */
@@ -326,7 +332,12 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('authority-presets', authorityPresetsPlugin, {}))
   rows.push(defineRow('fs', fsLocalPlugin))
   rows.push(defineRow('fs-observation-policy', fsObservationPolicyPlugin))
-  rows.push(defineRow('shell', shellStdioPlugin, { dialect: options.dialect }))
+  rows.push(
+    defineRow('shell', shellStdioPlugin, {
+      dialect: options.dialect,
+      ...(options.confinement === undefined ? {} : { confinement: options.confinement }),
+    }),
+  )
   if (options.spillRoot !== undefined) rows.push(defineRow('spill', spillLocalPlugin, { root: options.spillRoot }))
   // A service row with no model-facing surface: the binary plane exists wherever
   // MiniDSH runs, while the tools that PRODUCE images stay composition, so the

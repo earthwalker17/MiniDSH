@@ -14,7 +14,7 @@ import type { Context, Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { isWider, SANDBOX, SANDBOX_MODES, SandboxError, type Sandbox, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
-import { SHELL } from '../../core/shell/index.ts'
+import { SHELL, type Shell, type ShellRunResult } from '../../core/shell/index.ts'
 import { excerptWithSpill, excerptWithoutSpill, SPILL } from '../../core/spill/index.ts'
 import { defineTool, TOOLS, type ToolContext } from '../../core/tools/index.ts'
 
@@ -105,9 +105,13 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
       const agent = exec.agent
       if (!agent) throw new Error('the shell tool requires an owning agent')
       const policy = await resolvePolicy(args, agent, exec, { sandbox, approval, toolName: name })
+      // An approved escalation is a grant over this call, never a session
+      // fact: the executor runs it beside the persistent shell so the grant
+      // leaves no state behind and the shell keeps its own.
+      const escalated = args.sandbox_permissions !== undefined
       const shellSession = shell.sessionFor(agent)
       try {
-        const result = await shellSession.exec({ command: args.command, policy, timeoutMs, signal: exec.signal })
+        const result = await shellSession.exec({ command: args.command, policy, timeoutMs, signal: exec.signal, ...(escalated ? { oneShot: true } : {}) })
         // "Nothing ran" must never read as "ran and printed nothing".
         if (result.aborted) throw Object.assign(new Error('command not dispatched: the call was cancelled'), { code: 'ABORTED_BEFORE_DISPATCH' })
         // "The shell died" must never read as "the command printed nothing":
@@ -116,12 +120,16 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
           ? `\n[timed out after ${timeoutMs}ms; the shell was reset]`
           : result.reset
             ? '\n[the shell exited before the command finished; a fresh shell serves the next call]'
-            : ''
+            : result.restarted === true
+              ? '\n[the sandbox policy changed since the last command, so this ran in a fresh shell: working directory and environment were reset]'
+              : escalated
+                ? '\n[the approved permission covered this command only, so it ran in a separate shell: nothing it changed about the working directory or environment persists]'
+                : ''
         // The tool owns what the model sees. A command's stdout exists nowhere
         // once the process exits, so output too large to show inline is SAVED
         // and located rather than thrown away — through a store the composition
         // may or may not have mounted, hence `tryGet`.
-        return { output: bound(ctx, exec, result.output + notice, excerpt), exitCode: result.exitCode ?? null }
+        return { output: bound(ctx, exec, result.output + notice + denialHint(shell, sandbox, result, escalated), excerpt), exitCode: result.exitCode ?? null }
       } catch (error) {
         if (error instanceof SandboxError && error.code === 'SANDBOX_UNAVAILABLE') {
           // A reported fact, not a failure: the command never ran, and the model
@@ -191,12 +199,40 @@ function viableEscalations(sandbox: Sandbox, base: SandboxMode): SandboxMode[] {
   return SANDBOX_MODES.filter((mode) => isWider(mode, base) && (mode === 'danger-full-access' || sandbox.enforcementFor(mode) !== 'none'))
 }
 
-function refusal(sandbox: Sandbox, policy: SandboxExecutionPolicy, reason: string): string {
-  const viable = viableEscalations(sandbox, policy.mode)
-  if (viable.length === 0) return `[sandbox: ${reason}]`
+/** One spelling of the one legitimate move, shared by a refusal and a kernel denial. */
+function escalationHint(sandbox: Sandbox, mode: SandboxMode): string | undefined {
+  const viable = viableEscalations(sandbox, mode)
+  if (viable.length === 0) return undefined
   return (
-    `[sandbox: ${reason}]\n` +
-    `[escalation available — retry this exact command once with sandbox_permissions (the narrowest of ${viable.map((mode) => `"${mode}"`).join(', ')} that suffices) ` +
+    `[escalation available — retry this exact command once with sandbox_permissions (the narrowest of ${viable.map((target) => `"${target}"`).join(', ')} that suffices) ` +
     `and justification; the user is asked to approve]`
   )
+}
+
+function refusal(sandbox: Sandbox, policy: SandboxExecutionPolicy, reason: string): string {
+  const hint = escalationHint(sandbox, policy.mode)
+  return hint === undefined ? `[sandbox: ${reason}]` : `[sandbox: ${reason}]\n${hint}`
+}
+
+/**
+ * On a host with a backend the command RUNS and the kernel refuses the write,
+ * so `SANDBOX_UNAVAILABLE` never fires and nothing would otherwise tell the
+ * model the one legitimate move. This offers the same hint a refusal offers,
+ * off the mounted backend's own words for a denial.
+ *
+ * A hint and never a classification: it adds a line and decides nothing, which
+ * is the only reason reading it out of command output is acceptable at all. It
+ * is deliberately incomplete — under bwrap a path beneath the sandbox's
+ * ephemeral `/tmp` is invisible rather than read-only, and that denial reads
+ * exactly like an ordinary missing directory. And it never fires on a command
+ * that already spent someone's consent: one ask per escalation.
+ */
+function denialHint(shell: Shell, sandbox: Sandbox, result: ShellRunResult, escalated: boolean): string {
+  if (escalated || result.exitCode === undefined || result.exitCode === 0) return ''
+  const signatures = shell.denialSignatures
+  if (signatures.length === 0) return ''
+  const lower = result.output.toLowerCase()
+  if (!signatures.some((signature) => lower.includes(signature))) return ''
+  const hint = escalationHint(sandbox, result.sandbox.mode)
+  return hint === undefined ? '' : `\n[sandbox: the sandbox refused a file effect this command attempted]\n${hint}`
 }

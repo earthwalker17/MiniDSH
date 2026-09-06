@@ -106,6 +106,9 @@ class TestClient {
   }
 }
 
+/** A stamp's recorded shape must not depend on whether this machine can confine a shell. */
+const UNCONFINED = { confinement: 'none' } as const
+
 async function startHost(
   adapter: ScriptedAdapter,
   extra?: {
@@ -126,6 +129,7 @@ async function startHost(
   const clients = Array.from({ length: 1 + (extra?.extraClients ?? 0) }, () => new TestClient())
   const sessionsRoot = extra?.sessionsRoot ?? tempDir('minidsh-proto-sessions-')
   const host = await startProtocolHost({
+    ...UNCONFINED,
     cwd: tempDir('minidsh-proto-cwd-'),
     sessionsRoot,
     logger: silent,
@@ -772,6 +776,7 @@ describe('protocol: workspaces are addressing, never authority', () => {
     const roots = [tempDir('minidsh-ws-a-'), tempDir('minidsh-ws-b-')]
     const client = new TestClient()
     const host = await startProtocolHost({
+      ...UNCONFINED,
       cwd: roots[0]!,
       workspaceRoots: roots,
       workspaces: [{ root: roots[0]!, name: 'alpha' }, { id: 'beta', root: roots[1]! }],

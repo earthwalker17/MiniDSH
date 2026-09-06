@@ -19,6 +19,15 @@ import { main } from './cli.ts'
 import { applyAuthority, bootComposition, resumeTask, runTask, type BootOptions } from './headless.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
+/**
+ * These tests are about a host with NO confinement backend — the shipped
+ * Windows posture, and what every host was before S11. Pinning it keeps the
+ * recorded stamps and the refusal text identical on a machine that HAS bwrap
+ * or sandbox-exec; `shell-stdio/confine.test.ts` is where a real backend is
+ * exercised against the kernel that enforces it.
+ */
+const UNCONFINED = { confinement: 'none' } as const
+
 
 let dirs: string[] = []
 afterEach(() => {
@@ -52,7 +61,7 @@ async function editorRun(
   )
   const events: EventEnvelope[] = []
   const result = await runTask(
-    { task: 'write the file', cwd, model: 'scripted-model', sessionsRoot: tempDir('minidsh-sessions-'), logger: silent, ...scripted(adapter), ...boot },
+    { task: 'write the file', cwd, model: 'scripted-model', sessionsRoot: tempDir('minidsh-sessions-'), logger: silent, ...UNCONFINED, ...scripted(adapter), ...boot },
     (frame) => void events.push(frame.event),
   )
   return { events, text: result.text }
@@ -113,6 +122,7 @@ describe('authority survives the process', () => {
       sessionsRoot,
       logger: silent,
       sandbox: 'read-only',
+      ...UNCONFINED,
       ...scripted(new ScriptedAdapter().script(assistantText('noted'))),
     })
     expect(first.exitCode).toBe(0)
@@ -127,6 +137,7 @@ describe('authority survives the process', () => {
         task: 'write the file',
         sessionsRoot,
         logger: silent,
+        ...UNCONFINED,
         ...scripted(new ScriptedAdapter().script(assistantToolCall('call-2', 'str_replace_editor', { command: 'create', path: target, file_text: 'x' }), assistantText('done'))),
       },
       (frame) => void events.push(frame.event),
@@ -154,6 +165,7 @@ describe('the audit view', () => {
         model: 'scripted-model',
         sessionsRoot: join(home, 'sessions'),
         logger: silent,
+        ...UNCONFINED,
         ...scripted(
           new ScriptedAdapter().script(
             assistantToolCall('call-1', 'str_replace_editor', { command: 'create', path: join(elsewhere, 'owned.txt'), file_text: 'no' }),
@@ -220,6 +232,7 @@ describe('what the model is told about its authority', () => {
       sessionsRoot: tempDir('minidsh-sessions-'),
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],
+      ...UNCONFINED,
       prepare: (context) => void context.get(LLM).registerAdapter(context, new ScriptedAdapter()),
       ...(sandbox === undefined ? {} : { sandbox }),
     })
@@ -268,6 +281,7 @@ describe('what a delegated child is told', () => {
       sessionsRoot: tempDir('minidsh-sessions-'),
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],
+      ...UNCONFINED,
       prepare: (context) => void context.get(LLM).registerAdapter(context, new ScriptedAdapter()),
     })
     try {

@@ -26,6 +26,15 @@ const binary = dialect === 'pwsh' ? 'pwsh' : 'bash'
 const shellAvailable = spawnSync(binary, ['--version'], { stdio: 'ignore' }).status === 0
 const echoCmd = dialect === 'pwsh' ? "Write-Output 'ran'" : "echo 'ran'"
 
+/**
+ * Every test here is about a host with NO confinement backend: the refusal,
+ * the escalation it offers, and the grant that covers one call. Pinned, so a
+ * machine with bwrap or sandbox-exec does not quietly turn them into tests of
+ * something else — `../shell-stdio/confine.test.ts` covers that host.
+ */
+const UNCONFINED = { confinement: 'none' } as const
+
+
 let harness: CoreHarness | undefined
 let workdir: string | undefined
 afterEach(async () => {
@@ -43,7 +52,7 @@ interface Fixture {
 async function setup(): Promise<Fixture> {
   workdir = mkdtempSync(join(tmpdir(), 'minidsh-shelltool-'))
   harness = await coreHarness()
-  harness.root.plugin(shellStdioPlugin, { dialect })
+  harness.root.plugin(shellStdioPlugin, { dialect, ...UNCONFINED })
   harness.root.plugin(toolShellPlugin, {})
   await harness.root.settle()
   const { agent } = await harness.create({ cwd: workdir })
@@ -162,7 +171,7 @@ describe('escalation', () => {
   it.skipIf(!shellAvailable)('lets consent outlast the registry default budget: the shell tool owns its own deadline', async () => {
     workdir = mkdtempSync(join(tmpdir(), 'minidsh-shelltool-'))
     harness = await coreHarness({ tools: { defaultTimeoutMs: 30 } })
-    harness.root.plugin(shellStdioPlugin, { dialect })
+    harness.root.plugin(shellStdioPlugin, { dialect, ...UNCONFINED })
     harness.root.plugin(toolShellPlugin, {})
     await harness.root.settle()
     const { agent } = await harness.create({ cwd: workdir })
