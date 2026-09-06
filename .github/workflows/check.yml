@@ -1,0 +1,75 @@
+# The repository gate, on the three platforms MiniDSH claims to run on.
+#
+# `pnpm check` is typecheck + lint + the dependency gate + the unit suite. The
+# live arcs are NOT here: they cost real provider calls and live in `live.yml`,
+# which only a person can start.
+#
+# The Linux and macOS legs additionally exist to prove OS confinement, so they
+# set MINIDSH_EXPECT_CONFINEMENT=1, which turns a self-skipped confinement test
+# into a failure. A leg that exists to prove something may not pass having
+# proved nothing — and a skip and a pass look identical in a summary.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # Every platform reports: one red leg must not hide the other two.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # ubuntu-latest is Ubuntu 24.04, which gates unprivileged user namespaces
+      # behind an AppArmor knob; bubblewrap needs them and is not preinstalled.
+      # The sysctl is best-effort because the FUNCTIONAL probe is what decides —
+      # the same reason nothing here checks for the binary's existence.
+      - name: Install bubblewrap and report whether it can actually confine
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "apparmor userns knob absent; the probe decides"
+          if bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent -- true; then
+            echo "bwrap: functional"
+          else
+            echo "bwrap: PRESENT BUT NOT FUNCTIONAL — the confinement tests below will fail, and that is the honest outcome"
+          fi
+
+      - name: Report whether sandbox-exec can actually confine
+        if: runner.os == 'macOS'
+        run: |
+          if sandbox-exec -p '(version 1)(allow default)(deny file-write*)' -- true; then
+            echo "sandbox-exec: functional"
+          else
+            echo "sandbox-exec: PRESENT BUT NOT FUNCTIONAL — the confinement tests below will fail, and that is the honest outcome"
+          fi
+
+      # Installs pnpm from `packageManager` and the runtime itself, so there is
+      # no second setup step to drift out of step with it.
+      - uses: pnpm/setup@v2
+        with:
+          runtime: node@24.19.0
+          cache: true
+          require-lockfile: true
+
+      - run: pnpm check
+        env:
+          # Windows ships no backend and is not asked to prove one (§13).
+          MINIDSH_EXPECT_CONFINEMENT: ${{ (runner.os == 'Linux' || runner.os == 'macOS') && '1' || '' }}

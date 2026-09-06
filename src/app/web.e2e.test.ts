@@ -55,17 +55,22 @@ function tempDir(prefix: string): string {
  */
 const PROMPTS = [
   'Create a file at the relative path notes.txt (not an absolute path) whose only line is exactly "the browser drove this" without the quotation marks, then read it back and tell me what it says.',
-  // The shell cannot be confined on any host MiniDSH ships for, so this is
-  // refused and the model must escalate — which is the consent this arc answers
-  // over the socket, with no --approve anywhere.
-  'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
+  // The consent this arc answers over the socket, with no --approve anywhere.
+  // It asks for an effect OUTSIDE the workspace, which needs authority this
+  // session does not have on either kind of host: where the shell cannot be
+  // confined the tool refuses before the command runs, and where it can the
+  // command runs and the KERNEL refuses the write. Either way the cost is
+  // exactly one one-shot approval — the sentence V1 makes about itself — so
+  // this arc needs no branch of its own. Filled per run, since it names a path.
+  '',
   'Read notes.txt one more time and reply with its line.',
   'Create a file at the relative path summary.txt (not an absolute path) whose only line is exactly "reconnected and finished" without the quotation marks.',
-] as const
+]
 
 describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket', () => {
   it('two clients, one session, a real approval, backward paging, and a reconnect mid-turn', { timeout: 600_000 }, async () => {
     const workspace = tempDir('minidsh-web-e2e-ws-')
+    const outside = tempDir('minidsh-web-e2e-out-')
     const home = tempDir('minidsh-web-e2e-home-')
     const decoy = join(workspace, 'decoy.txt')
     writeFileSync(decoy, 'must never change\n', 'utf8')
@@ -105,14 +110,22 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
     expect(view.authority.sandbox).toBe('workspace-write')
 
     // ---- a real consent, answered over the socket -----------------------
+    const granted = join(outside, 'granted.txt')
+    PROMPTS[1] =
+      'Using the shell tool (not the file editor), run one command that writes the word ok into the file at the absolute path ' +
+      granted.replace(/\\/g, '/') +
+      ". If a tool refuses, follow the guidance it gives you."
     await driver.request('session/prompt', { sessionId, text: PROMPTS[1] })
     await driver.waitForCompletedTurn(sessionId, 2)
-    // No --approve anywhere: the shell is unconfinable on this host, the model
-    // escalated, and a browser-shaped client granted it over the wire.
+    // No --approve anywhere: the effect needed authority this session did not
+    // have, the model asked for it, and a browser-shaped client granted it over
+    // the wire. The world says whether the grant was real.
     expect(driver.events('approval/asked', sessionId).length).toBeGreaterThan(0)
     expect(driver.events('approval/decided', sessionId).some((event) => (event.data as { outcome: string }).outcome === 'allowed-once')).toBe(true)
     // Both clients saw the same durable decision — it IS the frame.
     expect(observer.events('approval/decided', sessionId).length).toBe(driver.events('approval/decided', sessionId).length)
+    // And the grant bought a real effect: outside the workspace, after consent.
+    expect(readFileSync(granted, 'utf8')).toContain('ok')
 
     // ---- one more turn, then page the whole transcript backwards ---------
     await driver.request('session/prompt', { sessionId, text: PROMPTS[2] })

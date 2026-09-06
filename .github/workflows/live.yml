@@ -1,0 +1,60 @@
+# The eight live arcs against the real providers.
+#
+# `workflow_dispatch` only, deliberately. These spend a real account, so no
+# push starts them and a fork's pull request cannot reach the secrets at all —
+# which is the same protection stated twice, and neither is a substitute for
+# the other. A person decides when this runs.
+#
+# It runs on Linux with bubblewrap active, because that is the only place the
+# confined branch of the authority arc and a real model meet.
+name: live
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: 'vitest filename filter (blank runs all eight arcs)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  arcs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      # Each arc self-skips without a key, so an unset secret would produce a
+      # green run that proved nothing — the same failure mode the confinement
+      # legs guard against, and it gets the same answer.
+      - name: Refuse to pass having run nothing
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "DEEPSEEK_API_KEY is unset: every arc would self-skip and this job would be a green lie."
+            exit 1
+          fi
+
+      - name: Install bubblewrap so the arcs run against a CONFINED host
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "apparmor userns knob absent; the probe decides"
+          bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent -- true \
+            && echo "bwrap: functional — the arcs take their confined branch" \
+            || echo "bwrap: not functional — the arcs take their unconfined branch"
+
+      - uses: pnpm/setup@v2
+        with:
+          runtime: node@24.19.0
+          cache: true
+          require-lockfile: true
+
+      - run: pnpm test:e2e ${{ inputs.filter }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

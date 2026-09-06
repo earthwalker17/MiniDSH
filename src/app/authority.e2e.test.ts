@@ -5,11 +5,22 @@
  * default `workspace-write`, so every consent in this arc is a real decision
  * answered by the client. Arc: an edit inside the workspace lands → an edit
  * outside it is refused by the fence (probed on disk, not asserted from the
- * agent's word) → a shell command is refused because this host cannot confine
- * it, the model escalates with a justification, the client approves, and the
- * command runs → the session is switched to `read-only` over the wire and the
- * next write is refused → a fresh single-turn log replays keylessly, proving
- * the new durable authority events leave the oracle intact.
+ * agent's word) → THE SHELL, which is where the two kinds of host diverge →
+ * the session is switched to `read-only` over the wire and the next write is
+ * refused → a fresh single-turn log replays keylessly, proving the durable
+ * authority events leave the oracle intact.
+ *
+ * The shell step branches on the enforcement `initialize` reports, and it must,
+ * because both halves are true somewhere and neither is a weaker stand-in:
+ *
+ *   unconfined — a command is refused before it runs, the model escalates with
+ *                a justification, the client approves, the command runs, and
+ *                the grant is provably not a session switch;
+ *   confined   — an ordinary command runs having cost nobody a decision (the
+ *                whole point of the authority default, and undemonstrable
+ *                before S11), and then a command that tries to write outside
+ *                the workspace leaves NO file on the host while every approval
+ *                is answered `rejected`, so a grant cannot be what stopped it.
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
@@ -47,6 +58,7 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     const outside = tempDir('minidsh-auth-out-')
     const home = tempDir('minidsh-auth-home-')
     const escape = join(outside, 'owned.txt')
+    const escapeShell = join(outside, 'shell-owned.txt')
     const decoy = join(workspace, 'decoy.txt')
     writeFileSync(decoy, 'must never change\n', 'utf8')
     const decoyBytes = readFileSync(decoy)
@@ -55,6 +67,11 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     const serve = new ServeProcess(workspace, home, {})
     const init = await serve.request<{ defaultAuthority: { sandbox: string; enforcement: string } }>('initialize')
     expect(init.defaultAuthority.sandbox).toBe('workspace-write')
+    // What this HOST reports, read once and branched on below. A live arc's
+    // premise is an assumption that decays silently, and "no host can confine"
+    // was this arc's premise for eight sessions.
+    const confined = init.defaultAuthority.enforcement !== 'none'
+    console.log('[authority arc] host enforcement: ' + init.defaultAuthority.enforcement + (confined ? ' (confined branch)' : ' (unconfined branch)'))
 
     // ---- 1. inside the workspace: ordinary work, no consent needed ---------
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', {
@@ -84,30 +101,79 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       .filter((event) => dataOf<{ error?: { code: string } }>(event).error?.code === 'FS_SANDBOX_DENIED')
     expect(denials.length).toBeGreaterThan(0)
 
-    // ---- 3. the shell: refused, escalated by the model, approved by us -----
-    const stop = serve.answerApprovals('allowed-once')
-    await serve.request('session/prompt', {
-      sessionId,
-      text: 'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
-    })
-    await serve.waitForCompletedTurn(sessionId, 3)
-    stop()
+    // ---- 3. the shell, and what this host can actually enforce -------------
+    // The arc branches on the enforcement the HOST reports, because the two
+    // kinds of host fail in different places and only one of them can be true
+    // here. Neither branch is the weaker one: on an unconfined host the
+    // question is whether a refusal is honest and escalable; on a confined
+    // host it is whether the sandbox is real.
+    if (!confined) {
+      // Refused before it ran, escalated by the model, approved by us.
+      const stop = serve.answerApprovals('allowed-once')
+      await serve.request('session/prompt', {
+        sessionId,
+        text: 'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
+      })
+      await serve.waitForCompletedTurn(sessionId, 3)
+      stop()
 
-    const asked = serve.events('approval/asked', sessionId)
-    expect(asked.length).toBeGreaterThan(0)
-    const ask = dataOf<{ id: string; toolName: string; callId?: string; reason?: string }>(asked[0]!)
-    expect(ask.reason).toContain('danger-full-access')
-    // The ask names only its tool; the command it covered is joined by callId.
-    const covered = serve.events('tool/call', sessionId).find((event) => dataOf<{ callId: string }>(event).callId === ask.callId)
-    expect(dataOf<{ arguments: string }>(covered!).arguments).toContain('sandbox_permissions')
-    const decided = serve.events('approval/decided', sessionId).find((event) => dataOf<{ id: string }>(event).id === ask.id)
-    expect(dataOf<{ outcome: string }>(decided!).outcome).toBe('allowed-once')
-    // The grant covered one call: it is not a session switch.
-    expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
+      const asked = serve.events('approval/asked', sessionId)
+      expect(asked.length).toBeGreaterThan(0)
+      const ask = dataOf<{ id: string; toolName: string; callId?: string; reason?: string }>(asked[0]!)
+      expect(ask.reason).toContain('danger-full-access')
+      // The ask names only its tool; the command it covered is joined by callId.
+      const covered = serve.events('tool/call', sessionId).find((event) => dataOf<{ callId: string }>(event).callId === ask.callId)
+      expect(dataOf<{ arguments: string }>(covered!).arguments).toContain('sandbox_permissions')
+      const decided = serve.events('approval/decided', sessionId).find((event) => dataOf<{ id: string }>(event).id === ask.id)
+      expect(dataOf<{ outcome: string }>(decided!).outcome).toBe('allowed-once')
+      // The grant covered one call: it is not a session switch.
+      expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
+    } else {
+      // 3a. THE PAYOFF: on a confined host an ordinary command costs nobody a
+      // decision. That is what the authority default was always for, and until
+      // S11 no host could demonstrate it.
+      const askedBefore = serve.events('approval/asked', sessionId).length
+      await serve.request('session/prompt', {
+        sessionId,
+        text: 'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
+      })
+      await serve.waitForCompletedTurn(sessionId, 3)
+      expect(serve.events('approval/asked', sessionId)).toHaveLength(askedBefore)
+      const versions = serve
+        .events('tool/result', sessionId)
+        .map((event) => JSON.stringify(dataOf<unknown>(event)))
+        .filter((text) => /v\d+\.\d+\.\d+/.test(text))
+      expect(versions.length, 'a confined host ran node --version without asking anyone').toBeGreaterThan(0)
+
+      // 3b. THE CLAIM: a shell command that tries to write outside the
+      // workspace fails because the SANDBOX refused it. Every approval here is
+      // answered `rejected`, so no grant can be what kept the file away — and
+      // the assertion is the file's absence on the host, never the model's
+      // account of what happened.
+      const refuseWrite = serve.answerApprovals('rejected')
+      await serve.request('session/prompt', {
+        sessionId,
+        text:
+          'Using the shell tool (not the file editor), run one command that writes the word owned into the file at the absolute path ' +
+          escapeShell.replace(/\\/g, '/') +
+          ", then report that command's exit status. If a tool refuses, follow the guidance it gives you.",
+      })
+      await serve.waitForCompletedTurn(sessionId, 4)
+      refuseWrite()
+      expect(existsSync(escapeShell), 'the sandbox let a write outside the workspace reach the host').toBe(false)
+      // It was the SHELL that was refused, not the in-process fence: the shell
+      // tool is what ran.
+      const shellCalls = serve
+        .events('tool/call', sessionId)
+        .filter((event) => ['bash', 'pwsh'].includes(dataOf<{ name: string }>(event).name))
+      expect(shellCalls.length).toBeGreaterThan(0)
+      // Nothing was granted, so the session's authority never moved.
+      expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
+    }
 
     // ---- 4. a durable switch, and the next write is refused ----------------
     // Anything asked for from here is refused, the way a person saying no is.
-    const refuse = serve.answerApprovals('rejected')
+    const refuseSwitch = serve.answerApprovals('rejected')
     const view = await serve.request<{ sandbox: string }>('session/authority', { sessionId, sandbox: 'read-only' })
     expect(view.sandbox).toBe('read-only')
     const change = serve.events('sandbox/mode', sessionId).at(-1)!
@@ -117,8 +183,8 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       sessionId,
       text: 'Append a second line reading "after the switch" to notes.txt. If a tool refuses, stop and say why.',
     })
-    await serve.waitForCompletedTurn(sessionId, 4)
-    refuse()
+    await serve.waitForCompletedTurn(sessionId, confined ? 5 : 4)
+    refuseSwitch()
     expect(readFileSync(join(workspace, 'notes.txt'), 'utf8')).not.toContain('after the switch')
     expect(readFileSync(decoy).equals(decoyBytes)).toBe(true)
 
