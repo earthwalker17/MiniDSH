@@ -14,9 +14,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import type { Agent } from '../../core/agent/types.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_REQUEST, type ApprovalOutcome } from '../../core/approval/index.ts'
-import { SANDBOX, SANDBOX_MODE } from '../../core/sandbox/index.ts'
+import { SANDBOX, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
 import { matches } from '../../core/session/index.ts'
 import { TOOLS, toolCall } from '../../core/tools/index.ts'
+import { SHELL, type Shell, type ShellExecRequest, type ShellSession } from '../../core/shell/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../shell-stdio/index.ts'
 import { toolShellPlugin } from './index.ts'
 
@@ -92,6 +93,116 @@ describe('the shell under a mode this host cannot enforce', () => {
     const result = await run({ command: echoCmd })
     expect(result.text).not.toContain('[sandbox:')
     expect(approvals(agent)).toHaveLength(0)
+  })
+})
+
+/**
+ * A world that confines, driven from the test rather than from the machine.
+ *
+ * On a host with a backend the tool's guidance and its refusal move: the
+ * command RUNS and the kernel refuses the write, so nothing arrives as
+ * `SANDBOX_UNAVAILABLE` and the escalation would be invisible unless the
+ * denial itself carries it. That is what these pin, on every platform,
+ * including the one that ships no backend at all.
+ */
+class StubShell implements Shell {
+  readonly dialect: ShellDialect = dialect
+  readonly denialSignatures = ['read-only file system']
+  readonly seen: ShellExecRequest[] = []
+  private readonly answer: { output: string; exitCode: number }
+  constructor(answer: { output: string; exitCode: number }) {
+    this.answer = answer
+  }
+  enforcementFor(mode: SandboxMode): SandboxEnforcement {
+    return mode === 'danger-full-access' ? 'none' : 'full'
+  }
+  sessionFor(): ShellSession {
+    return {
+      exec: (request: ShellExecRequest) => {
+        this.seen.push(request)
+        return Promise.resolve({
+          output: this.answer.output,
+          exitCode: this.answer.exitCode,
+          timedOut: false,
+          truncated: false,
+          reset: false,
+          sandbox: { mode: request.policy.mode, enforcement: this.enforcementFor(request.policy.mode) },
+        })
+      },
+      restart: () => Promise.resolve(),
+      dispose: () => Promise.resolve(),
+    }
+  }
+}
+
+async function confinedSetup(answer: { output: string; exitCode: number }): Promise<Fixture & { shell: StubShell }> {
+  workdir = mkdtempSync(join(tmpdir(), 'minidsh-shelltool-'))
+  harness = await coreHarness()
+  const shell = new StubShell(answer)
+  harness.root.plugin({ name: 'shell-stub', apply: (ctx) => void ctx.provide(SHELL, shell) })
+  harness.root.plugin(toolShellPlugin, {})
+  await harness.root.settle()
+  const { agent } = await harness.create({ cwd: workdir })
+  const tools = harness.root.get(TOOLS)
+  return {
+    agent,
+    shell,
+    run: async (args: object) => {
+      const result = await tools.execute(toolCall(`call-${Math.random()}`, toolName, JSON.stringify(args), agent, new AbortController().signal))
+      const text = result.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+      return { isError: result.isError, code: result.error?.info?.code, text }
+    },
+  }
+}
+
+describe('the shell on a host that DOES confine', () => {
+  it('runs an ordinary command with no refusal and no approval at all', async () => {
+    const { agent, run } = await confinedSetup({ output: 'ran', exitCode: 0 })
+    const result = await run({ command: echoCmd })
+    expect(result.text).toContain('ran')
+    expect(result.text).not.toContain('[sandbox:')
+    expect(approvals(agent)).toHaveLength(0)
+  })
+
+  it('offers the same escalation for a KERNEL denial that a refusal offers, since nothing else would', async () => {
+    const { run } = await confinedSetup({ output: "sh: 1: cannot create /etc/x: Read-only file system", exitCode: 2 })
+    const result = await run({ command: echoCmd })
+    expect(result.text).toContain('the sandbox refused a file effect')
+    expect(result.text).toContain('sandbox_permissions')
+    expect(result.text).toContain('"danger-full-access"')
+  })
+
+  it('says nothing about escalation for an ordinary failure that merely exits non-zero', async () => {
+    const { run } = await confinedSetup({ output: 'grep: no matches', exitCode: 1 })
+    const result = await run({ command: echoCmd })
+    expect(result.text).not.toContain('[sandbox:')
+  })
+
+  it('marks an approved escalation one-shot, and tells the model its state did not persist', async () => {
+    const { agent, run, shell } = await confinedSetup({ output: 'ran', exitCode: 0 })
+    harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
+    const result = await run({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'write outside' })
+    expect(result.isError).toBe(false)
+    expect(shell.seen.at(-1)!.oneShot).toBe(true)
+    expect(shell.seen.at(-1)!.policy.mode).toBe('danger-full-access')
+    expect(result.text).toContain('ran in a separate shell')
+    // One ask per escalation: a command that already spent consent is finished.
+    expect(approvals(agent).filter((entry) => entry.type === 'approval/asked')).toHaveLength(1)
+  })
+
+  it('never asks twice: a denial on an already-escalated command carries no fresh hint', async () => {
+    const { run } = await confinedSetup({ output: 'cannot create /etc/x: Read-only file system', exitCode: 2 })
+    harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
+    const result = await run({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'write outside' })
+    expect(result.text).not.toContain('the sandbox refused a file effect')
+  })
+
+  it('describes the boundary the way THIS host actually enforces it', async () => {
+    await confinedSetup({ output: 'ran', exitCode: 0 })
+    const schemas = harness!.root.get(TOOLS).schemas()
+    const description = schemas.find((schema) => schema.name === toolName)!.description
+    expect(description).toContain('inside an OS sandbox')
+    expect(description).not.toContain('cannot be confined on this host is REFUSED')
   })
 })
 

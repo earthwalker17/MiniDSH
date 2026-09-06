@@ -59,6 +59,32 @@ function modeEffect(mode: SandboxMode, workspaceRoot: string | undefined): strin
     : `File modifications are confined to ${workspaceRoot}; reads are unrestricted.`
 }
 
+/**
+ * What the recorded `enforcement` means for a shell command, in the model's
+ * terms. Three answers, because they are three different worlds:
+ *
+ *   `none`    the shell REFUSES a confined command before running it, and the
+ *             refusal carries the escalation;
+ *   `full`    the command runs and the operating system refuses the write —
+ *             which reads like an ordinary command failure unless it is said;
+ *   `partial` the same, minus the promise that every effect is governed. No
+ *             backend reports it today; the vocabulary carries it because a
+ *             caller needing an absolute boundary must not read it as `full`.
+ */
+function confinementLines(enforcement: SandboxEnforcement): string[] {
+  if (enforcement === 'none') {
+    return [
+      '- This host cannot confine shell commands, so the shell refuses to run under this mode.',
+      '  Follow the escalation guidance a refusal returns rather than working around it.',
+    ]
+  }
+  const governed = enforcement === 'full' ? 'enforces this mode' : 'enforces this mode only partially'
+  return [
+    `- Shell commands run inside an OS sandbox that ${governed}: a file write outside the sandbox fails`,
+    '  because the operating system refused it, not because a tool did. Follow the escalation guidance rather than working around it.',
+  ]
+}
+
 /** What a policy means for an action that needs consent. One spelling, shared the same way. */
 function policyEffect(policy: ApprovalPolicy): string {
   return policy === 'ask'
@@ -82,13 +108,7 @@ function authorityLines(ctx: Context, agent: Agent | undefined): string[] {
   // An agent with no stamp at all was not created through the registry; there is
   // nothing recorded to read, so the live world is the only honest answer.
   const enforcement: SandboxEnforcement = stamp?.enforcement ?? sandbox.enforcementFor(mode)
-  const confinement =
-    mode !== 'danger-full-access' && enforcement === 'none'
-      ? [
-          '- This host cannot confine shell commands, so the shell refuses to run under this mode.',
-          '  Follow the escalation guidance a refusal returns rather than working around it.',
-        ]
-      : []
+  const confinement = mode === 'danger-full-access' ? [] : confinementLines(enforcement)
   return [
     `- Sandbox: ${mode}. ${modeEffect(mode, undefined)}`,
     ...confinement,

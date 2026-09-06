@@ -34,22 +34,40 @@ const configSchema = z
   })
   .optional()
 
-const CONFINEMENT_GUIDANCE = `* Commands run under this session's sandbox policy. A command that cannot be confined on this host is REFUSED and the result says so.
+/**
+ * What the model is told about the boundary — and it must be what this host
+ * actually does, because the two hosts fail in different places. Where nothing
+ * confines, the TOOL refuses before the command runs. Where something does,
+ * the command runs and the KERNEL refuses the write, which looks like an
+ * ordinary command failure unless the guidance says otherwise.
+ *
+ * Resolved once, at mount, from the mounted world: a tool description is part
+ * of every request's prefix and may not vary within a session.
+ */
+function confinementGuidance(confining: boolean): string {
+  if (!confining) {
+    return `* Commands run under this session's sandbox policy. A command that cannot be confined on this host is REFUSED and the result says so.
 * To run a refused command anyway, retry THE SAME command once with sandbox_permissions (the narrowest wider mode that suffices) and justification (why it is required). The user is asked to approve, and a grant covers that one call only.
 * Never work around a denial by rewriting the command to hide its effect.`
+  }
+  return `* Commands run inside an OS sandbox enforcing this session's policy. Under a confined mode a write outside what the policy allows fails because the operating system refused it, not because the tool did — reads and network are not restricted.
+* To run a command that must write outside those bounds, retry THE SAME command once with sandbox_permissions (the narrowest wider mode that suffices) and justification (why it is required). The user is asked to approve, and a grant covers that one call only.
+* A command running under an approved permission runs in a SEPARATE shell, so any working-directory or environment change it makes does not persist.
+* Never work around a denial by rewriting the command to hide its effect.`
+}
 
-const BASH_DESCRIPTION = `Run a command in a persistent bash shell.
+const bashDescription = (confining: boolean): string => `Run a command in a persistent bash shell.
 * State (working directory, environment) persists across calls.
 * Combine multiple steps with && or ; in one call.
 * Avoid commands that never terminate. Output too long to show inline is shortened to its head and tail; the result says how much was omitted and, when it was saved, the file to read it from.
-${CONFINEMENT_GUIDANCE}`
+${confinementGuidance(confining)}`
 
-const PWSH_DESCRIPTION = `Run a command in a persistent PowerShell (pwsh) shell.
+const pwshDescription = (confining: boolean): string => `Run a command in a persistent PowerShell (pwsh) shell.
 * State (working directory, environment) persists across calls.
 * Use native Windows paths (C:\\...) and $env:NAME variables; this is PowerShell, not bash.
 * Combine multiple steps with ; in one call.
 * Avoid commands that never terminate. Output too long to show inline is shortened to its head and tail; the result says how much was omitted and, when it was saved, the file to read it from.
-${CONFINEMENT_GUIDANCE}`
+${confinementGuidance(confining)}`
 
 const InputSchema = z
   .object({
@@ -86,9 +104,12 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
   const sandbox = ctx.get(SANDBOX)
   const approval = ctx.get(APPROVAL)
   const name = shell.dialect === 'pwsh' ? 'pwsh' : 'bash'
+  // The representative confined mode: `danger-full-access` is never confined
+  // and `read-only` and `workspace-write` are enforced by the same mechanism.
+  const confining = shell.enforcementFor('workspace-write') !== 'none'
   return defineTool({
     name,
-    description: shell.dialect === 'pwsh' ? PWSH_DESCRIPTION : BASH_DESCRIPTION,
+    description: shell.dialect === 'pwsh' ? pwshDescription(confining) : bashDescription(confining),
     input: InputSchema,
     output: z.object({ output: z.string(), exitCode: z.number().nullable() }),
     // The executor owns the deadline outright: it kills the child and returns

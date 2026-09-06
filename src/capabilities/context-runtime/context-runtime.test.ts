@@ -135,6 +135,37 @@ describe('the runtime-context section', () => {
     expect(assembled.system).toContain('A denial is policy, not a bug')
   })
 
+  /**
+   * The two hosts fail in different PLACES, and the section is where the model
+   * learns which one it is on. Where nothing confines, a refusal arrives
+   * before the command runs. Where something does, the command runs and the
+   * kernel refuses the write — indistinguishable from an ordinary command
+   * failure unless this says otherwise.
+   */
+  it('tells a model on a confined host that the refusal will come from the operating system', async () => {
+    const test = await harness('full')
+    const { agent } = await test.create()
+    const assembled = await test.root.get(PROMPT).assemble(agent)
+    expect(assembled.system).toContain('OS sandbox that enforces this mode')
+    expect(assembled.system).toContain('because the operating system refused it, not because a tool did')
+    expect(assembled.system).not.toContain('cannot confine shell commands')
+  })
+
+  it('does not promise a partial backend governs everything', async () => {
+    const test = await harness('partial')
+    const { agent } = await test.create()
+    const assembled = await test.root.get(PROMPT).assemble(agent)
+    expect(assembled.system).toContain('enforces this mode only partially')
+  })
+
+  it('says nothing about confinement under danger-full-access, which asks for none', async () => {
+    const test = await harness('full', 'danger-full-access')
+    const { agent } = await test.create()
+    const assembled = await test.root.get(PROMPT).assemble(agent)
+    expect(assembled.system).not.toContain('OS sandbox')
+    expect(assembled.system).not.toContain('cannot confine shell commands')
+  })
+
   it('states the authority THIS lifecycle opened under, not the one its log opens with', async () => {
     const test = await harness('none')
     const { agent } = await test.create()
