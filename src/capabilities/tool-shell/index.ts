@@ -50,9 +50,13 @@ function confinementGuidance(confining: boolean): string {
 * To run a refused command anyway, retry THE SAME command once with sandbox_permissions (the narrowest wider mode that suffices) and justification (why it is required). The user is asked to approve, and a grant covers that one call only.
 * Never work around a denial by rewriting the command to hide its effect.`
   }
+  // Deliberately NOT a fourth bullet saying an approved command runs in a
+  // separate shell. That matters only once a grant has been given, and the
+  // result of such a command already says it — so a bullet would spend tokens
+  // on every request of every session to repeat a notice that arrives exactly
+  // when it is true. The description is the fixed prefix; the notice is not.
   return `* Commands run inside an OS sandbox enforcing this session's policy. Under a confined mode a write outside what the policy allows fails because the operating system refused it, not because the tool did — reads and network are not restricted.
 * To run a command that must write outside those bounds, retry THE SAME command once with sandbox_permissions (the narrowest wider mode that suffices) and justification (why it is required). The user is asked to approve, and a grant covers that one call only.
-* A command running under an approved permission runs in a SEPARATE shell, so any working-directory or environment change it makes does not persist.
 * Never work around a denial by rewriting the command to hide its effect.`
 }
 

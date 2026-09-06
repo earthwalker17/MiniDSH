@@ -36,8 +36,22 @@ import { bootComposition } from './headless.ts'
 const DEEPSEEK = process.env.DEEPSEEK_API_KEY
 const ANTHROPIC = process.env.ANTHROPIC_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
-/** Low enough that three file reads cross it for real. */
-const BUDGET = 6_000
+/**
+ * Low enough that three file reads cross it for real, and no lower.
+ *
+ * Raised from 6,000 at S11, which is a calibration repair rather than a
+ * loosening. A confined host carries 48 more tokens of FIXED prefix per
+ * request (measured: the runtime-context section gains two lines and the shell
+ * tool's guidance changes), and at 6,000 the threshold sits at 3,000 with
+ * roughly one turn of headroom left after a compaction — so those 48 tokens
+ * took the arc from 2 applied compactions to 3 or 4, and `assertConsumed()`
+ * requires the REPLAY to reproduce every recorded out-of-loop call. Measured
+ * at this budget: 1 of 3 runs passed. Compaction is this arc's vehicle, not
+ * its subject: what it exists to prove is that a route switch is one durable
+ * fact, that a role can send the summary somewhere else, and that the mixed
+ * log replays. It still asserts at least one applied compaction.
+ */
+const BUDGET = 6_400
 
 let dirs: string[] = []
 afterAll(() => {
@@ -96,10 +110,18 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     )
 
     // Every prompt of the arc, in order — the replay walks the same path.
+    // Each prompt NAMES the editor tool and forbids the shell, for the reason
+    // the context arc already carries: "read alpha.txt" is answerable by one
+    // `cat`, and until S11 the only thing stopping the model reaching for it
+    // was that no host could confine a shell. A confined host runs it happily,
+    // which quietly turned this into an arc about tool choice — the exact
+    // premise decay ARCHITECTURE §10 warns about, arriving the moment the
+    // system got better. What this arc measures is that a route switch is one
+    // durable fact, and it may not depend on which tool the model picks.
     const PROMPTS = [
-      'Read alpha.txt and reply with only the marker token it contains.',
-      'Now read bravo.txt and reply with only the marker token it contains.',
-      'Now read charlie.txt and reply with only the marker token it contains.',
+      'Using the file editor tool (not the shell), read alpha.txt and reply with only the marker token it contains.',
+      'Using the file editor tool (not the shell), read bravo.txt and reply with only the marker token it contains.',
+      'Using the file editor tool (not the shell), read charlie.txt and reply with only the marker token it contains.',
       'List every marker token you have found so far, one per line, and nothing else.',
     ] as const
 

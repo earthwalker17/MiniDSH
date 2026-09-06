@@ -151,8 +151,12 @@ describe.skipIf(!KEY)('S5 live E2E: a long session stays in budget without the l
 
     const serve = new ServeProcess(workspace, home, { approve: true })
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: FIRST_PROMPT })
-    // The shell has no confinement backend on any host, so give this run the
-    // mode that needs none rather than spending a round trip per command.
+    // This run needs a shell that works on EVERY platform, and only one mode
+    // does: a Linux or macOS host confines and would run the command under
+    // `workspace-write`, while a Windows host has no backend and would refuse
+    // it, spending a round trip on consent per command. The arc is about
+    // context pressure, not about authority — the authority arc is where the
+    // difference between those hosts is the subject.
     await serve.request('session/authority', { sessionId, sandbox: 'danger-full-access' })
     await serve.waitForCompletedTurn(sessionId, 1)
 
