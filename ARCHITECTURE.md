@@ -375,6 +375,7 @@ A register, not an essay: each line is a thing a contributor should know before 
 - An attachment write interrupted between its staging write and its rename leaves a `.part` file under `attachments/v1/tmp/` that nothing reclaims.
 - A lost attachment object is turn-fatal (`ATTACHMENT_UNREADABLE`, nothing retries) and image validation is header-only; images have one producer and no client upload path.
 - No session deletion and no search, no rename and no model-written title — all of which need a projection, since `persistence.list()` reads only a bounded prefix. That prefix is also why a session whose first prompt exceeds 64 KiB lists without a name.
+- Every POSIX process group a one-shot escalation opened is reaped at disposal, addressed by pgid. A group that has entirely exited frees its pid, so a pid-space wraparound within one agent's lifetime could in principle signal an unrelated group — the same unreachable edge the write lease has, needing millions of process creations in between.
 - The lease degrades to manual cleanup at its unreachable edges (pid reuse, foreign hosts); a process killed inside a reclaim leaves a `.lock.steal` mutex that blocks later reclaims until removed.
 - A turn that loses durability ends but leaves the agent `idle`; reachable only through a provider or driver bug.
 - A fork boundary may separate the compaction bracket from the replace that realized it.

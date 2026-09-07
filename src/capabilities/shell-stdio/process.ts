@@ -100,10 +100,17 @@ export class ShellProcess implements ShellSession {
    * that backgrounds and disowns something leaves the leader exiting at once
    * while its descendant runs on, so by the time disposal looks there is no
    * child left to kill and the escaped process holds the widest authority the
-   * session ever granted. The group outlives its leader and stays addressable
-   * — Linux keeps a pid allocated while it is in use as a pgid, so there is no
-   * window in which this could signal an unrelated process — which is what
-   * makes reaping at disposal both possible and safe.
+   * session ever granted. A process group outlives its leader and stays
+   * addressable while ANY member is alive — the kernel will not reuse a pid
+   * that is still in use as a pgid — which is what makes reaping at disposal
+   * possible at all.
+   *
+   * The stated edge: once a group is entirely gone its pid is free again, so a
+   * pid-space wraparound inside one agent's lifetime could in principle put an
+   * unrelated leader on a number still in this set. That needs millions of
+   * process creations between an escalation and a disposal; it is the same
+   * unreachable edge the write lease documents for pid reuse, and it is named
+   * rather than papered over.
    */
   private readonly oneShotGroups = new Set<number>()
   /** True from a spawn until its first command answered: a child that dies before that never worked at all. */
