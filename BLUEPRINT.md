@@ -6,7 +6,7 @@ What comes next, the route to get there, what is still undecided, and a compact 
 
 S11.5 closed the engineering gate: three-platform CI is green including an install smoke, the tarball installs and runs on two hosts, two release-blocking defects and twenty smaller ones are fixed, and both architecture documents are rewritten. What is left is publication, and nothing in it is engineering.
 
-1. **Flip `private: true` off** in `package.json` and set the version to `1.0.0`. The flag blocks `npm publish` (`EPRIVATE`) and nothing else; `pnpm pack` and a tarball install already work with it on, which is why it survived this long.
+1. **Flip `private: true` off** in `package.json` and set the version to `1.0.0`. The flag blocks `npm publish` (`EPRIVATE`) and nothing else; `pnpm pack` and a tarball install already work with it on, which is why it survived this long. **`npm publish --dry-run` cannot rehearse this** — the private check lives inside libnpmpublish, which a dry run never calls, so the rehearsal prints success for a publish that will fail. Assert it directly instead: `node -e "if (require('./package.json').private) throw new Error('still private')"`. `prepublishOnly` runs `pnpm check`, so the publish is at least gated by the suite.
 2. **`pnpm check` on both hosts, `gh workflow run check.yml`, and `live.yml` once** on the release commit — the same gate every session ends with, on the exact bytes that ship.
 3. **`npm publish`**, then a `v1.0.0` git tag and a GitHub release.
 4. **The README quick start becomes `npx minidsh chat --cwd <repo>`.** Today it says a clone or a packed tarball; publication is the only thing that makes the shorter line true.
