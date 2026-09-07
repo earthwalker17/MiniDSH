@@ -39,6 +39,7 @@ export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
     const adapter = new DeepSeekAdapter({
       apiKeyRef: ref,
       resolveKey: () => credentials.resolve(ref),
+      describeKey: () => credentials.describe(ref),
       // `tryGet`, not `inject`: an adapter must not REQUIRE an attachment store.
       // Without one it refuses image content instead of failing to mount.
       resolveAttachments: () => ctx.tryGet(ATTACHMENTS),

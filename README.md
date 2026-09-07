@@ -15,11 +15,14 @@ MiniDSH studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 
 ## Quick start
 
-Requirements: Node ≥ 24 (TypeScript runs natively, no build step); pnpm 11 (`corepack enable`, or `npm i -g pnpm`); on Windows, PowerShell 7 (`pwsh`) — the shell tool refuses loudly if it is missing; on Linux, `bubblewrap` if you want the shell confined rather than asking per command (`apt install bubblewrap`; macOS needs nothing extra); and a provider key: `DEEPSEEK_API_KEY` for the default route, `ANTHROPIC_API_KEY` for the Anthropic one, either in the environment or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}` (only the name is ever logged). Today MiniDSH runs from a clone; an npm package is the V1 release step.
+Requirements: Node ≥ 24; on Windows, PowerShell 7 (`pwsh`) — the shell tool refuses loudly if it is missing; on Linux, `bubblewrap` if you want the shell confined rather than asking per command (`apt install bubblewrap`; macOS needs nothing extra); and a provider key: `DEEPSEEK_API_KEY` for the default route, `ANTHROPIC_API_KEY` for the Anthropic one, either in the environment or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}` (only the name is ever logged; a run without one says exactly this).
+
+Two ways to run it. **From a clone** (development; TypeScript runs natively on Node 24, no build step; needs pnpm 11 via `corepack enable`): `pnpm install`, then `pnpm minidsh …` as below. **From the package**: `npm install -g minidsh`, then `minidsh …` — the same commands without the `pnpm` prefix. Publication to npm is the V1 release step; until then the package is built and installed from a tarball (`pnpm pack`, then `npm install -g ./minidsh-*.tgz`), which is what CI does on every platform. (`npx minidsh -v` prints npx's own version — npx keeps `-v`/`--version` for itself — so ask the installed bin, `minidsh --version`.)
 
 ```sh
 pnpm install
 pnpm check                                  # typecheck + lint + dependency gate + tests
+pnpm build                                  # emits dist/ — what the package runs; prepack runs this for you
 pnpm minidsh run "fix the failing test" --cwd path/to/workspace --approve
 pnpm minidsh run "review this module" --provider anthropic --model claude-sonnet-5
 pnpm minidsh run "summarize this repo" --json   # one JSON line per session event on stdout

@@ -74,3 +74,25 @@ jobs:
         env:
           # Windows ships no backend and is not asked to prove one (§13).
           MINIDSH_EXPECT_CONFINEMENT: ${{ (runner.os == 'Linux' || runner.os == 'macOS') && '1' || '' }}
+
+      # The install path, on every platform: pack the tarball `prepack` builds,
+      # install it into an empty directory OUTSIDE the checkout, and start the
+      # installed bin — which must pick `dist/`, since `src/` is not in the
+      # tarball and Node would refuse to strip its types under node_modules
+      # anyway. Keyless, so this proves the package installs and starts; the
+      # arcs in live.yml are what prove it works.
+      - name: Pack, install into an empty directory, and start the installed bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP"
+          mkdir -p install && cd install
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund ../minidsh-*.tgz
+          test ! -e node_modules/minidsh/src
+          test -f node_modules/minidsh/dist/app/cli.js
+          test -f node_modules/minidsh/dist/app/web/index.html
+          node node_modules/minidsh/bin/minidsh.js --version
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list

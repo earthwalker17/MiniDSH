@@ -10,7 +10,10 @@ export const DEFAULT_BASE_URL = 'https://api.deepseek.com'
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 export const DEFAULT_MAX_TOKENS = 8192
 const IDLE_TIMEOUT_MS = 300_000
-const USER_AGENT = 'minidsh/0.1.0 (+https://github.com/earthwalker17/MiniDSH)'
+// No version in it: `package.json` is the one string that knows, and a
+// capability may not read the app's copy of it. A second spelling here would
+// say `0.1.0` to the provider for the life of 1.x.
+const USER_AGENT = 'minidsh (+https://github.com/earthwalker17/MiniDSH)'
 /**
  * DeepSeek's own vocabulary. The provider silently maps `medium` and `xhigh`
  * to `high`; the adapter refuses them instead, because a request the log
@@ -32,6 +35,8 @@ export interface DeepSeekAdapterOptions {
   readonly apiKeyRef: string
   /** Called per request, so a rotated key takes effect without a reload. */
   readonly resolveKey: () => string | undefined
+  /** Where the key would be looked for, for the refusal that names the fix; absent falls back to naming the reference alone. */
+  readonly describeKey?: () => string
   /**
    * The mounted attachment store, read per request for the same reason the key
    * is. Absent is legal and means this deployment stores no attachments.
@@ -79,7 +84,10 @@ export class DeepSeekAdapter implements LlmAdapter {
     })
     const apiKey = this.options.resolveKey()
     if (!apiKey || apiKey.trim().length === 0) {
-      throw new LlmError('MISSING_CREDENTIAL', `DeepSeek API key not set (expected credential ${this.options.apiKeyRef})`)
+      // The first failure a fresh install meets, so it names BOTH places a key
+      // may go — the store is the only thing that knows its own layers.
+      const where = this.options.describeKey?.()
+      throw new LlmError('MISSING_CREDENTIAL', `DeepSeek API key not set (expected credential ${this.options.apiKeyRef}${where === undefined ? '' : `: set ${where}`})`)
     }
     const wire = {
       model: request.model,

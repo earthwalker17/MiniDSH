@@ -12,8 +12,16 @@
   "bin": {
     "minidsh": "./bin/minidsh.js"
   },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "minidsh": "node bin/minidsh.js",
+    "build": "node scripts/build.ts",
+    "prepack": "node scripts/build.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "oxlint src scripts",
     "check:deps": "node scripts/check-deps.ts",

@@ -10,7 +10,8 @@ export const DEFAULT_BASE_URL = 'https://api.anthropic.com'
 export const DEFAULT_MAX_TOKENS = 8192
 const API_VERSION = '2023-06-01'
 const IDLE_TIMEOUT_MS = 300_000
-const USER_AGENT = 'minidsh/0.1.0 (+https://github.com/earthwalker17/MiniDSH)'
+// No version in it, for the reason the sibling adapter gives: one version string, in package.json.
+const USER_AGENT = 'minidsh (+https://github.com/earthwalker17/MiniDSH)'
 
 /**
  * How a model takes its thinking configuration. `adaptive` models (the 5
@@ -97,6 +98,8 @@ export interface AnthropicAdapterOptions {
   readonly apiKeyRef: string
   /** Called per request, so a rotated key takes effect without a reload. */
   readonly resolveKey: () => string | undefined
+  /** Where the key would be looked for, for the refusal that names the fix; absent falls back to naming the reference alone. */
+  readonly describeKey?: () => string
   /**
    * The mounted attachment store, read per request for the same reason the key
    * is: a store that appears later must take effect without a reload, and an
@@ -236,7 +239,8 @@ export class AnthropicAdapter implements LlmAdapter {
     const body = this.buildBody(request, images)
     const apiKey = this.options.resolveKey()
     if (!apiKey || apiKey.trim().length === 0) {
-      throw new LlmError('MISSING_CREDENTIAL', `Anthropic API key not set (expected credential ${this.options.apiKeyRef})`)
+      const where = this.options.describeKey?.()
+      throw new LlmError('MISSING_CREDENTIAL', `Anthropic API key not set (expected credential ${this.options.apiKeyRef}${where === undefined ? '' : `: set ${where}`})`)
     }
 
     const idle = new AbortController()

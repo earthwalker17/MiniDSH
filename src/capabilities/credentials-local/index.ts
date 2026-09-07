@@ -56,6 +56,11 @@ class LocalCredentials implements Credentials {
     }
   }
 
+  describe(ref: CredentialRef): string {
+    const env = `the ${ref} environment variable`
+    return this.path === undefined ? env : `${env}, or "${ref}" in ${this.path}`
+  }
+
   private report(what: string): void {
     if (this.warned) return
     this.warned = true

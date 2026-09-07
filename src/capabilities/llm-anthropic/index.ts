@@ -40,6 +40,7 @@ export const anthropicPlugin: Plugin<AnthropicConfig | undefined> = {
     const adapter = new AnthropicAdapter({
       apiKeyRef: ref,
       resolveKey: () => credentials.resolve(ref),
+      describeKey: () => credentials.describe(ref),
       // See the sibling adapter: an attachment store is optional, never injected.
       resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
       baseURL: config?.baseURL ?? process.env.ANTHROPIC_BASE_URL ?? DEFAULT_BASE_URL,

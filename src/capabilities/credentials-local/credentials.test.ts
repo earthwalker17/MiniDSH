@@ -88,6 +88,21 @@ describe('credentials-local', () => {
     expect(resolve()).toBeUndefined() // non-string value
   })
 
+  it('describes where a value would be looked for, naming the store only when it has one', async () => {
+    const { store } = await mountWithStore()
+    const withStore = root!.get(CREDENTIALS).describe(REF)
+    expect(withStore).toContain('MINIDSH_TEST_SECRET environment variable')
+    expect(withStore).toContain(store)
+    await root!.dispose()
+    // Environment-only resolution has no file to name, and must not invent one.
+    root = createRoot({ logger: silent })
+    root.plugin(credentialsLocalPlugin, {})
+    await root.settle()
+    const envOnly = root.get(CREDENTIALS).describe(REF)
+    expect(envOnly).toContain('MINIDSH_TEST_SECRET environment variable')
+    expect(envOnly).not.toContain('credentials.json')
+  })
+
   it('refuses a reference that is not an environment-variable name', () => {
     expect(() => credentialRef('has space')).toThrow(/not an environment-variable name/)
     expect(() => credentialRef('')).toThrow(/not an environment-variable name/)
@@ -108,6 +123,24 @@ describe('the deepseek consumer', () => {
     const first = adapter.stream(request as never)[Symbol.asyncIterator]()
     await expect(first.next()).rejects.toSatisfy((error: unknown) => {
       return error instanceof LlmError && error.code === 'MISSING_CREDENTIAL' && /MINIDSH_TEST_SECRET/.test(error.message)
+    })
+  })
+
+  it('names BOTH places a key may go when the store can say — the first failure a fresh install meets', async () => {
+    const { store } = await mountWithStore()
+    const credentials = root!.get(CREDENTIALS)
+    const adapter = new DeepSeekAdapter({
+      apiKeyRef: REF,
+      resolveKey: () => credentials.resolve(REF),
+      describeKey: () => credentials.describe(REF),
+      baseURL: 'http://localhost:1',
+      defaultMaxTokens: 16,
+    })
+    const request = { provider: 'deepseek', model: 'deepseek-v4-flash', system: '', messages: [], tools: [] }
+    const first = adapter.stream(request as never)[Symbol.asyncIterator]()
+    await expect(first.next()).rejects.toSatisfy((error: unknown) => {
+      if (!(error instanceof LlmError) || error.code !== 'MISSING_CREDENTIAL') return false
+      return error.message.includes('MINIDSH_TEST_SECRET environment variable') && error.message.includes(store)
     })
   })
 })

@@ -27,6 +27,15 @@ export interface Credentials {
    * only the reference may appear in an error or a durable record.
    */
   resolve(ref: CredentialRef): string | undefined
+  /**
+   * Where a value for `ref` would be looked for, in words a person can act on
+   * — "the X environment variable, or X in ~/.minidsh/credentials.json". For
+   * the message a consumer writes when `resolve` came back empty: the
+   * provider is the only thing that knows its own layers, and a first run that
+   * says "key not set" without saying where to set it is a first run that
+   * ends in the docs. Never a value, never a partial one.
+   */
+  describe(ref: CredentialRef): string
 }
 
 export const CREDENTIALS = serviceKey<Credentials>('credentials')

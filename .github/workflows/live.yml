@@ -5,8 +5,11 @@
 # which is the same protection stated twice, and neither is a substitute for
 # the other. A person decides when this runs.
 #
-# It runs on Linux with bubblewrap active, because that is the only place the
-# confined branch of the authority arc and a real model meet.
+# It runs on the two hosts that can confine a shell — Linux with bubblewrap,
+# macOS with Seatbelt — because that is where the confined branch of the
+# authority arc and a real model meet, and there is no Mac anywhere else in
+# this project: the macOS leg is the only evidence that branch has on that OS.
+# Both legs report (`fail-fast: false`); neither stands in for the other.
 name: live
 
 on:
@@ -22,8 +25,13 @@ permissions:
 
 jobs:
   arcs:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -47,6 +55,7 @@ jobs:
           fi
 
       - name: Install bubblewrap so the arcs run against a CONFINED host
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap
@@ -54,6 +63,15 @@ jobs:
           bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent -- true \
             && echo "bwrap: functional — the arcs take their confined branch" \
             || echo "bwrap: not functional — the arcs take their unconfined branch"
+
+      # The same functional probe check.yml makes: the arcs branch on what the
+      # host REPORTS, and this line says up front which branch to expect.
+      - name: Report whether sandbox-exec can actually confine
+        if: runner.os == 'macOS'
+        run: |
+          sandbox-exec -p '(version 1)(allow default)(deny file-write*)' -- true \
+            && echo "sandbox-exec: functional — the arcs take their confined branch" \
+            || echo "sandbox-exec: not functional — the arcs take their unconfined branch"
 
       - uses: pnpm/setup@v2
         with:

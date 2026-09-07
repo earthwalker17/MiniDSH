@@ -7,3 +7,4 @@ dist/
 .minidsh/
 .DS_Store
 Thumbs.db
+*.tgz
