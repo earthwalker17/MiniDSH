@@ -89,3 +89,41 @@ jobs:
           FILTER: ${{ inputs.filter }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # The arcs above run the CHECKOUT's TypeScript source. `check.yml` proves
+      # the installed package STARTS; nothing proved it works, and "works" is
+      # the whole claim a release makes. So: pack, install into an empty
+      # directory outside the checkout, and drive one real task through the
+      # installed bin against the same model — the artifact a stranger gets,
+      # doing the thing they got it for.
+      - name: Do real work through the INSTALLED package, not the checkout
+        shell: bash
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP"
+          mkdir -p installed/proj installed/ws installed/home && cd installed/proj
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund ../../minidsh-*.tgz
+          cat > ../ws/slug.mjs <<'JS'
+          export function slugify(input) {
+            return input.replace(/ /g, '-')
+          }
+          JS
+          cat > ../ws/slug.test.mjs <<'JS'
+          import { test } from 'node:test'
+          import assert from 'node:assert'
+          import { slugify } from './slug.mjs'
+          test('slugify lowercases and hyphenates', () => {
+            assert.strictEqual(slugify('Hello World'), 'hello-world')
+          })
+          JS
+          # It must fail first, or what follows proves nothing.
+          if (cd ../ws && node --test slug.test.mjs > /dev/null 2>&1); then
+            echo "the fixture test passed before the agent ran: this step would prove nothing"; exit 1
+          fi
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js run "slug.test.mjs fails against slug.mjs. Read both with the editor tool, fix slug.mjs so the test passes, and say what you changed. Use relative paths." --cwd ../ws --approve --max-steps 12
+          # The WORLD, not the agent's account of it.
+          cd ../ws && node --test slug.test.mjs

@@ -8,16 +8,16 @@ MiniDSH studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 
 ## Documents
 
-- [`PROJECT.md`](PROJECT.md) — thesis, positioning, research context.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the implemented system shape (current state), what it deliberately differs on, and what it knowingly lacks.
-- [`BLUEPRINT.md`](BLUEPRINT.md) — the route to V1 and the compact development record.
-- [`CLAUDE.md`](CLAUDE.md) — project constitution and execution rules.
+- [`PROJECT.md`](https://github.com/earthwalker17/MiniDSH/blob/main/PROJECT.md) — thesis, positioning, research context.
+- [`ARCHITECTURE.md`](https://github.com/earthwalker17/MiniDSH/blob/main/ARCHITECTURE.md) — the implemented system shape (current state), what it deliberately differs on, and what it knowingly lacks.
+- [`BLUEPRINT.md`](https://github.com/earthwalker17/MiniDSH/blob/main/BLUEPRINT.md) — the route to V1 and the compact development record.
+- [`CLAUDE.md`](https://github.com/earthwalker17/MiniDSH/blob/main/CLAUDE.md) — project constitution and execution rules.
 
 ## Quick start
 
 Requirements: Node ≥ 24; on Windows, PowerShell 7 (`pwsh`) — the shell tool refuses loudly if it is missing; on Linux, `bubblewrap` if you want the shell confined rather than asking per command (`apt install bubblewrap`; macOS needs nothing extra); and a provider key: `DEEPSEEK_API_KEY` for the default route, `ANTHROPIC_API_KEY` for the Anthropic one, either in the environment or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}` (only the name is ever logged; a run without one says exactly this).
 
-Two ways to run it. **From a clone** (development; TypeScript runs natively on Node 24, no build step; needs pnpm 11 via `corepack enable`): `pnpm install`, then `pnpm minidsh …` as below. **From the package**: `npm install -g minidsh`, then `minidsh …` — the same commands without the `pnpm` prefix. Publication to npm is the V1 release step; until then the package is built and installed from a tarball (`pnpm pack`, then `npm install -g ./minidsh-*.tgz`), which is what CI does on every platform. (`npx minidsh -v` prints npx's own version — npx keeps `-v`/`--version` for itself — so ask the installed bin, `minidsh --version`.)
+Two ways to run it. **From a clone** (development; TypeScript runs natively on Node 24, no build step; needs pnpm 11 via `corepack enable`): `pnpm install`, then `pnpm minidsh …` as below. **From the package**: `npm install -g minidsh`, then `minidsh …` — the same commands without the `pnpm` prefix. Publication to npm is the V1 release step; until then the package is built and installed from a tarball (`pnpm pack`, then `npm install -g ./minidsh-*.tgz`), which is what CI does on every platform. (Before publication `npx minidsh` cannot resolve the name at all; after it, `npx minidsh --version` works — the npm that ships with Node 24 forwards the flag to the command rather than keeping it.)
 
 ```sh
 pnpm install
@@ -48,4 +48,4 @@ Session logs live under `~/.minidsh/sessions` (override the home with `MINIDSH_H
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](https://github.com/earthwalker17/MiniDSH/blob/main/LICENSE).

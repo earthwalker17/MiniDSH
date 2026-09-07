@@ -756,7 +756,16 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   if (typeof plan === 'string') return usage(plan)
   if (sub === 'list') {
     return withPersistence(plan, (persistence) => {
-      for (const { header, title } of persistence.list()) {
+      const stored = persistence.list()
+      // An empty store said NOTHING, which reads the same as a listing that is
+      // broken — and a fresh install is exactly the empty case, so it was the
+      // first thing a stranger saw. On stderr, so a script cutting the rows
+      // apart still reads an empty stdout.
+      if (stored.length === 0) {
+        process.stderr.write(`no stored sessions in ${plan.home.sessionsRoot}\n`)
+        return 0
+      }
+      for (const { header, title } of stored) {
         // Lineage is durable: a delegated child says whose work it was doing.
         const lineage = header.delegatedBy === undefined ? '' : `\t↳ delegated by ${header.delegatedBy} (depth ${header.delegationDepth ?? 1})`
         // The name last, so the three columns that were here before keep their

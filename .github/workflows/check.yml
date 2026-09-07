@@ -12,7 +12,10 @@ name: check
 
 on:
   push:
-    branches: [main]
+    # Release candidates too: the gate that exists to stop a leg passing having
+    # proved nothing is itself only proved by running, and a branch it never
+    # runs on is a branch where a change to this file goes unexercised.
+    branches: [main, 's11.5-rc', 'release/**']
   pull_request:
   workflow_dispatch:
 
@@ -99,6 +102,9 @@ jobs:
           test ! -e node_modules/minidsh/src
           test -f node_modules/minidsh/dist/app/cli.js
           test -f node_modules/minidsh/dist/app/web/index.html
-          node node_modules/minidsh/bin/minidsh.js --version
-          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config
-          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list
+          node node_modules/minidsh/bin/minidsh.js --version | grep -q '^minidsh '
+          # Each command must ASSERT something, not merely exit 0: `config`
+          # proves the whole plugin graph assembled, and the listing proves it
+          # answered the empty case rather than failing silently into no output.
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'core-agent-loop'
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list 2>&1 | grep -q 'no stored sessions'

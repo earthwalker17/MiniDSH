@@ -24,7 +24,14 @@ const ROOT = resolve(import.meta.dirname, '..')
 const SRC = join(ROOT, 'src')
 const DIST = join(ROOT, 'dist')
 const WEB = join('app', 'web')
-/** The browser client ships verbatim: plain ES modules, no build step, no TypeScript. */
+/**
+ * The browser client ships verbatim: plain ES modules, no build step, no
+ * TypeScript. The list is what the emit is CHECKED against, not what it is
+ * built from — `src/app/web/` is read below and a file this list does not name
+ * fails the pack. A fifth asset added there and forgotten here would otherwise
+ * 404 for installed users only, with every test and every CI leg still green,
+ * because a checkout serves the directory itself.
+ */
 const WEB_ASSETS = ['index.html', 'style.css', 'app.js', 'wire.js'] as const
 
 function fail(message: string): never {
@@ -57,6 +64,9 @@ const tsc = spawnSync(process.execPath, [join(ROOT, 'node_modules', 'typescript'
 })
 if (tsc.status !== 0) fail(`tsc exited ${tsc.status ?? tsc.signal}`)
 
+const shipped = readdirSync(join(SRC, WEB)).filter((name) => !isTest(name))
+const unlisted = shipped.filter((name) => !(WEB_ASSETS as readonly string[]).includes(name))
+if (unlisted.length > 0) fail(`src/${WEB} holds an asset the emit does not copy: ${unlisted.join(', ')} — add it to WEB_ASSETS`)
 for (const asset of WEB_ASSETS) cpSync(join(SRC, WEB, asset), join(DIST, WEB, asset))
 
 // What must not be in the emit: a test, the test harness, or a `.ts` specifier
