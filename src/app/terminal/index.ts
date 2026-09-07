@@ -101,6 +101,8 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
    * a prompt is standing, so a rendered event can break the line first.
    */
   let promptStanding = false
+  /** A real terminal echoes what is typed; an injected stream and a pipe do not. */
+  const isTty = options.io === undefined && process.stdin.isTTY === true
   const prompt = (): void => {
     if (exiting) return
     out.write('you> ')
@@ -422,9 +424,12 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   // of creating a second session.
   let lineChain: Promise<void> = Promise.resolve()
   const enqueueLine = (raw: string): void => {
-    // The line the user just sent consumed the prompt — a TTY echoed their
-    // Enter, so nothing is standing and the next event needs no break.
-    promptStanding = false
+    // A TTY echoed the user's keystrokes and their Enter, so the cursor has
+    // already left the prompt and the next event needs no break. A PIPE echoes
+    // nothing, so `you> ` is still sitting on the line and the first rendered
+    // event would glue itself to it — which is what a scripted `minidsh chat`
+    // and every piped transcript actually look like.
+    if (isTty) promptStanding = false
     lineChain = lineChain.then(() => onLine(raw)).catch(printError)
   }
   rl.on('line', enqueueLine)
