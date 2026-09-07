@@ -12,10 +12,12 @@ name: check
 
 on:
   push:
-    # Release candidates too: the gate that exists to stop a leg passing having
-    # proved nothing is itself only proved by running, and a branch it never
-    # runs on is a branch where a change to this file goes unexercised.
-    branches: [main, 's11.5-rc', 'release/**']
+    # Release branches too, by PATTERN rather than by name: the gate that exists
+    # to stop a leg passing having proved nothing is itself only proved by
+    # running, and a branch it never runs on is a branch where a change to this
+    # file goes unexercised — which is how the shell gate reached a release
+    # candidate unrun. A dead branch name here would be the same drift again.
+    branches: [main, 'release/**']
   pull_request:
   workflow_dispatch:
 
