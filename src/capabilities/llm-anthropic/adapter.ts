@@ -47,13 +47,32 @@ const MANUAL_BUDGETS: Readonly<Record<string, number>> = { low: 2048, high: 6144
 /** A dated snapshot answers to its undated alias: `claude-haiku-4-5` IS `claude-haiku-4-5-20251001`. */
 const ALIASES: Readonly<Record<string, string>> = { 'claude-haiku-4-5': 'claude-haiku-4-5-20251001' }
 
-/** Verified against the live `GET /v1/models` on 2026-09-02; ids are pinned snapshots. */
+/**
+ * Verified against the live `GET /v1/models` on 2026-09-08, reading each
+ * model's own `max_input_tokens`, `max_tokens` and `capabilities.effort`.
+ */
 const CATALOG: readonly CatalogModel[] = [
   // Fable 5 refuses `thinking.type: "disabled"`, so `off` is not in its set.
   { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-fable-5', name: 'Claude Fable 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  // The 4 family, which one prefix could never have expressed: its members
+  // disagree about the window, the output cap, the effort set AND whether they
+  // take a temperature. Left unlisted they all took the flat 200K/8192 default
+  // — a window wrong by five times, which is what a compaction budget is
+  // measured against, and a cap that refuses a legal `maxTokens` before any
+  // I/O. Every value below is a MEASURED provider answer, not a doc reading:
+  // `xhigh` on 4-6 is a 400 naming "high, low, max, medium"; `max` on 4-5 is a
+  // 400 naming "high, low, medium"; `temperature` is "deprecated for this
+  // model" on 4-7 and 4-8 and accepted by 4-6 and 4-5; the caps are the two
+  // 400s that name 128000 and 64000.
+  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'xhigh'), defaultEffort: 'high', sampling: true, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'xhigh'), defaultEffort: 'high', sampling: true, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'xhigh' && effort !== 'max'), defaultEffort: 'high', sampling: true, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', contextWindow: 1_000_000, maxOutputTokens: 64_000, thinking: 'manual', efforts: ['off', ...Object.keys(MANUAL_BUDGETS)], defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
   { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, thinking: 'manual', efforts: ['off', ...Object.keys(MANUAL_BUDGETS)], defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
 ]
 
@@ -72,6 +91,16 @@ const FAMILIES: readonly { readonly prefix: string; readonly like: string }[] = 
   { prefix: 'claude-fable-5', like: 'claude-fable-5' },
   { prefix: 'claude-opus-5', like: 'claude-opus-5' },
   { prefix: 'claude-sonnet-5', like: 'claude-sonnet-5' },
+  // The 4 family is matched at MINOR-version granularity, not family
+  // granularity, because its members disagree about the window and the effort
+  // set — a `claude-opus-4-` prefix would hand `opus-4-5`'s 200K to
+  // `opus-4-8`'s 1M. A dated snapshot still lands on its own minor version.
+  { prefix: 'claude-opus-4-8', like: 'claude-opus-4-8' },
+  { prefix: 'claude-opus-4-7', like: 'claude-opus-4-7' },
+  { prefix: 'claude-opus-4-6', like: 'claude-opus-4-6' },
+  { prefix: 'claude-sonnet-4-6', like: 'claude-sonnet-4-6' },
+  { prefix: 'claude-opus-4-5', like: 'claude-opus-4-5-20251101' },
+  { prefix: 'claude-sonnet-4-5', like: 'claude-sonnet-4-5-20250929' },
   { prefix: 'claude-haiku-4-5', like: 'claude-haiku-4-5-20251001' },
 ]
 

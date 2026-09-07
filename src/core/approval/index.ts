@@ -49,6 +49,28 @@ export interface ApprovalRequest {
 }
 
 /**
+ * A `reason` is the requester's justification for an action, and the shell's
+ * comes from the MODEL: unbounded free text that a terminal renders straight
+ * into the `[y/N]` line a person is about to answer. A terminal executes what
+ * it is written, so a `\r\x1b[2K` in it erases that line and repaints a
+ * different, milder question above the same keystroke — the grant would be
+ * real and its description a forgery. Neutralized and clamped HERE, before it
+ * enters the log, because the log is what every surface renders and because
+ * one place is the only way a future requester cannot reintroduce it. The
+ * model's exact words stay durable in the `tool/call` arguments beside it.
+ */
+const REASON_MAX_CHARS = 300
+function safeReason(text: string): string {
+  let flat = ''
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!
+    flat += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? ' ' : ch
+  }
+  const oneLine = flat.replace(/\s+/gu, ' ').trim()
+  return oneLine.length > REASON_MAX_CHARS ? `${oneLine.slice(0, REASON_MAX_CHARS - 1)}…` : oneLine
+}
+
+/**
  * What answerers see: the request plus its durable id — the same id the
  * `approval/asked` audit event carries, so a surface can correlate a live
  * prompt with the log and echo the id back in its answer.
@@ -123,11 +145,12 @@ class ApprovalService implements Approval {
     // The id is the asked event's own seq: unique within the session for its whole
     // lifetime (across resume and fork), with no in-memory counter to reset.
     const id = `approval-${session.seq}`
+    const reason = request.reason === undefined ? undefined : safeReason(request.reason)
     session.append(APPROVAL_ASKED, {
       id,
       toolName: request.toolName,
       ...(request.callId === undefined ? {} : { callId: request.callId }),
-      ...(request.reason === undefined ? {} : { reason: request.reason }),
+      ...(reason === undefined || reason.length === 0 ? {} : { reason }),
     })
     // A request cancelled before it could be asked is decided without consulting
     // anyone: no answerer should ever see a prompt whose outcome is already fixed.
@@ -141,7 +164,9 @@ class ApprovalService implements Approval {
       session.append(APPROVAL_DECIDED, { id, outcome: 'rejected' })
       return 'rejected'
     }
-    const prompt: ApprovalPrompt = { ...request, id }
+    // The prompt carries the SAME reason the log does: an answerer must never
+    // be shown text a reader of the audit could not have seen.
+    const prompt: ApprovalPrompt = { ...request, id, ...(reason === undefined ? {} : { reason }) }
     let outcome: ApprovalOutcome
     try {
       // Dispatched in the requesting agent's scope: an answerer registered through

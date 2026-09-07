@@ -214,5 +214,13 @@ export class LlmError extends Error {
   }
 }
 
-/** The retryable codes an agent-level recovery policy honors by default. */
-export const RETRYABLE_CODES: ReadonlySet<LlmErrorCode> = new Set(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE'])
+/**
+ * The retryable codes an agent-level recovery policy honors by default.
+ *
+ * `STREAM_CLOSED` is here for the same reason `TRANSPORT` and `TIMEOUT` are:
+ * it is the same dropped connection, caught a moment later. A body that ends
+ * without its terminator has appended nothing but trace-tier chunks, so the
+ * next attempt re-derives an identical history — which is exactly the property
+ * the other two rely on.
+ */
+export const RETRYABLE_CODES: ReadonlySet<LlmErrorCode> = new Set(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE', 'STREAM_CLOSED'])

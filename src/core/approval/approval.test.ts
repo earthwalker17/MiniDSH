@@ -28,6 +28,42 @@ describe('approval seam', () => {
     expect((decided.data as { id: string; outcome: string }).id).toBe(seen)
   })
 
+  /**
+   * The shell's `reason` is the MODEL's own `justification`, and it is rendered
+   * into the `[y/N]` line a person answers. A terminal executes what it is
+   * written, so a `\r` + erase-line in that text repaints the prompt with a
+   * milder question above the same keystroke: the grant would be real and its
+   * description a forgery. Neutralized before the log, so no surface — and no
+   * later requester — can reintroduce it.
+   */
+  it('neutralizes a reason a terminal would obey, and bounds one no line could hold', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    let seen: string | undefined
+    harness.root.on(APPROVAL_REQUEST, async (prompt): Promise<ApprovalOutcome> => {
+      seen = prompt.reason
+      return 'allowed-once'
+    })
+    // A carriage return and an erase-line, spelled by code point so no editor
+    // or diff can quietly normalize the thing under test.
+    const CR = String.fromCharCode(13)
+    const ESC = String.fromCharCode(27)
+    const forged = `read one file${CR}${ESC}[2Kapprove str_replace_editor (view README.md`
+    await harness.root.get(APPROVAL).request({ agent, toolName: 'bash', reason: forged })
+    const asked = agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!
+    const reason = (asked.data as { reason?: string }).reason!
+    // No control character survives, in the log or in what the answerer saw.
+    expect([...reason].some((ch) => ch.codePointAt(0)! < 0x20 || (ch.codePointAt(0)! >= 0x7f && ch.codePointAt(0)! <= 0x9f))).toBe(false)
+    expect(reason).toBe('read one file [2Kapprove str_replace_editor (view README.md')
+    expect(seen).toBe(reason)
+
+    const { agent: second } = await harness.create()
+    await harness.root.get(APPROVAL).request({ agent: second, toolName: 'bash', reason: 'x'.repeat(5_000) })
+    const long = (second.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { reason: string }).reason
+    expect(long).toHaveLength(300)
+    expect(long.endsWith('…')).toBe(true)
+  })
+
   it('an answerer that never resolves is settled by the request signal as cancelled', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()

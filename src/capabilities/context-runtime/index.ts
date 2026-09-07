@@ -33,6 +33,7 @@ import { APPROVAL, APPROVAL_POLICY, openingApprovalPolicy, type ApprovalPolicy }
 import { createPluginMessage } from '../../core/llm/message.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import { openingSandboxStamp, SANDBOX, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
+import { canonicalPath } from '../../core/sandbox/paths.ts'
 import type { SessionId } from '../../core/ids.ts'
 import { matches, SESSION_EVENT, type Session } from '../../core/session/index.ts'
 import { SHELL } from '../../core/shell/index.ts'
@@ -51,6 +52,25 @@ inspect files before editing, make one change at a time, and run the project's t
 confirm your work. When the task is complete, stop and give a short summary of what you changed.`
 
 /** What a mode means for file effects. One spelling, shared by the section and the switch note. */
+/**
+ * The workspace root as the SANDBOX means it, which is the canonical spelling.
+ *
+ * The fence, the shell child's cwd and every denial message name
+ * `canonicalPath(header.cwd)`; the raw header spelling is only what the session
+ * was created with. On a host where that path runs through a symlink — macOS
+ * `/tmp` -> `/private/tmp` is the ordinary case, and every temp workspace sits
+ * under it — the model was told one directory and shown another by the first
+ * refusal it read. A path this host will not resolve keeps its spelling: a
+ * prompt render may not throw.
+ */
+function statedRoot(cwd: string): string {
+  try {
+    return canonicalPath(cwd)
+  } catch {
+    return cwd
+  }
+}
+
 function modeEffect(mode: SandboxMode, workspaceRoot: string | undefined): string {
   if (mode === 'read-only') return 'File modifications are refused by policy; reads are unrestricted.'
   if (mode === 'danger-full-access') return 'File modifications are unrestricted.'
@@ -174,7 +194,7 @@ class SwitchNotes {
         if (!agent) continue
         const lines: string[] = []
         if (change.sandbox !== undefined) {
-          lines.push(`Sandbox mode is now "${change.sandbox}". ${modeEffect(change.sandbox, change.session.header.cwd)}`)
+          lines.push(`Sandbox mode is now "${change.sandbox}". ${modeEffect(change.sandbox, statedRoot(change.session.header.cwd))}`)
         }
         if (change.approval !== undefined) lines.push(`Approvals are now "${change.approval}". ${policyEffect(change.approval)}`)
         // Each agent on its own: an inject that throws (an invariant rejecting
@@ -212,7 +232,7 @@ export const contextRuntimePlugin: Plugin<ContextRuntimeConfig | undefined> = {
       text: (agent: Agent | undefined) => {
         // Resolved at render time, not at mount time: the section must not depend on row order.
         const dialect = ctx.tryGet(SHELL)?.dialect
-        const cwd = agent?.session.header.cwd ?? process.cwd()
+        const cwd = statedRoot(agent?.session.header.cwd ?? process.cwd())
         const lines = [
           'Runtime context (stable for this session):',
           `- Working directory: ${cwd}`,

@@ -242,7 +242,34 @@ describe('Anthropic adapter', () => {
     expect(adapter.resolveModel('claude-fable-5').reasoning.efforts).not.toContain('off')
     expect(adapter.resolveModel('claude-haiku-4-5-20251001')).toMatchObject({ contextWindow: 200_000, reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'off' } })
     expect(adapter.resolveModel('claude-next-99')).toMatchObject({ contextWindow: 200_000 })
-    expect(adapter.listModels().map((model) => model.id)).toEqual(['claude-fable-5-1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'])
+    // The 4 family disagrees with itself on every fact that matters, so each
+    // minor version is its own row and the assertions are the measured 400s:
+    // `xhigh` is refused by 4-6 and accepted by 4-8, and a temperature is
+    // "deprecated" on 4-7/4-8 while 4-6 takes one.
+    expect(adapter.resolveModel('claude-opus-4-8')).toMatchObject({ contextWindow: 1_000_000 })
+    expect(adapter.resolveModel('claude-opus-4-8').reasoning.efforts).toContain('xhigh')
+    expect(adapter.resolveModel('claude-sonnet-4-6')).toMatchObject({ contextWindow: 1_000_000 })
+    expect(adapter.resolveModel('claude-sonnet-4-6').reasoning.efforts).not.toContain('xhigh')
+    expect(adapter.resolveModel('claude-opus-4-5-20251101')).toMatchObject({ contextWindow: 200_000 })
+    expect(adapter.resolveModel('claude-opus-4-5-20251101').reasoning.efforts).not.toContain('max')
+    const request = { provider: 'anthropic', messages: [createUserMessage('hi')] }
+    expect(() => adapter.buildBody({ ...request, model: 'claude-opus-4-8', temperature: 0.3 })).toThrowError(expect.objectContaining({ code: 'UNSUPPORTED_OPTION' }))
+    expect(() => adapter.buildBody({ ...request, model: 'claude-opus-4-6', temperature: 0.3 })).not.toThrow()
+    expect(() => adapter.buildBody({ ...request, model: 'claude-opus-4-8', maxTokens: 100_000 })).not.toThrow()
+    expect(() => adapter.buildBody({ ...request, model: 'claude-opus-4-5-20251101', maxTokens: 100_000 })).toThrowError(expect.objectContaining({ code: 'UNSUPPORTED_OPTION' }))
+    expect(adapter.listModels().map((model) => model.id)).toEqual([
+      'claude-fable-5-1',
+      'claude-fable-5',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-opus-4-6',
+      'claude-sonnet-4-6',
+      'claude-opus-4-5-20251101',
+      'claude-sonnet-4-5-20250929',
+      'claude-haiku-4-5-20251001',
+    ])
   })
 
   /**

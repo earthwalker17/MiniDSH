@@ -49,6 +49,28 @@ function envOption(overlay: Readonly<Record<string, string>> | undefined): { env
 }
 
 /**
+ * A CONFINED child gets its own POSIX session, which is `--new-session` by
+ * another name.
+ *
+ * The bwrap profile passes that flag deliberately: a command that keeps the
+ * harness's controlling terminal can push a line into the user's own shell with
+ * `ioctl(TIOCSTI)` without writing a single file, so no file-effect ceiling
+ * describes it. Seatbelt cannot do the same — it is a syscall filter, not a
+ * namespace — so on macOS the escape the Linux profile closes was open, and the
+ * two backends disagreed about a threat only one of them had named. `setsid`
+ * closes it for both.
+ *
+ * Only where something confines. An unconfined persistent child stays in the
+ * harness's session on purpose: it makes no confinement claim to protect, and
+ * staying there keeps the terminal's own SIGHUP as a last reaper.
+ */
+function sessionOption(confined: boolean): { detached?: boolean } {
+  // Never on Windows: `detached` there means a new console, not a new session,
+  // and Windows has no backend to confine with anyway.
+  return confined && process.platform !== 'win32' ? { detached: true } : {}
+}
+
+/**
  * The identity of the execution world a child was spawned into.
  *
  * Two policies share a child exactly when a child spawned under one would be
@@ -71,6 +93,19 @@ export class ShellProcess implements ShellSession {
   private provenWorld: string | undefined
   /** An in-flight one-shot child, which disposal must reap: it runs under the WIDEST authority a session ever granted. */
   private oneShotChild: ChildProcess | undefined
+  /**
+   * Every POSIX process group a one-shot escalation opened in this session.
+   *
+   * Reaping the CHILD is not enough, and the probe is the reason: a command
+   * that backgrounds and disowns something leaves the leader exiting at once
+   * while its descendant runs on, so by the time disposal looks there is no
+   * child left to kill and the escaped process holds the widest authority the
+   * session ever granted. The group outlives its leader and stays addressable
+   * — Linux keeps a pid allocated while it is in use as a pgid, so there is no
+   * window in which this could signal an unrelated process — which is what
+   * makes reaping at disposal both possible and safe.
+   */
+  private readonly oneShotGroups = new Set<number>()
   /** True from a spawn until its first command answered: a child that dies before that never worked at all. */
   private fresh = false
   /** True when the live child was spawned through the confinement wrapper. */
@@ -146,7 +181,7 @@ export class ShellProcess implements ShellSession {
     const base = shellCommand(this.dialect, this.shellPath)
     const { cmd, args } = this.confinement.wrap(base.cmd, base.args, policy)
     const wrapped = cmd !== base.cmd
-    const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], ...envOption(this.confinement.envFor(policy)) })
+    const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], ...envOption(this.confinement.envFor(policy)), ...sessionOption(wrapped) })
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     // Identity-guarded: output from a killed child never lands in the live buffer.
@@ -283,11 +318,24 @@ export class ShellProcess implements ShellSession {
     const base = oneShotCommand(this.dialect, this.shellPath, request.command)
     const { cmd, args } = this.confinement.wrap(base.cmd, base.args, request.policy)
     const wrapped = cmd !== base.cmd
-    const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['ignore', 'pipe', 'pipe'], ...envOption(this.confinement.envFor(request.policy)) })
+    // The one-shot is detached on POSIX whether or not it is wrapped, and for a
+    // second reason: `danger-full-access` is never wrapped, so the escalated
+    // child is the one child that is BOTH unconfined and running under the
+    // widest authority the session ever grants. Its own process group is what
+    // lets the kill below reap what it started — without it a backgrounded
+    // command survived the grant, the tool call and the agent scope, which is
+    // the opposite of what the comment under this line has always promised.
+    const child = spawn(cmd, args, {
+      cwd: this.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...envOption(this.confinement.envFor(request.policy)),
+      ...sessionOption(true),
+    })
     // Reachable from `dispose`: an escalated command runs under the widest
     // authority the session ever granted, so it is the LAST thing that may
     // outlive the agent scope that was supposed to end it.
     this.oneShotChild = child
+    if (child.pid !== undefined && process.platform !== 'win32') this.oneShotGroups.add(child.pid)
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     let output = ''
@@ -305,9 +353,9 @@ export class ShellProcess implements ShellSession {
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGKILL')
+      killTree(child)
     }, timeoutMs)
-    const onAbort = (): void => void child.kill('SIGKILL')
+    const onAbort = (): void => killTree(child)
     request.signal?.addEventListener('abort', onAbort, { once: true })
     try {
       const { code, failed } = await ended
@@ -391,7 +439,39 @@ export class ShellProcess implements ShellSession {
     this.childWorld = undefined
     this.oneShotChild = undefined
     await Promise.all([killAndWait(child), killAndWait(oneShot)])
+    // …and everything an escalation left behind, including what outlived the
+    // child that started it. Nothing granted for one call may outlive the scope.
+    for (const group of this.oneShotGroups.values()) {
+      try {
+        process.kill(-group, 'SIGKILL')
+      } catch {
+        // Already gone, which is the ordinary case.
+      }
+    }
+    this.oneShotGroups.clear()
   }
+}
+
+/**
+ * Kill a child AND what it started, where the platform can say so.
+ *
+ * A child spawned `detached` on POSIX leads its own process group, so a
+ * negative pid signals the group — the difference between reaping a shell and
+ * reaping a shell that backgrounded something. Falls back to the child alone
+ * when there is no group (never detached), when it is already gone, or on
+ * Windows, which has neither.
+ */
+function killTree(child: ChildProcess): void {
+  if (child.exitCode !== null || child.pid === undefined) return
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+      return
+    } catch {
+      // Fall through to the single-child kill.
+    }
+  }
+  child.kill('SIGKILL')
 }
 
 /** Kills a child and waits for it to actually exit (so its cwd lock is released on Windows). */
@@ -404,6 +484,6 @@ function killAndWait(child: ChildProcess | undefined): Promise<void> {
     }
     const timer = setTimeout(done, 2000)
     child.once('exit', done)
-    child.kill('SIGKILL')
+    killTree(child)
   })
 }

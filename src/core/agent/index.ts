@@ -59,16 +59,25 @@ export function sameAgentOptions(a: AgentOptions, b: AgentOptions): boolean {
 
 /**
  * A switch merged over a base. An undefined value never clobbers; a route
- * change (provider or model) drops an effort the switch did not name, because
- * effort ids are adapter-owned and one adapter's id means nothing to another.
+ * change (provider or model) drops every SAMPLING knob the switch did not
+ * name, because whether a model accepts one is adapter-owned knowledge and one
+ * adapter's answer means nothing to another. Effort ids are the obvious case;
+ * `temperature` is the sharper one — an adapter that refuses it (rather than
+ * clamping, which this system never does) would refuse every step of a session
+ * that switched into it, and no surface can send an undefined to clear it.
+ * `maxSteps` is the loop's, not the route's, and survives.
  */
+const ROUTE_SCOPED_OPTIONS = ['reasoningEffort', 'temperature', 'maxTokens'] as const
+
 export function mergeAgentOptions(base: AgentOptions, partial: Partial<AgentOptions>): AgentOptions {
   const merged: Record<string, unknown> = { ...canonicalAgentOptions(base) }
   for (const [key, value] of Object.entries(partial)) {
     if (value !== undefined) merged[key] = value
   }
   const routeChanged = merged.provider !== base.provider || merged.model !== base.model
-  if (routeChanged && partial.reasoningEffort === undefined) delete merged.reasoningEffort
+  if (routeChanged) {
+    for (const key of ROUTE_SCOPED_OPTIONS) if (partial[key] === undefined) delete merged[key]
+  }
   return canonicalAgentOptions(merged as unknown as AgentOptions)
 }
 

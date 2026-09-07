@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -211,6 +211,37 @@ describe('persistence-jsonl: the read Definition', () => {
     expect(persistence.load('missing')).toBeUndefined()
     expect(persistence.load('notes')).toBeUndefined()
     expect(persistence.load('older')!.events).toHaveLength(3)
+  })
+
+  /**
+   * The listing memoizes each file's summary against its own `size`/`mtimeMs`,
+   * because it is bounded per file and unbounded in file COUNT while
+   * `sessions/list` is a hot RPC (1,000 stored sessions measured 441 ms of
+   * blocked event loop per call). A cache that could go stale would be worse
+   * than the cost, so the three transitions are pinned here: a file that grew,
+   * a file that appeared, and a file that is gone.
+   */
+  it('re-reads a stored session whose file changed, and forgets one that is gone', async () => {
+    const { sessions, base } = await mount()
+    sessions.create({ cwd: '/w', id: asSessionId('growing'), createdAt: 1000 })
+    const persistence = root!.get(PERSISTENCE)
+    const growing = sessions.get(asSessionId('growing'))!
+    growing.append(USER_MESSAGE, { message: createUserMessage('first prompt') }, { surfaceOp: { op: 'append' } })
+    expect(persistence.list().map((one) => one.title)).toEqual(['first prompt'])
+
+    // The same file, one line longer: the summary must be recomputed.
+    growing.append(SESSION_TITLE, { title: 'renamed', messageSeqs: [0], source: { kind: 'user' } })
+    expect(persistence.list().map((one) => one.title)).toEqual(['renamed'])
+
+    // A file this process never wrote, appearing under the root.
+    appendFileSync(
+      join(base, 'foreign.jsonl'),
+      `${JSON.stringify({ kind: 'session', version: 0, id: 'foreign', createdAt: 5000, cwd: '/w' })}\n${JSON.stringify({ type: 'session/title', seq: 0, time: 1, data: { title: 'from elsewhere', messageSeqs: [], source: { kind: 'user' } } })}\n`,
+    )
+    expect(persistence.list().map((one) => String(one.header.id))).toEqual(['foreign', 'growing'])
+
+    unlinkSync(join(base, 'foreign.jsonl'))
+    expect(persistence.list().map((one) => String(one.header.id))).toEqual(['growing'])
   })
 })
 

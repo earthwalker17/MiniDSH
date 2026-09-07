@@ -156,6 +156,33 @@ describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
     await new Promise((resolve) => setTimeout(resolve, 3_500))
     expect(existsSync(marker), 'an escalated command outlived the shell that ran it').toBe(false)
   }, SHELL_TEST_TIMEOUT_MS)
+
+  /**
+   * The harder half of the same promise, and the one reaping the child alone
+   * does not keep: a command that BACKGROUNDS something exits immediately, so
+   * by the time disposal looks there is no child left to kill while its
+   * descendant runs on — holding the widest authority the session ever granted.
+   * The one-shot leads its own process group for exactly this, and the group
+   * outlives its leader (Linux keeps a pid allocated while it is a pgid, so
+   * signalling it can never reach an unrelated process). POSIX only: Windows
+   * has no process groups here and no confinement backend either.
+   */
+  it.skipIf(process.platform === 'win32' || !bashAvailable)('reaps what an escalated command left running, not just the command', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-tree-'))
+    const marker = join(dir, 'late.txt')
+    const shell = new ShellProcess('bash', dir)
+    const result = await shell.exec({
+      command: `( sleep 3; echo late > ${JSON.stringify(marker)} ) & disown; echo started`,
+      policy: unconfined(dir),
+      oneShot: true,
+      timeoutMs: 30_000,
+    })
+    // The call itself is over at once — that is the whole difficulty.
+    expect(result.exitCode).toBe(0)
+    await shell.dispose()
+    await new Promise((resolve) => setTimeout(resolve, 4_500))
+    expect(existsSync(marker), 'a backgrounded descendant of an escalated command outlived the scope that granted it').toBe(false)
+  }, SHELL_TEST_TIMEOUT_MS)
 })
 
 describe('a shell binary that is not there', () => {
