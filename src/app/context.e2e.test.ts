@@ -22,7 +22,7 @@
  */
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import { COMPACTION_APPLIED } from '../core/compaction/index.ts'
@@ -195,7 +195,11 @@ describe.skipIf(!KEY)('S5 live E2E: a long session stays in budget without the l
     // judgement. The model must have READ the rule to name its token at all —
     // no prompt in this arc ever mentions it — and it must have ACTED on it for
     // the file to carry a header nobody asked for.
-    expect(JSON.stringify(events)).toContain(MARKER)
+    // The model NAMED the token in its own words — which it could only do
+    // having read the injected rule, since no prompt in this arc mentions it.
+    // (Serializing `events` proved nothing: the injected message is IN events,
+    // so the assertion above already implied it.)
+    expect(assistantTexts(events).some((text) => text.includes(MARKER)), 'no answer ever named the workspace rule token').toBe(true)
     expect(summary.trimStart().startsWith(MARKER), `summary.txt was:
 ${summary}
 --- last answer:
@@ -299,8 +303,18 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
     const excerpts = shellResults.filter((text) => text.includes('characters omitted'))
     expect(excerpts.length).toBeGreaterThanOrEqual(1)
     expect(excerpts.some((text) => text.includes(NEEDLE))).toBe(false)
-    // …and the model reported it anyway, so it really read the saved file.
+    // …and the model reported it anyway.
     expect(assistantTexts(events).some((text) => text.includes(NEEDLE))).toBe(true)
+    // That alone is not evidence it READ the file: the prompt hands over the
+    // generating expression ($((i*7))), so `row-450:3150` is one multiplication
+    // away from what the model already has. The read itself is the claim, so
+    // the read is what is asserted — a call naming the saved file by name.
+    const spillNames = new Set(spillFiles.map((file) => basename(file)))
+    const reads = events
+      .filter((event) => event.type === 'tool/call')
+      .map((event) => (event.data as { arguments?: string }).arguments ?? '')
+      .filter((args) => [...spillNames].some((name) => args.includes(name)))
+    expect(reads.length, `no tool call named any of ${[...spillNames].join(', ')}: the needle could have come from the prompt's own formula`).toBeGreaterThan(0)
 
     // ---- the log is still its own oracle ------------------------------------
     // A pristine copy of the workspace, so the replayed run meets the world the

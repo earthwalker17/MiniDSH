@@ -32,6 +32,18 @@ export interface ServeOptions {
   readonly args?: readonly string[]
 }
 
+/**
+ * The child's environment, minus what would let this machine's ambient settings
+ * choose an arc's route. `MINIDSH_MODEL` outranks settings.json (settings.ts),
+ * and the composition arc asserts the model its OWN settings.json named — so a
+ * developer who exported one would fail that arc for a reason it does not test.
+ * The unit tests isolate the same precedence by passing `env: {}` explicitly.
+ */
+function childEnv(home: string): NodeJS.ProcessEnv {
+  const { MINIDSH_MODEL: _ambient, ...rest } = process.env
+  return { ...rest, MINIDSH_HOME: home }
+}
+
 export class ServeProcess {
   readonly child: ChildProcess
   readonly frames: { sessionId: string; event: EventEnvelope }[] = []
@@ -46,7 +58,7 @@ export class ServeProcess {
     if (options.approve) argv.push('--approve')
     if (options.sandbox) argv.push('--sandbox', options.sandbox)
     if (options.args) argv.push(...options.args)
-    this.child = spawn(process.execPath, argv, { env: { ...process.env, MINIDSH_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] })
+    this.child = spawn(process.execPath, argv, { env: childEnv(home), stdio: ['pipe', 'pipe', 'pipe'] })
     spawned.push(this.child)
     this.exited = new Promise((resolve) => this.child.on('exit', (code) => resolve(code)))
     this.child.stderr!.on('data', (chunk: Buffer) => {

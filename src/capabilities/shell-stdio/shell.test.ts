@@ -13,6 +13,28 @@ const available = spawnSync(binary, ['--version'], { stdio: 'ignore' }).status =
 // — not only where bash is the platform default.
 const bashAvailable = spawnSync('bash', ['--version'], { stdio: 'ignore' }).status === 0
 
+/**
+ * Every case below spawns a REAL shell, and a `pwsh` start alone costs 1.2-2 s
+ * on an idle Windows machine: the slowest here measured 7.8 s, which a loaded
+ * CI runner turns into a timeout rather than into a defect. Same reasoning and
+ * same number as `spill-local/spill.test.ts`, which had to declare it first.
+ */
+const SHELL_TEST_TIMEOUT_MS = 120_000
+
+/**
+ * The same rule confinement gets, for the same reason. Every shell case here
+ * self-skips without its dialect's binary, so a host that HAS no `pwsh` would
+ * report a green suite having run none of them — and on Windows a missing
+ * `pwsh` is not a skipped feature, it is `SHELL_UNAVAILABLE` on every command
+ * the model runs. A leg that exists to prove the shell works may not pass
+ * having proved nothing, so CI says so and this turns the skip into a failure.
+ */
+describe.runIf(process.env.MINIDSH_EXPECT_SHELL === '1')('a host that is REQUIRED to have a shell', () => {
+  it('has its dialect installed', () => {
+    expect(available, `MINIDSH_EXPECT_SHELL=1 but \`${binary} --version\` does not run on ${process.platform}`).toBe(true)
+  })
+})
+
 let proc: ShellProcess | undefined
 let dir: string | undefined
 afterEach(async () => {
@@ -56,7 +78,7 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
     expect(result.output).toContain('hello world')
     expect(result.exitCode).toBe(0)
     expect(result.timedOut).toBe(false)
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it('persists working directory across calls', async () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
@@ -65,7 +87,7 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
     await proc.exec({ command: dialect === 'pwsh' ? 'Set-Location sub' : 'cd sub', policy: unconfined(dir), timeoutMs: 30_000 })
     const result = await proc.exec({ command: pwdCmd(), policy: unconfined(dir), timeoutMs: 30_000 })
     expect(result.output.toLowerCase()).toContain('sub')
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it.skipIf(!bashAvailable)('a command that reads stdin gets EOF instead of the next command', async () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
@@ -77,14 +99,14 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
     const after = await proc.exec({ command: "echo 'still here'", policy: unconfined(dir), timeoutMs: 30_000 })
     expect(after.output).toContain('still here')
     expect(after.exitCode).toBe(0)
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it('reports a non-zero exit code for a failing command', async () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
     proc = new ShellProcess(dialect, dir)
     const result = await proc.exec({ command: failCmd(), policy: unconfined(dir), timeoutMs: 30_000 })
     expect(result.exitCode).not.toBe(0)
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 })
 
 /**
@@ -114,7 +136,7 @@ describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
     // The grant covered one call, so it moved nothing here.
     const after = await proc.exec({ command: pwdCmd(), policy, timeoutMs: 30_000 })
     expect(after.output.toLowerCase()).toContain('sub')
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it('is reaped by dispose, so nothing outlives the scope that ran it', async () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-'))
@@ -133,7 +155,7 @@ describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
     await running
     await new Promise((resolve) => setTimeout(resolve, 3_500))
     expect(existsSync(marker), 'an escalated command outlived the shell that ran it').toBe(false)
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 })
 
 describe('a shell binary that is not there', () => {

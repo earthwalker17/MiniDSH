@@ -17,7 +17,7 @@
  *
  * Requires DEEPSEEK_API_KEY and ANTHROPIC_API_KEY; skipped otherwise.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -256,6 +256,7 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     seedWorkspace(replayWorkspace)
     const file = loadCompositionFile(join(home, 'composition.json'))!
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
+    let replayedEvents: EventEnvelope[] = []
     const root = await bootComposition({
       sessionsRoot: tempDir('minidsh-e2e6-replay-'),
       approve: true,
@@ -280,7 +281,8 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
         await handle.agent.whenIdle()
       }
       // Both routes were recorded, and both were replayed from one script.
-      const replayedContexts = handle.agent.session.events.filter((event) => event.type === 'request/context').map((event) => (event.data as { provider: string }).provider)
+      replayedEvents = handle.agent.session.events.slice()
+      const replayedContexts = replayedEvents.filter((event) => event.type === 'request/context').map((event) => (event.data as { provider: string }).provider)
       expect(replayedContexts).toEqual(['deepseek', 'anthropic'])
       await handle.dispose()
     } finally {
@@ -289,7 +291,10 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     expect(replayHandle!.providers.toSorted()).toEqual(['anthropic', 'deepseek'])
     expect(replayHandle!.auxCalls).toBeGreaterThanOrEqual(1)
     replayHandle!.assertConsumed()
-    // A pristine workspace was read the same way it was read live.
-    expect(readFileSync(join(replayWorkspace, 'alpha.txt'), 'utf8')).toContain('ALPHA-11')
+    // A pristine workspace was read the same way it was read live — the read
+    // itself, not the seed. (`seedWorkspace` above wrote ALPHA-11 into this
+    // very file, so asserting the file's contents could not fail.)
+    const replayedResults = replayedEvents.filter((event) => event.type === 'tool/result')
+    expect(replayedResults.some((event) => JSON.stringify(event.data).includes('ALPHA-11')), 'the replayed session never read alpha.txt back').toBe(true)
   })
 })

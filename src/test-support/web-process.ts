@@ -24,6 +24,18 @@ export interface WebHostOptions {
   readonly args?: readonly string[]
 }
 
+/**
+ * The child's environment, minus what would let this machine's ambient settings
+ * choose an arc's route. `MINIDSH_MODEL` outranks settings.json (settings.ts),
+ * and the composition arc asserts the model its OWN settings.json named — so a
+ * developer who exported one would fail that arc for a reason it does not test.
+ * The unit tests isolate the same precedence by passing `env: {}` explicitly.
+ */
+function childEnv(home: string): NodeJS.ProcessEnv {
+  const { MINIDSH_MODEL: _ambient, ...rest } = process.env
+  return { ...rest, MINIDSH_HOME: home }
+}
+
 /** The spawned host: its URL, its cookie, and the sockets opened against it. */
 export class WebHostProcess {
   readonly child: ChildProcess
@@ -37,7 +49,7 @@ export class WebHostProcess {
     if (options.approve) argv.push('--approve')
     if (options.sandbox) argv.push('--sandbox', options.sandbox)
     if (options.args) argv.push(...options.args)
-    this.child = spawn(process.execPath, argv, { env: { ...process.env, MINIDSH_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] })
+    this.child = spawn(process.execPath, argv, { env: childEnv(home), stdio: ['pipe', 'pipe', 'pipe'] })
     spawned.push(this.child)
     this.child.stderr!.on('data', (chunk: Buffer) => {
       this.stderr += String(chunk)
@@ -114,13 +126,30 @@ export class WebClient {
     return new WebClient(socket)
   }
 
-  async request<T>(method: string, params?: unknown): Promise<T> {
+  /**
+   * One request, and it is bounded — the same deadline `ServeProcess.request`
+   * carries and for the same reason. `waitFor` below has one and this did not,
+   * so the one shape that CAN wait forever (a reply that never comes, or a
+   * socket that closes with a request pending) was the one shape that said
+   * nothing about where: the arc hung to vitest's own 600 s file timeout, which
+   * names the whole test and nothing inside it.
+   */
+  async request<T>(method: string, params?: unknown, timeoutMs = 120_000): Promise<T> {
     const id = this.nextId++
+    let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<Record<string, unknown>>((resolve) => this.pending.set(id, resolve))
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${method} did not answer in ${timeoutMs} ms\n${this.describeStall()}`)), timeoutMs)
+    })
     this.socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }))
-    const frame = await reply
-    if (frame.error) throw new Error(`${method} failed: ${(frame.error as { message: string }).message}`)
-    return frame.result as T
+    try {
+      const frame = await Promise.race([reply, deadline])
+      if (frame.error) throw new Error(`${method} failed: ${(frame.error as { message: string }).message}`)
+      return frame.result as T
+    } finally {
+      clearTimeout(timer)
+      this.pending.delete(id)
+    }
   }
 
   events(type: string, sessionId?: string): EventEnvelope[] {

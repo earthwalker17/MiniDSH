@@ -210,7 +210,7 @@ describe('the retention sweep', () => {
     expect(existsSync(treasure)).toBe(true)
   })
 
-  it('skips a symlink instead of following it', async () => {
+  it('skips a symlink instead of following it', async (ctx) => {
     const spillRoot = tempDir('minidsh-sweep-')
     const outside = tempDir('minidsh-sweep-outside-')
     const treasure = aged(join(outside, 'call-1-shell.txt'), 40)
@@ -231,7 +231,9 @@ describe('the retention sweep', () => {
     } catch {
       linkedFile = undefined
     }
-    if (linkedDir === undefined && linkedFile === undefined) return
+    // A host that can make NEITHER kind has not exercised the rule, and a bare
+    // `return` here would report that as a pass. Skipping says so out loud.
+    if (linkedDir === undefined && linkedFile === undefined) ctx.skip('this host can create neither a junction nor a file symlink')
 
     await swept(spillRoot, 30)
 

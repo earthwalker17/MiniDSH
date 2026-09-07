@@ -108,6 +108,20 @@ function authoritiesFor(bind: string, port: number): ReadonlySet<string> | undef
 }
 
 /**
+ * The one URL this process prints, and it has to OPEN. Two binds the `--host`
+ * flag accepts are not authorities a browser can use: an IPv6 literal is not a
+ * URL host until it is bracketed (`http://::1:7000/` is not parseable at all),
+ * and a wildcard is a bind, not an address — `http://0.0.0.0:7000/` reaches
+ * nothing on Windows. A wildcard therefore prints the loopback of its own
+ * family, which the wildcard rule in `authoritiesFor` already accepts.
+ */
+function printableAuthority(bind: string, port: number): string {
+  if (bind === '0.0.0.0' || bind === '') return `127.0.0.1:${port}`
+  if (bind === '::') return `[::1]:${port}`
+  return `${bind.includes(':') ? `[${bind}]` : bind}:${port}`
+}
+
+/**
  * The Host/Origin half of the fence. A browser sends `Origin` on an upgrade and
  * on a cross-site request; anything that is not one of this host's own
  * authorities is another page trying to drive this one, which is the whole
@@ -146,9 +160,18 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   let tokenSpent = false
   const server: Server = createServer((request: IncomingMessage, response: ServerResponse) => {
     const authority = request.headers.host ?? ''
-    const url = new URL(request.url ?? '/', `http://${authority.length > 0 ? authority : 'localhost'}`)
     if (!sameAuthority(request, authorities)) {
       response.writeHead(403).end('forbidden')
+      return
+    }
+    // The request-target is attacker-controlled and Node's parser hands it over
+    // verbatim: `GET http://a:b:c/ HTTP/1.1` reaches this listener, and `new
+    // URL` on it throws. Thrown here it is an UNCAUGHT exception inside a
+    // server callback, which ends the process and every agent it is hosting —
+    // so the fence runs first and the parse is answered, never trusted.
+    const url = URL.parse(request.url ?? '/', `http://${authority.length > 0 ? authority : 'localhost'}`)
+    if (url === null) {
+      response.writeHead(400).end('bad request')
       return
     }
     const given = url.searchParams.get('token')
@@ -233,7 +256,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   return {
     root,
     port,
-    url: `http://${bind}:${port}/?token=${token}`,
+    url: `http://${printableAuthority(bind, port)}/?token=${token}`,
     closed,
     dispose: () =>
       (disposed ??= (async () => {

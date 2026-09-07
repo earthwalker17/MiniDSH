@@ -103,6 +103,7 @@ async function startWebHost(
     prepare?: (root: Context) => void
     softLimitBytes?: number
     hardLimitBytes?: number
+    heartbeatMs?: number
   },
 ): Promise<{ host: ProtocolHostHandle; port: number }> {
   const server = createServer((_request, response) => {
@@ -126,6 +127,7 @@ async function startWebHost(
         server,
         ...(extra?.authorize === undefined ? {} : { authorize: extra.authorize as never }),
         ...(extra?.softLimitBytes === undefined ? {} : { softLimitBytes: extra.softLimitBytes }),
+        ...(extra?.heartbeatMs === undefined ? {} : { heartbeatMs: extra.heartbeatMs }),
       },
       // A second carrier on the same server, for a client whose limits differ.
       ...(extra?.hardLimitBytes === undefined ? [] : [{ kind: 'websocket' as const, server, path: '/slow', hardLimitBytes: extra.hardLimitBytes }]),
@@ -253,11 +255,14 @@ describe('the websocket carrier', () => {
   })
 
   it('answers a ping and survives it', async () => {
-    const { port } = await startWebHost(new ScriptedAdapter())
+    // The heartbeat is 30 s by default, so a test that waits 60 ms and passes
+    // has proved only that nothing happened. Beat every 25 ms instead and wait
+    // for SEVERAL: a peer that misses one pong is closed 1013 on the next beat,
+    // so surviving is the assertion. Node's client answers server pings itself.
+    const { port } = await startWebHost(new ScriptedAdapter(), { heartbeatMs: 25 })
     const client = await connect(port)
-    // Node's client answers server pings itself; this proves the connection is
-    // still usable after the heartbeat machinery has run.
-    await new Promise((resolve) => setTimeout(resolve, 60))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(client.closes, 'the heartbeat closed a socket that was answering its pings').toEqual([])
     expect((await client.result<{ serverInfo: { name: string } }>('initialize')).serverInfo.name).toBe('minidsh')
   })
 })

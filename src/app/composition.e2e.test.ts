@@ -10,7 +10,7 @@
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -97,12 +97,13 @@ describe.skipIf(!KEY)('S4 live E2E: a from-disk composition drives the real runt
     // Keyless replay under the SAME disk composition: the layers reproduce the world.
     const file = loadCompositionFile(join(home, 'composition.json'))!
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
+    const replaySessionsRoot = tempDir('minidsh-e2e4-replay-')
     const replayed = await runTask(
       {
         task: TASK,
         cwd: workspace,
         model: 'deepseek-v4-flash',
-        sessionsRoot: tempDir('minidsh-e2e4-replay-'),
+        sessionsRoot: replaySessionsRoot,
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         configLayers: [{ name: 'home', patches: await toPatches(file, home) }],
@@ -115,6 +116,13 @@ describe.skipIf(!KEY)('S4 live E2E: a from-disk composition drives the real runt
     expect(replayed.exitCode).toBe(0)
     expect(replayed.text).toBe(lastAssistantText(log.events))
     replayHandle!.assertConsumed()
+    // The claim is "the layers reproduce the WORLD", and none of the three
+    // assertions above can fail if they did not: an unmounted `tool-greet`
+    // answers UNKNOWN_TOOL, which is an isError result the turn survives, so
+    // the recorded chunks replay, the text matches and the cursors drain on
+    // arithmetic (the S7.5 class). The replayed log is where the tool ran.
+    const replayLog = readFileSync(join(replaySessionsRoot, `${encodeURIComponent(replayed.sessionId)}.jsonl`), 'utf8')
+    expect(replayLog, 'the replay drained its script without ever running the module-loaded tool').toContain('greeting:MINIDSH-7')
   })
 })
 

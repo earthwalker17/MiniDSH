@@ -20,7 +20,6 @@ import { attachmentsLocalPlugin } from '../attachments-local/index.ts'
 import { fsLocalPlugin } from '../fs-local/index.ts'
 import { fsObservationPolicyPlugin } from '../fs-observation-policy/index.ts'
 import { toolEditorPlugin } from '../tool-editor/index.ts'
-import { sandboxPlugin } from '../../core/sandbox/index.ts'
 import { toolViewImagePlugin } from './index.ts'
 
 let harnesses: CoreHarness[] = []
@@ -58,13 +57,16 @@ async function world(options: { vision: boolean; store?: boolean } = { vision: t
     const resolve = harness.adapter.resolveModel.bind(harness.adapter)
     harness.adapter.resolveModel = (model: string) => ({ ...resolve(model), inputModalities: ['text', 'image'] as const })
   }
-  harness.root.plugin(sandboxPlugin, {})
+  // No second `sandboxPlugin`: `coreHarness()` already mounted it on this root,
+  // and the kernel's claim-once rule failed the duplicate row silently — the
+  // world under test was a row short and nothing said so, because the settle
+  // report was discarded. It is read now, so a failed row cannot hide again.
   harness.root.plugin(fsLocalPlugin)
   harness.root.plugin(fsObservationPolicyPlugin)
   if (options.store !== false) harness.root.plugin(attachmentsLocalPlugin, { root: attachmentsRoot })
   harness.root.plugin(toolViewImagePlugin)
   harness.root.plugin(toolEditorPlugin, {})
-  await harness.root.settle()
+  expect((await harness.root.settle()).failed).toEqual([])
   return { harness, cwd, attachmentsRoot, create: () => harness.create({ cwd }) }
 }
 

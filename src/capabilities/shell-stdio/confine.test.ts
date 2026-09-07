@@ -296,7 +296,12 @@ describe.skipIf(!installed || process.platform !== 'linux')('the bwrap ceiling',
 
   it('gives the sandbox a PRIVATE /tmp: the write succeeds and the host temp directory is untouched', async () => {
     const ws = tempDir('minidsh-confine-ws-')
-    const canary = join(tmpdir(), 'minidsh-confine-tmpfs-canary.txt')
+    // `/tmp` literally, NOT os.tmpdir(): the mount the profile makes is
+    // `--tmpfs /tmp`, and on a host whose TMPDIR points elsewhere
+    // (TMPDIR=$HOME/tmp) the canary would land in the read-only bind instead —
+    // the write would be refused, the ceiling would have held, and this test
+    // would fail for saying the wrong thing about where the tmpfs is.
+    const canary = join('/tmp', 'minidsh-confine-tmpfs-canary.txt')
     shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
     const result = await shell.exec({ command: writeInto(canary), policy: policyFor('workspace-write', ws), timeoutMs: 30_000 })
     // It may well succeed — into a tmpfs that dies with the shell. What the

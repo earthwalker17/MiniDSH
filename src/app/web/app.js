@@ -136,8 +136,16 @@ function row(event) {
       return el('div', 'row note', `[subagent ${data.childId} · depth ${data.depth} · ${data.sandbox}, approvals never]`)
     case 'subagent/end':
       return el('div', 'row note', `[subagent ${data.childId} ${data.reason?.kind}]`)
-    case 'turn/end':
-      return data.reason?.kind === 'completed' ? undefined : el('div', 'row note', `[turn ${data.reason?.kind}${data.reason?.code ? `: ${data.reason.code}` : ''}]`)
+    case 'turn/end': {
+      // A failed turn says WHY here too. The code alone left a keyless first
+      // run in the browser reading `[turn error: MISSING_CREDENTIAL]` with the
+      // remedy — which the event carries — shown nowhere, while the terminal
+      // printed it (present.ts). One runtime, one answer on every surface.
+      if (data.reason?.kind === 'completed') return undefined
+      const code = data.reason?.code ? `: ${data.reason.code}` : ''
+      const why = data.reason?.kind === 'error' && data.reason?.message ? ` — ${data.reason.message}` : ''
+      return el('div', 'row note', `[turn ${data.reason?.kind}${code}${why}]`)
+    }
     default:
       return undefined
   }

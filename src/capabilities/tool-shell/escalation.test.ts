@@ -35,6 +35,14 @@ const echoCmd = dialect === 'pwsh' ? "Write-Output 'ran'" : "echo 'ran'"
  */
 const UNCONFINED = { confinement: 'none' } as const
 
+/**
+ * The four cases below reach a REAL shell, and a `pwsh` start alone costs
+ * 1.2-2 s on an idle Windows machine — close enough to the 30 s default that a
+ * loaded runner fails them as timeouts rather than as defects. Same budget and
+ * same reasoning as `spill-local/spill.test.ts` and `shell-stdio/shell.test.ts`.
+ */
+const SHELL_TEST_TIMEOUT_MS = 120_000
+
 
 let harness: CoreHarness | undefined
 let workdir: string | undefined
@@ -93,7 +101,7 @@ describe('the shell under a mode this host cannot enforce', () => {
     const result = await run({ command: echoCmd })
     expect(result.text).not.toContain('[sandbox:')
     expect(approvals(agent)).toHaveLength(0)
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 })
 
 /**
@@ -295,7 +303,7 @@ describe('escalation', () => {
       .execute(toolCall('call-slow', toolName, JSON.stringify({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'run it' }), agent, new AbortController().signal))
     expect(result.error?.info?.code).toBeUndefined()
     expect(result.content.map((block) => (block.type === 'text' ? block.text : '')).join('')).toContain('ran')
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it.skipIf(!shellAvailable)('an already-cancelled call dispatches nothing to the persistent shell', async () => {
     workdir = mkdtempSync(join(tmpdir(), 'minidsh-shelltool-'))
@@ -314,7 +322,7 @@ describe('escalation', () => {
     } finally {
       await shell.dispose()
     }
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 
   it.skipIf(!shellAvailable)('runs the command once when granted, and never records it as a session switch', async () => {
     const { agent, run } = await setup()
@@ -329,5 +337,5 @@ describe('escalation', () => {
     // The grant covered that one call: the only stamp is the session own mode.
     expect(modeStamps(agent).map((event) => event.data)).toEqual([{ mode: 'workspace-write', enforcement: 'none', reason: 'initial' }])
     expect(harness!.root.get(SANDBOX).resolve({ session: agent.session }).mode).toBe('workspace-write')
-  })
+  }, SHELL_TEST_TIMEOUT_MS)
 })

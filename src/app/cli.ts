@@ -16,6 +16,7 @@ import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
+import { statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { presetTable } from '../core/presets/index.ts'
 import type { AuthorityPresetsConfig } from '../capabilities/authority-presets/index.ts'
@@ -187,6 +188,31 @@ function refuseUnknownFlags(args: ParsedArgs): string | undefined {
   return undefined
 }
 
+/**
+ * Flags a known name is not enough for: their VALUE can be wrong in a way that
+ * would otherwise be dropped in silence, and the drop is expensive. A `--cwd`
+ * naming nothing booted and durably recorded a session whose workspace root no
+ * tool can act on; a `--max-steps abc` started a paid run under the DEFAULT
+ * ceiling, the same typo `--at` and `--port` already refuse. The wire refuses
+ * both of these (`"cwd" is not an existing directory`, `"maxSteps" must be a
+ * positive integer`) — the CLI is the same runtime behind a different carrier,
+ * so it refuses them in the same words.
+ */
+function refuseMalformedFlags(args: ParsedArgs): string | undefined {
+  const cwd = args.flags.get('cwd')
+  if (cwd !== undefined) {
+    if (typeof cwd !== 'string' || cwd.trim() === '') return '--cwd takes a directory'
+    const root = resolve(cwd)
+    if (statSync(root, { throwIfNoEntry: false })?.isDirectory() !== true) return `--cwd is not an existing directory: ${root}`
+  }
+  const maxSteps = args.flags.get('max-steps')
+  if (maxSteps !== undefined) {
+    const value = typeof maxSteps === 'string' ? Number(maxSteps) : Number.NaN
+    if (!Number.isInteger(value) || value <= 0) return `--max-steps expects a positive integer, got "${String(maxSteps)}"`
+  }
+  return undefined
+}
+
 /** The boot options every app entry shares, from one plan. */
 function bootFields(plan: BootPlan): {
   sessionsRoot: string
@@ -218,6 +244,8 @@ function baseRows(home: HomeLayout, authority: AuthorityFlags = {}): Row[] {
 async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'required' | 'optional' = 'required'): Promise<BootPlan | string> {
   const unknown = refuseUnknownFlags(args)
   if (unknown !== undefined) return unknown
+  const malformed = refuseMalformedFlags(args)
+  if (malformed !== undefined) return malformed
   const authority = authorityFlags(args)
   if (typeof authority === 'string') return authority
   const loadedSettings = loadSettings()

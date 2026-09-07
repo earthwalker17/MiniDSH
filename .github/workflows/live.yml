@@ -73,11 +73,12 @@ jobs:
             && echo "sandbox-exec: functional — the arcs take their confined branch" \
             || echo "sandbox-exec: not functional — the arcs take their unconfined branch"
 
+      # No `require-lockfile`: the first real run of check.yml warned that the
+      # v2 action has no such input, and pnpm installs frozen under CI anyway.
       - uses: pnpm/setup@v2
         with:
           runtime: node@24.19.0
           cache: true
-          require-lockfile: true
 
       # FILTER goes through the environment, never interpolated into the script:
       # `${{ inputs.filter }}` is expanded before bash parses the line, so a

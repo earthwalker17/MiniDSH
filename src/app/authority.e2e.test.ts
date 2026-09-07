@@ -135,6 +135,12 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       expect(dataOf<{ arguments: string }>(covered!).arguments).toContain('sandbox_permissions')
       const decided = serve.events('approval/decided', sessionId).find((event) => dataOf<{ id: string }>(event).id === ask.id)
       expect(dataOf<{ outcome: string }>(decided!).outcome).toBe('allowed-once')
+      // And it RAN. Recording that consent was asked and granted says nothing
+      // about the throwaway child that carries it — the exact thing S11's review
+      // found broken twice — so the grant is proved by the covered call's own
+      // result, joined by callId, the way the confined branch proves it below.
+      const granted = serve.events('tool/result', sessionId).find((event) => dataOf<{ callId?: string }>(event).callId === ask.callId)
+      expect(JSON.stringify(dataOf<unknown>(granted!)), 'the approved command produced no version output, so the one-shot child never ran it').toMatch(/v\d+\.\d+\.\d+/)
       // The grant covered one call: it is not a session switch.
       expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
     } else {
@@ -201,16 +207,31 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
 
     await serve.request('session/prompt', {
       sessionId,
-      text: 'Append a second line reading "after the switch" to notes.txt. If a tool refuses, stop and say why.',
+      // The attempt is asked for explicitly. The model was TOLD the mode is now
+      // read-only (context-runtime writes a durable message on every change),
+      // so "append a line" alone makes declining without a tool call the likely
+      // answer — and an absent line would then prove nothing, exactly as step
+      // 3b spells out for the shell. The claim is that the POLICY refuses, so
+      // something has to reach it.
+      text:
+        'Using the file editor tool, append a second line reading "after the switch" to notes.txt. ' +
+        'Make the attempt even if you expect it to be refused, then report exactly what the tool returned.',
     })
     await serve.waitForCompletedTurn(sessionId, confined ? 5 : 4)
     refuseSwitch()
     expect(readFileSync(join(workspace, 'notes.txt'), 'utf8')).not.toContain('after the switch')
     expect(readFileSync(decoy).equals(decoyBytes)).toBe(true)
+    // …and the refusal is what kept it away. Scoped past the switch, because
+    // step 2 already produced a denial and a session-wide count would accept it.
+    const refusedAfter = serve
+      .events('tool/result', sessionId)
+      .filter((event) => event.seq > change.seq)
+      .filter((event) => dataOf<{ error?: { code: string } }>(event).error?.code === 'FS_SANDBOX_DENIED')
+    expect(refusedAfter.length, 'nothing was refused after the switch to read-only, so the durable switch was never tested').toBeGreaterThan(0)
 
     // ---- 5. the log is still its own oracle -------------------------------
     const fresh = await serve.request<{ sessionId: string }>('session/prompt', {
-      text: 'Create a file named done.txt in the working directory containing exactly: ok',
+      text: 'Create a file named done.txt (a relative path, not an absolute one) in the working directory containing exactly: ok',
     })
     await serve.waitForCompletedTurn(fresh.sessionId, 1)
     const freshLog = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId: fresh.sessionId })
@@ -218,10 +239,15 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     expect(freshLog.events.some((event) => event.type === 'sandbox/mode')).toBe(true)
 
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
+    // The replay runs in a DIFFERENT root, so a recording whose model chose the
+    // absolute workspace path replays into a fence that rightly refuses it —
+    // and with no world check the only symptom is a file that never appears
+    // (ARCHITECTURE §13; the web arc pins its prompts for the same reason).
+    const replayCwd = tempDir('minidsh-auth-replay-ws-')
     const replayed = await runTask(
       {
-        task: 'Create a file named done.txt in the working directory containing exactly: ok',
-        cwd: tempDir('minidsh-auth-replay-ws-'),
+        task: 'Create a file named done.txt (a relative path, not an absolute one) in the working directory containing exactly: ok',
+        cwd: replayCwd,
         model: 'deepseek-v4-flash',
         sessionsRoot: tempDir('minidsh-auth-replay-'),
         logger: silent,
@@ -234,5 +260,6 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     )
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
+    expect(existsSync(join(replayCwd, 'done.txt')), 'the replayed run drained its script but wrote nothing: the recorded path did not survive the move').toBe(true)
   })
 })

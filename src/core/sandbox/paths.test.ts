@@ -98,11 +98,15 @@ describe.skipIf(!linksWork)('canonicalPath and links', () => {
 })
 
 describe('canonicalPath without links', () => {
-  it('refuses a path whose identity the host will not disclose, instead of trusting its spelling', () => {
-    // Not reachable portably; the guarantee is the ABSENCE of a lexical
-    // fallback, which this asserts structurally: an unresolvable existing entry
-    // must throw rather than return. A missing path is not such a case.
+  // The name used to promise the refusal and the body asserted the opposite
+  // case, so a green result said nothing about either. The refusal itself —
+  // an EXISTING entry the host will not resolve must throw rather than fall
+  // back to its spelling — is not reachable portably and is pinned by stubbing
+  // `fs.resolve` in `workspace-instructions/instructions.test.ts`. What IS
+  // portable is the other half of the same rule, and that is what this says.
+  it('resolves a missing path under its existing ancestor rather than refusing it', () => {
     const workspace = tempDir('minidsh-ws-')
     expect(() => canonicalPath(join(workspace, 'nope', 'still-fine.txt'))).not.toThrow()
+    expect(isInside(canonicalPath(workspace), canonicalPath(join(workspace, 'nope', 'still-fine.txt')))).toBe(true)
   })
 })

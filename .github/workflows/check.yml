@@ -74,6 +74,12 @@ jobs:
         env:
           # Windows ships no backend and is not asked to prove one (§13).
           MINIDSH_EXPECT_CONFINEMENT: ${{ (runner.os == 'Linux' || runner.os == 'macOS') && '1' || '' }}
+          # Every platform IS asked to prove its shell. The shell suites all
+          # self-skip without their dialect's binary, so a runner image that
+          # dropped `pwsh` would turn 13 Windows tests green by not running
+          # them — the same "green having proved nothing" the line above
+          # refuses, and it gets the same answer.
+          MINIDSH_EXPECT_SHELL: '1'
 
       # The install path, on every platform: pack the tarball `prepack` builds,
       # install it into an empty directory OUTSIDE the checkout, and start the

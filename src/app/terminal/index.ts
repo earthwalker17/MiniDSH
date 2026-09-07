@@ -94,8 +94,17 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   /** Where `/history` reads from: the cut this client synchronized on, and the oldest event it holds. */
   let history: { cursor: number; oldest: number; hasMore: boolean } | undefined
 
+  /**
+   * `you> ` is written and LEFT on the line, so anything rendered under it
+   * would glue itself to the prompt — which is what the first screen of a
+   * fresh `chat` did, reading `you> [approvals: ask]`. The flag says whether
+   * a prompt is standing, so a rendered event can break the line first.
+   */
+  let promptStanding = false
   const prompt = (): void => {
-    if (!exiting) out.write('you> ')
+    if (exiting) return
+    out.write('you> ')
+    promptStanding = true
   }
   const printError = (error: unknown): void => {
     out.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
@@ -110,13 +119,20 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       out.write('tip: approvals are one-shot; /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops these prompts\n')
     }
     out.write(`approve ${data.toolName}${data.reason ? ` (${data.reason})` : ''}? [y/N] `)
+    promptStanding = true
   }
 
   const handleFrame = (frame: SessionEventFrame): void => {
     if (sessionId !== undefined && frame.sessionId !== sessionId) return
     if (frame.event.seq < liveFromSeq) return // already in the rendered snapshot
     const text = renderer.onEvent(frame.event)
-    if (text) out.write(text)
+    if (text) {
+      if (promptStanding) {
+        out.write('\n')
+        promptStanding = false
+      }
+      out.write(text)
+    }
     if (matches(frame.event, APPROVAL_ASKED)) {
       askApproval(frame.event.data)
     } else if (matches(frame.event, APPROVAL_DECIDED)) {
@@ -406,6 +422,9 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   // of creating a second session.
   let lineChain: Promise<void> = Promise.resolve()
   const enqueueLine = (raw: string): void => {
+    // The line the user just sent consumed the prompt — a TTY echoed their
+    // Enter, so nothing is standing and the next event needs no break.
+    promptStanding = false
     lineChain = lineChain.then(() => onLine(raw)).catch(printError)
   }
   rl.on('line', enqueueLine)

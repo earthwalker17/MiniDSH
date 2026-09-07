@@ -55,10 +55,15 @@ async function web(options: { host?: string } = {}): Promise<{ host: WebHostHand
   return { host, origin: `http://127.0.0.1:${host.port}`, token: new URL(host.url).searchParams.get('token')! }
 }
 
-/** A raw request, so headers `fetch` refuses to forge (Host, Origin) can be set. */
-function status(port: number, headers: Record<string, string>): Promise<number> {
+/**
+ * A raw request, so headers `fetch` refuses to forge (Host, Origin) can be set
+ * — and so a request-TARGET can be sent verbatim: `fetch` normalizes `/../x`
+ * away before it leaves the client, which would make a traversal case a test
+ * of the client rather than of the server.
+ */
+function status(port: number, headers: Record<string, string>, path = '/'): Promise<number> {
   return new Promise((resolve, reject) => {
-    const request = httpRequest({ host: '127.0.0.1', port, path: '/', method: 'GET', headers }, (response) => {
+    const request = httpRequest({ host: '127.0.0.1', port, path, method: 'GET', headers }, (response) => {
       response.resume()
       resolve(response.statusCode ?? 0)
     })
@@ -108,11 +113,30 @@ describe('the web surface trust fence', () => {
   })
 
   it('serves no path but its own flat assets', async () => {
-    const { origin, token } = await web()
+    const { host, origin, token } = await web()
     const cookie = await signIn(origin, token)
-    for (const path of ['/../package.json', '/nested/app.js', '/app.ts']) {
+    for (const path of ['/nested/app.js', '/app.ts']) {
       expect((await fetch(`${origin}${path}`, { headers: { cookie } })).status).toBe(404)
     }
+    // The traversal spellings go through the RAW helper: `fetch` normalizes
+    // `/../x` to `/x` before it leaves the client, so sending them that way
+    // proved "unknown asset", not "traversal refused" — the server has to be
+    // the thing that says no.
+    for (const path of ['/../package.json', '/%2e%2e/package.json', '/..%2fpackage.json']) {
+      expect(await status(host.port, { cookie }, path), `${path} was not refused`).toBe(404)
+    }
+  })
+
+  it('answers a request-target it cannot parse, instead of dying on it', async () => {
+    // Node's parser hands an absolute-form target over verbatim, and `new URL`
+    // throws on `http://a:b:c/`. Thrown inside the server callback that was an
+    // UNCAUGHT exception: one unauthenticated line of TCP ended the process and
+    // every agent it hosted. The refusal has to be an answer, and the host has
+    // to still be there afterwards — which is what the second request proves.
+    const { host, origin, token } = await web()
+    expect(await status(host.port, {}, 'http://a:b:c/')).toBe(400)
+    const cookie = await signIn(origin, token)
+    expect(await status(host.port, { cookie })).toBe(200)
   })
 
   it('closes an upgrade to a path nobody serves, instead of holding the socket open', async () => {
@@ -132,6 +156,23 @@ describe('the web surface trust fence', () => {
     expect(outcome).toBe('closed')
   })
 
+  it('prints an IPv6 bind as a URL, since an unbracketed one is not a URL at all', async (ctx) => {
+    // `--host ::1` printed `http://::1:PORT/?token=…`, which `new URL` refuses:
+    // the flag was offered and the link it handed back could not be opened.
+    let opened: Awaited<ReturnType<typeof web>>
+    try {
+      opened = await web({ host: '::1' })
+    } catch {
+      ctx.skip('this host has no IPv6 loopback to bind')
+      return
+    }
+    expect(new URL(opened.host.url).host).toBe(`[::1]:${opened.host.port}`)
+    // And the fence accepts that spelling: `authoritiesFor` lists `[::1]:port`
+    // for a loopback bind, so the printed URL is one a browser can actually use.
+    const cookie = await signIn(`http://[::1]:${opened.host.port}`, opened.token)
+    expect(cookie).toContain('minidsh')
+  })
+
   it('answers a wildcard bind, where an allow-list built from the bind address never could', async () => {
     // `--host 0.0.0.0` is offered by the CLI. `0.0.0.0` is never a Host header
     // any client sends, so a list built from it would 403 every request and the
@@ -139,6 +180,10 @@ describe('the web surface trust fence', () => {
     // Host it was sent to", which is the strongest check still meaningful when
     // the host does not know its own names.
     const { host, origin, token } = await web({ host: '0.0.0.0' })
+    // The one URL this process prints has to OPEN. A wildcard is a bind, not
+    // an address: `http://0.0.0.0:PORT/` reaches nothing on Windows, so the
+    // printed authority is the loopback the wildcard rule already accepts.
+    expect(new URL(host.url).host).toBe(`127.0.0.1:${host.port}`)
     const cookie = await signIn(origin, token)
     expect(await status(host.port, { cookie })).toBe(200)
     // A foreign Origin is still refused before any credential is looked at.
