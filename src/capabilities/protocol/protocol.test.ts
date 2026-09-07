@@ -10,6 +10,7 @@ import { serviceKey, type Context, type Logger } from '../../kernel/index.ts'
 import { AGENTS } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { LLM, LlmError } from '../../core/llm/index.ts'
+import { canonicalPath } from '../../core/sandbox/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { startProtocolHost, type ProtocolHostHandle } from '../../app/serve.ts'
@@ -799,7 +800,12 @@ describe('protocol: workspaces are addressing, never authority', () => {
     expect(init.workspaces).toHaveLength(2)
     expect(init.workspaces[0]!.name).toBe('alpha')
     expect(init.workspaces[1]!.id).toBe('beta')
-    expect(init.workspaces.map((one) => one.root.toLowerCase())).toEqual(roots.map((root) => root.toLowerCase()))
+    // The host reports CANONICAL roots, so the expectation is canonicalized the
+    // same way — never the raw `mkdtemp` path. On this machine the two agree by
+    // accident; macOS's `/var → /private/var` symlink and a Windows runner whose
+    // TEMP is an 8.3 short name (`runner~1`) are where the first CI run found
+    // that a test which passed here had been comparing a path to itself.
+    expect(init.workspaces.map((one) => one.root.toLowerCase())).toEqual(roots.map((root) => canonicalPath(root).toLowerCase()))
     // The derived id is a function of the root, not a fresh uuid: it survives a restart.
     expect(init.workspaces[0]!.id).toMatch(/^[0-9a-f]{12}$/)
     // The allow-list is still published beside it — the workspace did not replace it.
@@ -813,12 +819,14 @@ describe('protocol: workspaces are addressing, never authority', () => {
 
     const first = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: alpha.id })
     const attached = await client.result<AttachResult>('session/attach', { sessionId: first.sessionId })
-    expect(attached.header.cwd.toLowerCase()).toBe(roots[0]!.toLowerCase())
+    // Canonical on both sides: the header records the path the fence derives
+    // from, which is the real one, not the spelling `mkdtemp` handed back.
+    expect(attached.header.cwd.toLowerCase()).toBe(canonicalPath(roots[0]!).toLowerCase())
 
     mkdirSync(join(roots[0]!, 'nested'))
     const second = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: alpha.id, path: 'nested' })
     const nested = await client.result<AttachResult>('session/attach', { sessionId: second.sessionId })
-    expect(nested.header.cwd.toLowerCase()).toBe(join(roots[0]!, 'nested').toLowerCase())
+    expect(nested.header.cwd.toLowerCase()).toBe(canonicalPath(join(roots[0]!, 'nested')).toLowerCase())
   })
 
   it('grants nothing the allow-list does not: a path out of the workspace is refused', async () => {

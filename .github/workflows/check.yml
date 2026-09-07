@@ -62,12 +62,13 @@ jobs:
           fi
 
       # Installs pnpm from `packageManager` and the runtime itself, so there is
-      # no second setup step to drift out of step with it.
+      # no second setup step to drift out of step with it. No `require-lockfile`:
+      # the first real run warned that the v2 action has no such input, and pnpm
+      # installs frozen under CI anyway (the run said "Lockfile is up to date").
       - uses: pnpm/setup@v2
         with:
           runtime: node@24.19.0
           cache: true
-          require-lockfile: true
 
       - run: pnpm check
         env:
