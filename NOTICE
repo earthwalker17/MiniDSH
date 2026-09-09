@@ -14,4 +14,4 @@ credited in the adjacent comment. The Cordis paper
 (https://github.com/cordiverse/paper) is the source of the two composability
 properties the kernel is built around.
 
-The bundled dependency `zod` is MIT licensed by its authors.
+The runtime dependency `zod` is MIT licensed by its authors.

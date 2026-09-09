@@ -2,18 +2,17 @@
 
 What comes next, the route to get there, what is still undecided, and a compact record of how the system arrived. `ARCHITECTURE.md` describes the current shape and its known limitations; this file says what comes next and why, and keeps the measurements the architecture map does not carry.
 
-## 1. Next session — V1 release
+## 1. Next session — after V1
 
-S11.5 closed the engineering gate: three-platform CI is green including an install smoke, the tarball installs and runs on two hosts, two release-blocking defects and twenty smaller ones are fixed, and both architecture documents are rewritten. What is left is publication, and nothing in it is engineering.
+V1 is published (§4). Nothing below is urgent, and none of it is a feature; the first real need decides the order.
 
-1. **Flip `private: true` off** in `package.json` and set the version to `1.0.0`. The flag blocks `npm publish` (`EPRIVATE`) and nothing else; `pnpm pack` and a tarball install already work with it on, which is why it survived this long. **`npm publish --dry-run` cannot rehearse this** — the private check lives inside libnpmpublish, which a dry run never calls, so the rehearsal prints success for a publish that will fail. Assert it directly instead: `node -e "if (require('./package.json').private) throw new Error('still private')"`. `prepublishOnly` runs `pnpm check`, so the publish is at least gated by the suite.
-2. **`pnpm check` on both hosts, `gh workflow run check.yml`, and `live.yml` once** on the release commit. Cut the release branch as `release/v1` — `check.yml` triggers on `main` and `release/**`, so the gate runs on the branch rather than only on the merge — the same gate every session ends with, on the exact bytes that ship.
-3. **`npm publish`**, then a `v1.0.0` git tag and a GitHub release.
-4. **The README quick start becomes `npx minidsh chat --cwd <repo>`.** Today it says a clone or a packed tarball; publication is the only thing that makes the shorter line true.
-5. **The demo log ships as a replay fixture**, so the demo is a test: record one session that does real work, store it beside the arcs, and replay it keylessly in `pnpm check`. A demo that can go stale without failing is a screenshot.
-6. **README and GitHub page polish**, deliberately left until the thing being described is installable.
+1. **The demo log as a replay fixture.** Deferred from the release deliberately — it is engineering, and the release session was publication only. Record one session that does real work through the installed package, store the log beside the arcs, and replay it keylessly in `pnpm check`, so the demo is a test. A demo that can go stale without failing is a screenshot.
+2. **Decide the importable surface** (§3): either an `exports` map naming the plugin-facing seams, or the stated rule that an out-of-tree plugin owns its own `package.json`. V1 shipped a binary and no `main`, which is an honest answer for as long as nobody has asked the question.
+3. **Publish from CI with provenance.** V1 was published from a developer machine after the gates. npm's trusted publishing (OIDC from `check.yml` on a tag) needs the package to exist first, which it now does; a `release.yml` that runs the gate on a `v*` tag and publishes with `--provenance` removes the machine from the path.
+4. **Visual assets** — a terminal recording, a browser screenshot, a social preview — were excluded from the release on purpose and belong to a session that can look at them.
+5. **The routing arc's second failure shape** (the model going off-instruction with the information reachable) is a prompt problem, not a compaction problem; report the two shapes separately until one of them is fixed.
 
-Verification: `pnpm check` on Windows and under WSL 2; the eight arcs three times on each host; one `live.yml` dispatch, whose last step now drives a real task through the INSTALLED package rather than the checkout; an install from the published tarball.
+Verification for any of these: the same gate as a feature session — `pnpm check` on Windows and under WSL 2 with both `MINIDSH_EXPECT_*` flags, the eight arcs three times on each host, `check.yml` on the branch.
 
 ## 2. Macro route (dependency-ordered; sessions are approximate)
 
@@ -25,7 +24,8 @@ Verification: `pnpm check` on Windows and under WSL 2; the eight arcs three time
 | ~~**S10** Session & product surfaces~~ | ✅ The spill sweep; a session's name as a log-only `session/title` with a first-prompt fallback, shown by every surface; a browser transcript that grows instead of being rebuilt; `/sessions`; `--version`. | S9 |
 | ~~**S11** Confinement & CI~~ | ✅ `bwrap` and `sandbox-exec` as a spawn wrapper inside `shell-stdio`, chosen by platform and PROBED functionally; the persistent child bound to the session's policy with a one-shot grant in a throwaway child; a kernel denial earning the same escalation a refusal carries; a three-platform CI matrix where a self-skipped confinement test FAILS the leg. | S10 |
 | ~~**S11.5** Hardening checkpoint = V1 release candidate~~ | ✅ §4 below. | S9–S11 |
-| **V1 release** | §1 above. | S11.5 |
+| ~~**V1 release**~~ | ✅ `minidsh@1.0.0` on npm, `v1.0.0` tagged, the README rewritten as the project's public account of itself, the repository's public files and metadata complete. §4 below. | S11.5 |
+| **After V1** | §1 above. | — |
 
 **V1 is** the smallest release a developer can install, point at a repository, and use daily without reading the architecture: two interactive surfaces (`chat`, `web`) and one headless entry (`run`) over one runtime; the default preset `workspace-write` + `ask`, under which an ordinary task on a confined host costs zero prompts and an out-of-workspace effect one one-shot approval — both demonstrated against a real model on a real confined host — and on Windows, which has no backend, the shell asks per call or the user chooses `danger-full-access`, stated in the README and hinted at the first ask, never silent; keys from the environment or `~/.minidsh/credentials.json`, with the first failure naming both; `pnpm check` green on three platforms in CI, an install smoke on each, and the eight live arcs green **three times** before the tag, on two hosts, with the routing arc's flake rate reported rather than hidden. The repetition count is the gate, not the host count: the routing arc has a documented flake, so a bar one lucky run clears is the one thing a release gate must not be.
 

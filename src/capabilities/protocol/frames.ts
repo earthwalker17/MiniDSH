@@ -4,6 +4,10 @@
  * reach a client type-only, there is no DTO layer, and no protocol version
  * until a client ships independently of the host (clients ignore unknown
  * event and notification types).
+ *
+ * The wire shape follows DeepSeek Harness's SDK — newline-delimited JSON-RPC
+ * over stdio (https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/README.md);
+ * the method table, the paged attach and the authority methods are MiniDSH's.
  */
 import type { AgentOptions } from '../../core/agent/index.ts'
 import type { ApprovalPolicy, OpenApproval } from '../../core/approval/index.ts'

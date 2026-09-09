@@ -96,13 +96,13 @@ Official references:
 - Subsystem documentation: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
 - Cordis paper: https://github.com/cordiverse/paper
 
-These sources are actively changing. Claude Code should inspect the current repository and primary docs whenever a design decision depends on them.
+These sources are actively changing, and DSH's notes move between `proposed/`, `implemented/` and `archived/` as they age, so a deep link into `.agents/notes` can go stale within weeks. Claude Code should inspect the current repository and primary docs whenever a design decision depends on them. Links here were last checked on 2026-09-09.
 
 ---
 
 ## 4. “Self-Evolving” Should Be Treated Carefully
 
-DeepSeek Harness is often described as enabling self-evolving agents. The direction is useful, but the architectural claim should be more precise.
+DeepSeek Harness's `extensions` family lets an agent define and run dynamic packages inside its own runtime, which is sometimes summarised as self-evolution. The direction is useful, but the architectural claim should be more precise.
 
 A dynamically composable harness does not automatically solve:
 
@@ -129,13 +129,13 @@ Self-improvement is behavior built on infrastructure.
 
 DeepSeek Harness already ships a minimal composition with a deliberately tiny model-facing tool surface. Its current minimal preset demonstrates an important point: a useful coding agent does not need dozens of overlapping tools.
 
-The official minimal configuration exposes essentially a persistent shell and a structured file editor while omitting many higher-level conveniences.
+The official minimal configuration exposes essentially a persistent shell while omitting many higher-level conveniences (as of September 2026; until then it paired the shell with a structured file editor).
 
 References:
 
-- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/config/agent-presets/minimal/agent.cordis.yml
-- Minimal JSON-RPC example: https://github.com/deepseek-ai/deepseek-harness/tree/master/examples/jsonrpc-agent
-- Tool-surface simplification note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/simplification/2026-08-10-default-presets-single-editor.md
+- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/preset/agent-presets/presets/minimal/agent.cordis.yml
+- The SDK (newline-delimited JSON-RPC over stdio): https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/README.md
+- Tool-surface simplification note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/archived/simplification/2026-08-10-default-presets-single-editor.md
 
 This means MiniDSH cannot justify itself merely by claiming to have a “minimal mode.”
 
@@ -320,11 +320,11 @@ It should not reimplement:
 - orchestration;
 - verification logic.
 
-DeepSeek Harness has already documented a similar host/client/carrier separation and explicitly reserves room for Web, headless, and future Electron clients.
+DeepSeek Harness already documents a similar host/client/carrier separation and ships web, headless and an Electron desktop application as clients of one runtime.
 
 Reference:
 
-- GUI layering and RPC design note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-layering-and-rpc-protocol.md
+- Host/client package split and the carrier vocabulary: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md and https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
 - Web client architecture note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md
 
 MiniDSH does not need to copy this structure. It should understand the invariant:
@@ -503,11 +503,11 @@ Especially useful starting points:
 - Module graph: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md
 - Subsystems: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
 - Cordis paper: https://github.com/cordiverse/paper
-- Package regrouping rationale: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-29-package-regrouping.md
+- Package regrouping rationale: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/archived/architecture/2026-07-29-package-regrouping.md
 - Agent scope design: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md
-- GUI/RPC layering: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-layering-and-rpc-protocol.md
+- Web client architecture note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md
 - LLM family: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/README.md
-- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/config/agent-presets/minimal/agent.cordis.yml
+- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/preset/agent-presets/presets/minimal/agent.cordis.yml
 - Attachment subsystem: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/attachment.md
 
 Search the current repository for newer decisions when these files reference superseded or archived notes.

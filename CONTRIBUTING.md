@@ -70,7 +70,7 @@ If a change needs state that must survive a restart, a resume or a fork, it is a
 
 ## Scope
 
-BLUEPRINT §2 lists what V1 deliberately does not do — background jobs, parallel tool calls, an MCP bridge, model-written extensions, a Windows confinement backend, session deletion, a search index, per-user identity — each with the reason. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
+BLUEPRINT §2 lists what V1 deliberately does not do — background jobs and parallel tool calls, an MCP client, model-written extensions and PTC, a Windows confinement backend and Landlock, standing approval grants, session deletion, a session search index, per-user identity, a desktop shell — each with the reason; the README's *Not built* list is the same list. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
 
 ## License and attribution
 

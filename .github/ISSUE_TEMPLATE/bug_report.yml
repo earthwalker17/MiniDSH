@@ -26,7 +26,7 @@ body:
     id: enforcement
     attributes:
       label: Shell confinement the session recorded
-      description: What `minidsh sessions show <id> --audit` reports as `enforcement` on the opening `sandbox/mode` stamp, or what `minidsh config` says for the `shell` row
+      description: What `minidsh sessions show <id> --audit` reports as `enforcement` on the session's opening `sandbox/mode` line
       options:
         - full (bubblewrap)
         - full (seatbelt)

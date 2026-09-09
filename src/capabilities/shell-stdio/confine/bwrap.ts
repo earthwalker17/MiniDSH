@@ -14,6 +14,10 @@
  * existing flags in and gets 33 of 34 (the one refusal is a shadowed duplicate
  * mount, invisible either way). That detail is the argument against a
  * hand-rolled backend, not a footnote.
+ *
+ * The profile follows DeepSeek Harness's bwrap runner (`dsh-sandbox-local`,
+ * https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/sandbox-local/README.md)
+ * flag for flag; the writable set it grants is MiniDSH's own (`writableRoots`).
  */
 import type { SandboxExecutionPolicy } from '../../../core/sandbox/index.ts'
 import { writableRoots } from '../../../core/sandbox/index.ts'

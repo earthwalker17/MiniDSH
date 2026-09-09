@@ -16,10 +16,10 @@ The first public release: the smallest MiniDSH a developer can install, point at
 - **Context management.** A pure meter over the log; compaction with three triggers, a durable bracket and a replacing surface operation that leaves history intact; bounded recall of what a compaction shadowed; spill for oversized tool output; workspace instructions from `AGENTS.md`.
 - **Delegation and vision.** A `subagent` tool with its own session and log; a verifier that can see, as a second row of the same tool on a vision route; a content-addressed attachment plane.
 - **Composition from disk.** `~/.minidsh/composition.json` layers over the built-ins with per-row provenance and a per-boot `composition/applied` stamp in every session; `settings.json` for user defaults; credentials by name only.
-- **Verification.** 676 tests mounting real compositions, green on Ubuntu, macOS and Windows in CI with an install smoke on each; eight live end-to-end arcs against real providers, run by hand and before every release.
+- **Verification.** 676 tests mounting real compositions, green on Ubuntu, macOS and Windows in CI with an install smoke on each; eight live end-to-end arcs against real providers, run from a manually dispatched workflow and on both development hosts before every release.
 
 ### Known limitations
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) §13. The ones most likely to matter on day one: Windows has no shell confinement backend, so every command there asks; confinement bounds file effects only, not the network or the environment; the filesystem fence cannot follow hard links.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) §13. The ones most likely to matter on day one: Windows has no shell confinement backend, so every shell command there costs one approval; confinement bounds file effects only, not the network or the environment; the filesystem fence cannot follow hard links.
 
 [1.0.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v1.0.0
