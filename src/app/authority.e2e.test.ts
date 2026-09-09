@@ -223,11 +223,25 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     expect(readFileSync(decoy).equals(decoyBytes)).toBe(true)
     // …and the refusal is what kept it away. Scoped past the switch, because
     // step 2 already produced a denial and a session-wide count would accept it.
-    const refusedAfter = serve
-      .events('tool/result', sessionId)
-      .filter((event) => event.seq > change.seq)
-      .filter((event) => dataOf<{ error?: { code: string } }>(event).error?.code === 'FS_SANDBOX_DENIED')
-    expect(refusedAfter.length, 'nothing was refused after the switch to read-only, so the durable switch was never tested').toBeGreaterThan(0)
+    // The count says what produced it: which tools the model called after the
+    // switch and what each answered. A zero here has two shapes that need
+    // different fixes — the model declined without a tool call (the arc's
+    // premise decaying), or it reached for a tool the fs fence does not answer
+    // for (the shell, whose confined refusal is the kernel's and carries no
+    // FS_SANDBOX_DENIED) — and the V1 macOS live leg produced a zero that the
+    // old message could not tell apart.
+    const callsAfter = serve.events('tool/call', sessionId).filter((event) => event.seq > change.seq)
+    const resultsAfter = serve.events('tool/result', sessionId).filter((event) => event.seq > change.seq)
+    const refusedAfter = resultsAfter.filter((event) => dataOf<{ error?: { code: string } }>(event).error?.code === 'FS_SANDBOX_DENIED')
+    const afterSwitch =
+      `after the switch to read-only: ${callsAfter.length} tool call(s) ` +
+      `[${callsAfter.map((event) => dataOf<{ name: string }>(event).name).join(', ')}], ` +
+      `result codes [${resultsAfter.map((event) => dataOf<{ error?: { code: string } }>(event).error?.code ?? 'ok').join(', ')}]`
+    console.log(`[authority arc] ${afterSwitch}`)
+    expect(
+      refusedAfter.length,
+      `nothing reached the fs fence ${afterSwitch} — the durable switch was never tested`,
+    ).toBeGreaterThan(0)
 
     // ---- 5. the log is still its own oracle -------------------------------
     const fresh = await serve.request<{ sessionId: string }>('session/prompt', {
