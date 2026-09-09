@@ -32,7 +32,7 @@
     "node": ">=24.0.0"
   },
   "bin": {
-    "minidsh": "./bin/minidsh.js"
+    "minidsh": "bin/minidsh.js"
   },
   "files": [
     "bin",
