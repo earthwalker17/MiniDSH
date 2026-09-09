@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-MiniDSH is an independent educational and engineering project inspired by
-DeepSeek Harness (https://github.com/deepseek-ai/deepseek-harness, MIT). It is
-not an official DeepSeek project and is not affiliated with DeepSeek. Code is
-implemented independently; where a contract or wording is adapted from
-DeepSeek Harness, the source is credited in the adjacent comment.

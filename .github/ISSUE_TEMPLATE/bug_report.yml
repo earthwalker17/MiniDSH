@@ -1,0 +1,55 @@
+name: Bug report
+description: Something the harness did that its documents say it should not do
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Before filing, check [`ARCHITECTURE.md` §13](https://github.com/earthwalker17/MiniDSH/blob/main/ARCHITECTURE.md#13-known-limitations-current): a good number of surprising behaviours are stated limitations with a reason beside them. If the defect can be exploited, use [private vulnerability reporting](https://github.com/earthwalker17/MiniDSH/security/advisories/new) instead of an issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `minidsh --version`
+      placeholder: minidsh 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system and version; Node version; on Windows, whether `pwsh` is installed
+      placeholder: Ubuntu 24.04, Node 24.19.0
+    validations:
+      required: true
+  - type: dropdown
+    id: enforcement
+    attributes:
+      label: Shell confinement the session recorded
+      description: What `minidsh sessions show <id> --audit` reports as `enforcement` on the opening `sandbox/mode` stamp, or what `minidsh config` says for the `shell` row
+      options:
+        - full (bubblewrap)
+        - full (seatbelt)
+        - none (Windows, or no backend on this host)
+        - not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command or surface, what you asked, what the harness did, and what you expected instead. Quote the exact refusal or error text where there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Session log
+      description: |
+        The relevant part of `minidsh sessions show <id> --json`, or the file under `~/.minidsh/sessions/`. Logs record credential *names*, never values, but read a log before pasting it — it also contains what the model was shown.
+      render: json
+  - type: textarea
+    id: doc
+    attributes:
+      label: What the documents say
+      description: If you can, the sentence in `ARCHITECTURE.md` or `README.md` that the behaviour contradicts. A defect here is a gap between the contract and the code, and naming the contract is half the fix.

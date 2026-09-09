@@ -1,12 +1,30 @@
 {
   "name": "minidsh",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Architecture-first, local-first minimal coding-agent harness (inspired by DeepSeek Harness; not affiliated).",
-  "keywords": ["agent", "harness", "coding-agent", "llm", "sandbox", "event-sourced", "cli"],
+  "version": "1.0.0",
+  "description": "Minimal surface, complete architecture: a small, local-first coding-agent harness re-derived from the invariants of DeepSeek Harness (independent project; not affiliated).",
+  "keywords": [
+    "agent",
+    "agent-harness",
+    "coding-agent",
+    "ai-agent",
+    "llm",
+    "deepseek",
+    "anthropic",
+    "sandbox",
+    "event-sourcing",
+    "plugin-architecture",
+    "local-first",
+    "json-rpc",
+    "cli"
+  ],
   "homepage": "https://github.com/earthwalker17/MiniDSH#readme",
-  "repository": { "type": "git", "url": "git+https://github.com/earthwalker17/MiniDSH.git" },
-  "bugs": { "url": "https://github.com/earthwalker17/MiniDSH/issues" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/earthwalker17/MiniDSH.git"
+  },
+  "bugs": {
+    "url": "https://github.com/earthwalker17/MiniDSH/issues"
+  },
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.1.3",
@@ -20,7 +38,8 @@
     "bin",
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "minidsh": "node bin/minidsh.js",

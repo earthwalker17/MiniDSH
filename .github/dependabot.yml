@@ -1,0 +1,18 @@
+# Keep the one runtime dependency, the dev toolchain and the Actions pinned
+# here current. Grouped so a week's updates are one pull request, not five,
+# and each one still has to pass check.yml on three platforms.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      dependencies:
+        patterns: ['*']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
