@@ -10,7 +10,7 @@
 
 ## Invariants and contracts preserved
 
-<!-- The documented behaviours near this change that still hold — and any that deliberately no longer do, with the ARCHITECTURE.md edit that says so. -->
+<!-- The documented behaviours near this change that still hold — and any that deliberately no longer do, with the `docs/ARCHITECTURE.md` edit that says so. -->
 
 ## Verification
 
@@ -20,6 +20,6 @@
 
 ## Documentation impact
 
-- [ ] `ARCHITECTURE.md` updated where a documented behaviour changed (it is a contract, not a history)
-- [ ] `ARCHITECTURE.md` §13 updated where a limitation was added, removed or changed
+- [ ] `docs/ARCHITECTURE.md` updated where a documented behaviour changed (it is a contract, not a history)
+- [ ] `docs/ARCHITECTURE.md` §13 updated where a limitation was added, removed or changed
 - [ ] `README.md` updated where a user-facing command, flag, default or file moved

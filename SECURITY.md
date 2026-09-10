@@ -12,7 +12,7 @@ The latest 1.x release.
 
 ## Where the boundaries are
 
-MiniDSH is a coding agent that edits files and runs commands on your machine, so it is worth being precise about what is a security boundary and what is not. The authoritative description is [`ARCHITECTURE.md`](ARCHITECTURE.md) §7 (authority) and §13 (known limitations); this is the summary.
+MiniDSH is a coding agent that edits files and runs commands on your machine, so it is worth being precise about what is a security boundary and what is not. The authoritative description is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §7 (authority) and §13 (known limitations); this is the summary.
 
 - **The model is never the boundary.** It proposes; policy decides; the effect boundary enforces; every decision is a durable event in the session log.
 - **File writes** are fenced inside the `fs` provider, in process, against the session's recorded sandbox mode: canonicalize, contain, refuse before any effect. Reads are unrestricted by design. The fence follows symbolic links and cannot follow a hard link, so a hard link inside the workspace whose inode lives outside it lets a write through. That is a documented limitation, not an undisclosed one.

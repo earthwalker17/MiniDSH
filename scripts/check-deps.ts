@@ -1,7 +1,7 @@
 /**
  * Source-shape gates. Three rules, one script:
  *
- * 1. Dependency direction, from ARCHITECTURE.md: kernel imports nothing
+ * 1. Dependency direction, from docs/ARCHITECTURE.md §1: kernel imports nothing
  *    internal; core imports kernel + core (but nothing but app/test-support
  *    imports core/loop); capabilities import kernel + core (never each other or
  *    app); app imports anything; test-support imports anything. Static,

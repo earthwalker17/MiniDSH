@@ -2,7 +2,7 @@
 
 One runtime composed from plugins over a tiny kernel. Everything the model can see is derived from an append-only session log. Everything the model can do goes through a guarded tool pipeline, fenced at the effect boundary by an authority the log records. The model is a capability the runtime routes to, not the agent: the route is a durable fact, a purpose may take a different one, and a delegated child runs under an authority it cannot widen. Bytes the model was shown live beside the log, content-addressed, never in it. Every surface only renders the log — by the page, because no client may be handed a whole one — and drives the agent registry; a session survives its process.
 
-This is the architecture contract: what each layer owns, what it may not own, and where a new thing goes. History lives in `BLUEPRINT.md` §4 and the commits; usage lives in `README.md`. §12 lists deliberate differences from DeepSeek Harness (DSH), §13 what is knowingly missing. Section numbers are cited from code comments and are stable.
+This is the architecture contract: what each layer owns, what it may not own, and where a new thing goes. History lives in `BLUEPRINT.md` §4 (beside this file) and the commits; usage lives in the root `README.md`. §12 lists deliberate differences from DeepSeek Harness (DSH), §13 what is knowingly missing. Section numbers are cited from code comments and are stable.
 
 ## 1. Layers and dependency direction
 
@@ -453,8 +453,9 @@ scripts/        build.ts (the dist emit + asset copy + smoke import) · check-de
 bin/            minidsh.js (checkout-or-install entry; refuses Node < 24)
 .github/        workflows/check.yml (three platforms, then an install smoke) · workflows/live.yml (the arcs, by hand)
                 ISSUE_TEMPLATE/ · PULL_REQUEST_TEMPLATE.md (the §6 plan questions) · dependabot.yml
-(root)          README.md · PROJECT.md · ARCHITECTURE.md · BLUEPRINT.md · CLAUDE.md · CONTRIBUTING.md · SECURITY.md
-                CHANGELOG.md · CODE_OF_CONDUCT.md · LICENSE (pure MIT, so GitHub detects it) · NOTICE (the attribution)
+(root)          README.md · CLAUDE.md · CONTRIBUTING.md · SECURITY.md · CHANGELOG.md · CODE_OF_CONDUCT.md
+                LICENSE (pure MIT, so GitHub detects it) · NOTICE (the attribution)
+docs/           PROJECT.md · ARCHITECTURE.md · BLUEPRINT.md · images/README_hero.png
 .claude/        hooks/guard-repo.mjs
 ```
 

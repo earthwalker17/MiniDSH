@@ -40,14 +40,14 @@ DeepSeek Harness evolves rapidly. Verify current behavior instead of freezing ol
 ## 5. Project Documents
 Use exactly four primary context documents:
 - `CLAUDE.md` — stable constitution and execution rules; keep under 200 lines; change rarely.
-- `PROJECT.md` — stable project thesis, positioning, scope, and research context; change rarely.
-- `ARCHITECTURE.md` — concise current architecture map and subsystem explanation; current state, not history.
-- `BLUEPRINT.md` — rolling long-term engineering plan plus compact development record; what comes next and why.
+- `docs/PROJECT.md` — stable project thesis, positioning, scope, and research context; change rarely.
+- `docs/ARCHITECTURE.md` — concise current architecture map and subsystem explanation; current state, not history.
+- `docs/BLUEPRINT.md` — rolling long-term engineering plan plus compact development record; what comes next and why.
+`CLAUDE.md` and `README.md` stay at the repository root; the other three live in `docs/`.
 At every substantive session start, read all four documents, then inspect the relevant current code before planning.
-In Session 1, create `ARCHITECTURE.md` and `BLUEPRINT.md` during planning, after sufficient research and before large implementation.
 After each substantive session:
-- update `ARCHITECTURE.md` to the actual implementation;
-- update `BLUEPRINT.md`, compressing completed work and moving the next session to the top;
+- update `docs/ARCHITECTURE.md` to the actual implementation;
+- update `docs/BLUEPRINT.md`, compressing completed work and moving the next session to the top;
 - delete stale claims rather than accumulating contradictory history;
 - keep both bounded enough to reread every session;
 - avoid duplicating the same truth across documents.
@@ -112,7 +112,7 @@ A session is eligible to push only after:
 2. repository verification is green;
 3. adversarial review is resolved;
 4. real-model live E2E passes;
-5. `ARCHITECTURE.md` and `BLUEPRINT.md` are current;
+5. `docs/ARCHITECTURE.md` and `docs/BLUEPRINT.md` are current;
 6. the user explicitly approves the session.
 Do not push without explicit user approval.
 

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        MiniDSH is architecture-first: a capability has a home before it has code. If you want to add something and [`ARCHITECTURE.md` §11](https://github.com/earthwalker17/MiniDSH/blob/main/ARCHITECTURE.md#11-where-new-things-go) already says where it goes, you can skip this and open a pull request. If it does not, or you think an existing boundary is wrong, this is the place — and the discussion is the contribution, whether or not code follows.
+        MiniDSH is architecture-first: a capability has a home before it has code. If you want to add something and [`docs/ARCHITECTURE.md` §11](https://github.com/earthwalker17/MiniDSH/blob/main/docs/ARCHITECTURE.md#11-where-new-things-go) already says where it goes, you can skip this and open a pull request. If it does not, or you think an existing boundary is wrong, this is the place — and the discussion is the contribution, whether or not code follows.
   - type: textarea
     id: capability
     attributes:
@@ -30,4 +30,4 @@ body:
     attributes:
       label: Relation to what is deliberately not built
       description: |
-        [`BLUEPRINT.md` §2](https://github.com/earthwalker17/MiniDSH/blob/main/BLUEPRINT.md#2-macro-route-dependency-ordered-sessions-are-approximate) lists what V1 leaves out and why, and §3 the open questions. If this touches one of them, say which and what has changed.
+        [`docs/BLUEPRINT.md` §2](https://github.com/earthwalker17/MiniDSH/blob/main/docs/BLUEPRINT.md#2-macro-route-dependency-ordered-sessions-are-approximate) lists what V1 leaves out and why, and §3 the open questions. If this touches one of them, say which and what has changed.

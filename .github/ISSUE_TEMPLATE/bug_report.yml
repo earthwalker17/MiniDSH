@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks. Before filing, check [`ARCHITECTURE.md` §13](https://github.com/earthwalker17/MiniDSH/blob/main/ARCHITECTURE.md#13-known-limitations-current): a good number of surprising behaviours are stated limitations with a reason beside them. If the defect can be exploited, use [private vulnerability reporting](https://github.com/earthwalker17/MiniDSH/security/advisories/new) instead of an issue.
+        Thanks. Before filing, check [`docs/ARCHITECTURE.md` §13](https://github.com/earthwalker17/MiniDSH/blob/main/docs/ARCHITECTURE.md#13-known-limitations-current): a good number of surprising behaviours are stated limitations with a reason beside them. If the defect can be exploited, use [private vulnerability reporting](https://github.com/earthwalker17/MiniDSH/security/advisories/new) instead of an issue.
   - type: input
     id: version
     attributes:
@@ -52,4 +52,4 @@ body:
     id: doc
     attributes:
       label: What the documents say
-      description: If you can, the sentence in `ARCHITECTURE.md` or `README.md` that the behaviour contradicts. A defect here is a gap between the contract and the code, and naming the contract is half the fix.
+      description: If you can, the sentence in `docs/ARCHITECTURE.md` or `README.md` that the behaviour contradicts. A defect here is a gap between the contract and the code, and naming the contract is half the fix.

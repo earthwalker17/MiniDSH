@@ -2,7 +2,7 @@
  * A model call that is not a loop step.
  *
  * A summary, a verification, a title: work the runtime does with the model
- * without it being a turn. `ARCHITECTURE.md` §11 reserves the shape — the
+ * without it being a turn. `docs/ARCHITECTURE.md` §11 reserves the shape — the
  * caller logs its own durable record with route and usage, because a bare
  * `llm.stream` is neither durable nor retried and would leave the session log
  * unable to explain a fact the model later acts on.

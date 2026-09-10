@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/earthwalker17/MiniDSH/security/advisories/new
     about: Report an exploitable defect privately, not as an issue.
   - name: Architecture contract
-    url: https://github.com/earthwalker17/MiniDSH/blob/main/ARCHITECTURE.md
+    url: https://github.com/earthwalker17/MiniDSH/blob/main/docs/ARCHITECTURE.md
     about: What each layer owns, where new things go (§11), and the known limitations (§13) — read before reporting a surprising behaviour.

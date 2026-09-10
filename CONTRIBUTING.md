@@ -5,9 +5,9 @@ MiniDSH is an architecture-first project. Before it is a set of features, it is 
 ## Read first
 
 - [`README.md`](README.md) — what the system is and how to run it.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the contract. Layers and the dependency rule (§1), what each service owns and must not own (§3), the session log (§4), the tool pipeline (§6), authority (§7), surfaces (§8), **where new things go (§11)**, deliberate divergences from DeepSeek Harness (§12) and the known limitations (§13).
-- [`BLUEPRINT.md`](BLUEPRINT.md) — what comes next, what is out of scope for now and why, and the development record.
-- [`PROJECT.md`](PROJECT.md) — the thesis.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the contract. Layers and the dependency rule (§1), what each service owns and must not own (§3), the session log (§4), the tool pipeline (§6), authority (§7), surfaces (§8), **where new things go (§11)**, deliberate divergences from DeepSeek Harness (§12) and the known limitations (§13).
+- [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) — what comes next, what is out of scope for now and why, and the development record.
+- [`docs/PROJECT.md`](docs/PROJECT.md) — the thesis.
 
 `CLAUDE.md` is the working constitution the coding-agent sessions that built the system run under. It is short, and it explains why the commits, the documents and the verification look the way they do.
 
@@ -64,7 +64,7 @@ If a change needs state that must survive a restart, a resume or a fork, it is a
 
 - Small, focused commits, each green under `pnpm check`.
 - The pull request template asks for the boundary being changed, why the change belongs there, the invariants preserved, how it was verified, and the documentation impact. These are the questions the sessions that built the system answer in their plans; they are not ceremony.
-- **`ARCHITECTURE.md` is a contract, not a history.** A pull request that changes documented behaviour changes the document in the same pull request. Documentation drift is a defect here, and the development record says what it has cost.
+- **`docs/ARCHITECTURE.md` is a contract, not a history.** A pull request that changes documented behaviour changes the document in the same pull request. Documentation drift is a defect here, and the development record says what it has cost.
 - A new or changed limitation is a line in ARCHITECTURE §13. A limitation that is stated is a contract; one that is not is a bug report waiting to happen.
 - If a change touches authority, the session log or the protocol, say which live arcs you ran. They cost money, so a maintainer may run them for you — say so rather than skipping them silently.
 
