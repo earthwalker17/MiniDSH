@@ -51,6 +51,9 @@ After each substantive session:
 - delete stale claims rather than accumulating contradictory history;
 - keep both bounded enough to reread every session;
 - avoid duplicating the same truth across documents.
+Size budgets, enforced by `scripts/check-docs.ts` in `pnpm check`: `docs/ARCHITECTURE.md` ≤ 84 KB, `docs/BLUEPRINT.md` ≤ 30 KB. The architecture ceiling sits just above the ~74 KB its rules alone measured at in 2026-09 (after a claim-by-claim review restored what compression had cut), not below it: a budget under the contracts is an order to delete them. Past 90% of a ceiling, the session that touches the document compacts existing sections before adding a line.
+Both documents have fixed section responsibilities. New material goes into the section that owns its topic and is written to fit; a section without room is compressed in place. Never add a parallel section, a chronological appendix, or a second statement of a truth another section holds. Tables (ownership, RPC, change-location, file map, retention, arcs) are lookup material and keep every row; prose is what gets compressed.
+A compaction ends with a mechanical claim-by-claim diff of old against new, run by something other than its author: two compactions each deleted contracts their authors did not notice.
 Project docs are canonical. Documentation drift is a defect.
 
 ## 6. Blueprint and Session Policy

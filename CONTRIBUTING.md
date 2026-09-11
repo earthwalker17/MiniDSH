@@ -34,7 +34,7 @@ A pure helper, an algorithm or a type does not need any of this. Architecture-fi
 
 ```sh
 pnpm install
-pnpm check          # tsc --noEmit + oxlint + the dependency gate + vitest
+pnpm check          # tsc --noEmit + oxlint + the dependency gate + the docs gate + vitest
 pnpm test:e2e       # the eight live arcs: real provider calls, real cost, needs the keys
 pnpm build          # emits dist/ — what the package runs; `prepack` runs it for you
 pnpm minidsh …      # run the checkout
@@ -51,6 +51,7 @@ Set `MINIDSH_EXPECT_SHELL=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` o
 | Dependency direction: `kernel` imports nothing internal; `core` imports `kernel` and other `core` contracts (nothing but `app` imports `core/loop`); a capability imports `kernel` and `core` Definitions, never another capability and never `app`; `app` imports anything | `scripts/check-deps.ts` |
 | An event payload is read through `matches(event, KIND)`, never `event.data as {…}`, so a renamed field is a type error and not a `NaN` on a screen | `scripts/check-deps.ts` |
 | Core is acyclic at file level: each package's vocabulary (`events.ts`, `types.ts`) sits below its service | `scripts/check-deps.ts` |
+| The documents: `docs/ARCHITECTURE.md` ≤ 84 KB and `docs/BLUEPRINT.md` ≤ 30 KB (a warning from 90%); every internal link and `#fragment` in the repository's markdown and issue templates resolves; every table row has the header's cell count | `scripts/check-docs.ts` |
 | Strict TypeScript including `exactOptionalPropertyTypes` and `erasableSyntaxOnly` — no enums, no parameter properties; rewrite rather than relax the flag | `tsconfig.json` |
 | oxlint with the `correctness` category as errors | `.oxlintrc.json` |
 
@@ -64,7 +65,7 @@ If a change needs state that must survive a restart, a resume or a fork, it is a
 
 - Small, focused commits, each green under `pnpm check`.
 - The pull request template asks for the boundary being changed, why the change belongs there, the invariants preserved, how it was verified, and the documentation impact. These are the questions the sessions that built the system answer in their plans; they are not ceremony.
-- **`docs/ARCHITECTURE.md` is a contract, not a history.** A pull request that changes documented behaviour changes the document in the same pull request. Documentation drift is a defect here, and the development record says what it has cost.
+- **`docs/ARCHITECTURE.md` is a contract, not a history.** A pull request that changes documented behaviour changes the document in the same pull request. Documentation drift is a defect here, and the development record says what it has cost. The document has a size budget the gate enforces: add to the section that owns the topic, and compress it in place if it has no room — never a new parallel section.
 - A new or changed limitation is a line in ARCHITECTURE §13. A limitation that is stated is a contract; one that is not is a bug report waiting to happen.
 - If a change touches authority, the session log or the protocol, say which live arcs you ran. They cost money, so a maintainer may run them for you — say so rather than skipping them silently.
 

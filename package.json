@@ -49,11 +49,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "oxlint src scripts",
     "check:deps": "node scripts/check-deps.ts",
+    "check:docs": "node scripts/check-docs.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "check": "pnpm typecheck && pnpm lint && pnpm check:deps && pnpm test"
+    "check": "pnpm typecheck && pnpm lint && pnpm check:deps && pnpm check:docs && pnpm test"
   },
   "dependencies": {
     "zod": "^4.4.3"
