@@ -3,7 +3,8 @@
  *
  * 1. Size budgets. `docs/ARCHITECTURE.md` and `docs/BLUEPRINT.md` are reread
  *    at the start of every development session, so their size is a per-session
- *    cost. Each has a hard ceiling (CLAUDE.md §5); crossing it fails the gate,
+ *    cost; `README.md` is what a visitor reads first, so its size is the cost
+ *    of a first impression. Each has a hard ceiling (CLAUDE.md §5); crossing it fails the gate,
  *    and crossing 90% of it prints a warning that says which document must be
  *    compacted before it grows again. The ceilings exist because the documents
  *    reached ~230 KB once (S8.5) and ~95 KB for the architecture alone (V1),
@@ -30,6 +31,7 @@ const ROOT = resolve(import.meta.dirname, '..')
 const BUDGETS: Record<string, number> = {
   'docs/ARCHITECTURE.md': 84 * 1024,
   'docs/BLUEPRINT.md': 30 * 1024,
+  'README.md': 32 * 1024,
 }
 const WARN_AT = 0.9
 

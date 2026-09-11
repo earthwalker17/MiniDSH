@@ -51,7 +51,7 @@ Set `MINIDSH_EXPECT_SHELL=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` o
 | Dependency direction: `kernel` imports nothing internal; `core` imports `kernel` and other `core` contracts (nothing but `app` imports `core/loop`); a capability imports `kernel` and `core` Definitions, never another capability and never `app`; `app` imports anything | `scripts/check-deps.ts` |
 | An event payload is read through `matches(event, KIND)`, never `event.data as {…}`, so a renamed field is a type error and not a `NaN` on a screen | `scripts/check-deps.ts` |
 | Core is acyclic at file level: each package's vocabulary (`events.ts`, `types.ts`) sits below its service | `scripts/check-deps.ts` |
-| The documents: `docs/ARCHITECTURE.md` ≤ 84 KB and `docs/BLUEPRINT.md` ≤ 30 KB (a warning from 90%); every internal link and `#fragment` in the repository's markdown and issue templates resolves; every table row has the header's cell count | `scripts/check-docs.ts` |
+| The documents: `docs/ARCHITECTURE.md` ≤ 84 KB, `docs/BLUEPRINT.md` ≤ 30 KB and `README.md` ≤ 32 KB (a warning from 90%); every internal link and `#fragment` in the repository's markdown and issue templates resolves; every table row has the header's cell count | `scripts/check-docs.ts` |
 | Strict TypeScript including `exactOptionalPropertyTypes` and `erasableSyntaxOnly` — no enums, no parameter properties; rewrite rather than relax the flag | `tsconfig.json` |
 | oxlint with the `correctness` category as errors | `.oxlintrc.json` |
 
