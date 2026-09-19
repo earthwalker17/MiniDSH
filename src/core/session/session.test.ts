@@ -194,6 +194,40 @@ describe('Session: seed, fork, replay-equivalence', () => {
     await sessions.detach(session)
     expect(announced).toEqual(['created:deferred', 'disposed:deferred'])
   })
+
+  it('refuses an append once detached, already closed when session/disposed is heard, and leaves the log as it was', async () => {
+    const { root, sessions } = await harness()
+    const session = sessions.create({ cwd: '/w' })
+    runTextTurn(sessions, 1, 'hi', 'hello')
+    const length = session.events.length
+
+    // A listener of the disposal is exactly who might be tempted to write a
+    // closing fact: persistence has stopped writing by then, so it must be refused.
+    let heardClosed: boolean | undefined
+    let refusedInListener: unknown
+    root.on({ kind: 'event', mode: 'emit', name: 'session/disposed' } as never, ((s: Session) => {
+      heardClosed = s.isClosed
+      try {
+        s.append(TURN_START, { turn: 2 })
+      } catch (error) {
+        refusedInListener = error
+      }
+    }) as never)
+
+    expect(session.isClosed).toBe(false)
+    await sessions.detach(session)
+    expect(heardClosed).toBe(true)
+    expect(refusedInListener).toMatchObject({ name: 'SessionClosedError', code: 'SESSION_CLOSED' })
+    expect(() => session.append(TURN_START, { turn: 2 })).toThrowError(/is closed: "turn\/start" was not appended/)
+    // Nothing entered the in-memory log either: memory and disk may not part ways quietly.
+    expect(session.events).toHaveLength(length)
+    expect(session.deriveMessages()).toHaveLength(2)
+
+    // A never-published session that is rolled back is closed too.
+    const rollback = sessions.create({ cwd: '/w', id: asSessionId('gone'), publish: false })
+    await sessions.detach(rollback)
+    expect(() => rollback.append(TURN_START, { turn: 1 })).toThrowError(/is closed/)
+  })
 })
 
 describe('Session: crash repair', () => {

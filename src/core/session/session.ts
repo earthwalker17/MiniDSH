@@ -36,6 +36,22 @@ export class SessionForkError extends Error {
 }
 
 /**
+ * An append to a session its store has detached. The log in memory and the log
+ * on disk part ways at detach (persistence closes its descriptor there), so an
+ * append that still succeeded would be a fact no reader could ever find: the
+ * one thing an append-only log may not do quietly. Whatever still holds the
+ * session (a tool body its deadline abandoned, a process callback racing
+ * teardown) hears about it here instead.
+ */
+export class SessionClosedError extends Error {
+  readonly code = 'SESSION_CLOSED'
+  constructor(id: string, type: string) {
+    super(`session ${id} is closed: "${type}" was not appended`)
+    this.name = 'SessionClosedError'
+  }
+}
+
+/**
  * An append-only log of typed events — the single source of truth. Model
  * history is derived from the surface, never stored. Structural integrity
  * (seq contiguity, JSON-lossless data, surface well-formedness, immutability)
@@ -53,6 +69,7 @@ export class Session {
   private readonly firstLiveSeq: number
   private derived: readonly Message[] = []
   private derivedKey = -1
+  private closed = false
 
   constructor(header: SessionHeader, host: SessionHost, seed?: readonly EventEnvelope[], origin?: SessionOrigin) {
     if (header.version !== SESSION_FORMAT_VERSION) {
@@ -118,8 +135,19 @@ export class Session {
     this.surface.apply(event)
   }
 
-  /** Appends a live event: validate + freeze + push + surface + emit. */
+  /** True once the store detached this session; reads stay valid, appends are refused. */
+  get isClosed(): boolean {
+    return this.closed
+  }
+
+  /** The store's, at detach: BEFORE `session/disposed`, so no listener of it can append into a log nobody writes. */
+  close(): void {
+    this.closed = true
+  }
+
+  /** Appends a live event: validate + freeze + push + surface + emit. Refused (`SESSION_CLOSED`) once detached. */
   append<Name extends string, Data>(kind: EventKind<Name, Data>, data: Data, intent?: SurfaceIntent): EventEnvelope<Data> {
+    if (this.closed) throw new SessionClosedError(this.header.id, kind.type)
     const event = this.build(kind, data, intent)
     this.commit(event, true)
     return event

@@ -99,10 +99,15 @@ class SessionStore implements Sessions, SessionHost {
     return [...this.sessions.values()].filter((session) => this.published.has(session))
   }
 
-  /** An unpublished session detaches silently: nothing was ever announced. */
+  /**
+   * An unpublished session detaches silently: nothing was ever announced.
+   * Either way the session is CLOSED first — persistence stops writing at
+   * `session/disposed`, and a later append must fail loudly, not vanish.
+   */
   async detach(session: Session): Promise<void> {
     if (this.sessions.get(session.id) !== session) return
     this.sessions.delete(session.id)
+    session.close()
     if (this.published.has(session)) this.ctx.emit(SESSION_DISPOSED, session)
   }
 }
