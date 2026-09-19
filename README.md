@@ -209,7 +209,7 @@ What it taught: documentation drift is a defect, so the documents carry size bud
 
 ## Verification
 
-`pnpm check` is typecheck, lint, the dependency gate, the documentation gate and 676 tests, run on Ubuntu, macOS and Windows on every pull request and every push to `main` or a release branch, each followed by an install smoke of the packed tarball. Tests mount real compositions; only the model is scripted or replayed from a recorded log.
+`pnpm check` is typecheck, lint, the dependency gate, the documentation gate and 712 tests, run on Ubuntu, macOS and Windows on every pull request and every push to `main` or a release branch, each followed by an install smoke of the packed tarball. Tests mount real compositions; only the model is scripted or replayed from a recorded log.
 
 Eight live end-to-end tests — *arcs* — run against the real providers before a release, from a manually dispatched workflow on Linux and macOS and by hand on the two development hosts, Windows and Linux. Each asserts the world rather than the agent's report: a task killed mid-turn is repaired by a second process and its log replays without a key; an edit outside the workspace is refused and the file checked to be absent; a context-budget crossing compacts and spills; a session switches provider mid-conversation; a delegated child works with every approval refused; the browser shares a session between two clients and takes a consent over the wire. The macOS leg runs under Seatbelt and is the only evidence this project has for that platform.
 

@@ -15,9 +15,9 @@ Status is relative to the shipped `web` profile (`packages/bundle/base` plus `pa
 | Session Controller | `packages/api/session-controller` | default-mounted | Host list, fork, prompt, cancel, page, follow, control; React-free Client mirrors. |
 | Client Modules, Slots | `packages/client/modules`, `packages/client/ui-slots` | default-mounted | Boot graph, `/plugins` bundles, typed slots; components never receive `ctx`; 47 `ui-*` directories. |
 | Commands, approvals | `packages/interaction/commands`, `packages/interaction/user-approval`, `packages/client/ui-approval` | default-mounted | Base rows: slash-command registry, approval dispatch and audit. Browser panel: allow-once or reject only. |
-| PTY sessions | `packages/terminal`, `packages/api/terminal-controller` | default-mounted | PTYs for model tools plus a Web sidebar panel; not a TUI; backend mount unverified. |
+| PTY sessions | `packages/terminal`, `packages/api/terminal-controller` | opt-in | Not a TUI. The controller and sidebar panel ship in web-app; the PTY backend only in `minimal` and sdk-minimal. |
 | SDK, ACP | `packages/sdk`, `packages/acp/acp` | opt-in | Newline JSON-RPC and Agent Client Protocol over stdio, selected as profiles. |
-| Desktop | `apps/desktop`, `apps/desktop-host` | opt-in | Electron thin wrapper around the full Web app, with a private host. |
+| Desktop | `apps/desktop`, `apps/desktop-host` | opt-in | Electron carrier, not a thin client: its own signed runtime plus a private Desktop Host. |
 
 ## Mechanisms worth knowing
 
@@ -40,7 +40,7 @@ Status is relative to the shipped `web` profile (`packages/bundle/base` plus `pa
 - **S21 and S22, client verbs** (`packages/api/session-controller/README.md`): a child is followed through a direct-parent subagent address on the same journal stream: another attach, not a new channel. Fork copies through the selected completed turn and rejects an anchor inside an unfinished one; prompt retries are idempotent on a client-minted `requestId`.
 - **S22, the truth rule**: Client models are "not a second source of business truth" (`docs/subsystems/web-client.md`). Slash commands stay Host-side: adapters get handler-free descriptors, and durable `command/run` and `command/done` events carry display facts as data, so clients never parse text (`docs/subsystems/commands.md`).
 - **S22, Desktop launcher**: upstream Desktop adds native adapters and packaging, no second runtime protocol. Copy the invariants (one release identity, exclusive profile ownership, lock before profile I/O, recovery without a Host), not the Electron update machinery.
-- **Terminal client, one protocol**: upstream ships no TUI (`tui` is only an example profile name in `apps/cli/README.md`), so the terminal client has NO oracle. FALSIFIED: "five protocol profiles"; they are composition profiles (sdk and sdk-minimal share one protocol) in `packages/bundle`, not `packages/preset`. ONE JSON-RPC over three carriers is deliberate; keep carriers noun-free.
+- **Terminal client, one protocol**: upstream ships no TUI (`tui` is only an example profile name in `apps/cli/README.md`), so the terminal client has NO oracle. PARTLY FALSIFIED: "five protocol profiles"; they are composition profiles (sdk and sdk-minimal share one protocol) in `packages/bundle`, not `packages/preset`. ONE JSON-RPC over three carriers is deliberate; keep carriers noun-free.
 
 ## Sources
 

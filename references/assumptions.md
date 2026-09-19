@@ -30,7 +30,7 @@ Verdicts: `confirmed`, `partly` (true, with a correction that matters), `falsifi
 | `session-query` is mounted by no shipped composition | falsified | The base bundle mounts `session-query-sqlite` with `openAt: never`: exact reads, titles and lineage work, only full-text search is off | `packages/bundle/base/cordis.patch.yml` | ARCHITECTURE §12 "Context" |
 | DSH has the same replay defect (first-request-order binding) | confirmed | A stated known limitation, deferred until siblings run concurrently | `packages/test-support/llm-replay/README.md` | ARCHITECTURE §13, BLUEPRINT §3, route S21 |
 | A user interrupt parks work rather than killing it | partly | Only for continuable children (`cancel` with `keepInbox`); work already claimed is gone; a plain cancel ends the turn `aborted` | `docs/subsystems/subagent.md`, `docs/subsystems/session.md` | BLUEPRINT §3 (background work) |
-| Queued input survives a DSH restart, as MiniDSH's inbox does | falsified | `agent/inbox/*` are runtime `emit` events, not session facts; input is logged as `user/message` only once claimed: unclaimed input dies with the process. MiniDSH's durable inbox has no oracle | `docs/agent-lifecycle.md`, `docs/event-producer-consumer.md` | ARCHITECTURE §4 "The durable inbox", route S17 |
+| DSH's inbox is durable, as MiniDSH's is | confirmed | `agent/inbox/spliced` is a persisted log-only event ("Every inbox mutation commits one"); only `agent/inbox/inserted`, `claimed` and `discarded` are runtime emits | `docs/persistence-catalog.md`, `packages/core/agent-loop/README.md` | ARCHITECTURE §4 "The durable inbox", route S17 |
 | DSH formats are additive like MiniDSH's version 0 | falsified | Immutable generations (v0..v3), frozen adjacent migrations, fsync per batch, checksummed frames; unknown kinds are REQUIRED unless marked ignorable | `docs/subsystems/persistence.md`, `docs/session-format-status.md` | route S16 |
 
 ## Execution, jobs, delegation
@@ -38,9 +38,9 @@ Verdicts: `confirmed`, `partly` (true, with a correction that matters), `falsifi
 | Assumption | Verdict | What is true at the pin | Source | MiniDSH leans on it in |
 |---|---|---|---|---|
 | `minimal` ships no jobs, continuable children, mailboxes or teams | confirmed | The jobs REGISTRY exists on the host plane, but no controller serves a minimal agent, so `start()` refuses | `docs/subsystems/jobs.md` | ARCHITECTURE §12 "Concurrency" |
-| The inbox is the only queue | confirmed | The job registry "neither queues nor preempts"; experimental teams add a durable mailbox that FEEDS the inbox | `docs/subsystems/subagent.md` | BLUEPRINT §3, route S17 |
+| The inbox is the only queue | confirmed | The job registry "neither queues nor preempts"; experimental teams add a durable mailbox that FEEDS the inbox | `docs/subsystems/subagent.md` | BLUEPRINT §2, route S17 |
 | A producer must not start work its owner cannot collect | confirmed | `start` refuses while no job controller serves the owner | `docs/subsystems/jobs.md` | route S17 |
-| Per-call `isConcurrencySafe`, results committed in model order | confirmed | Pure, synchronous, fail-closed classifier per CALL; pool cap 10 | `packages/core/agent-loop/README.md` | BLUEPRINT §3, route S21 |
+| Per-call `isConcurrencySafe`, results committed in model order | confirmed | Pure, synchronous, fail-closed classifier per CALL; pool cap 10 | `packages/core/agent-loop/README.md` | BLUEPRINT §2, route S21 |
 | The one-shot foreground child is upstream's default delegation | partly | Package default, yes; SHIPPED default, no: `standard` and the base bundle set `backgroundMode: continuable` | `packages/preset/agent-presets/presets/standard/agent.cordis.yml` | ARCHITECTURE §12 "Concurrency", BLUEPRINT §2 |
 | Background children are built on jobs | falsified | Continuable children use NO jobs (durable child session, resident activation, its own inbox); only the one-shot background child is a job | `docs/subsystems/subagent.md` | route S17, S21 |
 | Upstream jobs are durable | falsified | In-memory registry; jobs die with the process and leave no session events | `packages/jobs/jobs-local/README.md` | route S17 (MiniDSH diverges on purpose) |

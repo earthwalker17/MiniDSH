@@ -17,7 +17,7 @@
 | Inspect tools | `packages/extensions/tool-cordis` | opt-in | Two read-only API discovery tools; `cordis` preset only. |
 | Plugin Manager tool | `packages/boot/plugin-manager` | disabled-by-default | Installs persistent profile-wide bundles; on only in `cordis`. |
 | MCP | `packages/mcp` | opt-in | One client row per server, none shipped; resource service inert. |
-| PTC | `packages/ptc-runtime` | opt-in | Runtime host row default-mounted; presentation only in the `ptc` preset. |
+| PTC | `packages/ptc-runtime` | default-mounted | Runtime host row in base; the `run_code` presentation tool only in the `ptc` preset. |
 
 ## Mechanisms worth knowing
 
