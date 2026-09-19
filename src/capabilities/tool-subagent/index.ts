@@ -304,10 +304,13 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     }
     child.followup(createUserMessage(args.prompt))
     await child.whenIdle()
-    // The end record is owed on EVERY exit path, exactly as the driver owes
-    // `step/end`: a child whose persistence is quarantined makes this flush
-    // throw, and an unpaired `subagent/start` would leave the parent's log
-    // unable to explain the very failure the pair exists for.
+    // The end record is owed on EVERY exit path of this function, exactly as
+    // the driver owes `step/end`: a child whose persistence is quarantined makes
+    // this flush throw, and an unpaired `subagent/start` would leave the
+    // parent's log unable to explain the very failure the pair exists for.
+    // A HOST DEATH is not an exit path of anything: crash repair does not close
+    // this bracket yet, so a killed delegation stays unpaired and its cost is
+    // summed nowhere (ARCHITECTURE §13; the recovery contract, BLUEPRINT §1).
     let lost: unknown
     try {
       await child.session.flush()

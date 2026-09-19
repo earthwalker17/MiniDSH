@@ -71,7 +71,12 @@ export interface ImageLimits {
   readonly maxImageBytes: number
   readonly maxImageDimension: number
   readonly maxImagePixels: number
-  /** Images one REQUEST may carry, folded over the live surface — the limit that actually binds (§ below). */
+  /**
+   * Images one REQUEST may carry, folded over the live surface — the limit that
+   * actually binds. Nothing here enforces it: `saveImage` has no session to
+   * fold. The fold lives in `tool-view-image`, the one producer, and a second
+   * producer needs it moved into core first (BLUEPRINT §2, S20 step 0).
+   */
   readonly maxImagesPerRequest: number
   readonly maxRequestImageBytes: number
   readonly mediaTypes: readonly ImageMediaType[]

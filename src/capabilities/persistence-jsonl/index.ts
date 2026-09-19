@@ -500,9 +500,16 @@ class JsonlArchive implements Persistence {
     // The file is read (agents.resume → persistence.load) BEFORE the lease is
     // taken at publication, and the lock is free in that gap — so compare
     // against the seed this session actually resumed from, not the log it has
-    // already grown (end-seed, a composition stamp, repair closers). Comparing
-    // against the grown length would tolerate a foreign writer's appends and
-    // then silently skip that many of this session's own events.
+    // already grown (end-seed, a composition stamp). Comparing against the
+    // grown length would tolerate a foreign writer's appends and then silently
+    // skip that many of this session's own events.
+    //
+    // Repair closers are IN the seed (`agents.resume` appends them before the
+    // session exists), so `liveStart` counts them and this length check alone
+    // tolerates up to that many foreign events. The tail identity below is what
+    // guards that window, and only because repair is DETERMINISTIC: another
+    // process resuming the same log writes byte-identical closers, and anything
+    // else differs in type or time. A repair that read a clock would open it.
     if (scan.events.length > session.liveStart) {
       throw new Error(`session ${session.id}: the stored log grew past what this session resumed from; refusing to attach`)
     }

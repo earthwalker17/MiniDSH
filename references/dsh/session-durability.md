@@ -62,7 +62,8 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`. `packages/bu
 | `docs/persistence-changes` | Schema records up to 2026-09-14 | 2026-09-19 |
 | `docs/subsystems/approval.md` | Audit pair, policy event | 2026-09-19 |
 | `docs/tool-execution-pipeline.md` | `tool/call` precedes the approval ask | 2026-09-19 |
-| `docs/agent-lifecycle.md` | Inbox claims; `agent/*` is live-only | 2026-09-19 |
+| `docs/agent-lifecycle.md` | Turn flow and inbox claims; its diagram does NOT say what persists | 2026-09-19 |
+| `docs/persistence-catalog.md` | `agent/inbox/spliced` is a persisted log-only event: the authority on durability | 2026-09-20 |
 | `docs/subsystems/session-projection.md` | Fold units, cache checkpoints | 2026-09-19 |
 | `docs/subsystems/session-query.md` | Event windows, traces, lineage | 2026-09-19 |
 | `packages/test-support/llm-replay/README.md` | Test-only, first-call-order limit | 2026-09-19 |

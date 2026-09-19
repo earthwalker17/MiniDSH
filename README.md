@@ -82,7 +82,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 **Version 1.0.0** is the smallest release a developer can install, point at a repository and use daily without reading the architecture. It is a small project with one maintainer. The full register of limitations is [ARCHITECTURE §13](docs/ARCHITECTURE.md); the ones most likely to matter first:
 
-- Windows has no shell-confinement backend and is not getting one. Every shell command there costs an approval, and a headless run without `--approve` cannot run a shell at all.
+- Windows has no shell-confinement backend and is not getting one. Every shell command there costs an approval and runs in a fresh shell (`cd` and environment changes do not persist), and a headless run without `--approve` cannot run a shell at all.
 - Confinement governs file effects only. A confined command reaches the network and reads the harness's environment, provider keys included.
 - The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. On a confined host the shell is unaffected because the OS bounds the whole process.
 - Tool execution is sequential and a delegated child is foreground; there are no background jobs.
