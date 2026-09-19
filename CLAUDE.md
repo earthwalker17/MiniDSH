@@ -36,6 +36,9 @@ Do not turn “everything is a plugin” into dogma. Pure helpers, algorithms, t
 For overlapping design questions, study the **current official repository and primary sources** before relying on community summaries.
 Prefer evidence in this order: current official code/behavior → official architecture/subsystem docs → implemented architecture notes/tests → Cordis paper and official DeepSeek material → secondary commentary.
 DeepSeek Harness evolves rapidly. Verify current behavior instead of freezing old assumptions. Reproduce principles and invariants, not implementation complexity.
+`references/` is the curated local map of DSH: what exists upstream, why it matters here, where the official source is, and what is likely to go stale, pinned to a commit and a date. It is a map, never a copy: no source dumps, every claim carries a repository path.
+- An **ordinary session** reads the `references/` files its task touches FIRST, then researches only those parts of the current DSH, and writes back what it falsified (the file, and `references/assumptions.md`).
+- A **`.5` hardening session** re-researches the current DSH broadly, reruns the assumptions ledger, works through each file's "Not read" list, and moves the pin.
 
 ## 5. Project Documents
 Use exactly four primary context documents:
@@ -43,15 +46,15 @@ Use exactly four primary context documents:
 - `docs/PROJECT.md` — stable project thesis, positioning, scope, and research context; change rarely.
 - `docs/ARCHITECTURE.md` — concise current architecture map and subsystem explanation; current state, not history.
 - `docs/BLUEPRINT.md` — rolling long-term engineering plan plus compact development record; what comes next and why.
-`CLAUDE.md` and `README.md` stay at the repository root; the other three live in `docs/`.
-At every substantive session start, read all four documents, then inspect the relevant current code before planning.
+`CLAUDE.md` and `README.md` stay at the repository root; the other three live in `docs/`. `references/` (§4) is reference material, not a fifth context document: it is consulted by topic, never reread whole.
+At every substantive session start, read all four documents and the session's own brief in `docs/BLUEPRINT.md`, then explore the code the task touches: the architecture map says where. A full-repository read is not a session-start ritual; it belongs to `.5` hardening sessions (§6).
 After each substantive session:
 - update `docs/ARCHITECTURE.md` to the actual implementation;
 - update `docs/BLUEPRINT.md`, compressing completed work and moving the next session to the top;
 - delete stale claims rather than accumulating contradictory history;
 - keep both bounded enough to reread every session;
 - avoid duplicating the same truth across documents.
-Size budgets, enforced by `scripts/check-docs.ts` in `pnpm check`: `docs/ARCHITECTURE.md` ≤ 84 KB, `docs/BLUEPRINT.md` ≤ 30 KB, `README.md` ≤ 32 KB (so the warning holds it under 30). The architecture ceiling sits just above the ~74 KB its rules alone measured at in 2026-09 (after a claim-by-claim review restored what compression had cut), not below it: a budget under the contracts is an order to delete them. Past 90% of a ceiling, the session that touches the document compacts existing sections before adding a line.
+Size budgets, enforced by `scripts/check-docs.ts` in `pnpm check`: `docs/ARCHITECTURE.md` ≤ 84 KB, `docs/BLUEPRINT.md` ≤ 30 KB, `README.md` ≤ 32 KB (so the warning holds it under 30), each file under `references/` ≤ 12 KB and the folder ≤ 120 KB (a reference file that outgrows its budget has started copying). The architecture ceiling sits just above the ~74 KB its rules alone measured at in 2026-09 (after a claim-by-claim review restored what compression had cut), not below it: a budget under the contracts is an order to delete them. Past 90% of a ceiling, the session that touches the document compacts existing sections before adding a line.
 All three documents have fixed section responsibilities. New material goes into the section that owns its topic and is written to fit; a section without room is compressed in place. Never add a parallel section, a chronological appendix, or a second statement of a truth another section holds. Tables (ownership, RPC, change-location, file map, retention, arcs) are lookup material and keep every row; prose is what gets compressed. `README.md` keeps its eleven sections in order — what it is, quick start, what you get, status and limitations, the question, architecture, what it learned from DSH, the experiment, verification, documents and help, license — and is written for a first-time visitor: a user-facing command, flag, default or limitation goes into quick start or status; a claim that needs the architecture to parse belongs in `docs/ARCHITECTURE.md` with a link, not here.
 A compaction ends with a mechanical claim-by-claim diff of old against new, run by something other than its author: two compactions each deleted contracts their authors did not notice.
 Project docs are canonical. Documentation drift is a defect.
@@ -62,6 +65,7 @@ The blueprint should define the likely architectural sequence and approximate se
 A session exists to advance the architecture along that route. A new idea does not automatically deserve a new subsystem or session.
 Use **Plan Mode** automatically for complex or architecture-affecting sessions.
 Before implementation, the plan must state: the boundary being changed, why the change belongs there, invariants/contracts to preserve, implementation phases, verification strategy, and documentation impact.
+Two kinds of session. An **ordinary session** advances one route entry: it starts from the documents, its brief and task-relevant exploration (§5), consults `references/` before any DSH research (§4), and validates in proportion (§10). A **`.5` hardening checkpoint** reviews the system as one architecture: a repo-wide read, invariants re-audited against the code, assumptions falsified, the current DSH re-researched and `references/` refreshed, the documents compacted where they are past 90%, and the broad live evidence rerun. Checkpoints are placed in the route after a CLUSTER of architectural change, where the whole deserves one look, never mechanically after every session.
 Architecture decides what each session should do.
 
 ## 7. Execution and Commits
@@ -100,6 +104,7 @@ Every substantive session must finish with:
 The live E2E must exercise the real MiniDSH runtime against a real workspace/task and prove useful software-engineering work can be completed through the system. Mock-only success does not count.
 DeepSeek is the default development provider unless the architecture under test requires another provider. Choose the current suitable official model at setup time instead of hard-coding stale names.
 Use paid API calls deliberately and keep them bounded, but do not replace required live validation with mocks merely to save effort.
+**Validation is proportionate to what changed.** An ordinary session runs the FULL repository gates (`pnpm check` on Windows and under WSL 2 with both `MINIDSH_EXPECT_*` flags) and, live, the ONE arc that exercises its change, or the few arcs whose premises it touches, once. Repeated full suites (every arc three times per host, `live.yml`) are concentrated where the question is the whole system: `.5` hardening checkpoints, release candidates, and a change to the loop, the session log or the protocol host. A flake is never cleared by one lucky pass: an ordinary session that touches an arc with a recorded flake reruns THAT arc and reports the per-run numbers.
 
 ## 11. Environment and Secrets
 Inspect the actual local toolchain when work depends on it.

@@ -9,6 +9,7 @@
  *    compacted before it grows again. The ceilings exist because the documents
  *    reached ~230 KB once (S8.5) and ~95 KB for the architecture alone (V1),
  *    and each time the fix was an emergency rewrite that lost contracts.
+ *    `references/` (the DSH map) has a per-file and a folder ceiling too.
  *
  * 2. Internal links. Every relative link, image and `blob/main/` URL in the
  *    repository's markdown and issue templates must name a file that exists,
@@ -34,6 +35,17 @@ const BUDGETS: Record<string, number> = {
   'README.md': 32 * 1024,
 }
 const WARN_AT = 0.9
+
+/**
+ * `references/` is a curated MAP of DeepSeek Harness, consulted by topic
+ * (CLAUDE.md §4): what exists upstream, why it matters, where the source is,
+ * what may be stale. A file that outgrows its ceiling has started copying, and
+ * a folder that outgrows its own has stopped being something a session reads
+ * before researching.
+ */
+const REFERENCES_DIR = 'references'
+const REFERENCE_FILE_CEILING = 12 * 1024
+const REFERENCES_TOTAL_CEILING = 120 * 1024
 
 const REPO_BLOB = 'https://github.com/earthwalker17/MiniDSH/blob/main/'
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage'])
@@ -85,6 +97,20 @@ for (const [file, ceiling] of Object.entries(BUDGETS)) {
   if (bytes > ceiling) failures.push(`${file}: ${bytes} bytes exceeds its ${ceiling}-byte ceiling (${pct}%) — compact existing sections before adding`)
   else if (bytes > ceiling * WARN_AT) warnings.push(`${file}: ${bytes} bytes is ${pct}% of its ${ceiling}-byte ceiling — compact before it grows again`)
   else console.log(`${file}: ${bytes} bytes (${pct}% of ${ceiling})`)
+}
+
+if (!existsSync(join(ROOT, REFERENCES_DIR))) failures.push(`${REFERENCES_DIR}/: missing (CLAUDE.md §4 names it as the DSH reference map)`)
+else {
+  let total = 0
+  for (const path of walk(join(ROOT, REFERENCES_DIR))) {
+    if (!path.endsWith('.md')) continue
+    const bytes = statSync(path).size
+    total += bytes
+    const rel = relative(ROOT, path).replace(/\\/g, '/')
+    if (bytes > REFERENCE_FILE_CEILING) failures.push(`${rel}: ${bytes} bytes exceeds the ${REFERENCE_FILE_CEILING}-byte ceiling for a reference file — curate it, a map is not a copy`)
+  }
+  if (total > REFERENCES_TOTAL_CEILING) failures.push(`${REFERENCES_DIR}/: ${total} bytes exceeds its ${REFERENCES_TOTAL_CEILING}-byte ceiling`)
+  else console.log(`${REFERENCES_DIR}/: ${total} bytes (${Math.round((total / REFERENCES_TOTAL_CEILING) * 100)}% of ${REFERENCES_TOTAL_CEILING})`)
 }
 
 const slugCache = new Map<string, Set<string>>()
