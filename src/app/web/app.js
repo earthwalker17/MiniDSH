@@ -10,6 +10,7 @@
  * - Every switch it asks for becomes a durable event it then reads back, like
  *   any other surface.
  */
+import { describeRow, tokens } from './rows.js'
 import { SessionWindow, Wire } from './wire.js'
 
 const $ = (id) => document.getElementById(id)
@@ -48,107 +49,17 @@ const state = {
 // ---- rendering -------------------------------------------------------------
 
 /**
- * What a message says. It mirrors `blockText` rather than filtering for text,
- * because a message whose only block is an image would otherwise compute `''`
- * and be dropped by `row()` entirely — no line at all, where every plain-text
- * surface renders its descriptor. Nothing puts an image in a user message today;
- * the next producer that does would find the row silently missing here.
- */
-const messageText = (message) =>
-  (message?.content ?? [])
-    .map((block) => (block.type === 'text' ? block.text : block.type === 'image' ? (block.text ?? '[image]') : ''))
-    .join('')
-const preview = (text, max) => (text.length <= max ? text : `${text.slice(0, max - 1)}…`)
-
-/**
- * Every image descriptor a result carries, at any depth.
- *
- * The same line the plain-text projection renders, deliberately: this client is
- * a different projection, not a second copy of one, and the two are allowed to
- * differ in FORM — but not in whether an event is visible at all. Every image
- * MiniDSH produces arrives inside a `tool/result`, so without this the browser
- * shows a bare checkmark for the one event a vision session exists to produce.
- */
-const imagesIn = (blocks) => {
-  const out = []
-  for (const block of blocks ?? []) {
-    if (block.type === 'image') out.push(block.text ?? '[image]')
-    else if (block.type === 'tool-result') out.push(...imagesIn(block.content))
-  }
-  return out
-}
-const tokens = (count) => (count < 1000 ? String(count) : `${(count / 1000).toFixed(count < 100_000 ? 1 : 0).replace(/\.0$/, '')}k`)
-
-/**
- * One row per event. A DIFFERENT projection from `app/present.ts` on purpose:
- * that one is the single projection every PLAIN-TEXT surface shares, and this
- * one renders structure a terminal cannot. Neither folds the surface.
+ * One row per event. WHAT a row says lives in `rows.js`, DOM-free and typed
+ * against the core event kinds, where a test holds it to the visibility of the
+ * plain-text projection; this only builds the nodes.
  */
 function row(event) {
-  const data = event.data ?? {}
-  switch (event.type) {
-    case 'user/message': {
-      const text = messageText(data.message)
-      if (!text) return undefined
-      const kind = data.message?.source?.kind
-      if (kind !== 'user') return el('div', 'row note', `context (${kind}${data.message?.source?.form ? `: ${data.message.source.form}` : ''})`)
-      const node = el('div', 'row user')
-      node.append(el('div', 'who', 'you'), el('div', 'body', text))
-      return node
-    }
-    case 'assistant/message': {
-      const text = messageText(data.message)
-      if (!text) return undefined
-      const node = el('div', 'row assistant')
-      node.append(el('div', 'who', data.message?.source?.model ?? 'assistant'), el('div', 'body', text))
-      return node
-    }
-    case 'tool/call':
-      return el('div', 'row tool', `→ ${data.name} ${preview(data.arguments ?? '', 160)}`)
-    case 'tool/result': {
-      if (data.error) return el('div', 'row denied', `✗ ${data.error.code}`)
-      const images = imagesIn(data.message?.content)
-      return el('div', 'row ok', images.length === 0 ? '✓' : `✓ ${images.join(' ')}`)
-    }
-    case 'approval/asked':
-      return el('div', 'row note', `? ${data.toolName}${data.reason ? `: ${data.reason}` : ''}`)
-    case 'approval/decided':
-      return el('div', 'row note', `! ${data.outcome}`)
-    case 'sandbox/mode':
-      return el('div', 'row note', `[sandbox: ${data.mode} (${data.reason}; enforcement ${data.enforcement})]`)
-    case 'approval/policy':
-      return el('div', 'row note', `[approvals: ${data.policy}]`)
-    case 'authority/preset':
-      return el('div', 'row note', `[preset: ${data.name}]`)
-    case 'agent/options':
-      return data.reason === 'initial'
-        ? undefined
-        : el('div', 'row note', `[model: ${data.options.provider}/${data.options.model}${data.options.reasoningEffort ? ` · ${data.options.reasoningEffort}` : ''}]`)
-    case 'compaction/start':
-      return el('div', 'row note', `[compacting ${data.plannedNodes ?? 0} messages · ${data.trigger}]`)
-    case 'compaction/end':
-      // The applied path already has its own record; a DECLINE had no line
-      // anywhere, and an automatic one has no RPC result to carry it either.
-      return data.outcome?.kind === 'applied' ? undefined : el('div', 'row note', `[compaction declined: ${data.outcome?.reason}]`)
-    case 'compaction/applied':
-      return el('div', 'row note', `[compacted ${data.shadowedSeqs?.length ?? 0} messages · ${data.trigger}]`)
-    case 'subagent/start':
-      return el('div', 'row note', `[subagent ${data.childId} · depth ${data.depth} · ${data.sandbox}, approvals never]`)
-    case 'subagent/end':
-      return el('div', 'row note', `[subagent ${data.childId} ${data.reason?.kind}]`)
-    case 'turn/end': {
-      // A failed turn says WHY here too. The code alone left a keyless first
-      // run in the browser reading `[turn error: MISSING_CREDENTIAL]` with the
-      // remedy — which the event carries — shown nowhere, while the terminal
-      // printed it (present.ts). One runtime, one answer on every surface.
-      if (data.reason?.kind === 'completed') return undefined
-      const code = data.reason?.code ? `: ${data.reason.code}` : ''
-      const why = data.reason?.kind === 'error' && data.reason?.message ? ` — ${data.reason.message}` : ''
-      return el('div', 'row note', `[turn ${data.reason?.kind}${code}${why}]`)
-    }
-    default:
-      return undefined
-  }
+  const described = describeRow(event)
+  if (!described) return undefined
+  if (described.who === undefined) return el('div', described.cls, described.text)
+  const node = el('div', described.cls)
+  node.append(el('div', 'who', described.who), el('div', 'body', described.text))
+  return node
 }
 
 /**

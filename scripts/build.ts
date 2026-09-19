@@ -32,7 +32,7 @@ const WEB = join('app', 'web')
  * 404 for installed users only, with every test and every CI leg still green,
  * because a checkout serves the directory itself.
  */
-const WEB_ASSETS = ['index.html', 'style.css', 'app.js', 'wire.js'] as const
+const WEB_ASSETS = ['index.html', 'style.css', 'app.js', 'rows.js', 'wire.js'] as const
 
 function fail(message: string): never {
   process.stderr.write(`build: ${message}\n`)
@@ -74,7 +74,12 @@ for (const asset of WEB_ASSETS) cpSync(join(SRC, WEB, asset), join(DIST, WEB, as
 const emitted = walk(DIST)
 const stray = emitted.filter((file) => isTest(file) || isSupport(file))
 if (stray.length > 0) fail(`test code reached dist/: ${stray.join(', ')}`)
-const unrewritten = emitted.filter((file) => file.endsWith('.js') && /(?:from|import\()\s*['"]\.[^'"]*\.ts['"]/.test(readFileSync(file, 'utf8')))
+// EMITTED modules only. A browser asset is copied verbatim, so the rewrite never
+// saw it, and the only `.ts` specifiers one carries are JSDoc type imports
+// (`rows.js` is typed against the core event kinds), which are comments. A real
+// one cannot hide behind this: the web host serves no `.ts` (web.test.ts), so it
+// fails in the first browser that loads a checkout.
+const unrewritten = emitted.filter((file) => file.endsWith('.js') && !isWebAsset(file) && /(?:from|import\()\s*['"]\.[^'"]*\.ts['"]/.test(readFileSync(file, 'utf8')))
 if (unrewritten.length > 0) fail(`a .ts import specifier survived the emit: ${unrewritten.join(', ')}`)
 
 // Every implementation file has exactly one emitted twin: the count is what

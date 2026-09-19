@@ -104,6 +104,8 @@ jobs:
           test ! -e node_modules/minidsh/src
           test -f node_modules/minidsh/dist/app/cli.js
           test -f node_modules/minidsh/dist/app/web/index.html
+          # app.js imports it at load: missing, the installed browser client is a blank page.
+          test -f node_modules/minidsh/dist/app/web/rows.js
           node node_modules/minidsh/bin/minidsh.js --version | grep -q '^minidsh '
           # Each command must ASSERT something, not merely exit 0: `config`
           # proves the whole plugin graph assembled, and the listing proves it
