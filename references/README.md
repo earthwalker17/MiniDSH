@@ -43,6 +43,8 @@ gh api -X GET search/code -f q='<terms> repo:deepseek-ai/deepseek-harness' --jq 
 
 For a broad pass, a partial checkout is cheaper than hundreds of API reads: `git fetch --depth 1 --filter=blob:limit=200k origin <sha>` into a scratch directory outside this repository, then check out only `docs`, `packages/README.md`, `packages/bundle`, `packages/preset` and `AGENTS.md`. Skip `*.zh.md` and `*.i18n.yaml`: they are translations.
 
+**An absent file is not an absent fact.** That blob limit silently omits the large generated files, `docs/persistence-catalog.md` and `docs/persistence-schema.json` among them, and those are the AUTHORITY on what upstream persists. S13 "verified" DSH's inbox as live-only from a sequence diagram in a checkout that lacked the catalog; the catalog lists `agent/inbox/spliced` as a persisted event. For "is X durable upstream", read the catalog through `gh api`, never a diagram.
+
 ## Naming traps (each cost a researcher time)
 
 - Upstream `docs/subsystems/web.md` and `packages/web` are **web search and fetch**, not the GUI. The GUI is `packages/host`, `packages/client`, `packages/api` and `apps/web`.
