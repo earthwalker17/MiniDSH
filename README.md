@@ -64,7 +64,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 ## What you get
 
-**Authority you set, and a record you can read back.** A run defaults to `workspace-write` with approvals `ask`: file writes are restricted to the working directory, reads are unrestricted, and shell commands are confined by the operating system where it can (bubblewrap on Linux, Seatbelt on macOS; the harness probes that the backend works before claiming it). On a confined host an ordinary task costs nobody a decision. The modes are `read-only`, `workspace-write` and `danger-full-access`, which drops confinement for the whole session; the first approval prompt says so. Approvals are answered in the terminal, in the browser, or by `--approve` on a headless run. Every session records the authority it starts under and every later switch, request and decision; `sessions show --audit` prints that history back. What confinement does not cover is in [Status and limitations](#status-and-limitations).
+**Authority you set, and a record you can read back.** A run defaults to `workspace-write` with approvals `ask`: file writes are restricted to the working directory, reads are unrestricted, and shell commands are confined by the operating system where it can (bubblewrap on Linux, Seatbelt on macOS; the harness probes that the backend works before claiming it). On a confined host an ordinary task costs nobody a decision. The modes are `read-only`, `workspace-write` and `danger-full-access`, which drops confinement and the file-write fence for the whole session; the first approval prompt says so. Approvals are answered in the terminal, in the browser, or by `--approve` on a headless run. Every session records the authority it starts under and every later switch, request and decision; `sessions show --audit` prints that history back. What confinement does not cover is in [Status and limitations](#status-and-limitations).
 
 **Sessions that survive their process.** Everything the model was shown and did is one append-only JSONL log. Kill the process mid-turn and the next `resume` repairs the tail and continues under the authority the log recorded; `fork <id> --at <seq>` branches a session at any event. A second process cannot resume a session another one holds: a lease refuses it before a byte is appended. Because the model's history is derived from the log, a stored log can be replayed without an API key, as a test of the session that wrote it.
 
@@ -88,7 +88,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 - Tool execution is sequential and a delegated child is foreground; there are no background jobs.
 - No session deletion, search or rename; no OpenAI adapter; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven: it cannot import MiniDSH's own modules and must ship its own `package.json` and dependencies (BLUEPRINT §3).
 
-What comes next is decided by the open questions in [BLUEPRINT §3](docs/BLUEPRINT.md) rather than by a feature list.
+What comes next is the route in [BLUEPRINT §2](docs/BLUEPRINT.md): the crash-recovery contract, then consent and the Windows shell, then integrity and forensics.
 
 ## The question it investigates
 
@@ -193,7 +193,7 @@ ARCHITECTURE §12 carries the reasons.
 
 ### Not built
 
-PTC (DSH's programmatic tool calling); model-written dynamic packages; an MCP client; a Windows confinement backend and Landlock; standing approval grants; session deletion; a session search index; per-user identity; a desktop shell. Each is in BLUEPRINT §2 with the reason.
+PTC (DSH's programmatic tool calling); model-written dynamic packages; an MCP client; a Windows confinement backend and Landlock; session deletion; a session search index; per-user identity; agent teams. Each is in BLUEPRINT §2 with the reason; grants, background jobs and a desktop launcher are on its route.
 
 ## The architecture-first experiment
 
@@ -203,7 +203,7 @@ Nearly all of the code was written by coding-agent *development sessions* under 
 
 **Every capability has a home before it has code.** A session states a capability's layer, seam, owned state and lifecycle before implementing it. When OS confinement arrived in the eleventh session the answer was "nowhere new": the shell contract had specified it since the third.
 
-**Falsify the architecture, and repair it.** Every second feature session is followed by a hardening checkpoint that finds the documented invariants that are not true in code. They found several — stated invariants that were not implemented, a crash-repair path that resumed conversations in a shape the providers' APIs reject, a network client that could inject a prompt into a running delegated child — and [`BLUEPRINT.md`](docs/BLUEPRINT.md) §4 records each with what it measured.
+**Falsify the architecture, and repair it.** A hardening checkpoint follows each cluster of architectural change and finds the documented invariants that are not true in code. They found several — stated invariants that were not implemented, a crash-repair path that resumed conversations in a shape the providers' APIs reject, a network client that could inject a prompt into a running delegated child — and [`BLUEPRINT.md`](docs/BLUEPRINT.md) §4 records each with what it measured.
 
 What it taught: documentation drift is a defect, so the documents carry size budgets a gate enforces; a convention that is not gated does not hold, so the dependency rules are scripts; verification means the world, not the agent's account of it. After sixteen sessions and a release, a new contributor can still answer where a capability belongs, what each layer owns and where truth is stored, from one document.
 

@@ -2,6 +2,17 @@
 
 All notable changes to MiniDSH are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The session-by-session engineering record, with what each session measured, lives in [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
+## [Unreleased]
+
+### Fixed
+
+- **A detached session refuses appends.** After a session was detached, an append still succeeded in memory while persistence had already closed its file and dropped the event without an error: the log in memory and the log on disk could part ways silently. The store now closes the session before `session/disposed`, and a later append throws `SESSION_CLOSED`.
+- **The browser shows every event the terminal shows.** The browser's event projection was an untested hand-copy of the terminal's and had drifted: a step's effective route (`request/context`) and a delegated child's route never appeared in the browser. The projection is now a typed, DOM-free module (`web/rows.js`) that a test holds to the terminal's visibility, kind by kind.
+
+### Changed
+
+- `docs/ARCHITECTURE.md` corrected in about twenty places where the code did not honour the text (what Windows really costs per shell command, what crash repair does not close, what a tool deadline does to its body, how the format version is stamped). `docs/BLUEPRINT.md` carries the post-1.0 route. `references/` is new: a curated, pinned map of DeepSeek Harness with a ledger of what MiniDSH assumes about it.
+
 ## [1.0.0] — 2026-09-09
 
 The first public release: the smallest MiniDSH a developer can install, point at a repository and use daily without reading the architecture.
