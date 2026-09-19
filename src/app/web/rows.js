@@ -93,11 +93,12 @@ export function describeRow(event) {
   switch (event.type) {
     case 'user/message': {
       const data = /** @type {UserMessageData} */ (event.data)
-      const text = messageText(data.message)
-      if (!text) return undefined
       const source = data.message.source
+      // Context the runtime entered is visible whatever its body holds, as in
+      // `describeEvent`: only a PERSON's empty message has nothing to show.
       if (source.kind !== 'user') return note(`context (${source.kind}${source.kind === 'plugin' && source.form ? `: ${source.form}` : ''})`)
-      return { cls: 'row user', who: 'you', text }
+      const text = messageText(data.message)
+      return text ? { cls: 'row user', who: 'you', text } : undefined
     }
     case 'assistant/message': {
       const data = /** @type {AssistantMessageData} */ (event.data)

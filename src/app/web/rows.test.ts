@@ -62,6 +62,9 @@ const image = { type: 'image' as const, attachment: { id: asAttachmentId('sha256
 const SAMPLES: readonly Sample[] = [
   sample('USER_MESSAGE', 'a person', USER_MESSAGE, { message: createUserMessage('fix the slug') }, true),
   sample('USER_MESSAGE', 'plugin context', USER_MESSAGE, { message: createPluginMessage('workspace-instructions', 'AGENTS.md says…', 'instructions') }, true),
+  // Context is visible whatever its body holds; only a PERSON's empty message has nothing to show.
+  sample('USER_MESSAGE', 'empty plugin context', USER_MESSAGE, { message: createPluginMessage('context-runtime', '') }, true),
+  sample('USER_MESSAGE', 'an empty message from a person', USER_MESSAGE, { message: createUserMessage('') }, true),
   sample('ASSISTANT_MESSAGE', 'text', ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([{ type: 'text', text: 'done' }], 'deepseek', 'deepseek-v4-flash'), usage }, true),
   sample('ASSISTANT_MESSAGE', 'tool calls only', ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([{ type: 'tool-call', id: asCallId('c1'), name: 'pwsh', arguments: '{}' }], 'deepseek', 'deepseek-v4-flash') }, true),
   sample('TOOL_CALL', 'call', TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'pwsh', arguments: '{"command":"node --test"}' }),
@@ -118,14 +121,16 @@ describe('the browser row projection against the plain-text one', () => {
 
   it('has a sample for every kind present.ts renders and for every case rows.js handles', () => {
     const present = readFileSync(join(import.meta.dirname, '..', 'present.ts'), 'utf8')
-    const body = present.slice(present.indexOf('export function describeEvent'), present.indexOf('export function transcriptLines'))
-    const rendered = new Set([...body.matchAll(/matches\(event, ([A-Z_]+)\)/g)].map((match) => match[1]!))
+    // The WHOLE file, not `describeEvent` alone: `transcriptLine` is the oracle
+    // above and has branches of its own, and a kind rendered only there (or only
+    // in the audit) would otherwise gain a terminal line with no sample here.
+    const rendered = new Set([...present.matchAll(/matches\(event, ([A-Z_]+)\)/g)].map((match) => match[1]!))
     expect(rendered.size).toBeGreaterThan(10) // the regex still finds the branches
     const sampledConstants = new Set(SAMPLES.map((entry) => entry.constant))
     expect([...rendered].filter((constant) => !sampledConstants.has(constant))).toEqual([])
 
     const rows = readFileSync(join(import.meta.dirname, 'rows.js'), 'utf8')
-    const cases = new Set([...rows.matchAll(/case '([a-z-]+\/[a-z-]+)'/g)].map((match) => match[1]!))
+    const cases = new Set([...rows.matchAll(/case '([^']+)'/g)].map((match) => match[1]!))
     expect(cases.size).toBeGreaterThan(10)
     const sampledTypes = new Set(SAMPLES.map((entry) => entry.event.type))
     expect([...cases].filter((type) => !sampledTypes.has(type))).toEqual([])

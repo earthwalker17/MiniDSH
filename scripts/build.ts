@@ -74,12 +74,15 @@ for (const asset of WEB_ASSETS) cpSync(join(SRC, WEB, asset), join(DIST, WEB, as
 const emitted = walk(DIST)
 const stray = emitted.filter((file) => isTest(file) || isSupport(file))
 if (stray.length > 0) fail(`test code reached dist/: ${stray.join(', ')}`)
-// EMITTED modules only. A browser asset is copied verbatim, so the rewrite never
-// saw it, and the only `.ts` specifiers one carries are JSDoc type imports
-// (`rows.js` is typed against the core event kinds), which are comments. A real
-// one cannot hide behind this: the web host serves no `.ts` (web.test.ts), so it
-// fails in the first browser that loads a checkout.
-const unrewritten = emitted.filter((file) => file.endsWith('.js') && !isWebAsset(file) && /(?:from|import\()\s*['"]\.[^'"]*\.ts['"]/.test(readFileSync(file, 'utf8')))
+// A browser asset is copied verbatim, so the rewrite never saw it, and `rows.js`
+// is typed against the core event kinds through JSDoc `import('….ts')` types,
+// which are comments. So an asset is held to the STATIC form alone: a type
+// import is never `from '….ts'`, and a runtime import in those files always is.
+// Nothing else would catch one. No test loads `app.js` as a module, and Node
+// resolves a `.ts` specifier happily when `rows.test.ts` imports `rows.js`.
+const RUNTIME_TS = /(?:from|import\()\s*['"]\.[^'"]*\.ts['"]/
+const STATIC_TS = /from\s*['"]\.[^'"]*\.ts['"]/
+const unrewritten = emitted.filter((file) => file.endsWith('.js') && (isWebAsset(file) ? STATIC_TS : RUNTIME_TS).test(readFileSync(file, 'utf8')))
 if (unrewritten.length > 0) fail(`a .ts import specifier survived the emit: ${unrewritten.join(', ')}`)
 
 // Every implementation file has exactly one emitted twin: the count is what

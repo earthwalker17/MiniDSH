@@ -52,9 +52,19 @@ const state = {
  * One row per event. WHAT a row says lives in `rows.js`, DOM-free and typed
  * against the core event kinds, where a test holds it to the visibility of the
  * plain-text projection; this only builds the nodes.
+ *
+ * The projection is typed against THIS host's kinds and no longer guards every
+ * field with `?.`, so an event shaped by a different host version can throw in
+ * it. That costs one row that says so, never the transcript: both render loops
+ * call this with no guard of their own.
  */
 function row(event) {
-  const described = describeRow(event)
+  let described
+  try {
+    described = describeRow(event)
+  } catch (error) {
+    described = { cls: 'row denied', text: `[unreadable ${event?.type ?? 'event'}: ${error instanceof Error ? error.message : String(error)}]` }
+  }
   if (!described) return undefined
   if (described.who === undefined) return el('div', described.cls, described.text)
   const node = el('div', described.cls)
