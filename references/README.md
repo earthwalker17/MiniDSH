@@ -52,7 +52,7 @@ For a broad pass, a partial checkout is cheaper than hundreds of API reads: `git
 - `packages/terminal` is a persistent PTY capability for model tools, not a TUI. DSH ships no TUI.
 - Deployment compositions moved: `packages/preset` now holds only per-session **agent presets** and the persona; the host plane is `packages/bundle/*/cordis.patch.yml`. Older notes and comments still say `base.cordis.yml`.
 - "Profiles" (`web`, `headless`, `sdk`, `sdk-minimal`, `acp`, plus Electron's reserved `desktop`) are composition stacks, not wire protocols.
-- Code Mode was renamed TO PTC (programmatic tool calls), not the reverse; the durable `tool/code-dispatch*` log vocabulary was deliberately left unrenamed.
+- Code Mode was renamed TO PTC (programmatic tool calls), not the reverse. The claim that the durable log vocabulary was left unrenamed is FALSE at the pin (2026-09-20): the v2→v3 migration renames both tags, and the events are `tool/ptc-dispatch-start|dispatch`.
 
 ## Budget
 
