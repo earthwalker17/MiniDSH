@@ -800,7 +800,10 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         const title = foldSessionTitle(stored.events)
         if (title !== undefined) process.stdout.write(`title: ${title}\n`)
         if (stored.header.delegatedBy !== undefined) {
-          process.stdout.write(`delegated by ${stored.header.delegatedBy} (depth ${stored.header.delegationDepth ?? 1})\n`)
+          // The CALL too, where the log records one: two children of a single
+          // step are otherwise indistinguishable from this side.
+          const call = stored.header.delegatedByCallId === undefined ? '' : `, call ${stored.header.delegatedByCallId}`
+          process.stdout.write(`delegated by ${stored.header.delegatedBy} (depth ${stored.header.delegationDepth ?? 1}${call})\n`)
         }
         // What this session cost and how full its context got, measured
         // against the window the log itself names for the route in use; a log

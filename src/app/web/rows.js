@@ -38,6 +38,7 @@
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').AGENT_OPTIONS>} AgentOptionsData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').SUBAGENT_START>} SubagentStartData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').SUBAGENT_END>} SubagentEndData */
+/** @typedef {DataOf<typeof import('../../core/effects/index.ts').EFFECT_RECORDED>} EffectRecordedData */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_START>} CompactionStartData */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_END>} CompactionEndData */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_APPLIED>} CompactionAppliedData */
@@ -158,6 +159,18 @@ export function describeRow(event) {
     case 'compaction/applied': {
       const data = /** @type {CompactionAppliedData} */ (event.data)
       return note(`[compacted ${data.shadowedSeqs.length} messages · ${data.trigger}]`)
+    }
+    case 'effect/recorded': {
+      // What a call actually did. The FORM differs from `present.ts` — a
+      // browser row has room for neither the full hash nor the absolute path —
+      // but the visibility never may, and the parity gate holds it to that.
+      const data = /** @type {EffectRecordedData} */ (event.data)
+      if (data.effect === 'fs-write') {
+        const name = data.path.split(/[\\/]/).pop() ?? data.path
+        return note(`[effect: wrote ${name} · ${data.bytes} B · sha256 ${data.sha256.slice(0, 12)}]`)
+      }
+      const outcome = data.timedOut === true ? 'timed out' : data.exitCode === undefined ? 'no exit code' : `exit ${data.exitCode}`
+      return note(`[effect: shell command · ${outcome} · ${data.mode}/${data.enforcement}]`)
     }
     case 'subagent/start': {
       const data = /** @type {SubagentStartData} */ (event.data)

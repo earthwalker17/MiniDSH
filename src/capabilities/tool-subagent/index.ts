@@ -246,6 +246,10 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     cwd: parent.session.header.cwd,
     agentOptions,
     delegatedBy: parent.id,
+    // The join the parent’s own record cannot always provide: this child is
+    // published before `subagent/start` is appended, and a host death in that
+    // window leaves it on disk unexplained.
+    delegatedByCallId: exec.callId,
     delegationDepth: depth,
     ...(parent.session.header.agentPreset === undefined ? {} : { agentPreset: parent.session.header.agentPreset }),
     signal: exec.callSignal,

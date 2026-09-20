@@ -12,6 +12,7 @@
 import { AGENT_OPTIONS, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../core/approval/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/compaction/index.ts'
+import { describeEffect, EFFECT_RECORDED } from '../core/effects/index.ts'
 import { blockText } from '../core/llm/content.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
 import type { ContentBlock } from '../core/llm/index.ts'
@@ -60,6 +61,14 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     // spent a session closing.
     const images = imagesIn(restoreMessage(event.data.message).content)
     return images.length === 0 ? '✓' : `✓ ${images.join(' ')}`
+  }
+  if (matches(event, EFFECT_RECORDED)) {
+    // What a call actually DID, from the code that did it. The one spelling is
+    // `core/effects`, so a transcript, a crash closer and a future audit all
+    // describe the same effect the same way — and the path goes through the
+    // same control-character neutralization every line of model-adjacent text
+    // does, because a filename is not this runtime's to trust either.
+    return `[effect: ${describeEffect(event.data)}]`
   }
   if (matches(event, ASSISTANT_MESSAGE)) {
     const text = messageText(restoreMessage(event.data.message))

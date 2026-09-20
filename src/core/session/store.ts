@@ -10,6 +10,7 @@ export interface CreateSessionOptions {
   readonly seed?: readonly EventEnvelope[]
   readonly seedLength?: number
   readonly delegatedBy?: SessionId
+  readonly delegatedByCallId?: string
   readonly delegationDepth?: number
   readonly agentPreset?: string
   readonly createdAt?: number
@@ -74,6 +75,7 @@ class SessionStore implements Sessions, SessionHost {
       ...(options.parentId === undefined ? {} : { parentId: options.parentId }),
       ...(options.seedLength === undefined ? {} : { seedLength: options.seedLength }),
       ...(options.delegatedBy === undefined ? {} : { delegatedBy: options.delegatedBy }),
+      ...(options.delegatedByCallId === undefined ? {} : { delegatedByCallId: options.delegatedByCallId }),
       ...(options.delegationDepth === undefined ? {} : { delegationDepth: options.delegationDepth }),
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     }

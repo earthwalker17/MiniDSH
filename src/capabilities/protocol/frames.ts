@@ -103,6 +103,8 @@ export interface SessionSummary {
   readonly live: boolean
   readonly parentId?: string
   readonly delegatedBy?: string
+  /** Which parent tool call created this child, when the header records one. */
+  readonly delegatedByCallId?: string
   readonly agentPreset?: string
 }
 

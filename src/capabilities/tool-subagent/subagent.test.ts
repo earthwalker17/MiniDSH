@@ -174,6 +174,11 @@ describe('delegation through the full composition', () => {
     expect(stored).toBeUndefined() // disposed with the call
     const header = JSON.parse(readFileSync(join(w.sessionsRoot, `${encodeURIComponent(start.childId)}.jsonl`), 'utf8').split('\n')[0]!) as Record<string, unknown>
     expect(header).toMatchObject({ delegatedBy: handle.agent.id, delegationDepth: 1 })
+    // The CALL, not just the session: the child is published and materialized
+    // before the parent appends `subagent/start`, so this is the only join that
+    // survives a host death in that window — and the only one that separates
+    // two children of a single step from the child's own side.
+    expect(header.delegatedByCallId).toBe((eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { callId: string }).callId)
 
     // The human-facing projections say what happened, and the audit calls it an authority act.
     expect(describeEvent(eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!)).toContain('approvals never')

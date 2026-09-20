@@ -155,6 +155,21 @@ export interface SessionHeader {
   readonly seedLength?: number
   /** Delegation lineage: the session whose agent created this one as a child. Distinct from fork lineage — a spawned child inherits no history. */
   readonly delegatedBy?: SessionId
+  /**
+   * WHICH parent tool call created this child. `delegatedBy` alone cannot say
+   * when one step delegated twice, and the parent's own `subagent/start` is
+   * not always there to ask: the child session is published and materialized
+   * by `agents.create`, and the parent appends that record afterwards, so a
+   * host death in between leaves a child on disk with NOTHING about it in the
+   * parent's log. This is the only durable join that survives it. Header
+   * rather than event because lineage is header-owned, and it travels through
+   * a resume and a fork exactly as the two fields beside it do.
+   *
+   * DSH declines this question outright — no delegation record, receipt,
+   * header field or descriptor field points back at a spawning call — so this
+   * has no upstream oracle.
+   */
+  readonly delegatedByCallId?: string
   /** Absent (zero) for a top-level session, the parent's depth + 1 for a delegated child. Durable, so a resumed child can never delegate as top-level. */
   readonly delegationDepth?: number
   /** The agent preset this session's world was composed from, when one was named — so a resume, or a child, can compose the same world. */

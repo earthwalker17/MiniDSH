@@ -295,6 +295,7 @@ class AgentRegistry implements Agents {
       ...(stored.header.seedLength === undefined ? {} : { seedLength: stored.header.seedLength }),
       // Lineage is immutable: a resumed child is still a child, at its depth, of its world.
       ...(stored.header.delegatedBy === undefined ? {} : { delegatedBy: stored.header.delegatedBy }),
+      ...(stored.header.delegatedByCallId === undefined ? {} : { delegatedByCallId: stored.header.delegatedByCallId }),
       ...(stored.header.delegationDepth === undefined ? {} : { delegationDepth: stored.header.delegationDepth }),
       ...(stored.header.agentPreset === undefined ? {} : { agentPreset: stored.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `session "${id}"`),
@@ -325,6 +326,7 @@ class AgentRegistry implements Agents {
       // A fork of a delegated child is still delegated: the seed carries the
       // opening stamps that fence it, and the header carries its depth.
       ...(src.header.delegatedBy === undefined ? {} : { delegatedBy: src.header.delegatedBy }),
+      ...(src.header.delegatedByCallId === undefined ? {} : { delegatedByCallId: src.header.delegatedByCallId }),
       ...(src.header.delegationDepth === undefined ? {} : { delegationDepth: src.header.delegationDepth }),
       ...(src.header.agentPreset === undefined ? {} : { agentPreset: src.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `fork of "${src.parentId}"`),

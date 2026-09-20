@@ -33,6 +33,7 @@ class LoopFactory implements AgentFactory {
       ...(options.parentId === undefined ? {} : { parentId: options.parentId }),
       ...(options.seedLength === undefined ? {} : { seedLength: options.seedLength }),
       ...(options.delegatedBy === undefined ? {} : { delegatedBy: options.delegatedBy }),
+      ...(options.delegatedByCallId === undefined ? {} : { delegatedByCallId: options.delegatedByCallId }),
       ...(options.delegationDepth === undefined ? {} : { delegationDepth: options.delegationDepth }),
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
       ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }),

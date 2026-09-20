@@ -21,6 +21,7 @@ import { AGENT_OPTIONS, INBOX_SPLICED, SUBAGENT_END, SUBAGENT_START } from '../.
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../../core/approval/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../../core/compaction/index.ts'
 import { asAttachmentId } from '../../core/attachments/index.ts'
+import { EFFECT_RECORDED } from '../../core/effects/index.ts'
 import { asCallId } from '../../core/ids.ts'
 import { createAssistantMessage, createPluginMessage, createToolResultMessage, createUserMessage } from '../../core/llm/message.ts'
 import { AUTHORITY_PRESET } from '../../core/presets/index.ts'
@@ -33,6 +34,7 @@ import {
   STEP_END,
   STEP_START,
   TOOL_CALL,
+  TOOL_DISPATCH,
   TOOL_RESULT,
   TURN_END,
   TURN_START,
@@ -82,6 +84,9 @@ const SAMPLES: readonly Sample[] = [
   sample('AUTHORITY_PRESET', 'preset', AUTHORITY_PRESET, { name: 'workspace-write' }),
   sample('APPROVAL_ASKED', 'asked', APPROVAL_ASKED, { id: 'approval-7', toolName: 'pwsh', callId: 'c1', reason: 'run under "danger-full-access": tests' }),
   sample('APPROVAL_DECIDED', 'decided', APPROVAL_DECIDED, { id: 'approval-7', outcome: 'allowed-once' }),
+  sample('EFFECT_RECORDED', 'fs write', EFFECT_RECORDED, { callId: 'c1', effect: 'fs-write', path: '/ws/notes.txt', bytes: 15, sha256: 'a1b2c3d4e5f6a7b8c9d0' }),
+  sample('EFFECT_RECORDED', 'shell command', EFFECT_RECORDED, { callId: 'c1', effect: 'shell-command', exitCode: 0, durationMs: 1234, mode: 'workspace-write', enforcement: 'full' }),
+  sample('EFFECT_RECORDED', 'shell command killed', EFFECT_RECORDED, { callId: 'c1', effect: 'shell-command', durationMs: 120_000, mode: 'read-only', enforcement: 'none', timedOut: true }),
   sample('SUBAGENT_START', 'start', SUBAGENT_START, { callId: 'c2', childId: 's-child', depth: 1, provider: 'deepseek', model: 'deepseek-v4-flash', sandbox: 'read-only', approval: 'never' }),
   sample('SUBAGENT_END', 'end', SUBAGENT_END, { callId: 'c2', childId: 's-child', reason: { kind: 'completed' }, usage }),
   sample('COMPACTION_START', 'start', COMPACTION_START, { trigger: 'explicit', budgetTokens: 1000, projectedTokens: 900, plannedStart: 2, plannedEnd: 9, plannedNodes: 6 }),
@@ -103,6 +108,10 @@ const SAMPLES: readonly Sample[] = [
   sample('TURN_START', 'structure', TURN_START, { turn: 1 }),
   sample('STEP_START', 'structure', STEP_START, { turn: 1, step: 1 }),
   sample('STEP_END', 'structure', STEP_END, { turn: 1, step: 1 }),
+  // Pure structure, like the two above: the gate-to-body fact is one per tool
+  // call and says nothing a reader wants in a transcript. Listed so that giving
+  // it a line in EITHER projection fails here until the other is decided too.
+  sample('TOOL_DISPATCH', 'structure', TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c1' }),
   sample('ASSISTANT_CHUNK', 'trace', ASSISTANT_CHUNK, { turn: 1, step: 1, attempt: 1, chunk: { type: 'text-delta', index: 0, text: 'd' } }),
   sample('INBOX_SPLICED', 'inbox', INBOX_SPLICED, { op: 'clear' }),
   sample('SESSION_TITLE', 'title', SESSION_TITLE, { title: 'fix the slug', messageSeqs: [2], source: { kind: 'fallback' } }),

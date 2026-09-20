@@ -89,6 +89,8 @@ export interface CreateAgentOptions {
   readonly seedLength?: number
   /** Delegation lineage, recorded in the header (see `SessionHeader`). */
   readonly delegatedBy?: SessionId
+  /** Which parent tool call created this child (see `SessionHeader.delegatedByCallId`). */
+  readonly delegatedByCallId?: string
   readonly delegationDepth?: number
   /** The preset name the world was composed from, recorded in the header. */
   readonly agentPreset?: string

@@ -478,6 +478,7 @@ export class ProtocolHost {
         ...(workspace === undefined ? {} : { workspaceId: workspace.id }),
         ...(header.parentId === undefined ? {} : { parentId: String(header.parentId) }),
         ...(header.delegatedBy === undefined ? {} : { delegatedBy: String(header.delegatedBy) }),
+        ...(header.delegatedByCallId === undefined ? {} : { delegatedByCallId: header.delegatedByCallId }),
         ...(header.agentPreset === undefined ? {} : { agentPreset: header.agentPreset }),
       })
     }
