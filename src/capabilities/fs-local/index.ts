@@ -12,6 +12,7 @@
  * untrusted, so canonicalize-then-contain is the complete answer for this
  * surface. Kernel-grade isolation of untrusted CODE stays the shell problem.
  */
+import { createHash } from 'node:crypto'
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, dirname, resolve as resolvePath } from 'node:path'
 import type { Plugin } from '../../kernel/index.ts'
@@ -27,6 +28,7 @@ import {
   type FsTarget,
   type FsWriteIntent,
 } from '../../core/fs/index.ts'
+import { EFFECT_RECORDED } from '../../core/effects/index.ts'
 import { allowsWrite, canonicalPath, SANDBOX, type Sandbox } from '../../core/sandbox/index.ts'
 
 function versionOf(info: { mtimeMs: number; size: number }): string {
@@ -100,8 +102,36 @@ class LocalFs implements Fs {
     await writeFile(written.path, text, 'utf8')
     const info = await stat(written.path)
     const version = versionOf(info)
+    this.record(written, text, actor)
     this.scopeOf(actor).emit(FS_OBSERVED, written, { kind: 'present', version }, actor)
     return { version }
+  }
+
+  /**
+   * The effect, on the record: the CANONICAL path the fence approved, the
+   * byte length written and a hash of those exact bytes — enough for a
+   * resumed session to read the file back and tell a landed write from a lost
+   * one. Never `target.displayPath`, which is the model's own spelling and
+   * stays where model text belongs, in the `tool/call` arguments.
+   *
+   * After the write, so its presence is proof and its absence is not. It is
+   * evidence, never a barrier: a session closed under an abandoned body, or a
+   * pre-commit invariant that rejects the append, must not fail a write that
+   * has already landed on the disk.
+   */
+  private record(target: FsTarget, text: string, actor: FsActor): void {
+    if (!actor.agent || actor.callId === undefined) return
+    try {
+      actor.agent.session.append(EFFECT_RECORDED, {
+        callId: actor.callId,
+        effect: 'fs-write',
+        path: target.path,
+        bytes: Buffer.byteLength(text, 'utf8'),
+        sha256: createHash('sha256').update(text, 'utf8').digest('hex'),
+      })
+    } catch (error) {
+      this.ctx.logger.warn(`fs-local: the effect record for ${target.path} was not appended`, error)
+    }
   }
 
   async listDir(target: FsTarget): Promise<DirEntry[]> {

@@ -11,9 +11,16 @@
  * `FS_SANDBOX_DENIED` before any effect, including creating parent
  * directories. Reads always pass: the mode vocabulary governs file EFFECTS.
  * The fence lives here, below every consumer, so no tool can be the boundary.
+ *
+ * **Effect record.** A provider SHOULD record a landed mutation as one
+ * `effect/recorded{fs-write}` on the acting agent's session, keyed by
+ * `FsActor.callId`, AFTER the write (§4). It is evidence, not a barrier:
+ * nothing may fail a write because the record could not be appended, and
+ * nothing may read a missing record as "no write happened".
  */
 import { emitEvent, serviceKey, waterfallEvent } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
+import type { CallId } from '../ids.ts'
 
 export type FsErrorCode =
   | 'FS_NOT_FOUND'
@@ -68,6 +75,13 @@ export type FsObservation = { readonly kind: 'present'; readonly version: string
  */
 export interface FsActor {
   readonly agent?: Agent
+  /**
+   * The tool call this operation belongs to, when one does. A provider that
+   * records an effect (§4) keys it by this; without it, and without an agent,
+   * there is no session to record into and nothing is written — which is why
+   * absence of a record proves nothing.
+   */
+  readonly callId?: CallId
 }
 
 export interface Fs {

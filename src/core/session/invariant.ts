@@ -10,6 +10,7 @@ import {
   STEP_END,
   STEP_START,
   TOOL_CALL,
+  TOOL_DISPATCH,
   TOOL_RESULT,
   TURN_END,
   TURN_START,
@@ -30,7 +31,7 @@ function freshTrace(): Trace {
   return { lastSeq: -1, openTurn: undefined, openStep: undefined, nextTurn: 1, nextStep: 1, pending: new Set() }
 }
 
-const STEP_SCOPED = new Set([ASSISTANT_CHUNK.type, ASSISTANT_MESSAGE.type, TOOL_CALL.type, TOOL_RESULT.type, REQUEST_HEADER.type])
+const STEP_SCOPED = new Set([ASSISTANT_CHUNK.type, ASSISTANT_MESSAGE.type, TOOL_CALL.type, TOOL_DISPATCH.type, TOOL_RESULT.type, REQUEST_HEADER.type])
 
 /** Validates one event against the running trace; throws via `fail` on violation. */
 function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): void {
@@ -77,6 +78,12 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
   if (STEP_SCOPED.has(event.type)) {
     if (trace.openStep === undefined) fail(`step-scoped event "${event.type}" outside an open step`)
     if (matches(event, TOOL_CALL)) trace.pending.add(event.data.callId)
+    // The gate-passed fact is only meaningful about a call this step logged:
+    // one without a pending call would make the recovery rule read a dispatch
+    // for something that was never dispatched.
+    if (matches(event, TOOL_DISPATCH) && !trace.pending.has(event.data.callId)) {
+      fail(`tool/dispatch for "${event.data.callId}" has no pending tool/call`)
+    }
     if (matches(event, TOOL_RESULT)) {
       const synthetic = event.data.error?.code === 'TOOL_NOT_STARTED'
       if (!synthetic && !trace.pending.has(event.data.callId)) fail(`tool/result for "${event.data.callId}" has no pending tool/call`)

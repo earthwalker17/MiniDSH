@@ -136,7 +136,10 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
       const escalated = args.sandbox_permissions !== undefined
       const shellSession = shell.sessionFor(agent)
       try {
-        const result = await shellSession.exec({ command: args.command, policy, timeoutMs, signal: exec.signal, ...(escalated ? { oneShot: true } : {}) })
+        // `callId` travels with the command so the PROVIDER can key its effect
+        // record to this call (§4) — the executor is what knows the command
+        // ran, its exit code and the enforcement it actually got.
+        const result = await shellSession.exec({ command: args.command, policy, callId: exec.callId, timeoutMs, signal: exec.signal, ...(escalated ? { oneShot: true } : {}) })
         // "Nothing ran" must never read as "ran and printed nothing".
         if (result.aborted) throw Object.assign(new Error('command not dispatched: the call was cancelled'), { code: 'ABORTED_BEFORE_DISPATCH' })
         // "The shell died" must never read as "the command printed nothing":

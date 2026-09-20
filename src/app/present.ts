@@ -19,6 +19,7 @@ import { formatTokens } from '../core/metering/index.ts'
 import { AUTHORITY_PRESET } from '../core/presets/index.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
+import { printableText } from '../core/text.ts'
 
 /** Every image descriptor a result carries, at any depth. */
 function imagesIn(blocks: readonly ContentBlock[]): string[] {
@@ -30,25 +31,8 @@ function imagesIn(blocks: readonly ContentBlock[]): string[] {
   return out
 }
 
-/**
- * Model-supplied text is rendered into a TERMINAL by this projection, and a
- * terminal executes what it is written: an ESC in a tool's arguments erases
- * the line and repaints a different one, above a `[y/N]` the person is about
- * to answer. `\s` does not cover ESC or the other C0/C1 controls, so they are
- * neutralized here — in the one projection every plain-text surface shares —
- * rather than at each of the lines that happens to carry model text today.
- */
-function printable(text: string): string {
-  let flat = ''
-  for (const ch of text) {
-    const code = ch.codePointAt(0)!
-    flat += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? ' ' : ch
-  }
-  return flat
-}
-
 export function preview(text: string, max = 80): string {
-  const oneLine = printable(text).replace(/\s+/g, ' ').trim()
+  const oneLine = printableText(text).replace(/\s+/g, ' ').trim()
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
 }
 
@@ -86,7 +70,7 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     // printing the kind alone left a keyless first run reading `[turn error]`
     // with "API key not set" recorded and shown nowhere.
     const reason = event.data.reason
-    return reason.kind === 'error' ? `[turn error: ${reason.code} — ${printable(reason.message)}]` : `[turn ${reason.kind}]`
+    return reason.kind === 'error' ? `[turn error: ${reason.code} — ${printableText(reason.message)}]` : `[turn ${reason.kind}]`
   }
   if (matches(event, SANDBOX_MODE)) {
     const { mode, enforcement, reason } = event.data
@@ -106,7 +90,7 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     return `[route: ${provider}/${model}${contextWindow === undefined ? '' : ` · window ${formatTokens(contextWindow)}`}]`
   }
   if (matches(event, AUTHORITY_PRESET)) return `[preset: ${event.data.name}]`
-  if (matches(event, APPROVAL_ASKED)) return `? ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${printable(event.data.reason)}` : ''}`
+  if (matches(event, APPROVAL_ASKED)) return `? ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${printableText(event.data.reason)}` : ''}`
   if (matches(event, APPROVAL_DECIDED)) return `! ${event.data.id} ${event.data.outcome}`
   if (matches(event, SUBAGENT_START)) {
     const { childId, depth, provider, model, sandbox } = event.data
@@ -205,7 +189,7 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       lines.push(`${at(event.seq)}  preset      ${event.data.name}`)
     } else if (matches(event, APPROVAL_ASKED)) {
       const covered = event.data.callId ? calls.get(event.data.callId) : undefined
-      lines.push(`${at(event.seq)}  asked       ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${printable(event.data.reason)}` : ''}`)
+      lines.push(`${at(event.seq)}  asked       ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${printableText(event.data.reason)}` : ''}`)
       if (covered) lines.push(`                    for: ${covered}`)
     } else if (matches(event, APPROVAL_DECIDED)) {
       lines.push(`${at(event.seq)}  decided     ${event.data.id} ${event.data.outcome}`)

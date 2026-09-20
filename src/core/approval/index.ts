@@ -15,6 +15,7 @@ import type { Agent } from '../agent/types.ts'
 import type { CallId } from '../ids.ts'
 import type { Session } from '../session/index.ts'
 import type { EventEnvelope } from '../session/types.ts'
+import { printableText } from '../text.ts'
 import {
   APPROVAL_ASKED,
   APPROVAL_DECIDED,
@@ -61,12 +62,7 @@ export interface ApprovalRequest {
  */
 const REASON_MAX_CHARS = 300
 function safeReason(text: string): string {
-  let flat = ''
-  for (const ch of text) {
-    const code = ch.codePointAt(0)!
-    flat += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? ' ' : ch
-  }
-  const oneLine = flat.replace(/\s+/gu, ' ').trim()
+  const oneLine = printableText(text).replace(/\s+/gu, ' ').trim()
   return oneLine.length > REASON_MAX_CHARS ? `${oneLine.slice(0, REASON_MAX_CHARS - 1)}…` : oneLine
 }
 

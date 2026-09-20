@@ -239,7 +239,10 @@ export class ShellProcess implements ShellSession {
   private async runOne(request: ShellExecRequest): Promise<ShellRunResult> {
     const enforcement = this.confine(request.policy)
     const sandbox = { mode: request.policy.mode, enforcement }
-    if (this.disposed) return { output: '', timedOut: false, truncated: false, reset: false, sandbox }
+    // Nothing ran. It carries `aborted` for the same reason the cancelled
+    // branch below does: 'nothing ran' must never read as 'ran and printed
+    // nothing', and a consumer recording effects needs one field to refuse on.
+    if (this.disposed) return { output: '', timedOut: false, truncated: false, reset: false, aborted: true, sandbox }
     // An already-cancelled call dispatches nothing: the poll loop would kill
     // the child a tick later, but by then the command had been written.
     if (request.signal?.aborted) return { output: '', timedOut: false, truncated: false, reset: false, aborted: true, sandbox }
@@ -266,6 +269,7 @@ export class ShellProcess implements ShellSession {
     const marker = `${this.markerBase}${++this.commandSeq}`
     const base64 = Buffer.from(request.command, 'utf8').toString('base64')
     child.stdin.write(wrapper(this.dialect, base64, marker))
+    const startedAt = Date.now()
 
     const pattern = new RegExp(`${marker}:(-?\\d+)`)
     const deadline = Date.now() + (request.timeoutMs ?? DEFAULT_TIMEOUT_MS)
@@ -277,7 +281,7 @@ export class ShellProcess implements ShellSession {
         this.fresh = false
         this.provenWorld = world
         const exitCode = Number(match[1])
-        return this.finalize(output, { exitCode, timedOut: false, reset: false, restarted }, sandbox)
+        return this.finalize(output, { exitCode, timedOut: false, reset: false, restarted, startedAt }, sandbox)
       }
       // The shell itself died (e.g. the command was `exit`): report immediately
       // instead of polling until the deadline.
@@ -305,10 +309,10 @@ export class ShellProcess implements ShellSession {
             `exited (code ${code ?? 'unknown'}) before it answered its first command${trimmed.length > 0 ? `: ${trimmed.slice(0, 200)}` : ''}`,
           )
         }
-        return this.finalize(output, { timedOut: false, reset: true, restarted }, sandbox)
+        return this.finalize(output, { timedOut: false, reset: true, restarted, startedAt }, sandbox)
       }
-      if (request.signal?.aborted) return this.finalize(this.buffer, { timedOut: false, reset: await this.reset(), restarted }, sandbox)
-      if (Date.now() > deadline) return this.finalize(this.buffer, { timedOut: true, reset: await this.reset(), restarted }, sandbox)
+      if (request.signal?.aborted) return this.finalize(this.buffer, { timedOut: false, reset: await this.reset(), restarted, startedAt }, sandbox)
+      if (Date.now() > deadline) return this.finalize(this.buffer, { timedOut: true, reset: await this.reset(), restarted, startedAt }, sandbox)
       await sleep(POLL_MS)
     }
   }
@@ -341,6 +345,7 @@ export class ShellProcess implements ShellSession {
     // Reachable from `dispose`: an escalated command runs under the widest
     // authority the session ever granted, so it is the LAST thing that may
     // outlive the agent scope that was supposed to end it.
+    const startedAt = Date.now()
     this.oneShotChild = child
     if (child.pid !== undefined && process.platform !== 'win32') this.oneShotGroups.add(child.pid)
     child.stdout.setEncoding('utf8')
@@ -373,7 +378,7 @@ export class ShellProcess implements ShellSession {
         throw this.startupFailure(this.confinement.id, true, `exited (code ${code ?? 'unknown'}): ${output.trim().slice(0, 200)}`)
       }
       // `reset` is about the persistent shell, and this call never touched it.
-      return this.finalize(output, { ...(code === null ? {} : { exitCode: code }), timedOut, reset: false, restarted: false }, sandbox)
+      return this.finalize(output, { ...(code === null ? {} : { exitCode: code }), timedOut, reset: false, restarted: false, startedAt }, sandbox)
     } finally {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', onAbort)
@@ -404,7 +409,7 @@ export class ShellProcess implements ShellSession {
 
   private finalize(
     raw: string,
-    extra: { exitCode?: number; timedOut: boolean; reset: boolean; restarted: boolean },
+    extra: { exitCode?: number; timedOut: boolean; reset: boolean; restarted: boolean; startedAt: number },
     sandbox: ShellRunResult['sandbox'],
   ): ShellRunResult {
     const trimmed = raw.replace(/^\n+/, '').replace(/\n+$/, '')
@@ -419,6 +424,7 @@ export class ShellProcess implements ShellSession {
       timedOut: extra.timedOut,
       truncated,
       reset: extra.reset,
+      durationMs: Date.now() - extra.startedAt,
       sandbox,
       ...(extra.restarted ? { restarted: true as const } : {}),
       ...(extra.exitCode === undefined ? {} : { exitCode: extra.exitCode }),

@@ -30,6 +30,20 @@ export interface ToolCall {
   readonly arguments: string
   readonly agent: Agent | undefined
   readonly signal: AbortSignal
+  /**
+   * Awaited once the gate has passed and immediately before the tool BODY, so
+   * a caller can make "this call reached its body" durable (§4). A throw
+   * refuses the call — the body never runs — and its `code` becomes the
+   * result's.
+   *
+   * The pipeline does not write the fact itself. The caller that owns the
+   * log's turn and step writes it, which is why the driver supplies this: a
+   * registry-written record would be a second writer of the call family, and a
+   * failure it turned into a mere error RESULT would not reach the loop's
+   * lost-write state machine, leaving a turn free to end `completed` after a
+   * durable write was lost.
+   */
+  readonly onDispatch?: () => Promise<void>
 }
 
 /**
@@ -196,7 +210,7 @@ class ToolRegistry implements Tools {
     let result: ToolResult
     try {
       const gate = await this.gate(execution, scope)
-      result = gate ?? (await this.dispatch(tool, validated.data as unknown, execution, scope))
+      result = gate ?? (await this.dispatch(tool, validated.data as unknown, execution, scope, call.onDispatch))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       result = errorResult(message, error instanceof Error ? error.name : 'Error', codeOf(error))
@@ -225,15 +239,39 @@ class ToolRegistry implements Tools {
    * something useful to say about running out of time owns a shorter deadline
    * of its own (the shell executor kills its child and returns the tail).
    */
-  private async dispatch(tool: AnyToolDefinition, args: unknown, execution: ToolContext, scope: Context): Promise<ToolResult> {
+  private async dispatch(
+    tool: AnyToolDefinition,
+    args: unknown,
+    execution: ToolContext,
+    scope: Context,
+    onDispatch: ToolCall['onDispatch'],
+  ): Promise<ToolResult> {
+    /**
+     * Inside the waterfall's TERMINAL continuation, not before the waterfall.
+     * `tools/execute` is around-middleware, and a middleware that answers
+     * without calling `next()` replaces the body outright — an effect-free
+     * replay is exactly that shape. A fact written before the waterfall would
+     * then say "the body may have run" about a body that provably did not.
+     */
+    const run = async (exec: ToolContext): Promise<ToolResult> => {
+      // The gate checked this on the way in, but consent and the durability
+      // write are both awaits: a cancellation landing in either of them must
+      // not still reach an effect. Checked on both sides of the write so a
+      // doomed call neither records a dispatch nor runs — the same re-check
+      // DSH's checkpoint policy makes around its own pre-body barrier.
+      if (exec.signal.aborted) return errorResult('tool call aborted before dispatch', 'AbortError', 'ABORTED_BEFORE_DISPATCH')
+      await onDispatch?.()
+      if (exec.signal.aborted) return errorResult('tool call aborted before dispatch', 'AbortError', 'ABORTED_BEFORE_DISPATCH')
+      return this.runBody(tool, args, exec)
+    }
     const ms = this.deadlineFor(tool)
     if (ms === undefined) {
-      const candidate = await scope.waterfall(TOOLS_EXECUTE, execution, () => this.runBody(tool, args, execution))
+      const candidate = await scope.waterfall(TOOLS_EXECUTE, execution, () => run(execution))
       return this.post(execution, candidate, scope)
     }
     const timer = AbortSignal.timeout(ms)
     const timed: ToolContext = { ...execution, signal: AbortSignal.any([execution.signal, timer]) }
-    const body = scope.waterfall(TOOLS_EXECUTE, timed, () => this.runBody(tool, args, timed))
+    const body = scope.waterfall(TOOLS_EXECUTE, timed, () => run(timed))
     const expired = new Promise<'timeout'>((resolve) => timer.addEventListener('abort', () => resolve('timeout'), { once: true }))
     const outcome = await Promise.race([body.then((candidate) => ({ candidate })), expired])
     if (outcome === 'timeout') {
@@ -305,8 +343,15 @@ export const toolsPlugin: Plugin<ToolsConfig | undefined> = {
 }
 
 /** Helper for capabilities: build a tool call from a durable tool/call record. */
-export function toolCall(callId: string, name: string, args: string, agent: Agent | undefined, signal: AbortSignal): ToolCall {
-  return { callId: asCallId(callId), name, arguments: args, agent, signal }
+export function toolCall(
+  callId: string,
+  name: string,
+  args: string,
+  agent: Agent | undefined,
+  signal: AbortSignal,
+  onDispatch?: ToolCall['onDispatch'],
+): ToolCall {
+  return { callId: asCallId(callId), name, arguments: args, agent, signal, ...(onDispatch === undefined ? {} : { onDispatch }) }
 }
 
 export type { ContentBlock }

@@ -110,6 +110,24 @@ export const REQUEST_CONTEXT = eventKind<RequestContextRecord>('request/context'
 export const ASSISTANT_CHUNK = eventKind<{ turn: number; step: number; attempt: number; chunk: JsonValue }>('assistant/chunk')
 export const ASSISTANT_MESSAGE = eventKind<{ turn: number; step: number; message: Message; usage?: TokenUsage; interrupted?: true }>('assistant/message')
 export const TOOL_CALL = eventKind<{ turn: number; step: number; callId: string; name: string; arguments: string }>('tool/call')
+/**
+ * The gate was passed and the tool BODY is about to run — the third member of
+ * the call family, and the fact that lets crash repair tell "this never ran"
+ * from "this may have run" (§4). Written by the driver, durable before the
+ * body, and therefore never written for a call denied by policy, refused by a
+ * guard, rejected at an approval, or cancelled before dispatch.
+ *
+ * A call with a `tool/call` and no `tool/dispatch` provably did not reach its
+ * body — but only in a log that records dispatches at all, which is why the
+ * repair rule falls back to "unknown" for a log that has never written one.
+ *
+ * **It sits AFTER the gate.** DSH's nearest event, `tool/ptc-dispatch-start`,
+ * is log-only and keyed by call id in the same way, but means "the pipeline
+ * was entered" and fires BEFORE its gate — the opposite side of the one
+ * boundary this fact exists to mark. Upstream has nothing at all here for a
+ * top-level call: a fail-closed flush, and no fact.
+ */
+export const TOOL_DISPATCH = eventKind<{ turn: number; step: number; callId: string }>('tool/dispatch')
 export const TOOL_RESULT = eventKind<{ turn: number; step: number; callId: string; message: Message; error?: { name: string; code: string } }>('tool/result')
 export const END_SEED = eventKind<Record<string, never>>('session/end-seed')
 

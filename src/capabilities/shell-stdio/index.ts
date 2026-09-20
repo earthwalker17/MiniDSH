@@ -8,8 +8,9 @@
  * descendant, so one wrap confines every command that shell will ever run.
  */
 import { z } from 'zod'
-import type { Plugin } from '../../kernel/index.ts'
+import type { Context, Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
+import { EFFECT_RECORDED } from '../../core/effects/index.ts'
 import { canonicalPath, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL, type Shell, type ShellSession } from '../../core/shell/index.ts'
 import { CONFINEMENT_CHOICES, selectConfinement, type Confinement, type ConfinementChoice } from './confine/index.ts'
@@ -39,10 +40,12 @@ const configSchema = z.strictObject({
 
 class ShellStdioProvider implements Shell {
   readonly dialect: ShellDialect
+  private readonly ctx: Context
   private readonly config: ShellStdioConfig
   private readonly confinement: Confinement
   private readonly sessions = new WeakMap<Agent, ShellSession>()
-  constructor(config: ShellStdioConfig) {
+  constructor(ctx: Context, config: ShellStdioConfig) {
+    this.ctx = ctx
     this.dialect = config.dialect
     this.config = config
     // Probed once, at mount, and then a synchronous fact: `enforcementFor` is
@@ -77,10 +80,52 @@ class ShellStdioProvider implements Shell {
       ...(this.config.shellPath === undefined ? {} : { shellPath: this.config.shellPath }),
       ...(this.config.maxCaptureChars === undefined ? {} : { maxCaptureChars: this.config.maxCaptureChars }),
     })
-    this.sessions.set(agent, process)
-    // The shell dies with the agent's scope.
+    const session = recording(process, agent, this.ctx)
+    this.sessions.set(agent, session)
+    // The shell dies with the agent's scope — the process, not the wrapper.
     agent.ctx.effect(() => () => process.dispose(), 'shell.session')
-    return process
+    return session
+  }
+}
+
+/**
+ * The effect boundary, on the record.
+ *
+ * `ShellProcess` holds a cwd string and a confinement, and deliberately
+ * nothing else: no session, no context, no clock beyond its own deadline. So
+ * the record is written HERE, in the provider, which is the last place that
+ * still knows which agent this shell belongs to — and it is written after the
+ * command returns, from what the run itself reported, never from the tool's
+ * account of it.
+ *
+ * Only what RAN: a refusal throws before this, and a command that was never
+ * dispatched says `aborted`. A failed append is swallowed, because a record
+ * is evidence and a command that already ran cannot be un-run by losing it.
+ * The decorator is what the WeakMap stores, so one agent keeps one shell.
+ */
+function recording(process: ShellProcess, agent: Agent, ctx: Context): ShellSession {
+  return {
+    async exec(request) {
+      const result = await process.exec(request)
+      if (request.callId !== undefined && result.aborted !== true) {
+        try {
+          agent.session.append(EFFECT_RECORDED, {
+            callId: request.callId,
+            effect: 'shell-command',
+            ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
+            durationMs: result.durationMs ?? 0,
+            mode: result.sandbox.mode,
+            enforcement: result.sandbox.enforcement,
+            ...(result.timedOut ? { timedOut: true as const } : {}),
+          })
+        } catch (error) {
+          ctx.logger.warn(`shell-stdio: the effect record for call ${request.callId} was not appended`, error)
+        }
+      }
+      return result
+    },
+    restart: () => process.restart(),
+    dispose: () => process.dispose(),
   }
 }
 
@@ -89,7 +134,7 @@ export const shellStdioPlugin: Plugin<ShellStdioConfig> = {
   name: 'shell-stdio',
   config: configSchema,
   apply(ctx, config) {
-    ctx.provide(SHELL, new ShellStdioProvider(config))
+    ctx.provide(SHELL, new ShellStdioProvider(ctx, config))
   },
 }
 

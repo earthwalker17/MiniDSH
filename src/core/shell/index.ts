@@ -31,9 +31,17 @@
  * DSH reaches the same binding and answers the first case by REFUSING the
  * switch while a shell is open; it never meets the second, because its
  * persistent shell has no escalation at all.
+ *
+ * **Effect record.** A provider SHOULD record a command that actually ran as
+ * one `effect/recorded{shell-command}` on the owning agent's session, keyed by
+ * `ShellExecRequest.callId`, AFTER it returns (§4) — exit code, duration and
+ * the enforcement that command really got. Never for a run it refused or never
+ * dispatched. Evidence, not a barrier, and never a list of what the command
+ * itself touched: the shell world is outside this process.
  */
 import { serviceKey } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
+import type { CallId } from '../ids.ts'
 import type { SandboxEnforcement, SandboxExecutionPolicy, SandboxMode } from '../sandbox/index.ts'
 
 export type ShellErrorCode = 'SHELL_UNAVAILABLE'
@@ -56,6 +64,12 @@ export interface ShellExecRequest {
   readonly command: string
   /** The per-call authority stamp; resolved by the caller from `ctx.sandbox`. */
   readonly policy: SandboxExecutionPolicy
+  /**
+   * The tool call this command belongs to, when one does. A provider that
+   * records an effect (§4) keys it by this; without it nothing is recorded,
+   * and a missing record means only that — never that nothing ran.
+   */
+  readonly callId?: CallId
   readonly timeoutMs?: number
   readonly signal?: AbortSignal
   /**
@@ -81,8 +95,19 @@ export interface ShellRunResult {
    * a previous call left behind is gone, and only a caller told so can say so.
    */
   readonly restarted?: true
-  /** True when the command was never dispatched because the call was already cancelled: nothing ran. */
+  /**
+   * True when the command was never dispatched: nothing ran. Set when the
+   * call was already cancelled, and when the shell was already disposed —
+   * "nothing ran" must never read as "ran and printed nothing", and a
+   * consumer recording effects must have one field to refuse on.
+   */
   readonly aborted?: true
+  /**
+   * Wall clock from the command reaching the child to its result. Absent when
+   * nothing was dispatched. It excludes the per-owner queue wait before it,
+   * which belongs to whoever was ahead in the queue, not to this command.
+   */
+  readonly durationMs?: number
   /** What actually governed this run — a reported fact, not a promise. */
   readonly sandbox: { readonly mode: SandboxMode; readonly enforcement: SandboxEnforcement }
 }

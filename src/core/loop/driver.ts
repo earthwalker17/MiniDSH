@@ -41,6 +41,7 @@ import {
   STEP_END,
   STEP_START,
   TOOL_CALL,
+  TOOL_DISPATCH,
   TOOL_RESULT,
   TURN_END,
   TURN_START,
@@ -467,7 +468,31 @@ export class ReactLoopAgent implements Agent {
         )
         continue
       }
-      const result = await deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, signal))
+      /**
+       * The second checkpoint of a call, and the one that makes the recovery
+       * contract readable: the pipeline runs it once the gate has passed and
+       * immediately before the body, so `tool/dispatch` is durable exactly
+       * when — and only when — an effect could follow. Without it, absence of
+       * the record would not prove absence of the body, and repair would have
+       * to read every logged call as outcome-unknown, which is where it
+       * started. The write is cheap: an append already reached the descriptor,
+       * and a flush here only surfaces a failure the provider remembered.
+       *
+       * A lost write sets `lost` HERE rather than leaving the pipeline to
+       * return an error result on its own, because the turn must end the way
+       * every lost write ends it. The result alone would let a last call that
+       * concludes the turn, or one that hits `maxSteps`, close it `completed`.
+       */
+      const onDispatch = async (): Promise<void> => {
+        this.session.append(TOOL_DISPATCH, { turn, step, callId: call.id })
+        try {
+          await this.checkpoint()
+        } catch (error) {
+          lost = error as DurabilityLost
+          throw error
+        }
+      }
+      const result = await deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, signal, onDispatch))
       const message = createToolResultMessage(call.id, [...result.content], result.isError)
       this.session.append(
         TOOL_RESULT,

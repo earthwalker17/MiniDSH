@@ -76,7 +76,10 @@ function buildEditor(ctx: Context, maxOutputChars: number) {
     output: OutputSchema,
     render: (_args, value) => [{ type: 'text', text: value.text }],
     execute: async (args: Input, exec) => {
-      const actor: FsActor = exec.agent ? { agent: exec.agent } : {}
+      // The call travels with the actor so the provider can key its effect
+      // record to it (§4): the editor asks for the write, the provider is what
+      // records that one landed.
+      const actor: FsActor = exec.agent ? { agent: exec.agent, callId: exec.callId } : {}
       const target = fs.resolve(args.path, cwdOf(exec.agent))
       switch (args.command) {
         case 'view':
