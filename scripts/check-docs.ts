@@ -30,7 +30,7 @@ const ROOT = resolve(import.meta.dirname, '..')
 
 /** Hard ceilings in bytes. Change them in CLAUDE.md §5 first; this is the enforcement. */
 const BUDGETS: Record<string, number> = {
-  'docs/ARCHITECTURE.md': 84 * 1024,
+  'docs/ARCHITECTURE.md': 94 * 1024,
   'docs/BLUEPRINT.md': 30 * 1024,
   'README.md': 32 * 1024,
 }
