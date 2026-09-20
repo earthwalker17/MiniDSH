@@ -73,13 +73,45 @@ describe.runIf(available)('the shell effect record', () => {
       const [record, ...rest] = effects(agent)
       expect(rest).toHaveLength(0)
       expect(record).toMatchObject({ callId: 'c1', effect: 'shell-command', exitCode: 0, mode: 'danger-full-access', enforcement: 'none' })
-      // The run's own wall clock, not the caller's: it is reported from inside
-      // the executor, so the per-owner queue wait is not in it.
-      expect(record!.durationMs).toBeGreaterThanOrEqual(0)
-      expect(record!.durationMs).toBeLessThanOrEqual(result.durationMs ?? Number.POSITIVE_INFINITY)
       expect(record!.timedOut).toBeUndefined()
     },
   )
+
+  /**
+   * The duration is the RUN's, not the caller's. Two commands are issued
+   * without awaiting the first, so the second sits in the per-owner queue
+   * behind a slow one: if `startedAt` were stamped at `exec()` rather than
+   * where the command reaches the child, the second record would carry the
+   * whole wait. Comparing the record to the result it came from proves
+   * nothing — they are the same number.
+   */
+  it('measures the run, not the wait behind another command', { timeout: SHELL_TEST_TIMEOUT_MS }, async () => {
+    const { agent, shell, policy } = await setup()
+    const slow = dialect === 'pwsh' ? 'Start-Sleep -Milliseconds 700' : 'sleep 0.7'
+    const first = shell.exec({ command: slow, policy, callId: asCallId('slow') })
+    const second = shell.exec({ command: 'echo second', policy, callId: asCallId('fast') })
+    await Promise.all([first, second])
+
+    const fast = effects(agent).find((record) => record.callId === 'fast')!
+    const queued = effects(agent).find((record) => record.callId === 'slow')!
+    expect(queued.durationMs).toBeGreaterThan(500)
+    expect(fast.durationMs, 'the queue wait behind the slow command is not this command s duration').toBeLessThan(500)
+  })
+
+  it('records a killed command as timed out, with no exit code to report', { timeout: SHELL_TEST_TIMEOUT_MS }, async () => {
+    const { agent, shell, policy } = await setup()
+    const forever = dialect === 'pwsh' ? 'Start-Sleep -Seconds 30' : 'sleep 30'
+    const result = await shell.exec({ command: forever, policy, callId: asCallId('c1'), timeoutMs: 300 })
+    expect(result.timedOut).toBe(true)
+
+    const [record] = effects(agent)
+    expect(record).toMatchObject({ callId: 'c1', effect: 'shell-command', timedOut: true })
+    // A killed command has no exit code, and the record must not invent one.
+    expect(record!.exitCode).toBeUndefined()
+    // Stamped where the result was decided, so the kill and the reap that
+    // follow it are not charged to the command's own deadline.
+    expect(record!.durationMs, 'the shell teardown after the deadline is not part of the run').toBeLessThan(2_000)
+  })
 
   it('records nothing without a call to key it to', { timeout: SHELL_TEST_TIMEOUT_MS }, async () => {
     const { agent, shell, policy } = await setup()

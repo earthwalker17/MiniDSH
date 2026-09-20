@@ -88,7 +88,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 - Tool execution is sequential and a delegated child is foreground; there are no background jobs.
 - No session deletion, search or rename; no OpenAI adapter; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven: it cannot import MiniDSH's own modules and must ship its own `package.json` and dependencies (BLUEPRINT §3).
 
-What comes next is the route in [BLUEPRINT §2](docs/BLUEPRINT.md): the crash-recovery contract, then consent and the Windows shell, then integrity and forensics.
+What comes next is the route in [BLUEPRINT §2](docs/BLUEPRINT.md): consent on the record and the Windows shell, then integrity and forensics.
 
 ## The question it investigates
 

@@ -100,9 +100,13 @@ class LocalFs implements Fs {
     // swapped in the meantime, and only the last check governs the effect.
     const written = this.fence(fenced, actor)
     await writeFile(written.path, text, 'utf8')
+    // Before the `stat`, which can fail on a write that already landed (a
+    // scanner holding the handle, the file unlinked under us) and would then
+    // throw past the record as well as past the caller. It needs nothing
+    // `stat` returns.
+    this.record(written, text, actor)
     const info = await stat(written.path)
     const version = versionOf(info)
-    this.record(written, text, actor)
     this.scopeOf(actor).emit(FS_OBSERVED, written, { kind: 'present', version }, actor)
     return { version }
   }

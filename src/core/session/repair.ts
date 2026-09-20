@@ -1,7 +1,7 @@
 import { APPROVAL_DECIDED, undecidedApprovals } from '../approval/events.ts'
 import { describeEffects, EFFECT_RECORDED, type EffectRecorded } from '../effects/events.ts'
-import { asCallId } from '../ids.ts'
-import { createToolResultMessage } from '../llm/message.ts'
+import { asCallId, asMessageId } from '../ids.ts'
+import { createToolResultMessage, restoreMessage } from '../llm/message.ts'
 import { deepFreeze, snapshotJson } from '../json.ts'
 import {
   ASSISTANT_MESSAGE,
@@ -45,23 +45,23 @@ export type TailCloser = (events: readonly EventEnvelope[], nextSeq: number, tim
  *
  * **What the result SAYS is the recovery contract.** Four cases, in order:
  *
- *   | evidence for the block                     | code                   |
- *   | no `tool/call`                             | `TOOL_NOT_STARTED`     |
- *   | a `tool/dispatch`                          | `TOOL_OUTCOME_UNKNOWN` |
- *   | no dispatch, in a log that records them    | `TOOL_NOT_STARTED`     |
- *   | no dispatch, in a log that records none    | `TOOL_OUTCOME_UNKNOWN` |
+ *   | evidence for the block                            | code                   |
+ *   | no `tool/call`                                    | `TOOL_NOT_STARTED`     |
+ *   | a `tool/dispatch`, or a recorded effect           | `TOOL_OUTCOME_UNKNOWN` |
+ *   | neither, in a log that records dispatches AND     | `TOOL_NOT_STARTED`     |
+ *   |   kept an event written after the `tool/call`     |                        |
+ *   | anything else                                     | `TOOL_OUTCOME_UNKNOWN` |
  *
  * The third row is what `tool/dispatch` bought: a call that died at its policy
  * gate or waiting on a person's consent provably never reached a body, and
- * before S14 every logged call had to be read as "may have run".
+ * before S14 every logged call had to be read as "may have run". `classify`
+ * below carries both of its conditions and why each is load-bearing.
  *
- * The fourth is the price of an additive format. A log written by an earlier
- * version records no dispatches at all, so absence there is not evidence, and
- * claiming "did not run" about a body that ran is the one error this contract
- * exists to prevent. The probe is therefore the whole log: if it has ever
- * recorded a dispatch, its writer records them. One hole remains and is
- * stated rather than papered over — a call killed inside its gate BEFORE a
- * log's first dispatch reads as outcome-unknown, the safe direction.
+ * The last row is a default, and it absorbs two different unknowns: a log an
+ * earlier version wrote (no dispatches at all, so absence says nothing), and a
+ * log whose tail stops AT the call (where absence could be truncation). In
+ * both, "did not run" would be a claim the log cannot support — and claiming
+ * it about a body that ran is the one error this contract exists to prevent.
  *
  * An outcome-unknown result also carries what the log can prove about how far
  * the call got: the effects recorded for it in this step (§4). Presence is
@@ -146,11 +146,36 @@ export function repairInterruptedTail(
   for (const [callId, callSeq] of calls) {
     if (!answered.has(callId) && !owed.some((entry) => entry.callId === callId)) owed.push({ callId, source: callSeq, started: true })
   }
+  /**
+   * The last seq the log actually kept. A crash truncates a SUFFIX — a torn
+   * final line, or whole lines still in the page cache when the power went
+   * (§13) — so nothing written before a surviving event can have been lost.
+   * That is what makes a missing dispatch mean something, and only there.
+   */
+  const lastSeq = events.at(-1)?.seq ?? -1
+
   for (const entry of owed) {
-    const ran = entry.started && (dispatched.has(entry.callId) || !recordsDispatch)
-    const text = ran ? unknownText(effects.get(entry.callId) ?? []) : notStartedText(entry.started)
-    const code = ran ? 'TOOL_OUTCOME_UNKNOWN' : 'TOOL_NOT_STARTED'
-    const message = createToolResultMessage(asCallId(entry.callId), [{ type: 'text', text }], true)
+    const recorded = effects.get(entry.callId) ?? []
+    const code = classify({
+      logged: entry.started,
+      reachedBody: dispatched.has(entry.callId) || recorded.length > 0,
+      recordsDispatch,
+      survivedPast: entry.source < lastSeq,
+    })
+    const text = code === 'TOOL_OUTCOME_UNKNOWN' ? unknownText(recorded) : notStartedText(entry.started)
+    /**
+     * A DERIVED message id, not a minted one. Everything else a closer emits
+     * is a pure function of the log, and `createToolResultMessage` would put a
+     * fresh UUID in the middle of it — so two readers of one stored log
+     * produced different bytes, and the claim persistence leans on when it
+     * compares a resumed tail ("another process writes the same closers")
+     * would have been false the moment that check grew past type and time.
+     * Unique within a session: one synthetic result per call, per open step.
+     */
+    const message = restoreMessage({
+      ...createToolResultMessage(asCallId(entry.callId), [{ type: 'text', text }], true),
+      id: asMessageId(`msg-repair-${turn}-${step}-${entry.callId}`),
+    })
     closers.push(
       deepFreeze({
         type: TOOL_RESULT.type,
@@ -167,6 +192,40 @@ export function repairInterruptedTail(
   }
   closers.push(deepFreeze({ type: TURN_END.type, seq: seq++, time, data: { turn, reason: { kind: 'interrupted' } } }) as EventEnvelope)
   return closers
+}
+
+/**
+ * The recovery table, as four rows.
+ *
+ * The last one is the one that is easy to get wrong. A missing `tool/dispatch`
+ * only means "the gate never passed" if the log could not have LOST it, and
+ * the log is not fsynced (§4): a crash truncates a suffix — a torn final line,
+ * or whole lines still in the page cache when the power went (§13). So absence
+ * is evidence exactly when this log kept something written AFTER the call,
+ * because the writer would have written the dispatch before that later event
+ * and a suffix truncation cannot take one and leave the other. A call whose
+ * `tool/call` is the last surviving line is the genuinely ambiguous case — the
+ * gate never passed, OR the dispatch and everything after it is gone — and
+ * there the answer is unknown.
+ *
+ * Without that bound the row is a REGRESSION on the pre-S14 rule: a power cut
+ * after an effect landed would read as "did not run, safe to call again",
+ * which is the one answer this whole contract exists to prevent.
+ */
+function classify(evidence: {
+  /** A `tool/call` was logged for this block. */
+  readonly logged: boolean
+  /** A `tool/dispatch` was logged for it, or an effect was recorded against it. */
+  readonly reachedBody: boolean
+  /** This log's writer records dispatches at all — a 1.0.0 log does not. */
+  readonly recordsDispatch: boolean
+  /** The log kept an event written after this call's `tool/call`. */
+  readonly survivedPast: boolean
+}): 'TOOL_NOT_STARTED' | 'TOOL_OUTCOME_UNKNOWN' {
+  if (!evidence.logged) return 'TOOL_NOT_STARTED'
+  if (evidence.reachedBody) return 'TOOL_OUTCOME_UNKNOWN'
+  if (evidence.recordsDispatch && evidence.survivedPast) return 'TOOL_NOT_STARTED'
+  return 'TOOL_OUTCOME_UNKNOWN'
 }
 
 /**

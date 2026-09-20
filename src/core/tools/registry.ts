@@ -255,10 +255,13 @@ class ToolRegistry implements Tools {
      */
     const run = async (exec: ToolContext): Promise<ToolResult> => {
       // The gate checked this on the way in, but consent and the durability
-      // write are both awaits: a cancellation landing in either of them must
-      // not still reach an effect. Checked on both sides of the write so a
-      // doomed call neither records a dispatch nor runs — the same re-check
-      // DSH's checkpoint policy makes around its own pre-body barrier.
+      // write are both awaits: a cancellation landing in either must not still
+      // reach an effect. Hence both sides — the same re-check DSH's checkpoint
+      // policy makes around its own pre-body barrier. The SECOND one refuses a
+      // call whose `tool/dispatch` is already on the record; that pair reads
+      // oddly in a log and is deliberate, because the alternative is an effect
+      // after a cancellation. It costs nothing at recovery: the call is
+      // answered, so repair never reads it.
       if (exec.signal.aborted) return errorResult('tool call aborted before dispatch', 'AbortError', 'ABORTED_BEFORE_DISPATCH')
       await onDispatch?.()
       if (exec.signal.aborted) return errorResult('tool call aborted before dispatch', 'AbortError', 'ABORTED_BEFORE_DISPATCH')

@@ -311,8 +311,17 @@ export class ShellProcess implements ShellSession {
         }
         return this.finalize(output, { timedOut: false, reset: true, restarted, startedAt }, sandbox)
       }
-      if (request.signal?.aborted) return this.finalize(this.buffer, { timedOut: false, reset: await this.reset(), restarted, startedAt }, sandbox)
-      if (Date.now() > deadline) return this.finalize(this.buffer, { timedOut: true, reset: await this.reset(), restarted, startedAt }, sandbox)
+      // `durationMs` is stamped HERE, before the reset: killing and reaping
+      // the child can take seconds, and charging that to the command would
+      // report a 120 s deadline as "timed out, 120.9s".
+      if (request.signal?.aborted) {
+        const durationMs = Date.now() - startedAt
+        return this.finalize(this.buffer, { timedOut: false, reset: await this.reset(), restarted, startedAt, durationMs }, sandbox)
+      }
+      if (Date.now() > deadline) {
+        const durationMs = Date.now() - startedAt
+        return this.finalize(this.buffer, { timedOut: true, reset: await this.reset(), restarted, startedAt, durationMs }, sandbox)
+      }
       await sleep(POLL_MS)
     }
   }
@@ -409,7 +418,7 @@ export class ShellProcess implements ShellSession {
 
   private finalize(
     raw: string,
-    extra: { exitCode?: number; timedOut: boolean; reset: boolean; restarted: boolean; startedAt: number },
+    extra: { exitCode?: number; timedOut: boolean; reset: boolean; restarted: boolean; startedAt: number; durationMs?: number },
     sandbox: ShellRunResult['sandbox'],
   ): ShellRunResult {
     const trimmed = raw.replace(/^\n+/, '').replace(/\n+$/, '')
@@ -424,7 +433,7 @@ export class ShellProcess implements ShellSession {
       timedOut: extra.timedOut,
       truncated,
       reset: extra.reset,
-      durationMs: Date.now() - extra.startedAt,
+      durationMs: extra.durationMs ?? Date.now() - extra.startedAt,
       sandbox,
       ...(extra.restarted ? { restarted: true as const } : {}),
       ...(extra.exitCode === undefined ? {} : { exitCode: extra.exitCode }),

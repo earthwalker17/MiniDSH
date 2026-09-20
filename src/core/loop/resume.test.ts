@@ -470,7 +470,7 @@ describe('the base route survives its process', () => {
 })
 
 describe('lineage survives the process', () => {
-  it('a resumed or forked child keeps delegatedBy, delegationDepth and agentPreset', async () => {
+  it('a resumed or forked child keeps its whole delegation lineage, the spawning CALL included', async () => {
     const { harness: h } = await persistedHarness()
     h.adapter.script(assistantText('one'))
     const agents = h.root.get(AGENTS)
@@ -478,6 +478,10 @@ describe('lineage survives the process', () => {
       cwd: process.cwd(),
       agentOptions: { provider: 'scripted', model: 'scripted-model' },
       delegatedBy: asSessionId('session-parent'),
+      // The join that survives a crash between the child's publication and the
+      // parent's `subagent/start` — and the only thing separating two children
+      // of one step from this side.
+      delegatedByCallId: 'call-7',
       delegationDepth: 2,
       agentPreset: 'reviewer',
     })
@@ -487,9 +491,9 @@ describe('lineage survives the process', () => {
     await child.dispose()
 
     const resumed = await agents.resume(h.root, id)
-    expect(resumed.agent.session.header).toMatchObject({ delegatedBy: 'session-parent', delegationDepth: 2, agentPreset: 'reviewer' })
+    expect(resumed.agent.session.header).toMatchObject({ delegatedBy: 'session-parent', delegatedByCallId: 'call-7', delegationDepth: 2, agentPreset: 'reviewer' })
     const forked = await agents.fork(h.root, id)
-    expect(forked.agent.session.header).toMatchObject({ parentId: id, delegatedBy: 'session-parent', delegationDepth: 2, agentPreset: 'reviewer' })
+    expect(forked.agent.session.header).toMatchObject({ parentId: id, delegatedBy: 'session-parent', delegatedByCallId: 'call-7', delegationDepth: 2, agentPreset: 'reviewer' })
     await forked.dispose()
     await resumed.dispose()
   })

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { asCallId, asSessionId } from '../ids.ts'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '../llm/message.ts'
+import { APPROVAL_ASKED } from '../approval/events.ts'
 import { EFFECT_RECORDED } from '../effects/index.ts'
 import { invariantsPlugin } from '../invariants/index.ts'
 import { repairInterruptedTail } from './repair.ts'
@@ -297,25 +298,56 @@ describe('Session: the recovery contract', () => {
     expect(text).toMatch(/never blindly/)
   })
 
-  it('reads a call that never left its gate as not started — but only in a log that records dispatches', async () => {
+  /** A log whose first step completed a dispatched call, so its writer demonstrably records them. */
+  const recordsDispatches = (a: Session['append']): void => {
+    a(TURN_START, { turn: 1 })
+    a(STEP_START, { turn: 1, step: 1 })
+    a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c0')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+    a(TOOL_CALL, { turn: 1, step: 1, callId: 'c0', name: 'str_replace_editor', arguments: '{}' })
+    a(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c0' })
+    a(TOOL_RESULT, { turn: 1, step: 1, callId: 'c0', message: createToolResultMessage(asCallId('c0'), [{ type: 'text', text: 'ok' }], false) }, { surfaceOp: { op: 'append' } })
+    a(STEP_END, { turn: 1, step: 1 })
+    a(STEP_START, { turn: 1, step: 2 })
+    a(ASSISTANT_MESSAGE, { turn: 1, step: 2, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+    a(TOOL_CALL, { turn: 1, step: 2, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
+  }
+
+  it('reads a call that never left its gate as not started, when the log kept something written after it', async () => {
     const { result } = await crashedAt((append) => {
       const a = append as unknown as Session['append']
-      a(TURN_START, { turn: 1 })
-      // Step 1 completed, so this log's WRITER demonstrably records dispatches.
-      a(STEP_START, { turn: 1, step: 1 })
-      a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c0')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
-      a(TOOL_CALL, { turn: 1, step: 1, callId: 'c0', name: 'str_replace_editor', arguments: '{}' })
-      a(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c0' })
-      a(TOOL_RESULT, { turn: 1, step: 1, callId: 'c0', message: createToolResultMessage(asCallId('c0'), [{ type: 'text', text: 'ok' }], false) }, { surfaceOp: { op: 'append' } })
-      a(STEP_END, { turn: 1, step: 1 })
-      // Step 2 died at the gate: a call, no dispatch.
-      a(STEP_START, { turn: 1, step: 2 })
-      a(ASSISTANT_MESSAGE, { turn: 1, step: 2, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
-      a(TOOL_CALL, { turn: 1, step: 2, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
+      recordsDispatches(a)
+      // The gate ASKED and the host died while a person deliberated. The ask
+      // is the event after the call, and it is what makes the absent dispatch
+      // mean something: the writer got past this call without dispatching it.
+      a(APPROVAL_ASKED, { id: 'approval-11', toolName: 'str_replace_editor', callId: 'c1' })
     })
     expect(codeOf(result)).toBe('TOOL_NOT_STARTED')
     expect(resultText(result)).toMatch(/policy and approval gate/)
     expect(resultText(result)).toMatch(/safe to make the call again/)
+  })
+
+  /**
+   * The row that would otherwise be a REGRESSION on the pre-S14 rule. The log
+   * is not fsynced, so a crash can take the dispatch line and leave the call —
+   * and "did not run, safe to call again" about a `git push` that went is the
+   * one answer this whole contract exists to prevent.
+   */
+  it('stays unknown when the `tool/call` is the last surviving line, because truncation explains it too', async () => {
+    const { result } = await crashedAt((append) => recordsDispatches(append as unknown as Session['append']))
+    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
+    expect(resultText(result)).toMatch(/may or may not have taken effect/)
+  })
+
+  it('stays unknown when the body left an effect, whatever else the log lost', async () => {
+    const { result } = await crashedAt((append) => {
+      const a = append as unknown as Session['append']
+      recordsDispatches(a)
+      // No `tool/dispatch` for c1 — but an effect recorded against it, which
+      // only the body could have produced. Proof beats the absence rule.
+      a(EFFECT_RECORDED, { callId: 'c1', effect: 'fs-write', path: '/w/landed.txt', bytes: 4, sha256: 'bbbbbbbbbbbb' })
+    })
+    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
+    expect(resultText(result)).toContain('wrote /w/landed.txt')
   })
 
   it('stays conservative on a log from before the dispatch fact existed', async () => {
@@ -365,6 +397,27 @@ describe('Session: relational invariant', () => {
     expect(() =>
       session.append(TOOL_RESULT, { turn: 1, step: 1, callId: 'missing', message: orphan }, { surfaceOp: { op: 'append' }, sourceEventSeqs: [] }),
     ).toThrowError(/no pending tool\/call/)
+  })
+
+  /**
+   * The gate-to-body fact is only meaningful about a call this step logged. A
+   * second writer appending one for an answered or unknown call would make
+   * repair read "the body may have run" about something that never dispatched
+   * — which is the whole reason the recovery rule trusts it.
+   */
+  it('throws when a tool/dispatch names a call this step never logged', async () => {
+    const { sessions } = await harness(true)
+    const session = sessions.create({ cwd: '/w' })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    expect(() => session.append(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'ghost' })).toThrowError(/tool\/dispatch for "ghost" has no pending tool\/call/)
+  })
+
+  it('throws when a tool/dispatch lands outside an open step', async () => {
+    const { sessions } = await harness(true)
+    const session = sessions.create({ cwd: '/w' })
+    session.append(TURN_START, { turn: 1 })
+    expect(() => session.append(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c1' })).toThrowError(/outside an open step/)
   })
 
   /**

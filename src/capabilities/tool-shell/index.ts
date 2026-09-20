@@ -141,7 +141,7 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
         // ran, its exit code and the enforcement it actually got.
         const result = await shellSession.exec({ command: args.command, policy, callId: exec.callId, timeoutMs, signal: exec.signal, ...(escalated ? { oneShot: true } : {}) })
         // "Nothing ran" must never read as "ran and printed nothing".
-        if (result.aborted) throw Object.assign(new Error('command not dispatched: the call was cancelled'), { code: 'ABORTED_BEFORE_DISPATCH' })
+        if (result.aborted) throw Object.assign(new Error('command not dispatched: the call was cancelled, or this shell was already disposed'), { code: 'ABORTED_BEFORE_DISPATCH' })
         // "The shell died" must never read as "the command printed nothing":
         // a reset without a timeout means the child exited under the command.
         // A one-shot command times out without touching the persistent shell,

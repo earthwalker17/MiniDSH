@@ -148,20 +148,30 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
       const { callId, error } = result.data as { callId: string; error: { code: string } }
       expect({ callId, unknown: error.code === 'TOOL_OUTCOME_UNKNOWN' }).toEqual({ callId, unknown: dispatched.has(callId) })
     }
-    // And every bracket a crash could have left open is closed. None is open
-    // in this arc, so this also asserts the closers invented none.
+    /**
+     * Brackets, in BOTH directions. This arc neither delegates nor compacts,
+     * so "nothing is left open" holds vacuously — and an invented closer would
+     * pass it too, by deleting a key that was never there. So the ends are
+     * counted against the starts as well: repair must close what the log
+     * opened and must not close what it did not.
+     */
     const openSubagents = new Set<string>()
     const openCompactions = new Set<number>()
+    const orphanEnds: string[] = []
     for (const event of storedEvents) {
       const data = event.data as { childId?: string; startSeq?: number }
       if (event.type === 'subagent/start') openSubagents.add(String(data.childId))
-      else if (event.type === 'subagent/end') openSubagents.delete(String(data.childId))
-      // A compaction bracket is keyed by the START's own seq, which its end cites.
-      else if (event.type === 'compaction/start') openCompactions.add(event.seq)
-      else if (event.type === 'compaction/end') openCompactions.delete(Number(data.startSeq))
+      else if (event.type === 'subagent/end') {
+        if (!openSubagents.delete(String(data.childId))) orphanEnds.push(`subagent/end ${String(data.childId)}`)
+        // A compaction bracket is keyed by the START's own seq, which its end cites.
+      } else if (event.type === 'compaction/start') openCompactions.add(event.seq)
+      else if (event.type === 'compaction/end') {
+        if (!openCompactions.delete(Number(data.startSeq))) orphanEnds.push(`compaction/end ${String(data.startSeq)}`)
+      }
     }
-    expect([...openSubagents]).toEqual([])
-    expect([...openCompactions]).toEqual([])
+    expect([...openSubagents], 'a bracket the crash left open').toEqual([])
+    expect([...openCompactions], 'a bracket the crash left open').toEqual([])
+    expect(orphanEnds, 'a closer that ended a bracket nothing opened').toEqual([])
 
     // The WIRE: history reads back over the protocol, seqs contiguous.
     const history = await second.request<{ events: EventEnvelope[] }>('session/events', { sessionId })

@@ -55,7 +55,7 @@ afterEach(async () => {
 
 interface Fixture {
   agent: Agent
-  run(args: object): Promise<{ isError: boolean; code: string | undefined; text: string }>
+  run(args: object, callId?: string): Promise<{ isError: boolean; code: string | undefined; text: string }>
 }
 
 async function setup(): Promise<Fixture> {
@@ -68,8 +68,8 @@ async function setup(): Promise<Fixture> {
   const tools = harness.root.get(TOOLS)
   return {
     agent,
-    run: async (args: object) => {
-      const result = await tools.execute(toolCall(`call-${Math.random()}`, toolName, JSON.stringify(args), agent, new AbortController().signal))
+    run: async (args: object, callId = `call-${Math.random()}`) => {
+      const result = await tools.execute(toolCall(callId, toolName, JSON.stringify(args), agent, new AbortController().signal))
       const text = result.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
       return { isError: result.isError, code: result.error?.info?.code, text }
     },
@@ -155,8 +155,8 @@ async function confinedSetup(answer: { output: string; exitCode: number }): Prom
   return {
     agent,
     shell,
-    run: async (args: object) => {
-      const result = await tools.execute(toolCall(`call-${Math.random()}`, toolName, JSON.stringify(args), agent, new AbortController().signal))
+    run: async (args: object, callId = `call-${Math.random()}`) => {
+      const result = await tools.execute(toolCall(callId, toolName, JSON.stringify(args), agent, new AbortController().signal))
       const text = result.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
       return { isError: result.isError, code: result.error?.info?.code, text }
     },
@@ -189,10 +189,14 @@ describe('the shell on a host that DOES confine', () => {
   it('marks an approved escalation one-shot, and tells the model its state did not persist', async () => {
     const { agent, run, shell } = await confinedSetup({ output: 'ran', exitCode: 0 })
     harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
-    const result = await run({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'write outside' })
+    const result = await run({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'write outside' }, 'call-escalated')
     expect(result.isError).toBe(false)
     expect(shell.seen.at(-1)!.oneShot).toBe(true)
     expect(shell.seen.at(-1)!.policy.mode).toBe('danger-full-access')
+    // The CALL travels with the command. Without it the provider has nothing
+    // to key an effect record to, and every shell command in the product
+    // silently stops recording one (§4).
+    expect(shell.seen.at(-1)!.callId).toBe('call-escalated')
     expect(result.text).toContain('ran in a separate shell')
     // One ask per escalation: a command that already spent consent is finished.
     expect(approvals(agent).filter((entry) => entry.type === 'approval/asked')).toHaveLength(1)

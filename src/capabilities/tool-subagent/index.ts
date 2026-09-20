@@ -312,9 +312,11 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     // the driver owes `step/end`: a child whose persistence is quarantined makes
     // this flush throw, and an unpaired `subagent/start` would leave the
     // parent's log unable to explain the very failure the pair exists for.
-    // A HOST DEATH is not an exit path of anything: crash repair does not close
-    // this bracket yet, so a killed delegation stays unpaired and its cost is
-    // summed nowhere (ARCHITECTURE §13; the recovery contract, BLUEPRINT §1).
+    // A HOST DEATH is not an exit path of anything, so the pair it leaves open
+    // is closed elsewhere: `closeUnpairedSubagents` writes one
+    // `subagent/end{interrupted}` at the next resume or cold fork — without
+    // `usage`, since the child's cost is summed in the child's own log and a
+    // closer may not invent a total (ARCHITECTURE §4, §13).
     let lost: unknown
     try {
       await child.session.flush()

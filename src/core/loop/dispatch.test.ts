@@ -14,7 +14,7 @@ import { assistantText, assistantToolCall } from '../../test-support/scripted-ad
 import { APPROVAL_REQUEST } from '../approval/index.ts'
 import { createUserMessage } from '../llm/message.ts'
 import { SESSION_FLUSH, TOOL_CALL, TOOL_DISPATCH, TOOL_RESULT, TURN_END, type EventEnvelope } from '../session/index.ts'
-import { defineTool, TOOLS, TOOLS_PRE_EXECUTE } from '../tools/index.ts'
+import { defineTool, TOOLS, TOOLS_EXECUTE, TOOLS_PRE_EXECUTE } from '../tools/index.ts'
 
 let harness: CoreHarness | undefined
 afterEach(async () => {
@@ -92,6 +92,50 @@ describe('the gate-to-body fact', () => {
     // The ask is durable; the dispatch is not, because the body never ran.
     expect(types(handle.agent.session.facts)).toContain('approval/asked')
     expect(types(handle.agent.session.facts)).not.toContain(TOOL_DISPATCH.type)
+    await handle.dispose()
+  })
+
+  /**
+   * The placement S14 argues for hardest, and nothing in the repository
+   * exercised it: `tools/execute` is around-middleware, and a middleware that
+   * answers without calling `next()` REPLACES the body. Written before the
+   * waterfall, the fact would claim a body that provably never ran — which is
+   * exactly what S16's planned effect-free replay middleware would produce.
+   */
+  it('is never written when a tools/execute middleware answers instead of the body', async () => {
+    const ran = { value: false }
+    const h = await world(ran)
+    h.root.on(TOOLS_EXECUTE, async () => ({ isError: false, content: [{ type: 'text', text: 'replayed' }] }))
+    h.adapter.script(assistantToolCall('c1', 'probe', {}), assistantText('done'))
+    const handle = await h.create()
+    handle.agent.followup(createUserMessage('go'))
+    await handle.agent.whenIdle()
+
+    expect(ran.value).toBe(false)
+    expect(types(handle.agent.session.facts)).not.toContain(TOOL_DISPATCH.type)
+    // The call and its answer are both on the record; only the claim that a
+    // body was about to run is absent, because none was.
+    expect(types(handle.agent.session.facts)).toContain(TOOL_CALL.type)
+    expect(types(handle.agent.session.facts)).toContain(TOOL_RESULT.type)
+    await handle.dispose()
+  })
+
+  it('refuses the body when the call is cancelled during the durability write', async () => {
+    const ran = { value: false }
+    const h = await world(ran)
+    h.adapter.script(assistantToolCall('c1', 'probe', {}), assistantText('done'))
+    const handle = await h.create()
+    // Ctrl-C landing inside the checkpoint: the dispatch is already durable,
+    // and the body must still not run.
+    h.root.on(SESSION_FLUSH, (session) => {
+      if (session.events.at(-1)?.type === TOOL_DISPATCH.type) handle.agent.cancel({ kind: 'user' })
+    })
+    handle.agent.followup(createUserMessage('go'))
+    await handle.agent.whenIdle()
+
+    expect(ran.value).toBe(false)
+    const result = handle.agent.session.facts.find((event) => event.type === TOOL_RESULT.type)!
+    expect(codeOf(result)).toBe('ABORTED_BEFORE_DISPATCH')
     await handle.dispose()
   })
 
