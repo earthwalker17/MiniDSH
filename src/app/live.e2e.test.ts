@@ -108,6 +108,43 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     expect((interrupted[0]!.data as { turn: number }).turn).toBe(2)
     expect(storedEvents.some((event) => event.type === 'session/end-seed')).toBe(true)
 
+    /**
+     * THE RECOVERY CONTRACT, against a real kill. The kill lands the instant
+     * turn 2 issues its first tool call, so which side of the gate it caught is
+     * genuinely undecided — which is exactly why the assertion is the
+     * EQUIVALENCE rather than either code: a synthetic result says "the body
+     * may have run" if and only if the log says the body was about to run.
+     * Turn 1 completed a tool call, so this log demonstrably records
+     * dispatches and the deduction is the sharp one, not the fallback.
+     */
+    const dispatched = new Set(
+      storedEvents.filter((event) => event.type === 'tool/dispatch').map((event) => (event.data as { callId: string }).callId),
+    )
+    expect(dispatched.size, 'turn 1 ran a tool, so this log records dispatches').toBeGreaterThan(0)
+    const synthetic = storedEvents.filter((event) => {
+      const code = (event.data as { error?: { code: string } }).error?.code
+      return event.type === 'tool/result' && (code === 'TOOL_OUTCOME_UNKNOWN' || code === 'TOOL_NOT_STARTED')
+    })
+    expect(synthetic.length, 'the kill left at least one call for repair to answer').toBeGreaterThan(0)
+    for (const result of synthetic) {
+      const { callId, error } = result.data as { callId: string; error: { code: string } }
+      expect({ callId, unknown: error.code === 'TOOL_OUTCOME_UNKNOWN' }).toEqual({ callId, unknown: dispatched.has(callId) })
+    }
+    // And every bracket a crash could have left open is closed. None is open
+    // in this arc, so this also asserts the closers invented none.
+    const openSubagents = new Set<string>()
+    const openCompactions = new Set<number>()
+    for (const event of storedEvents) {
+      const data = event.data as { childId?: string; startSeq?: number }
+      if (event.type === 'subagent/start') openSubagents.add(String(data.childId))
+      else if (event.type === 'subagent/end') openSubagents.delete(String(data.childId))
+      // A compaction bracket is keyed by the START's own seq, which its end cites.
+      else if (event.type === 'compaction/start') openCompactions.add(event.seq)
+      else if (event.type === 'compaction/end') openCompactions.delete(Number(data.startSeq))
+    }
+    expect([...openSubagents]).toEqual([])
+    expect([...openCompactions]).toEqual([])
+
     // The WIRE: history reads back over the protocol, seqs contiguous.
     const history = await second.request<{ events: EventEnvelope[] }>('session/events', { sessionId })
     expect(history.events.every((event, index) => event.seq === index)).toBe(true)

@@ -24,11 +24,13 @@
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
+import { canonicalPath } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { runTask } from './headless.ts'
@@ -242,6 +244,42 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       refusedAfter.length,
       `nothing reached the fs fence ${afterSwitch} — the durable switch was never tested`,
     ).toBeGreaterThan(0)
+
+    /**
+     * ---- 4b. the log explains the WORLD ----------------------------------
+     *
+     * The effect record's whole claim is that a resumed session can tell a
+     * landed write from a lost one by reading the file. So it is checked the
+     * only way that means anything: hash what is on disk and compare. Bounded
+     * to `notes.txt`, whose final bytes the arc has just pinned — the
+     * read-only write was refused, so the LAST record for it describes what is
+     * there now.
+     */
+    const effects = serve
+      .events('effect/recorded', sessionId)
+      .map((event) => dataOf<{ callId: string; effect: string; path?: string; sha256?: string; bytes?: number; mode?: string; enforcement?: string }>(event))
+    const notes = canonicalPath(join(workspace, 'notes.txt'))
+    const writes = effects.filter((record) => record.effect === 'fs-write' && record.path === notes)
+    expect(writes.length, `no fs-write effect named ${notes}; the editor wrote it through ctx.fs, so one is owed`).toBeGreaterThan(0)
+    const landed = writes.at(-1)!
+    const onDisk = readFileSync(notes)
+    expect(landed.sha256, 'the recorded hash does not describe the bytes on disk').toBe(createHash('sha256').update(onDisk).digest('hex'))
+    expect(landed.bytes).toBe(onDisk.byteLength)
+
+    // Every shell command that RAN reports the authority it actually got, and
+    // the two branches disagree about what that is — which is the point.
+    const commands = effects.filter((record) => record.effect === 'shell-command')
+    console.log(`[authority arc] ${effects.length} effect(s) recorded: ${writes.length} write(s) of notes.txt, ${commands.length} shell command(s)`)
+    for (const command of commands) {
+      const expected = command.mode === 'danger-full-access' ? 'none' : confined ? 'full' : 'none'
+      expect({ mode: command.mode, enforcement: command.enforcement }).toEqual({ mode: command.mode, enforcement: expected })
+    }
+    if (!confined) {
+      // On an unconfined host step 3a's ordinary command was REFUSED before it
+      // ran, and only the approved escalation ran at all. A record for a
+      // command that never ran would be the exact falsehood this fact forbids.
+      expect(commands.every((command) => command.mode === 'danger-full-access')).toBe(true)
+    }
 
     // ---- 5. the log is still its own oracle -------------------------------
     const fresh = await serve.request<{ sessionId: string }>('session/prompt', {
