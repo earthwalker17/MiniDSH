@@ -282,10 +282,18 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     }
 
     // ---- 5. the log is still its own oracle -------------------------------
+    // An answerer stays up for this turn. The claim here is about the LOG, not
+    // about consent, and on an unconfined host a model that decides to verify
+    // its own file with a shell command asks for an escalation nobody was
+    // listening for — which stalls the arc on the model's mood rather than on
+    // anything this session is testing. `rejected` keeps the fence honest and
+    // lets the turn finish either way.
+    const refuseFresh = serve.answerApprovals('rejected')
     const fresh = await serve.request<{ sessionId: string }>('session/prompt', {
       text: 'Create a file named done.txt (a relative path, not an absolute one) in the working directory containing exactly: ok',
     })
     await serve.waitForCompletedTurn(fresh.sessionId, 1)
+    refuseFresh()
     const freshLog = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId: fresh.sessionId })
     await serve.shutdown()
     expect(freshLog.events.some((event) => event.type === 'sandbox/mode')).toBe(true)

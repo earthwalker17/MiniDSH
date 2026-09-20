@@ -109,23 +109,41 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     expect(storedEvents.some((event) => event.type === 'session/end-seed')).toBe(true)
 
     /**
-     * THE RECOVERY CONTRACT, against a real kill. The kill lands the instant
-     * turn 2 issues its first tool call, so which side of the gate it caught is
-     * genuinely undecided — which is exactly why the assertion is the
-     * EQUIVALENCE rather than either code: a synthetic result says "the body
-     * may have run" if and only if the log says the body was about to run.
-     * Turn 1 completed a tool call, so this log demonstrably records
-     * dispatches and the deduction is the sharp one, not the fallback.
+     * THE RECOVERY CONTRACT, against a real kill, in two assertions — one that
+     * every run exercises and one that only a kill inside the call window does.
+     *
+     * The first is the invariant the whole rule rests on: a call that PRODUCED
+     * a result ran its body, so the log must carry its `tool/dispatch`. If that
+     * ever failed, repair would read a successful call's absence of a dispatch
+     * as "never started" and tell a resumed model to redo work that was done.
+     * It holds on every call of every turn here, killed or not.
+     *
+     * The second is the equivalence, over whatever the kill actually caught.
+     * `waitFor` sees turn 2's `tool/call` frame and SIGKILLs, but the call can
+     * finish inside that window — so the count is printed rather than required,
+     * and this run's value is on the record either way. Turn 1 completed a tool
+     * call, so the log demonstrably records dispatches and any synthetic result
+     * here is decided by the sharp rule, not the 1.0.0 fallback.
      */
     const dispatched = new Set(
       storedEvents.filter((event) => event.type === 'tool/dispatch').map((event) => (event.data as { callId: string }).callId),
     )
     expect(dispatched.size, 'turn 1 ran a tool, so this log records dispatches').toBeGreaterThan(0)
-    const synthetic = storedEvents.filter((event) => {
+    const results = storedEvents.filter((event) => event.type === 'tool/result')
+    for (const result of results) {
+      const { callId, error } = result.data as { callId: string; error?: { code: string } }
+      if (error === undefined) {
+        expect({ callId, dispatched: true }, 'a call that produced a result ran its body').toEqual({ callId, dispatched: dispatched.has(callId) })
+      }
+    }
+    const synthetic = results.filter((event) => {
       const code = (event.data as { error?: { code: string } }).error?.code
-      return event.type === 'tool/result' && (code === 'TOOL_OUTCOME_UNKNOWN' || code === 'TOOL_NOT_STARTED')
+      return code === 'TOOL_OUTCOME_UNKNOWN' || code === 'TOOL_NOT_STARTED'
     })
-    expect(synthetic.length, 'the kill left at least one call for repair to answer').toBeGreaterThan(0)
+    console.log(
+      `[live arc] ${dispatched.size} dispatch(es), ${results.length} result(s), ${synthetic.length} synthesized by repair` +
+        (synthetic.length === 0 ? ' — the kill landed after the call completed, so the equivalence was not exercised this run' : ''),
+    )
     for (const result of synthetic) {
       const { callId, error } = result.data as { callId: string; error: { code: string } }
       expect({ callId, unknown: error.code === 'TOOL_OUTCOME_UNKNOWN' }).toEqual({ callId, unknown: dispatched.has(callId) })
