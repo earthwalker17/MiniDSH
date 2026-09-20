@@ -13,6 +13,7 @@ export {
   type SessionTitleState,
 } from './title.ts'
 export { repairInterruptedTail } from './repair.ts'
+export type { TailCloser } from './repair.ts'
 export {
   DEFAULT_PAGE_MESSAGES,
   MAX_PAGE_EVENTS,

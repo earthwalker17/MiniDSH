@@ -14,13 +14,13 @@ import {
   eventKind,
   foldRequestHeader,
   matches,
-  repairInterruptedTail,
   sliceForkSeed,
   type EventEnvelope,
   type Session,
   type SessionHeader,
 } from '../session/index.ts'
 import { AGENT_CREATED, AGENT_DISPOSED, AGENT_REQUEST, foldAgentOptions } from './events.ts'
+import { repairTail } from './repair.ts'
 import type {
   Agent,
   AgentFactory,
@@ -36,6 +36,9 @@ import type {
 } from './types.ts'
 
 export * from './types.ts'
+// The composed crash repair: the session's own closers plus one per bracket
+// this package and `core/compaction` own (see `repair.ts`).
+export * from './repair.ts'
 // The vocabulary lives below the service (`events.ts`), like the sandbox and
 // approval vocabularies, so a core service can name an agent event without
 // importing this registry; every caller keeps importing it from here.
@@ -280,7 +283,7 @@ class AgentRegistry implements Agents {
 
   async resume(owner: Context, id: SessionId, options: ResumeAgentOptions = {}): Promise<AgentHandle> {
     const stored = this.loadStored(id)
-    const closers = repairInterruptedTail(stored.events)
+    const closers = repairTail(stored.events)
     const seed = closers.length === 0 ? stored.events : [...stored.events, ...closers]
     return this.create(owner, {
       cwd: stored.header.cwd,
@@ -348,7 +351,7 @@ class AgentRegistry implements Agents {
     const live = this.agents.get(source)
     if (live) return { events: live.session.events, cwd: live.session.header.cwd, parentId: live.session.id, header: live.session.header }
     const stored = this.loadStored(source)
-    const closers = repairInterruptedTail(stored.events)
+    const closers = repairTail(stored.events)
     return {
       events: closers.length === 0 ? stored.events : [...stored.events, ...closers],
       cwd: stored.header.cwd,

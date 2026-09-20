@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { persistenceJsonlPlugin } from '../../capabilities/persistence-jsonl/index.ts'
-import { AGENTS } from '../agent/index.ts'
+import { AGENTS, SUBAGENT_END, SUBAGENT_START } from '../agent/index.ts'
+import { COMPACTION_END, COMPACTION_START, foldCompactionFailures } from '../compaction/index.ts'
 import { asSessionId } from '../ids.ts'
 import { createUserMessage } from '../llm/message.ts'
-import { SESSIONS, STEP_START, TOOL_CALL, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
+import { SESSIONS, STEP_START, TOOL_CALL, TOOL_DISPATCH, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
 import { assistantText } from '../../test-support/scripted-adapter.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 
@@ -122,6 +123,46 @@ describe('agents.resume', () => {
     expect(stored).toContain('session/end-seed')
     const turnEnds = resumed.agent.session.events.filter((event) => event.type === 'turn/end')
     expect(turnEnds.map((event) => (event.data as { reason: { kind: string } }).reason.kind)).toEqual(['interrupted', 'completed'])
+    await resumed.dispose()
+  })
+
+  /**
+   * The oracle for "a child killed mid-call must close" (BLUEPRINT §1). A host
+   * death is not an exit path of the delegation tool, so before S14 the
+   * parent's log could not explain its own unfinished business: the bracket
+   * stayed open and the child's cost was summed nowhere.
+   */
+  it('closes a delegation and a compaction the host died inside, and the give-up count does not move', async () => {
+    const { harness: h, dir: base } = await persistedHarness()
+    const sessions = h.root.get(SESSIONS)
+    const session = sessions.create({ cwd: process.cwd(), id: asSessionId('killed') })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('delegate it') }, { surfaceOp: { op: 'append' } })
+    session.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'subagent', arguments: '{}' })
+    session.append(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c1' })
+    session.append(SUBAGENT_START, { callId: 'c1', childId: 'child-1', depth: 1, provider: 'scripted', model: 'scripted-model', sandbox: 'read-only', approval: 'never' })
+    session.append(COMPACTION_START, { trigger: 'explicit', budgetTokens: 1000, projectedTokens: 900, plannedStart: 2, plannedEnd: 3, plannedNodes: 2 })
+    void sessions.detach(session)
+
+    h.adapter.script(assistantText('recovered'))
+    const resumed = await h.root.get(AGENTS).resume(h.root, asSessionId('killed'), {
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+    })
+
+    const stored = fileEvents(base, 'killed')
+    const end = stored.find((event) => event.type === SUBAGENT_END.type)!
+    expect(end.data).toEqual({ callId: 'c1', childId: 'child-1', reason: { kind: 'interrupted' } })
+    const compactionEnd = stored.find((event) => event.type === COMPACTION_END.type)!
+    expect(compactionEnd.data).toMatchObject({ outcome: { kind: 'declined', reason: 'unclosed' } })
+    // The call had reached its body, so the model is told the outcome is
+    // unknown rather than that nothing ran.
+    const result = stored.find((event) => event.type === 'tool/result')!
+    expect((result.data as { error: { code: string } }).error.code).toBe('TOOL_OUTCOME_UNKNOWN')
+    // Closers are seeded BELOW liveStart, so the fold that disables automatic
+    // compaction after two fruitless summaries never reaches them.
+    expect(compactionEnd.seq).toBeLessThan(resumed.agent.session.liveStart)
+    expect(foldCompactionFailures(resumed.agent.session.facts, resumed.agent.session.liveStart)).toBe(0)
     await resumed.dispose()
   })
 

@@ -71,6 +71,39 @@ export const SUBAGENT_END = eventKind<{
   readonly usage?: TokenUsage
 }>('subagent/end')
 
+/**
+ * One `subagent/end{interrupted}` per `subagent/start` the log never paired.
+ *
+ * `interrupted` is the honest word here, and it is NOT the word the compaction
+ * closer uses. The delegation tool owes its end record on every exit path it
+ * has — a depth refusal, a cancelled call, a child that lost durability, a
+ * throw — so an unpaired start is not an ordinary shape this runtime can
+ * reach. Only a host death leaves one, and the turn closer beside this one
+ * says `interrupted` about the same death.
+ *
+ * It carries no `usage`: the child's cost is summed in its own log, and a
+ * closer that invented a total would be stating a number nobody measured.
+ * NOT scoped to the tail turn — a delegation can outlive the turn that
+ * started it, and the surface closers stop at the open one.
+ *
+ * Pure: the caller supplies the next seq and the shared timestamp, so a cold
+ * read and a durable repair produce identical bytes.
+ */
+export function closeUnpairedSubagents(events: readonly EventEnvelope[], nextSeq: number, time: number): EventEnvelope[] {
+  const open = new Map<string, { callId: string; childId: string }>()
+  for (const event of events) {
+    if (matches(event, SUBAGENT_START)) open.set(event.data.childId, { callId: event.data.callId, childId: event.data.childId })
+    else if (matches(event, SUBAGENT_END)) open.delete(event.data.childId)
+  }
+  let seq = nextSeq
+  return [...open.values()].map((child) => ({
+    type: SUBAGENT_END.type,
+    seq: seq++,
+    time,
+    data: { callId: child.callId, childId: child.childId, reason: { kind: 'interrupted' as const } },
+  }))
+}
+
 // ---- the base route ---------------------------------------------------------
 
 /**

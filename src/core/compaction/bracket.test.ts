@@ -37,7 +37,9 @@ describe('foldCompactionFailures', () => {
    */
   it('skips every race and shutdown, neither counting nor clearing them', () => {
     seq = 0
-    const races: CompactionDeclineReason[] = ['turn-started', 'plan-stale', 'agent-gone', 'cancelled']
+    // `unclosed` is repair's, not an attempt's: the bracket recorded no end and
+    // the writer is gone. It says nothing about the summariser either.
+    const races: CompactionDeclineReason[] = ['turn-started', 'plan-stale', 'agent-gone', 'cancelled', 'unclosed']
     expect(foldCompactionFailures(races.map(declined))).toBe(0)
     for (const reason of races) expect(COUNTING_DECLINE_REASONS.has(reason)).toBe(false)
 

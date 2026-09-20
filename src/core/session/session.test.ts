@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { asCallId, asSessionId } from '../ids.ts'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '../llm/message.ts'
+import { EFFECT_RECORDED } from '../effects/index.ts'
 import { invariantsPlugin } from '../invariants/index.ts'
 import { repairInterruptedTail } from './repair.ts'
 import { deriveEventMessage, foldRequestHeader } from './surface.ts'
@@ -11,6 +12,7 @@ import {
   STEP_END,
   STEP_START,
   TOOL_CALL,
+  TOOL_DISPATCH,
   TOOL_RESULT,
   TURN_END,
   TURN_START,
@@ -252,6 +254,104 @@ describe('Session: crash repair', () => {
     sessions.create({ cwd: '/w' })
     runTextTurn(sessions, 1, 'hi', 'hello')
     expect(repairInterruptedTail(sessions.list()[0]!.events)).toEqual([])
+  })
+})
+
+/**
+ * The four rows of the recovery table (see `repair.ts`). What separates them is
+ * evidence in the log, never a guess, and the one direction that must never
+ * happen is calling a body that ran "not started".
+ */
+describe('Session: the recovery contract', () => {
+  const call = (id: string) => ({ type: 'tool-call' as const, id: asCallId(id), name: 'str_replace_editor', arguments: '{}' })
+  // A tool result is user-role with ONE `tool-result` block wrapping the text.
+  const resultText = (event: { data: unknown }): string =>
+    (event.data as { message: { content: { content: { text: string }[] }[] } }).message.content[0]!.content[0]!.text
+  const codeOf = (event: { data: unknown }): string => (event.data as { error: { code: string } }).error.code
+
+  /** An open step whose single call is unanswered, with whatever evidence the caller adds. */
+  async function crashedAt(build: (append: (kind: never, data: never, intent?: never) => unknown) => void) {
+    const { sessions } = await harness(false)
+    const session = sessions.create({ cwd: '/w' })
+    build(session.append.bind(session) as never)
+    const closers = repairInterruptedTail(session.events)
+    return { session, closers, result: closers.find((event) => event.type === TOOL_RESULT.type)! }
+  }
+
+  it('reads a dispatched call as outcome-unknown, and says what it provably did', async () => {
+    const { result } = await crashedAt((append) => {
+      const a = append as unknown as Session['append']
+      a(TURN_START, { turn: 1 })
+      a(STEP_START, { turn: 1, step: 1 })
+      a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+      a(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
+      a(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c1' })
+      a(EFFECT_RECORDED, { callId: 'c1', effect: 'fs-write', path: '/w/notes.txt', bytes: 12, sha256: 'abc123def4567890abcdef' })
+    })
+    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
+    const text = resultText(result)
+    expect(text).toContain('wrote /w/notes.txt (12 bytes, sha256 abc123def456)')
+    // It is evidence, not an inventory, and the model is told which retry is safe.
+    expect(text).toContain('not a complete list')
+    expect(text).toMatch(/read-only or idempotent/)
+    expect(text).toMatch(/never blindly/)
+  })
+
+  it('reads a call that never left its gate as not started — but only in a log that records dispatches', async () => {
+    const { result } = await crashedAt((append) => {
+      const a = append as unknown as Session['append']
+      a(TURN_START, { turn: 1 })
+      // Step 1 completed, so this log's WRITER demonstrably records dispatches.
+      a(STEP_START, { turn: 1, step: 1 })
+      a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c0')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+      a(TOOL_CALL, { turn: 1, step: 1, callId: 'c0', name: 'str_replace_editor', arguments: '{}' })
+      a(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c0' })
+      a(TOOL_RESULT, { turn: 1, step: 1, callId: 'c0', message: createToolResultMessage(asCallId('c0'), [{ type: 'text', text: 'ok' }], false) }, { surfaceOp: { op: 'append' } })
+      a(STEP_END, { turn: 1, step: 1 })
+      // Step 2 died at the gate: a call, no dispatch.
+      a(STEP_START, { turn: 1, step: 2 })
+      a(ASSISTANT_MESSAGE, { turn: 1, step: 2, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+      a(TOOL_CALL, { turn: 1, step: 2, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
+    })
+    expect(codeOf(result)).toBe('TOOL_NOT_STARTED')
+    expect(resultText(result)).toMatch(/policy and approval gate/)
+    expect(resultText(result)).toMatch(/safe to make the call again/)
+  })
+
+  it('stays conservative on a log from before the dispatch fact existed', async () => {
+    // The same shape as above with step 1's dispatch removed: absence is no
+    // longer evidence, so the call a 1.0.0 log left open reads as it always did.
+    const { result } = await crashedAt((append) => {
+      const a = append as unknown as Session['append']
+      a(TURN_START, { turn: 1 })
+      a(STEP_START, { turn: 1, step: 1 })
+      a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+      a(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
+    })
+    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
+    expect(resultText(result)).toContain('No effect was recorded for it, which is not proof that none happened')
+  })
+
+  it('never attributes an earlier step’s effects to a repeated call id', async () => {
+    const { result } = await crashedAt((append) => {
+      const a = append as unknown as Session['append']
+      a(TURN_START, { turn: 1 })
+      a(STEP_START, { turn: 1, step: 1 })
+      a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+      a(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
+      a(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c1' })
+      a(EFFECT_RECORDED, { callId: 'c1', effect: 'fs-write', path: '/w/from-step-one.txt', bytes: 3, sha256: 'aaaaaaaaaaaa' })
+      a(TOOL_RESULT, { turn: 1, step: 1, callId: 'c1', message: createToolResultMessage(asCallId('c1'), [{ type: 'text', text: 'ok' }], false) }, { surfaceOp: { op: 'append' } })
+      a(STEP_END, { turn: 1, step: 1 })
+      // The SAME id again — nothing makes a call id unique across steps.
+      a(STEP_START, { turn: 1, step: 2 })
+      a(ASSISTANT_MESSAGE, { turn: 1, step: 2, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+      a(TOOL_CALL, { turn: 1, step: 2, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
+      a(TOOL_DISPATCH, { turn: 1, step: 2, callId: 'c1' })
+    })
+    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
+    expect(resultText(result)).not.toContain('from-step-one.txt')
+    expect(resultText(result)).toContain('No effect was recorded')
   })
 })
 
