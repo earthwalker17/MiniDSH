@@ -19,7 +19,7 @@
 import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
 import { APPROVAL_REQUEST, type ApprovalAnswer } from '../../core/approval/index.ts'
-import { intentKey } from '../../core/effects/index.ts'
+import { clampIntent, intentKey, MAX_INTENT_CHARS } from '../../core/effects/index.ts'
 import { SANDBOX_MODES, type SandboxMode } from '../../core/sandbox/index.ts'
 
 /** One exact action this deployment approves without asking anyone. */
@@ -44,7 +44,11 @@ const configSchema = z
       .array(
         z.strictObject({
           tool: z.string().min(1),
-          command: z.string().min(1),
+          // Bounded by the same cap the subject is: past it an intent is
+          // `truncated` and has no key at all, so a longer entry could only
+          // ever be a row that silently matches nothing. The contract refuses
+          // it at boot, naming the row, as every shipped config does.
+          command: z.string().min(1).max(MAX_INTENT_CHARS),
           mode: z.enum(SANDBOX_MODES as [SandboxMode, ...SandboxMode[]]),
           enforcement: z.enum(['full', 'partial', 'none']).optional(),
         }),
@@ -53,17 +57,33 @@ const configSchema = z
   })
   .optional()
 
-/** The allow-list as keys, built once at mount: a list this long is a lookup, not a scan. */
+/**
+ * The allow-list as keys, built once at mount: a list this long is a lookup,
+ * not a scan.
+ *
+ * Every entry goes through `clampIntent` — the SAME normalization the seam
+ * applies to a live subject before keying it. Keying the raw config string
+ * instead would disagree with the request side in both directions: an entry
+ * naming a two-line script could never match (a dead row, silently), and an
+ * entry naming a one-line command could match a two-line one the author never
+ * wrote. A row whose key cannot exist at all (the cut at `MAX_INTENT_CHARS`)
+ * fails the boot naming itself, because a silently inert allow entry is how an
+ * unattended run stops for a reason nobody can see.
+ */
 function allowedKeys(allow: readonly HeadlessAllowEntry[]): ReadonlySet<string> {
   const keys = new Set<string>()
   for (const entry of allow) {
-    const key = intentKey(entry.tool, {
-      effect: 'shell-command',
-      command: entry.command,
-      mode: entry.mode,
-      enforcement: entry.enforcement ?? 'none',
-    })
-    if (key !== undefined) keys.add(key)
+    const key = intentKey(
+      entry.tool,
+      clampIntent({
+        effect: 'shell-command',
+        command: entry.command,
+        mode: entry.mode,
+        enforcement: entry.enforcement ?? 'none',
+      }),
+    )
+    if (key === undefined) throw new Error(`approval-headless: allow entry for "${entry.tool}" has a command too long to identify; shorten it or drop the entry`)
+    keys.add(key)
   }
   return keys
 }

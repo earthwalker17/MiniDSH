@@ -18,7 +18,7 @@ import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
-import type { ApprovalOfferId, OpenApproval } from '../../core/approval/index.ts'
+import type { ApprovalOfferId, ApprovedCall, OpenApproval } from '../../core/approval/index.ts'
 import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
@@ -169,7 +169,14 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
    * the first would leave a standing `[y/N]` for a question that is already
    * answered, and the next line a person typed would be swallowed as its answer.
    */
-  const askApproval = (data: { id: string; toolName: string; reason?: string; subject?: EffectIntent; offers?: readonly ApprovalOfferId[] }): void => {
+  const askApproval = (data: {
+    id: string
+    toolName: string
+    reason?: string
+    subject?: EffectIntent
+    call?: ApprovedCall
+    offers?: readonly ApprovalOfferId[]
+  }): void => {
     if (answeredIds.has(data.id)) return
     pendingApproval = { id: data.id, toolName: data.toolName, offered: false }
     queueMicrotask(() => {
@@ -188,6 +195,15 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       // parentheses, where it reads as the claim it is.
       const says = data.subject ? ` — ${describeIntent(data.subject)}` : ''
       const keys = offered ? '[y/N/a] ' : '[y/N] '
+      // With no subject — only a deployment's own `tools/pre-execute` policy
+      // asks that way — the joined call is all there is, and a bare tool name
+      // is not a question anyone can answer. The browser has always shown it;
+      // a terminal user was being asked to consent to strictly less.
+      const call = data.call ?? lastPending.find((entry) => entry.id === data.id)?.call
+      if (says === '' && call !== undefined) {
+        const omitted = call.omittedChars === undefined ? '' : `\n  […${call.omittedChars} more characters: approve from \`minidsh sessions show <id> --json\`, or deny]`
+        out.write(`  ${call.name} ${call.arguments}${omitted}\n`)
+      }
       out.write(`approve ${data.toolName}${says}${data.reason ? ` (${data.reason})` : ''}? ${keys}`)
       promptStanding = true
     })

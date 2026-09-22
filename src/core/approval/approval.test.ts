@@ -3,9 +3,10 @@ import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { AGENTS } from '../agent/index.ts'
 import { intentKey, type EffectIntent } from '../effects/index.ts'
 import { SANDBOX } from '../sandbox/index.ts'
+import { AUTHORITY_PRESET } from '../presets/index.ts'
 import { TOOL_CALL, type EventEnvelope } from '../session/index.ts'
 import { matches } from '../session/index.ts'
-import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_REQUEST, openApprovals, type ApprovalOutcome } from './index.ts'
+import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_REQUEST, liveGrants, openApprovals, type ApprovalAnswer, type ApprovalOutcome } from './index.ts'
 
 let harness: CoreHarness | undefined
 afterEach(async () => {
@@ -84,9 +85,35 @@ describe('approval seam', () => {
     })
     const asked = agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!
     const subject = (asked.data as { subject?: EffectIntent }).subject!
-    expect(subject.command).toBe('ls [2Kapprove')
+    // ESCAPED, not flattened. Replacing each control with a space is
+    // many-to-one, and on a consent line that is fatal twice over: a person
+    // reads one command where two were written, and the two share a key.
+    expect(subject.command).toBe('ls\\x1b[2Kapprove')
+    expect(subject.escaped).toBe(true)
     // The answerer is shown exactly the bytes a reader of the audit would see.
     expect(seen).toEqual(subject)
+  })
+
+  it('does not let a control character hide a second command inside a consented one', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalAnswer> => ({ outcome: 'allowed-once', by: 'user', grant: true }))
+    const approval = harness.root.get(APPROVAL)
+    const ask = (command: string): Promise<ApprovalOutcome> =>
+      approval.request({ agent, toolName: 'bash', subject: { effect: 'shell-command', command, mode: 'danger-full-access', enforcement: 'none' } })
+
+    await ask('echo hello')
+    expect(approval.grants(agent.session)).toHaveLength(1)
+    const askedBefore = agent.session.facts.filter((event) => matches(event, APPROVAL_ASKED)).length
+
+    // Same bytes but for one newline: a different command, and it MUST be put
+    // to somebody rather than answered by the consent given for the first.
+    await ask('echo\nhello')
+    const decisions = agent.session.facts.filter((event) => matches(event, APPROVAL_DECIDED)).slice(askedBefore)
+    expect(decisions.map((event) => (event.data as { decidedBy?: string }).decidedBy)).toEqual(['user'])
+    // And a literal backslash-n does not meet a real newline in the middle.
+    const escaped = agent.session.facts.filter((event) => matches(event, APPROVAL_ASKED)).map((event) => (event.data as { subject?: EffectIntent }).subject!)
+    expect(new Set(escaped.map((subject) => intentKey('bash', subject))).size).toBe(escaped.length)
   })
 
   it('records that an over-long subject was cut, so it can never key a grant', async () => {
@@ -289,6 +316,56 @@ describe('standing grants', () => {
 
     harness.root.get(SANDBOX).setMode(agent.session, 'read-only')
     expect(approval.grants(agent.session)).toHaveLength(0)
+  })
+
+  /**
+   * Two of the four kinds in `AUTHORITY_KINDS` are bare string literals no
+   * compiler checks — a rename or a typo in either would compile, typecheck and
+   * pass every other test while grants quietly outlived the authority change
+   * that was supposed to end them. `/accept none` is precisely a change to what
+   * the shell world does, so it is the one a grant must not survive.
+   */
+  it('ends a grant on the OTHER two authority kinds too, which no type checks', async () => {
+    for (const move of ['acceptance', 'preset'] as const) {
+      harness = await coreHarness()
+      const { agent } = await harness.create()
+      harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+      const approval = harness.root.get(APPROVAL)
+      await approval.request({ agent, toolName: 'bash', subject })
+      expect(approval.grants(agent.session), move).toHaveLength(1)
+
+      if (move === 'acceptance') harness.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
+      else agent.session.append(AUTHORITY_PRESET, { name: 'workspace-write' })
+      expect(approval.grants(agent.session), move).toHaveLength(0)
+      await harness.dispose()
+      harness = undefined
+    }
+  })
+
+  /**
+   * The grant is written BEFORE the decision that names it, so the decision can
+   * carry its id — and the log is not fsynced, so a crash can keep the first
+   * line and lose the second. Repair then closes that ask `cancelled`: nobody
+   * consented. A grant whose own ask was never allowed must not go on answering
+   * for the rest of the session.
+   */
+  it('does not honour a grant whose decision the log never kept', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject })
+    const whole = agent.session.facts
+    expect(liveGrants(whole).size).toBe(1)
+
+    // The same log with its last line lost — exactly what a suffix truncation
+    // leaves, and what the tail repair then closes `cancelled`.
+    const torn = whole.filter((event) => !matches(event, APPROVAL_DECIDED))
+    expect(torn.some((event) => matches(event, APPROVAL_GRANT))).toBe(true)
+    expect(liveGrants(torn).size).toBe(0)
+
+    const repaired = [...torn, { ...whole.at(-1)!, data: { id: (whole.at(-1)!.data as { id: string }).id, outcome: 'cancelled' } }] as typeof whole
+    expect(liveGrants(repaired).size).toBe(0)
   })
 
   it('is revocable, and says so when there is nothing to revoke', async () => {

@@ -303,6 +303,37 @@ describe('what enforcement a session accepts', () => {
     expect(agent.session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(0)
   })
 
+  /**
+   * The deployment default is what `serve`, `web` and `chat` reach through:
+   * they do not create the session themselves, so `--accept` can only arrive
+   * as a row default. It was read into the service and consulted for nobody —
+   * `initialize` advertised it while every session refused — so the flag was
+   * silently a no-op on exactly the host that needs it.
+   */
+  it('lets a deployment weaken the default, and pins a child against it', async () => {
+    harness = await coreHarness({ sandbox: { accepts: 'none' } })
+    const { agent } = await harness.create()
+    const sandbox = harness.root.get(SANDBOX)
+    expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe('none')
+    // Still a DEFAULT, not a stamp: nothing is recorded until somebody decides.
+    expect(agent.session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(0)
+
+    // And the hazard the fallback creates, closed: a child whose row pins it to
+    // `full` records that `full`, because otherwise the fold would fall through
+    // to the deployment's `none` and the delegation would WIDEN the child.
+    const child = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: agent.session.id,
+      setup: (_childCtx, delegated) => {
+        sandbox.open(delegated.session, { mode: 'read-only', reason: 'delegation', accepts: 'full' })
+        harness!.root.get(APPROVAL).open(delegated.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    expect(sandbox.acceptsFor(child.agent.session, 'read-only')).toBe('full')
+    await child.dispose()
+  })
+
   it('applies an acceptance ONLY to the mode it was accepted for', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()

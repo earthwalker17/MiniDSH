@@ -88,6 +88,12 @@ export type EffectIntent = {
   readonly command: string
   readonly mode: SandboxMode
   readonly enforcement: SandboxEnforcement
+  /**
+   * Set when the command carried control characters and `clampIntent` escaped
+   * them. It is part of the identity, not a note: within an escaped command a
+   * backslash is doubled, so the two classes cannot meet in the middle.
+   */
+  readonly escaped?: true
   /** Set when `clampIntent` had to cut a field. A truncated intent is never grantable (`intentKey`). */
   readonly truncated?: true
 }
@@ -101,25 +107,62 @@ export type EffectIntent = {
  * for that reason). The bound exists so one durable record cannot be
  * unbounded, not to summarize.
  */
-const MAX_INTENT_CHARS = 4000
+export const MAX_INTENT_CHARS = 4000
 
 /**
- * Control-stripped and bounded, at the seam, before it reaches the log.
+ * A control character has no printable form, and a subject needs one that is
+ * both safe in a terminal and FAITHFUL: escaping gives both, where replacing
+ * gives only the first.
  *
- * The same rule `safeReason` applies to a requester's prose (§7), for the same
- * reason: a terminal executes what it is written, and an intent is rendered
- * straight into the line a person answers. `printableText` REPLACES rather
- * than drops, so the length a clamp sees is the length that was written.
+ * `printableText` (the rule everywhere else this runtime renders text it did
+ * not author) maps every C0/C1 control to a space — many-to-one. Applied to a
+ * consent subject that is fatal in two ways at once: a person answering
+ * `[y/N]` for `echo rm -rf ~/work` would be consenting to a rendering of
+ * `echo\nrm -rf ~/work`, two commands where they read one; and the two share a
+ * grant key, so one consent covers both forever. Escaping is injective, so
+ * neither happens. Backslash is escaped too, or `echo \n` typed literally
+ * would meet a real newline in the middle.
+ */
+function escapeControls(text: string): string {
+  const named: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t', '\\': '\\\\' }
+  let out = ''
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!
+    if (named[ch] !== undefined) out += named[ch]
+    else if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) out += `\\x${code.toString(16).padStart(2, '0')}`
+    else out += ch
+  }
+  return out
+}
+
+/** True iff `escapeControls` would change anything but a backslash. */
+function hasControls(text: string): boolean {
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true
+  }
+  return false
+}
+
+/**
+ * Made printable and bounded, at the seam, before it reaches the log.
  *
- * Truncation is recorded rather than silent because the field is an identity,
- * not only a rendering: two different commands sharing a 4000-character prefix
- * would otherwise collide on one grant key. A cut intent keeps its (partial)
- * rendering and loses its key — the fail-closed direction.
+ * A command with no control characters is left VERBATIM — the common case, and
+ * the one where doubling every backslash would make a Windows path harder to
+ * read for nothing. One with control characters is escaped whole, backslashes
+ * included, and marked `escaped`; since the mark is part of the key, a verbatim
+ * command can never collide with an escaped one that renders the same way.
+ *
+ * Truncation is recorded rather than silent for the same reason the escape is
+ * injective: the field is an IDENTITY, not only a rendering, and two commands
+ * sharing a 4000-character prefix would otherwise share one grant. A cut intent
+ * keeps its (partial) rendering and loses its key — the fail-closed direction.
  */
 export function clampIntent(intent: EffectIntent): EffectIntent {
-  const command = printableText(intent.command)
-  if (command.length <= MAX_INTENT_CHARS) return command === intent.command ? intent : { ...intent, command }
-  return { ...intent, command: command.slice(0, MAX_INTENT_CHARS), truncated: true }
+  const escaped = hasControls(intent.command)
+  const base = escaped ? { ...intent, command: escapeControls(intent.command), escaped: true as const } : intent
+  if (base.command.length <= MAX_INTENT_CHARS) return base
+  return { ...base, command: base.command.slice(0, MAX_INTENT_CHARS), truncated: true }
 }
 
 /**
@@ -144,6 +187,7 @@ export function intentKey(toolName: string, intent: EffectIntent): string | unde
     intent.effect,
     intent.mode,
     intent.enforcement,
+    intent.escaped === true ? 'esc' : 'raw',
     String(intent.command.length),
     intent.command,
   ]
@@ -152,8 +196,12 @@ export function intentKey(toolName: string, intent: EffectIntent): string | unde
 
 /** One intent as one clause, for the line a person answers. Pure, and safe in a terminal. */
 export function describeIntent(intent: EffectIntent): string {
-  const cut = intent.truncated === true ? ` […cut at ${MAX_INTENT_CHARS} characters]` : ''
-  return `run \`${intent.command}\`${cut} under ${intent.mode}/${intent.enforcement}`
+  const notes = [
+    ...(intent.escaped === true ? ['control characters shown escaped'] : []),
+    ...(intent.truncated === true ? [`cut at ${MAX_INTENT_CHARS} characters`] : []),
+  ]
+  const said = notes.length === 0 ? '' : ` […${notes.join('; ')}]`
+  return `run \`${intent.command}\`${said} under ${intent.mode}/${intent.enforcement}`
 }
 
 function duration(ms: number): string {

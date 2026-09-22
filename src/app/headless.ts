@@ -140,6 +140,12 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
       ...(options.invariants === undefined ? {} : { invariants: options.invariants }),
       ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
+      // The deployment default, so that a session this process does not create
+      // — every session `serve`, `web` and `chat` open over the wire — opens
+      // under the flag too. `applyAuthority` records the per-session fact on
+      // the paths that DO own a creation; the two agree because both read the
+      // same value, and the recorded one always wins the fold.
+      ...(options.accepts === undefined ? {} : { accepts: options.accepts }),
     }),
     ...(options.extraBaseRows ?? []),
   ]

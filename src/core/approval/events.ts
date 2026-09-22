@@ -117,19 +117,35 @@ const AUTHORITY_KINDS: ReadonlySet<string> = new Set([APPROVAL_POLICY.type, 'san
  */
 export function liveGrants(events: readonly EventEnvelope[]): Map<string, ApprovalGrant> {
   const live = new Map<string, ApprovalGrant>()
+  // A grant is written BEFORE the decision it came from (so the decision can
+  // name it), and the log is not fsynced, so a crash can keep the grant and
+  // lose the decision. Repair then closes that ask `cancelled` — nobody
+  // consented — while the grant would go on answering for the rest of the
+  // session. A consent is only live once its own ask is recorded as allowed,
+  // which is the same rule the pre-commit invariant states from the other side.
+  const born = new Map<string, { key: string; grant: ApprovalGrant }>()
   for (const event of events) {
     if (AUTHORITY_KINDS.has(event.type)) {
       live.clear()
+      born.clear()
+      continue
+    }
+    if (matches(event, APPROVAL_DECIDED)) {
+      const pending = born.get(event.data.id)
+      if (pending === undefined) continue
+      born.delete(event.data.id)
+      if (event.data.outcome === 'allowed-once') live.set(pending.key, pending.grant)
       continue
     }
     if (!matches(event, APPROVAL_GRANT)) continue
     if (event.data.op === 'revoke') {
       const id = event.data.id
       for (const [key, grant] of live) if (grant.id === id) live.delete(key)
+      for (const [askId, pending] of born) if (pending.grant.id === id) born.delete(askId)
       continue
     }
     const key = intentKey(event.data.toolName, event.data.subject)
-    if (key !== undefined) live.set(key, { id: event.data.id, toolName: event.data.toolName, subject: event.data.subject })
+    if (key !== undefined) born.set(event.data.fromApproval, { key, grant: { id: event.data.id, toolName: event.data.toolName, subject: event.data.subject } })
   }
   return live
 }

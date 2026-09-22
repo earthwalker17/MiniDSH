@@ -54,7 +54,7 @@ afterEach(async () => {
   for (const mounted of open.splice(0)) await mounted.dispose()
 })
 
-async function harness(enforcement: SandboxEnforcement = 'none', defaultMode: SandboxMode = 'workspace-write'): Promise<Harness> {
+async function harness(enforcement: SandboxEnforcement = 'none', defaultMode: SandboxMode = 'workspace-write', accepts?: SandboxEnforcement): Promise<Harness> {
   const root = createRoot({ logger: silent })
   const shell = new SwitchableShell(enforcement)
   const shellRow: Plugin = {
@@ -70,7 +70,7 @@ async function harness(enforcement: SandboxEnforcement = 'none', defaultMode: Sa
   root.plugin(toolsPlugin, {})
   root.plugin(promptPlugin)
   root.plugin(approvalPlugin)
-  root.plugin(sandboxPlugin, { mode: defaultMode })
+  root.plugin(sandboxPlugin, { mode: defaultMode, ...(accepts === undefined ? {} : { accepts }) })
   root.plugin(authorityInvariantPlugin)
   root.plugin(shellRow)
   root.plugin(contextRuntimePlugin, {})
@@ -151,11 +151,25 @@ describe('the runtime-context section', () => {
     expect(assembled.system).not.toContain('cannot confine shell commands')
   })
 
+  /**
+   * A `partial` backend is one this session does not accept by default, so the
+   * honest sentence is the REFUSAL, not a promise of a working sandbox. The
+   * branch used to key on `enforcement === 'none'` alone and told such a model
+   * its commands ran confined while `confine()` refused every one of them.
+   */
   it('does not promise a partial backend governs everything', async () => {
-    const test = await harness('partial')
-    const { agent } = await test.create()
-    const assembled = await test.root.get(PROMPT).assemble(agent)
-    expect(assembled.system).toContain('enforces this mode only partially')
+    const strict = await harness('partial')
+    const first = await strict.create()
+    const refused = (await strict.root.get(PROMPT).assemble(first.agent)).system
+    expect(refused).toContain('enforces this mode only "partial", which this session does not accept')
+    expect(refused).not.toContain('enforces this mode only partially')
+
+    // Accept it, and the sentence becomes the bounded promise — which is the
+    // only state in which a `partial` command actually runs.
+    const lenient = await harness('partial', 'workspace-write', 'partial')
+    const second = await lenient.create()
+    const accepted = (await lenient.root.get(PROMPT).assemble(second.agent)).system
+    expect(accepted).toContain('enforces this mode only partially')
   })
 
   it('tells a model that an ACCEPTED unconfined shell is not bounded by the mode', async () => {
@@ -163,16 +177,26 @@ describe('the runtime-context section', () => {
     // recorded and still governs `ctx.fs`, but it no longer describes what a
     // shell command can write. A sentence that let the two be confused is the
     // whole risk of this knob.
+    //
+    // Reached through the DEPLOYMENT default, because the section reads the
+    // acceptance this lifecycle OPENED under: a `setAcceptance` mid-lifecycle
+    // is a `change` at/after `liveStart`, which the opening fold deliberately
+    // steps past. Asserting the refusal sentence after two such calls — as
+    // this test did — passed with the whole branch deleted.
+    const test = await harness('none', 'workspace-write', 'none')
+    const { agent } = await test.create()
+    const system = (await test.root.get(PROMPT).assemble(agent)).system
+    expect(system).toContain('a shell command runs WITHOUT an OS sandbox')
+    expect(system).toContain('it does not bound what a shell command can write')
+    expect(system).not.toContain('so the shell refuses to run under this mode')
+  })
+
+  it('reads the acceptance this LIFECYCLE opened under, so a mid-session change does not move the cached prefix', async () => {
     const test = await harness('none')
     const { agent } = await test.create()
     test.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
-    // Its own lifecycle's opening acceptance is what the section reads, so a
-    // fresh agent is needed for the new value to appear.
-    const next = await test.create()
-    test.root.get(SANDBOX).setAcceptance(next.agent.session, 'none', 'workspace-write')
-    const system = (await test.root.get(PROMPT).assemble(next.agent)).system
-    // The section is the cached prefix and reads the OPENING acceptance, so a
-    // mid-lifecycle switch does not appear here at all — it arrives as a message.
+    const system = (await test.root.get(PROMPT).assemble(agent)).system
+    // The switch arrives as a durable message instead (asserted below).
     expect(system).toContain('so the shell refuses to run under this mode')
   })
 

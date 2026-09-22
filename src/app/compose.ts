@@ -11,7 +11,7 @@ import { invariantsPlugin } from '../core/invariants/index.ts'
 import { llmPlugin } from '../core/llm/index.ts'
 import { loopInvariantPlugin, loopPlugin } from '../core/loop/index.ts'
 import { promptPlugin } from '../core/prompt/index.ts'
-import { sandboxPlugin, type SandboxMode } from '../core/sandbox/index.ts'
+import { sandboxPlugin, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { sessionTitlePlugin } from '../capabilities/session-title/index.ts'
@@ -283,6 +283,12 @@ export interface ComposeOptions {
   readonly invariants?: boolean
   /** Deployment default for sessions that have recorded no mode of their own. */
   readonly sandbox?: SandboxMode
+  /**
+   * Deployment default for what a session accepts from its execution world
+   * (default `full`). It is a default, not a ceiling: a session records its
+   * own the moment anyone changes one, and that recorded fact is what replays.
+   */
+  readonly accepts?: SandboxEnforcement
   /** Deployment default approval policy (`never` refuses every request unattended). */
   readonly approvalPolicy?: ApprovalPolicy
 }

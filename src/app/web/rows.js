@@ -131,7 +131,8 @@ export function describeRow(event) {
     }
     case 'approval/decided': {
       const data = /** @type {ApprovalDecidedData} */ (event.data)
-      return note(`! ${data.outcome}${data.decidedBy ? ` (by ${data.decidedBy})` : ''}`)
+      const named = data.grantId ? ` ${data.grantId}` : ''
+      return note(`! ${data.outcome}${data.decidedBy ? ` (by ${data.decidedBy}${named})` : ''}`)
     }
     case 'sandbox/mode': {
       const data = /** @type {SandboxModeData} */ (event.data)

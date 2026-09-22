@@ -1083,8 +1083,22 @@ describe('protocol: more than one client', () => {
     // A person can see it and take it back.
     const view = await client.result<{ grants: { id: string }[] }>('session/authority', { sessionId })
     expect(view.grants.map((grant) => grant.id)).toEqual([grantFrame.id])
+    const viewsOf = () =>
+      client.notifications
+        .filter((entry) => entry.method === 'session.view')
+        .map((entry) => entry.params as unknown as { sessionId: string; view: SessionView })
+        .filter((entry) => entry.sessionId === sessionId)
+    const viewsBefore = viewsOf().length
     expect(await client.result<{ revoked: boolean }>('approval/revoke', { sessionId, grantId: grantFrame.id })).toEqual({ revoked: true })
     expect(await client.result<{ revoked: boolean }>('approval/revoke', { sessionId, grantId: grantFrame.id })).toEqual({ revoked: false })
+
+    // And every WATCHER learns, not only the caller that got `{revoked:true}`.
+    // A revoke appends one event and nothing follows it, so a kind missing from
+    // the view-changing set leaves a taken-back consent on every attached
+    // client's screen until some unrelated event happens to move the view.
+    const published = viewsOf().slice(viewsBefore)
+    expect(published.length, 'a revoke published no view at all').toBeGreaterThan(0)
+    expect(published.at(-1)!.view.authority.grants).toEqual([])
   })
 
   it('treats a disconnect as one client leaving, not as a shutdown', async () => {

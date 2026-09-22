@@ -56,6 +56,31 @@ describe('the headless answerer', () => {
     expect(await approval.request({ agent, toolName: 'bash' })).toBe('unavailable')
   })
 
+  /**
+   * The config side and the request side must normalize identically, or the
+   * list disagrees with itself in both directions: keying the raw string made
+   * an ordinary two-line script a permanently dead row, while a one-line entry
+   * matched a two-line command its author never wrote.
+   */
+  it('normalizes a declared entry exactly as the seam normalizes a live subject', async () => {
+    const test = await withConfig({ allow: [{ tool: 'bash', command: 'npm ci\nnpm test', mode: 'workspace-write' }] })
+    const { agent } = await test.create()
+    const approval = test.root.get(APPROVAL)
+
+    // The multi-line entry matches the multi-line command — it is not dead.
+    expect(await approval.request({ agent, toolName: 'bash', subject: subject({ command: 'npm ci\nnpm test' }) })).toBe('allowed-once')
+    // And it does not answer for the one-line command that used to share its key.
+    expect(await approval.request({ agent, toolName: 'bash', subject: subject({ command: 'npm ci npm test' }) })).toBe('unavailable')
+  })
+
+  it('refuses a declared entry it could never match, instead of mounting a silently dead row', () => {
+    // Past the subject's own cap an intent is `truncated` and has no key, so
+    // such an entry could only ever match nothing. The row's CONTRACT refuses
+    // it, the way every shipped config refuses a value it cannot honour.
+    const config = { allow: [{ tool: 'bash', command: 'x'.repeat(5_000), mode: 'workspace-write' as const }] }
+    expect(() => approvalHeadlessPlugin.config!.parse(config)).toThrow()
+  })
+
   it('records itself as auto, never as a person, and never mints a grant', async () => {
     const test = await withConfig({ allow: [{ tool: 'bash', command: 'pnpm check', mode: 'workspace-write' }] })
     const { agent } = await test.create()

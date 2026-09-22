@@ -146,6 +146,33 @@ describe('the environment a child is given', () => {
     }
   })
 
+  /**
+   * The helper being right is not the claim; the claim is that a REAL child
+   * gets its result. Three independent one-line reverts — restoring the old
+   * wholesale `process.env` spread, dropping `withheld` where the provider
+   * builds the process, or dropping a row's `declare` — each put this
+   * deployment's API key back into every command the model runs, and every one
+   * of them left the two pure-function tests above passing.
+   */
+  it.skipIf(!available)('gives a REAL child the scrubbed environment, not just the helper', async () => {
+    const before = { ...process.env }
+    process.env.CORP_LLM_CRED = 'renamed-by-config'
+    process.env.SOME_API_KEY = 'looks-like-one'
+    process.env.ORDINARY_SETTING = 'kept'
+    const root = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    dir = root
+    try {
+      proc = new ShellProcess(dialect, root, { withheld: ['CORP_LLM_CRED'] })
+      const read = async (name: string): Promise<string> =>
+        (await proc!.exec({ command: readVar(name), policy: unconfined(root), timeoutMs: 30_000 })).output
+      expect(await read('CORP_LLM_CRED')).not.toContain('renamed-by-config')
+      expect(await read('SOME_API_KEY')).not.toContain('looks-like-one')
+      expect(await read('ORDINARY_SETTING')).toContain('kept')
+    } finally {
+      process.env = before
+    }
+  }, SHELL_TEST_TIMEOUT_MS)
+
   it('merges the caller overlay AFTER the scrub, so a forwarded value survives', () => {
     // Nothing forwards one today; the ordering is what makes it possible
     // later without reopening the scrub, and it is upstream's ordering too.

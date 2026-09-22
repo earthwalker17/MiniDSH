@@ -510,7 +510,13 @@ async function start() {
   for (const knob of ['sandbox', 'approval', 'accepts']) {
     $(knob).addEventListener('change', (event) => {
       if (!state.window) return
-      void state.wire.request('session/authority', { sessionId: state.window.sessionId, [knob]: event.target.value }).catch(fail)
+      // A refused change appends nothing, so no view push arrives to correct
+      // the control: re-render from what the runtime last published, or the
+      // knob keeps showing the value the runtime rejected.
+      void state.wire.request('session/authority', { sessionId: state.window.sessionId, [knob]: event.target.value }).catch((error) => {
+        fail(error)
+        renderView()
+      })
     })
   }
   $('allow').addEventListener('click', () => void answer('allowed-once'))

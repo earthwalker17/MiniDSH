@@ -33,7 +33,6 @@ import { APPROVAL, APPROVAL_POLICY, openingApprovalPolicy, type ApprovalPolicy }
 import { createPluginMessage } from '../../core/llm/message.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import {
-  DEFAULT_ACCEPTANCE,
   meetsAcceptance,
   openingAcceptance,
   SANDBOX,
@@ -102,19 +101,25 @@ function modeEffect(mode: SandboxMode, workspaceRoot: string | undefined): strin
  *             caller needing an absolute boundary must not read it as `full`.
  */
 function confinementLines(enforcement: SandboxEnforcement, accepts: SandboxEnforcement): string[] {
+  // ONE discriminator, the same one `confine()` uses: what this host delivers
+  // against what this session accepts. Branching on `enforcement === 'none'`
+  // instead told a model on a `partial` host that its commands run confined,
+  // when a session accepting only `full` refuses every one of them.
+  if (!meetsAcceptance(enforcement, accepts)) {
+    return [
+      enforcement === 'none'
+        ? '- This host cannot confine shell commands, so the shell refuses to run under this mode.'
+        : `- This host enforces this mode only "${enforcement}", which this session does not accept, so the shell refuses to run under it.`,
+      '  Follow the escalation guidance a refusal returns rather than working around it.',
+    ]
+  }
   if (enforcement === 'none') {
     // The third world: this host cannot confine, and the session has said so on
     // the record and asked for the command anyway. The sentence must not let a
     // model read the mode as a shell boundary, because here it is not one.
-    if (meetsAcceptance('none', accepts)) {
-      return [
-        '- This host cannot confine shell commands, and this session accepts that: a shell command runs WITHOUT an OS sandbox.',
-        '  The sandbox mode still governs file edits made through the editor tool; it does not bound what a shell command can write.',
-      ]
-    }
     return [
-      '- This host cannot confine shell commands, so the shell refuses to run under this mode.',
-      '  Follow the escalation guidance a refusal returns rather than working around it.',
+      '- This host cannot confine shell commands, and this session accepts that: a shell command runs WITHOUT an OS sandbox.',
+      '  The sandbox mode still governs file edits made through the editor tool; it does not bound what a shell command can write.',
     ]
   }
   const governed = enforcement === 'full' ? 'enforces this mode' : 'enforces this mode only partially'
@@ -150,7 +155,7 @@ function authorityLines(ctx: Context, agent: Agent | undefined): string[] {
   // Off the OPENING acceptance for the opening mode, for the reason the stamp
   // itself is: this section is the cached prompt prefix, and a mid-session
   // switch may not move it. A switch arrives as a message instead.
-  const accepts = agent ? openingAcceptance(agent.session.facts, agent.session.liveStart, mode) : DEFAULT_ACCEPTANCE
+  const accepts = agent ? openingAcceptance(agent.session.facts, agent.session.liveStart, mode, sandbox.acceptsFor(undefined, mode)) : sandbox.acceptsFor(undefined, mode)
   const confinement = mode === 'danger-full-access' ? [] : confinementLines(enforcement, accepts)
   return [
     `- Sandbox: ${mode}. ${modeEffect(mode, undefined)}`,

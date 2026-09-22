@@ -247,6 +247,31 @@ describe('the shell on a host that DOES confine', () => {
     expect(result.text).not.toContain('the sandbox refused a file effect')
   })
 
+  /**
+   * The Windows fix, at the seam that carries it. Nothing else offline notices
+   * if the tool stops asking the sandbox what this session accepts: the shell
+   * provider then falls back to the strict default and refuses every confined
+   * command again — which is the whole regression S15 exists to close — while
+   * typecheck, lint and every other test stay green. Only a paid live arc on
+   * an unconfined host saw it.
+   */
+  it('tells the shell what THIS session accepts, per call', async () => {
+    const { agent, run, shell } = await confinedSetup({ output: 'ran', exitCode: 0 })
+    await run({ command: echoCmd })
+    expect(shell.seen.at(-1)!.accepts).toBe('full')
+
+    harness!.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
+    await run({ command: echoCmd })
+    expect(shell.seen.at(-1)!.accepts).toBe('none')
+
+    // And it is the acceptance for the mode the call RUNS under, not a session
+    // constant: an acceptance given for `workspace-write` says nothing about a
+    // command the model escalates to `danger-full-access`.
+    harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
+    await run({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'write outside' })
+    expect(shell.seen.at(-1)!).toMatchObject({ policy: { mode: 'danger-full-access' }, accepts: 'full' })
+  })
+
   it('describes the boundary the way THIS host actually enforces it', async () => {
     await confinedSetup({ output: 'ran', exitCode: 0 })
     const schemas = harness!.root.get(TOOLS).schemas()

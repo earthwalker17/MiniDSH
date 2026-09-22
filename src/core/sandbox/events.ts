@@ -175,12 +175,12 @@ export const DEFAULT_ACCEPTANCE: SandboxEnforcement = 'full'
  * MODE, else the strict default. An acceptance for another mode is not an
  * acceptance for this one.
  */
-export function acceptanceFor(events: readonly EventEnvelope[], mode: SandboxMode): SandboxEnforcement {
+export function acceptanceFor(events: readonly EventEnvelope[], mode: SandboxMode, fallback: SandboxEnforcement = DEFAULT_ACCEPTANCE): SandboxEnforcement {
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]!
     if (matches(event, SANDBOX_ACCEPTANCE) && event.data.forMode === mode) return event.data.accepts
   }
-  return DEFAULT_ACCEPTANCE
+  return fallback
 }
 
 /**
@@ -189,8 +189,13 @@ export function acceptanceFor(events: readonly EventEnvelope[], mode: SandboxMod
  * runtime-context block must be byte-stable for a lifecycle, so a mid-session
  * `change` may not move it. A switch reaches the model as a message instead.
  */
-export function openingAcceptance(events: readonly EventEnvelope[], liveStart: number, mode: SandboxMode): SandboxEnforcement {
-  let seeded = DEFAULT_ACCEPTANCE
+export function openingAcceptance(
+  events: readonly EventEnvelope[],
+  liveStart: number,
+  mode: SandboxMode,
+  fallback: SandboxEnforcement = DEFAULT_ACCEPTANCE,
+): SandboxEnforcement {
+  let seeded = fallback
   for (const event of events) {
     if (!matches(event, SANDBOX_ACCEPTANCE) || event.data.forMode !== mode) continue
     if (event.seq >= liveStart) {

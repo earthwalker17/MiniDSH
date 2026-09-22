@@ -15,10 +15,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { serviceKey, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS, type AgentHandle } from '../core/agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST, type ApprovalOutcome } from '../core/approval/index.ts'
+import { CREDENTIALS } from '../core/credentials/index.ts'
 import { LLM } from '../core/llm/index.ts'
 import { SANDBOX, type Sandbox } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { TOOLS } from '../core/tools/index.ts'
+import { childEnvironment } from '../capabilities/shell-stdio/process.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
 import { COMPOSITION, defineRow } from './compose.ts'
@@ -163,6 +165,29 @@ describe('agent presets: a world visible to that agent alone', () => {
     const denial = events.find((event) => event.type === 'tool/result')
     expect((denial?.data as { error?: { code: string } } | undefined)?.error?.code).toBe('FS_SANDBOX_DENIED')
     expect(existsSync(escape)).toBe(false)
+  })
+
+  /**
+   * The one thing assembly cannot know: a provider row may rename its own
+   * `apiKeyEnv`, so no hand-copied deny-list and no name pattern can catch
+   * `CORP_LLM_CRED`. Only the row itself can say which name holds its secret,
+   * and only the credential seam can carry that to the shell world. Dropping
+   * either `declare` leaks this deployment's key into every command the model
+   * runs, and nothing else in the suite notices.
+   */
+  it('every provider row declares the credential name it actually uses, renamed or not', async () => {
+    const ctx = await bootComposition({
+      sessionsRoot: tempDir('minidsh-comp-'),
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', config: { apiKeyEnv: 'CORP_LLM_CRED' } }],
+      prepare: (inner) => void inner.get(LLM).registerAdapter(inner, new ScriptedAdapter()),
+    })
+    root = ctx
+    const declared = ctx.get(CREDENTIALS).declaredRefs().map(String)
+    expect(declared).toContain('CORP_LLM_CRED')
+    expect(declared).toContain('ANTHROPIC_API_KEY')
+    // And the shell world withholds exactly those from a child it spawns.
+    expect(childEnvironment(declared, undefined).CORP_LLM_CRED).toBeUndefined()
   })
 
   it('a scoped approval answerer is consent-by-composition: real for its agent, invisible to others', async () => {

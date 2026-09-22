@@ -319,6 +319,86 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     expect(await exitCode).toBe(0)
   })
 
+  /**
+   * A tool whose consent has NO subject — only a deployment's own
+   * `tools/pre-execute` policy asks that way — still names an action, and the
+   * joined call is the only place it is written. The browser has always
+   * rendered it; a terminal user was being asked to approve a bare tool name.
+   */
+  it('shows the joined CALL when an ask carries no subject, as the browser does', async () => {
+    const opaque = defineTool({
+      name: 'opaque',
+      description: 'asks for itself, saying nothing about what it will do',
+      input: z.object({ path: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      execute: async (_args, exec) => {
+        await approvalOf(exec).request({ agent: exec.agent!, toolName: 'opaque', callId: exec.callId, reason: 'careful' })
+        return { ok: true }
+      },
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'opaque', { path: '/etc/hosts' }), assistantText('done'))
+    let approval: Approval | undefined
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      ...scriptedBoot(adapter, (root) => {
+        approval = root.get(APPROVAL)
+        root.get(TOOLS).register(root, opaque)
+      }),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    approvalOf = () => approval!
+    await driver.see('you> ')
+    driver.type('use the tool')
+    await driver.see('opaque {"path":"/etc/hosts"}')
+    // No subject means no identity, so no scope is offered either.
+    await driver.see('approve opaque (careful)? [y/N] ')
+    driver.type('y')
+    await driver.see('done')
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
+
+  /**
+   * The three authority commands S15 added. Without this the whole of
+   * `manageGrants` and the `/accept` arm of the switch could be misrouted —
+   * sending `id` where the host wants `grantId` typechecks, because RPC params
+   * are an untyped record — and every other test would stay green.
+   */
+  it('drives /accept, /grants and /revoke over the wire', async () => {
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(assistantText('hello'), assistantText('still here'))
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      ...scriptedBoot(adapter),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    await driver.see('you> ')
+    driver.type('hi')
+    await driver.see('hello')
+
+    driver.type('/accept none')
+    await driver.see('accepting none')
+    driver.type('/grants')
+    await driver.see('no standing grants in this session')
+    driver.type('/revoke nonesuch')
+    await driver.see('no live grant "nonesuch" in this session')
+    // A bad argument is answered, not thrown out of the read loop.
+    driver.type('/accept')
+    await driver.see('usage: /accept <full|none>')
+    driver.type('/accept sideways')
+    await driver.see('error: session/authority: "accepts" must be full | none')
+    driver.type('hi again')
+    await driver.see('still here')
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
+
   it('resumes a stored session interactively: transcript first, then the conversation continues', async () => {
     const sessionsRoot = tempDir('minidsh-term-sessions-')
     const cwd = tempDir('minidsh-term-cwd-')

@@ -116,7 +116,8 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     return `? ${id} ${toolName}${says}${reason ? `: ${printableText(reason)}` : ''}`
   }
   if (matches(event, APPROVAL_DECIDED)) {
-    const by = event.data.decidedBy === undefined ? '' : ` (by ${event.data.decidedBy})`
+    const named = event.data.grantId === undefined ? '' : ` ${event.data.grantId}`
+    const by = event.data.decidedBy === undefined ? '' : ` (by ${event.data.decidedBy}${named})`
     return `! ${event.data.id} ${event.data.outcome}${by}`
   }
   if (matches(event, SUBAGENT_START)) {
@@ -240,7 +241,11 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       const covered = callId ? whole.get(callId) : undefined
       if (covered) lines.push(`                    for: ${covered}`)
     } else if (matches(event, APPROVAL_DECIDED)) {
-      const by = event.data.decidedBy === undefined ? '' : ` (by ${event.data.decidedBy})`
+      // The grant's id, not only that a grant answered: a session holding two
+      // standing consents otherwise reads the same for both, and the audit
+      // cannot tie a decision back to the `granted …` line that authorized it.
+      const named = event.data.grantId === undefined ? '' : ` ${event.data.grantId}`
+      const by = event.data.decidedBy === undefined ? '' : ` (by ${event.data.decidedBy}${named})`
       lines.push(`${at(event.seq)}  decided     ${event.data.id} ${event.data.outcome}${by}`)
     } else if (matches(event, COMPACTION_APPLIED)) {
       // A compaction rewrites what the model can see, which is the kind of act

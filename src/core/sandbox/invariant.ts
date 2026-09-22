@@ -67,11 +67,12 @@ function freshTrace(): Trace {
  */
 function subjectFault(subject: unknown): string | undefined {
   if (typeof subject !== 'object' || subject === null) return 'not an object'
-  const { effect, command, mode, enforcement, truncated } = subject as Record<string, unknown>
+  const { effect, command, mode, enforcement, escaped, truncated } = subject as Record<string, unknown>
   if (effect !== 'shell-command') return `unknown effect ${JSON.stringify(effect)}`
   if (typeof command !== 'string') return 'command is not a string'
   if (!isSandboxMode(mode)) return `unknown mode ${JSON.stringify(mode)}`
   if (typeof enforcement !== 'string' || !ENFORCEMENTS.has(enforcement)) return `unknown enforcement ${JSON.stringify(enforcement)}`
+  if (escaped !== undefined && escaped !== true) return 'escaped is neither absent nor true'
   if (truncated !== undefined && truncated !== true) return 'truncated is neither absent nor true'
   return undefined
 }
@@ -215,7 +216,17 @@ const installAuthorityInvariant: InvariantInstaller = (ctx, fail) => {
     }
     // Observation is pre-commit and any observer may still reject this event, so
     // the advanced trace is only staged here and committed once the event lands.
-    const next: Trace = { ...trace, asked: new Set(trace.asked), decided: new Set(trace.decided) }
+    // Every mutable member is copied, not only the two that were here first: a
+    // later observer's throw rejects the whole dispatch, and a container shared
+    // with the committed trace would keep a rejected event's effects — an ask
+    // that never landed still counting as open for the grant provenance check.
+    const next: Trace = {
+      ...trace,
+      asked: new Set(trace.asked),
+      decided: new Set(trace.decided),
+      openSubjects: new Map(trace.openSubjects),
+      grantIds: new Set(trace.grantIds),
+    }
     validate(next, event, fail)
     staged.set(session, next)
   })

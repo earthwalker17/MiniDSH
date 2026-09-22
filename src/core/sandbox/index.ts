@@ -227,17 +227,20 @@ class SandboxService implements Sandbox {
       throw new SandboxError('SANDBOX_ALREADY_OPEN', `session ${session.id} has already recorded its opening sandbox mode`)
     }
     session.append(SANDBOX_MODE, { mode: opening.mode, enforcement: this.enforcementFor(opening.mode), reason: opening.reason })
-    // A child's acceptance is recorded only when it is not the strict default:
-    // a `full` line would say nothing the stamp above does not already imply,
-    // and every session would carry one. When it IS recorded it is a PIN —
-    // first, and unchangeable for the child's life.
-    if (opening.accepts !== undefined && opening.accepts !== DEFAULT_ACCEPTANCE) {
+    // A child's acceptance is recorded only when it differs from what this
+    // deployment would answer anyway: an identical line would say nothing, and
+    // every session would carry one. The comparison is against the DEPLOYMENT
+    // default, not the strict one — under a deployment that accepts `none`, a
+    // child pinned `full` by its row must record that `full`, or the fold
+    // would fall through to the deployment's answer and widen the child.
+    // When it IS recorded it is a PIN: first, and unchangeable for its life.
+    if (opening.accepts !== undefined && opening.accepts !== this.defaultAcceptance) {
       session.append(SANDBOX_ACCEPTANCE, { accepts: opening.accepts, forMode: opening.mode, reason: opening.reason })
     }
   }
 
   acceptsFor(session: Session | undefined, mode: SandboxMode): SandboxEnforcement {
-    return session ? acceptanceFor(session.facts, mode) : this.defaultAcceptance
+    return session ? acceptanceFor(session.facts, mode, this.defaultAcceptance) : this.defaultAcceptance
   }
 
   setAcceptance(session: Session, accepts: SandboxEnforcement, forMode: SandboxMode): void {
@@ -257,7 +260,7 @@ class SandboxService implements Sandbox {
         `session ${session.id} was delegated accepting "${pin?.accepts ?? DEFAULT_ACCEPTANCE}" enforcement and cannot change it`,
       )
     }
-    if (acceptanceFor(session.facts, forMode) === accepts) return
+    if (this.acceptsFor(session, forMode) === accepts) return
     session.append(SANDBOX_ACCEPTANCE, { accepts, forMode, reason: 'change' })
   }
 
