@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { AGENTS } from '../agent/index.ts'
 import { intentKey, type EffectIntent } from '../effects/index.ts'
+import { SANDBOX } from '../sandbox/index.ts'
 import { TOOL_CALL, type EventEnvelope } from '../session/index.ts'
 import { matches } from '../session/index.ts'
-import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_REQUEST, openApprovals, type ApprovalOutcome } from './index.ts'
+import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_REQUEST, openApprovals, type ApprovalOutcome } from './index.ts'
 
 let harness: CoreHarness | undefined
 afterEach(async () => {
@@ -212,6 +213,141 @@ describe('approval seam', () => {
     expect(new Set(all.map((entry) => entry.id)).size).toBe(3)
     for (const entry of all) expect(entry.id).toBe(`approval-${entry.seq}`)
     await resumed.dispose()
+  })
+})
+
+describe('standing grants', () => {
+  const subject = { effect: 'shell-command' as const, command: 'pnpm check', mode: 'danger-full-access' as const, enforcement: 'none' as const }
+
+  it('offers a scope only where one can be honoured, and mints it from the answer', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+    const approval = harness.root.get(APPROVAL)
+
+    expect(await approval.request({ agent, toolName: 'bash', subject })).toBe('allowed-once')
+    const grants = approval.grants(agent.session)
+    expect(grants).toHaveLength(1)
+    expect(grants[0]).toMatchObject({ toolName: 'bash', subject })
+    // The grant is written BEFORE the decision it came from, and the decision
+    // names it: the log reads in the order the consent was given.
+    const kinds = agent.session.facts.map((event) => event.type)
+    expect(kinds.indexOf('approval/grant')).toBeLessThan(kinds.lastIndexOf('approval/decided'))
+    const decided = agent.session.events.findLast((event) => matches(event, APPROVAL_DECIDED))!.data
+    expect(decided).toMatchObject({ outcome: 'allowed-once', decidedBy: 'user', grantId: grants[0]!.id })
+  })
+
+  it('answers a repeat with the grant, consulting nobody — and still writes the whole audit pair', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    let asked = 0
+    harness.root.on(APPROVAL_REQUEST, async () => {
+      asked += 1
+      return asked === 1 ? { outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const } : { outcome: 'allowed-once' as const }
+    })
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject })
+    await approval.request({ agent, toolName: 'bash', subject })
+    expect(asked).toBe(1)
+
+    // A granted call is never thinner on the record than an asked one.
+    const pairs = agent.session.events.filter((event) => matches(event, APPROVAL_ASKED) || matches(event, APPROVAL_DECIDED))
+    expect(pairs).toHaveLength(4)
+    const second = agent.session.events.findLast((event) => matches(event, APPROVAL_DECIDED))!.data
+    expect(second).toMatchObject({ outcome: 'allowed-once', decidedBy: 'grant', grantId: approval.grants(agent.session)[0]!.id })
+  })
+
+  it('does not cover a command that differs at all, which is the whole safety of an exact key', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    let asked = 0
+    harness.root.on(APPROVAL_REQUEST, async () => {
+      asked += 1
+      return { outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }
+    })
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject })
+    // A different command, the same command under a different mode, and the
+    // same command through a different tool are three different questions.
+    await approval.request({ agent, toolName: 'bash', subject: { ...subject, command: 'pnpm check --fix' } })
+    await approval.request({ agent, toolName: 'bash', subject: { ...subject, mode: 'workspace-write' } })
+    await approval.request({ agent, toolName: 'pwsh', subject })
+    expect(asked).toBe(4)
+  })
+
+  it('ends every grant when the authority it was given under moves', async () => {
+    // Consent is to the world as it stood. Without this, a grant taken under an
+    // escalation to danger-full-access still matches after somebody narrows the
+    // session to read-only, and the narrowing changes nothing for exactly the
+    // command they were worried about.
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject })
+    expect(approval.grants(agent.session)).toHaveLength(1)
+
+    harness.root.get(SANDBOX).setMode(agent.session, 'read-only')
+    expect(approval.grants(agent.session)).toHaveLength(0)
+  })
+
+  it('is revocable, and says so when there is nothing to revoke', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject })
+    const id = approval.grants(agent.session)[0]!.id
+
+    expect(approval.revoke(agent.session, id)).toBe(true)
+    expect(approval.grants(agent.session)).toHaveLength(0)
+    expect(approval.revoke(agent.session, id)).toBe(false)
+    expect(approval.revoke(agent.session, 'grant-nope')).toBe(false)
+  })
+
+  it('never lets a pinned "never" be answered by a grant, however the grant got there', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject })
+    expect(approval.grants(agent.session)).toHaveLength(1)
+
+    // The policy switch itself ends the grant, AND the policy is checked first
+    // — two independent reasons, because this is the one that must not fail.
+    approval.setPolicy(agent.session, 'never')
+    const decided = await approval.request({ agent, toolName: 'bash', subject })
+    expect(decided).toBe('rejected')
+    expect(agent.session.events.findLast((event) => matches(event, APPROVAL_DECIDED))!.data).toMatchObject({ decidedBy: 'policy' })
+  })
+
+  it('refuses to mint one for a subject nobody was offered a scope for', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    // A truncated subject can never be keyed, so it can never be granted — two
+    // 4000-character commands sharing a prefix must not become one consent.
+    harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject: { ...subject, command: 'x'.repeat(5_000) } })
+    expect(approval.grants(agent.session)).toHaveLength(0)
+
+    // And an answerer that claims a grant for an ask with no subject at all
+    // gets nothing: there is no identity to hold one to.
+    await approval.request({ agent, toolName: 'bash' })
+    expect(approval.grants(agent.session)).toHaveLength(0)
+  })
+
+  it('refuses a forged grant that names no open matching ask', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    // The provenance rule, pre-commit: a grant is a fact about a consent that
+    // provably happened, in THIS log, for THIS subject, still open. Without it
+    // `fromApproval` is convention and any mounted row could write a standing
+    // consent for a subject nobody was ever asked about.
+    expect(() => agent.session.append(APPROVAL_GRANT, { op: 'grant', id: 'grant-x', toolName: 'bash', subject, fromApproval: 'approval-999' })).toThrowError(
+      /names no open/,
+    )
+    expect(() => agent.session.append(APPROVAL_GRANT, { op: 'revoke', id: 'grant-x' })).toThrowError(/never granted/)
   })
 })
 

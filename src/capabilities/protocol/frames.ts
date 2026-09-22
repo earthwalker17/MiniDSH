@@ -10,7 +10,7 @@
  * the method table, the paged attach and the authority methods are MiniDSH's.
  */
 import type { AgentOptions } from '../../core/agent/index.ts'
-import type { ApprovalPolicy, OpenApproval } from '../../core/approval/index.ts'
+import type { ApprovalGrant, ApprovalOfferId, ApprovalPolicy, OpenApproval } from '../../core/approval/index.ts'
 import type { CompactionDeclineReason } from '../../core/compaction/index.ts'
 import type { ProviderInfo } from '../../core/llm/index.ts'
 import type { ContextMetrics } from '../../core/metering/index.ts'
@@ -129,6 +129,8 @@ export interface AuthorityView {
    * cannot confine runs anyway, with only the in-process file fence left.
    */
   readonly accepts: SandboxEnforcement
+  /** Standing consents this session still holds — a person may see and take back what they gave. */
+  readonly grants: readonly ApprovalGrant[]
   /** Derived from the pair against the preset table (`custom` = no match); absent when no presets capability is mounted. */
   readonly preset?: string
 }
@@ -316,11 +318,27 @@ export type CompactResult =
   | { readonly kind: 'nothing-to-do'; readonly reason?: CompactionDeclineReason }
 
 
+export interface ApprovalRevokeParams {
+  readonly sessionId: string
+  readonly grantId: string
+}
+
+export interface ApprovalRevokeResult {
+  /** False when this session holds no such live grant — already revoked, or ended by an authority change. */
+  readonly revoked: boolean
+}
+
 export interface ApprovalAnswerParams {
   readonly sessionId: string
   /** The durable id from the `approval/asked` event streaming over `session.event`. */
   readonly id: string
   readonly outcome: 'allowed-once' | 'rejected'
+  /**
+   * A scope the HOST offered on this approval (`view.pendingApprovals[].offers`),
+   * taken beside the one-shot yes. A surface may not invent one: an id the fold
+   * did not offer is refused here, and the seam re-checks before writing.
+   */
+  readonly offer?: ApprovalOfferId
 }
 
 export interface ApprovalAnswerResult {

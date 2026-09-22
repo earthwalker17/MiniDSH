@@ -24,8 +24,13 @@ import {
   APPROVAL_POLICY,
   delegationPin,
   effectiveApprovalPolicy,
+  APPROVAL_GRANT,
+  grantFor,
   isApprovalOutcome,
+  liveGrants,
+  openApprovals,
   type ApprovalDecider,
+  type ApprovalGrant,
   type ApprovalOutcome,
   type ApprovalPolicy,
 } from './events.ts'
@@ -101,7 +106,19 @@ export interface ApprovalPrompt extends ApprovalRequest {
  * `auto`, including an answerer that says nothing, because one that does not
  * claim a human did not have one.
  */
-export type ApprovalAnswer = ApprovalOutcome | { readonly outcome: ApprovalOutcome; readonly by?: 'user' | 'auto' }
+export type ApprovalAnswer =
+  | ApprovalOutcome
+  | {
+      readonly outcome: ApprovalOutcome
+      readonly by?: 'user' | 'auto'
+      /**
+       * The answerer reports that the person took the `grant-session` offer.
+       * A REPORT, not an instruction: the seam re-runs the same fold that
+       * produced the offer and writes nothing if it no longer stands, so an
+       * answerer cannot mint a consent nobody was offered.
+       */
+      readonly grant?: true
+    }
 
 /**
  * One place where a raw answerer value becomes the durable decision.
@@ -111,12 +128,17 @@ export type ApprovalAnswer = ApprovalOutcome | { readonly outcome: ApprovalOutco
  * cancelled a request the abort signal killed. And `cancelled`/`unavailable`
  * carry no decider at all: nobody made that decision, and the outcome says so.
  */
-function decide(answer: unknown, aborted: boolean): { outcome: ApprovalOutcome; by?: ApprovalDecider } {
+function decide(answer: unknown, aborted: boolean): { outcome: ApprovalOutcome; by?: ApprovalDecider; grant?: true } {
   if (aborted) return { outcome: 'cancelled' }
-  const shaped = typeof answer === 'object' && answer !== null ? (answer as { outcome?: unknown; by?: unknown }) : { outcome: answer }
+  const shaped = typeof answer === 'object' && answer !== null ? (answer as { outcome?: unknown; by?: unknown; grant?: unknown }) : { outcome: answer }
   const outcome = isApprovalOutcome(shaped.outcome) ? shaped.outcome : 'unavailable'
   if (outcome !== 'allowed-once' && outcome !== 'rejected') return { outcome }
-  return { outcome, by: shaped.by === 'user' ? 'user' : 'auto' }
+  return {
+    outcome,
+    by: shaped.by === 'user' ? 'user' : 'auto',
+    // Only a yes can buy a standing consent, and only where one was offered.
+    ...(outcome === 'allowed-once' && shaped.grant === true ? { grant: true as const } : {}),
+  }
 }
 
 export interface Approval {
@@ -135,6 +157,17 @@ export interface Approval {
   open(session: Session, opening?: { readonly policy: ApprovalPolicy; readonly reason: 'delegation' }): void
   /** The policy governing a session: its last recorded one, else the deployment default. */
   policyFor(session: Session | undefined): ApprovalPolicy
+  /**
+   * The standing consents this session still holds, newest last.
+   *
+   * There is deliberately no public `grant`. A consent is minted only inside
+   * `request`, from an answer to an offer this seam itself computed, so a
+   * mounted row cannot write one for a subject nobody was ever asked about —
+   * and the invariant refuses one that names no open matching ask.
+   */
+  grants(session: Session): ApprovalGrant[]
+  /** Ends one standing consent. A person may take back what they gave. */
+  revoke(session: Session, grantId: string): boolean
   readonly defaultPolicy: ApprovalPolicy
 }
 
@@ -151,6 +184,16 @@ class ApprovalService implements Approval {
 
   policyFor(session: Session | undefined): ApprovalPolicy {
     return (session ? effectiveApprovalPolicy(session.facts) : undefined) ?? this.defaultPolicy
+  }
+
+  grants(session: Session): ApprovalGrant[] {
+    return [...liveGrants(session.facts).values()]
+  }
+
+  revoke(session: Session, grantId: string): boolean {
+    if (!this.grants(session).some((grant) => grant.id === grantId)) return false
+    session.append(APPROVAL_GRANT, { op: 'revoke', id: grantId })
+    return true
   }
 
   open(session: Session, opening?: { readonly policy: ApprovalPolicy; readonly reason: 'delegation' }): void {
@@ -190,25 +233,45 @@ class ApprovalService implements Approval {
     // future requester can reintroduce a control character into the line a
     // person answers — and so the answerer and the audit see the same bytes.
     const subject = request.subject === undefined ? undefined : clampIntent(request.subject)
-    session.append(APPROVAL_ASKED, {
-      id,
-      toolName: request.toolName,
-      ...(request.callId === undefined ? {} : { callId: request.callId }),
-      ...(reason === undefined || reason.length === 0 ? {} : { reason }),
-      ...(subject === undefined ? {} : { subject }),
-    })
-    // A request cancelled before it could be asked is decided without consulting
-    // anyone: no answerer should ever see a prompt whose outcome is already fixed.
+    const ask = (): void => {
+      session.append(APPROVAL_ASKED, {
+        id,
+        toolName: request.toolName,
+        ...(request.callId === undefined ? {} : { callId: request.callId }),
+        ...(reason === undefined || reason.length === 0 ? {} : { reason }),
+        ...(subject === undefined ? {} : { subject }),
+      })
+    }
+
+    // Everything decided WITHOUT consulting anyone is decided before the ask is
+    // appended, so the pair lands in one tick and no surface ever publishes a
+    // view in which the question is open. A prompt printed for an already
+    // settled question stands over nothing and swallows the next line typed.
     if (request.signal?.aborted) {
+      ask()
       session.append(APPROVAL_DECIDED, { id, outcome: 'cancelled' })
       return 'cancelled'
     }
     // The strict unattended stance: refuse without consulting anyone. Enforced
-    // here, before dispatch, so no answerer can be composed around it.
+    // here, before dispatch, so no answerer can be composed around it — and
+    // BEFORE any standing consent is consulted, so a delegated child's pin
+    // still wins absolutely.
     if (this.policyFor(session) === 'never') {
+      ask()
       session.append(APPROVAL_DECIDED, { id, outcome: 'rejected', decidedBy: 'policy' })
       return 'rejected'
     }
+    const standing = subject === undefined ? undefined : grantFor(session.facts, request.toolName, subject)
+    if (standing !== undefined) {
+      // The full audit pair even though nobody was asked: a granted call must
+      // not be thinner on the record than an asked one, and `grantId` says
+      // which consent answered it.
+      ask()
+      session.append(APPROVAL_DECIDED, { id, outcome: 'allowed-once', decidedBy: 'grant', grantId: standing.id })
+      return 'allowed-once'
+    }
+
+    ask()
     // The prompt carries the SAME reason and subject the log does: an answerer
     // must never be shown text a reader of the audit could not have seen.
     const prompt: ApprovalPrompt = { ...request, id, ...(reason === undefined ? {} : { reason }), ...(subject === undefined ? {} : { subject }) }
@@ -223,9 +286,35 @@ class ApprovalService implements Approval {
     } catch {
       answered = 'unavailable'
     }
-    const { outcome, by } = decide(answered, request.signal?.aborted === true)
-    session.append(APPROVAL_DECIDED, { id, outcome, ...(by === undefined ? {} : { decidedBy: by }) })
+    const { outcome, by, grant } = decide(answered, request.signal?.aborted === true)
+    // The grant BEFORE the decision it came from, so the log reads in the order
+    // the consent was given — and only if the offer this seam computed still
+    // stands, re-checked here rather than taken on the answerer's word.
+    const grantId = grant === true ? this.mint(session, id, request.toolName, subject) : undefined
+    session.append(APPROVAL_DECIDED, {
+      id,
+      outcome,
+      ...(by === undefined ? {} : { decidedBy: by }),
+      ...(grantId === undefined ? {} : { grantId }),
+    })
     return outcome
+  }
+
+  /**
+   * Writes the standing consent an answer reported, or nothing.
+   *
+   * The offer is recomputed from the log rather than trusted: `openApprovals`
+   * is the one function that decides what an ask may durably buy, and running
+   * it here is what stops a composed answerer minting a consent for a subject
+   * nobody was offered one for.
+   */
+  private mint(session: Session, askedId: string, toolName: string, subject: EffectIntent | undefined): string | undefined {
+    if (subject === undefined) return undefined
+    const offered = openApprovals(session.facts).find((entry) => entry.id === askedId)
+    if (offered?.offers?.includes('grant-session') !== true) return undefined
+    const id = `grant-${session.seq}`
+    session.append(APPROVAL_GRANT, { op: 'grant', id, toolName, subject, fromApproval: askedId })
+    return id
   }
 }
 

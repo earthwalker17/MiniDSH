@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { AGENT_OPTIONS, INBOX_SPLICED, SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../../core/approval/index.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY } from '../../core/approval/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../../core/compaction/index.ts'
 import { asAttachmentId } from '../../core/attachments/index.ts'
 import { EFFECT_RECORDED } from '../../core/effects/index.ts'
@@ -93,6 +93,14 @@ const SAMPLES: readonly Sample[] = [
   }),
   sample('APPROVAL_DECIDED', 'decided', APPROVAL_DECIDED, { id: 'approval-7', outcome: 'allowed-once' }),
   sample('APPROVAL_DECIDED', 'decided by a person', APPROVAL_DECIDED, { id: 'approval-9', outcome: 'allowed-once', decidedBy: 'user' }),
+  sample('APPROVAL_GRANT', 'granted', APPROVAL_GRANT, {
+    op: 'grant',
+    id: 'grant-11',
+    toolName: 'pwsh',
+    subject: { effect: 'shell-command', command: 'pnpm check', mode: 'danger-full-access', enforcement: 'none' },
+    fromApproval: 'approval-9',
+  }),
+  sample('APPROVAL_GRANT', 'revoked', APPROVAL_GRANT, { op: 'revoke', id: 'grant-11' }),
   sample('EFFECT_RECORDED', 'fs write', EFFECT_RECORDED, { callId: 'c1', effect: 'fs-write', path: '/ws/notes.txt', bytes: 15, sha256: 'a1b2c3d4e5f6a7b8c9d0' }),
   sample('EFFECT_RECORDED', 'shell command', EFFECT_RECORDED, { callId: 'c1', effect: 'shell-command', exitCode: 0, durationMs: 1234, mode: 'workspace-write', enforcement: 'full' }),
   sample('EFFECT_RECORDED', 'shell command killed', EFFECT_RECORDED, { callId: 'c1', effect: 'shell-command', durationMs: 120_000, mode: 'read-only', enforcement: 'none', timedOut: true }),

@@ -116,7 +116,7 @@ describe('terminal render (pure)', () => {
   })
 
   it('renders the context pressure the host publishes, and says nothing when there is no news', () => {
-    const authority = { sandbox: 'workspace-write', approval: 'ask', enforcement: 'none', accepts: 'full' } as const
+    const authority = { sandbox: 'workspace-write', approval: 'ask', enforcement: 'none', accepts: 'full', grants: [] } as const
     const quiet: SessionView = { status: 'idle', pendingApprovals: [], authority }
     const at = (projectedTokens: number): SessionView => ({
       ...quiet,
@@ -221,9 +221,13 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     // The prompt IS the ask's rendering: no second `? approval-…` line precedes it.
     expect(driver.text()).not.toContain('? approval-')
     expect(driver.text()).toContain('! approval-')
-    // The first ask carries the one tip that names the session-scoped answer, once.
-    expect(driver.text().split('tip: approvals are one-shot')).toHaveLength(2)
-    expect(driver.text().indexOf('tip: approvals')).toBeLessThan(driver.text().indexOf('approve touchy'))
+    // The first ask carries ONE tip, and it names the answer that fits THIS
+    // host: where the shell cannot be sandboxed, accepting that keeps the file
+    // fence, where advising `danger-full-access` would drop it too.
+    expect(driver.text().split('tip: ')).toHaveLength(2)
+    expect(driver.text()).toContain('/accept none')
+    expect(driver.text()).not.toContain('/preset danger-full-access (or')
+    expect(driver.text().indexOf('tip: ')).toBeLessThan(driver.text().indexOf('approve touchy'))
     driver.type('/exit')
     expect(await exitCode).toBe(0)
   })
@@ -302,7 +306,9 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     driver.type('use the tool')
     // The command a person consents to is on the line, ahead of the model's
     // account of it — which is the whole point of the field.
-    await driver.see('approve risky — run `rm -rf /tmp/x` under danger-full-access/none (trust me)? [y/N] ')
+    // `[y/N/a]`, because this ask carries a subject the runtime can key: the
+    // third key is the offer, and it appears only where the fold says so.
+    await driver.see('approve risky — run `rm -rf /tmp/x` under danger-full-access/none (trust me)? [y/N/a] ')
     driver.type('y')
     await driver.see('done')
     driver.type('/exit')

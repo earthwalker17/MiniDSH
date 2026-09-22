@@ -24,6 +24,7 @@ import {
   APPROVAL_POLICY,
   effectiveApprovalPolicy,
   isApprovalPolicy,
+  liveGrants,
   openApprovals,
   type ApprovalAnswer,
   type ApprovalPrompt,
@@ -69,6 +70,7 @@ import {
   METHOD_NOT_FOUND,
   RpcFailure,
   type ApprovalAnswerResult,
+  type ApprovalRevokeResult,
   type AttachResult,
   type AuthorityView,
   type CompactResult,
@@ -427,6 +429,8 @@ export class ProtocolHost {
         return this.compact(record)
       case 'approval/answer':
         return this.approvalAnswer(connection, record)
+      case 'approval/revoke':
+        return this.approvalRevoke(record)
       case 'session/authority':
         return this.authority(record)
       case 'session/model':
@@ -637,6 +641,7 @@ export class ProtocolHost {
       approval: this.ctx.get(APPROVAL).defaultPolicy,
       enforcement: sandbox.enforcementFor(sandbox.defaultMode),
       accepts: sandbox.acceptsFor(undefined, sandbox.defaultMode),
+      grants: [],
     })
   }
 
@@ -708,6 +713,7 @@ export class ProtocolHost {
       approval: approval.policyFor(agent.session),
       enforcement: sandbox.enforcementFor(mode),
       accepts: sandbox.acceptsFor(agent.session, mode),
+      grants: approval.grants(agent.session),
     })
   }
 
@@ -1003,6 +1009,7 @@ export class ProtocolHost {
       // From the LOG, like every other field here: a cold read has no agent,
       // and a stored session's acceptance is as readable as its mode.
       accepts: acceptanceFor(facts, mode),
+      grants: [...liveGrants(facts).values()],
     })
     const route = foldRequestContext(facts)
     const options = source.agent?.options ?? foldAgentOptions(facts)
@@ -1092,6 +1099,13 @@ export class ProtocolHost {
     if (outcome !== 'allowed-once' && outcome !== 'rejected') {
       throw new RpcFailure(INVALID_PARAMS, 'approval/answer: "outcome" must be "allowed-once" or "rejected"')
     }
+    const offer = params.offer
+    if (offer !== undefined && offer !== 'grant-session') {
+      throw new RpcFailure(INVALID_PARAMS, 'approval/answer: "offer" must be "grant-session"')
+    }
+    if (offer !== undefined && outcome !== 'allowed-once') {
+      throw new RpcFailure(INVALID_PARAMS, 'approval/answer: an "offer" only applies to "allowed-once"')
+    }
     const key = `${sessionId}:${id}`
     const pending = this.pendingApprovals.get(key)
     // First answer wins, whichever client sent it; every other client learns
@@ -1104,9 +1118,32 @@ export class ProtocolHost {
     if (!this.receives(connection, sessionId, false)) {
       throw new RpcFailure(INVALID_PARAMS, `approval/answer: this connection does not watch session "${sessionId}"`)
     }
+    // The offer is re-run against the same fold that produced it, so a client
+    // cannot take a scope it was never shown. The seam checks again before it
+    // writes anything; this one exists so a client learns why.
+    if (offer !== undefined) {
+      const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
+      const open = agent === undefined ? [] : openApprovals(agent.session.facts)
+      if (open.find((entry) => entry.id === id)?.offers?.includes(offer) !== true) {
+        throw new RpcFailure(INVALID_PARAMS, `approval/answer: "${offer}" is not offered on approval "${id}"`)
+      }
+    }
     this.pendingApprovals.delete(key)
-    pending.settle({ outcome, by: 'user' })
+    pending.settle({ outcome, by: 'user', ...(offer === undefined ? {} : { grant: true as const }) })
     return { outcome: 'accepted' }
+  }
+
+  /**
+   * Ends a standing consent. A person may take back what they gave, and the
+   * taking-back is a durable fact like the giving was.
+   */
+  private approvalRevoke(params: Record<string, unknown>): ApprovalRevokeResult {
+    const sessionId = requireString(params, 'sessionId', 'approval/revoke')
+    const grantId = requireString(params, 'grantId', 'approval/revoke')
+    const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
+    if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
+    this.assertDrivable(agent, 'approval/revoke')
+    return { revoked: this.ctx.get(APPROVAL).revoke(agent.session, grantId) }
   }
 
   /** Dispose-to-idle: owned turns close as `cancelled` and flush; durable queues survive for the next resume. */

@@ -10,7 +10,7 @@
  * layers its own live cases on top and falls back here for everything else.
  */
 import { AGENT_OPTIONS, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../core/approval/index.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY } from '../core/approval/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/compaction/index.ts'
 import { describeEffect, describeIntent, EFFECT_RECORDED } from '../core/effects/index.ts'
 import { blockText } from '../core/llm/content.ts'
@@ -90,6 +90,11 @@ export function describeEvent(event: EventEnvelope): string | undefined {
   if (matches(event, SANDBOX_ACCEPTANCE)) {
     const { accepts, forMode, reason } = event.data
     return `[shell enforcement: accepts ${accepts} under ${forMode} (${reason})]`
+  }
+  if (matches(event, APPROVAL_GRANT)) {
+    const data = event.data
+    if (data.op === 'revoke') return `[grant revoked: ${data.id}]`
+    return `[grant ${data.id}: ${data.toolName} ${describeIntent(data.subject)}]`
   }
   if (matches(event, APPROVAL_POLICY)) return `[approvals: ${event.data.policy}]`
   if (matches(event, AGENT_OPTIONS)) {
@@ -211,6 +216,15 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       // An authority DECISION, so `--audit` owes it a line: a projection that
       // showed the mode but not what unfenced the shell would be worse than none.
       lines.push(`${at(event.seq)}  accepts     ${event.data.accepts} under ${event.data.forMode} (${event.data.reason})`)
+    } else if (matches(event, APPROVAL_GRANT)) {
+      // A standing consent is an authority act with no knob behind it, so the
+      // audit is the only place a reader can see what one covered.
+      const data = event.data
+      lines.push(
+        data.op === 'revoke'
+          ? `${at(event.seq)}  revoked     ${data.id}`
+          : `${at(event.seq)}  granted     ${data.id} ${data.toolName} ${describeIntent(data.subject)} (from ${data.fromApproval})`,
+      )
     } else if (matches(event, APPROVAL_POLICY)) {
       lines.push(`${at(event.seq)}  approvals   ${event.data.policy} (${event.data.reason})`)
     } else if (matches(event, AUTHORITY_PRESET)) {

@@ -11,6 +11,7 @@ import { AGENTS } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { LLM, LlmError } from '../../core/llm/index.ts'
 import { canonicalPath } from '../../core/sandbox/index.ts'
+import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { startProtocolHost, type ProtocolHostHandle } from '../../app/serve.ts'
@@ -408,6 +409,8 @@ describe('protocol: the workspace root is host policy', () => {
   })
 })
 
+let riskyApproval: Approval | undefined
+
 describe('protocol: the authority control plane', () => {
   it('reports what a new session would start under, and what this host can enforce', async () => {
     const { client } = await startHost(new ScriptedAdapter())
@@ -419,6 +422,7 @@ describe('protocol: the authority control plane', () => {
       approval: 'ask',
       enforcement: 'none',
       accepts: 'full',
+      grants: [],
       preset: 'workspace-write',
     })
   })
@@ -431,7 +435,7 @@ describe('protocol: the authority control plane', () => {
 
     const view = await client.result<{ sandbox: string; approval: string }>('session/authority', { sessionId, sandbox: 'read-only', approval: 'never' })
     // read-only + never matches no shipped preset: the derived value is `custom`.
-    expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none', accepts: 'full', preset: 'custom' })
+    expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none', accepts: 'full', grants: [], preset: 'custom' })
 
     // Two stamps: the mode the session opened under, then the switch.
     const stamp = await client.waitFor(() => client.frames('sandbox/mode').at(1), 'the switch frame')
@@ -1022,6 +1026,65 @@ describe('protocol: more than one client', () => {
     expect(accepted.outcome).toBe('accepted')
     await first.waitForIdle(sessionId)
     expect(first.frames('approval/decided', sessionId)[0]!.event.data).toMatchObject({ outcome: 'allowed-once', decidedBy: 'user' })
+  })
+
+  it('refuses a scope the fold did not offer, and takes the one it did', async () => {
+    const risky = defineTool({
+      name: 'risky',
+      description: 'asks for itself',
+      input: z.object({ command: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      execute: async (args, exec) => {
+        await riskyApproval!.request({
+          agent: exec.agent!,
+          toolName: 'risky',
+          callId: exec.callId,
+          subject: { effect: 'shell-command', command: args.command, mode: 'danger-full-access', enforcement: 'none' },
+        })
+        return { ok: true }
+      },
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const adapter = new ScriptedAdapter().script(
+      assistantToolCall('c1', 'risky', { command: 'pnpm check' }),
+      assistantToolCall('c2', 'risky', { command: 'pnpm check' }),
+      assistantText('done'),
+    )
+    const { client } = await startHost(adapter, {
+      prepare: (root) => {
+        riskyApproval = root.get(APPROVAL)
+        root.get(TOOLS).register(root, risky)
+      },
+    })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    const asked = await client.waitFor(() => client.frames('approval/asked', sessionId)[0], 'the ask')
+    const id = asked.event.data.id as string
+
+    // A scope nobody offered is refused in the wire's words — the host re-runs
+    // the same fold that produced the offers, so a client cannot invent one.
+    const forged = await client.call('approval/answer', { sessionId, id, outcome: 'allowed-once', offer: 'grant-everything' })
+    expect(forged.error?.code).toBe(-32602)
+    // And one only applies to a yes.
+    const wrong = await client.call('approval/answer', { sessionId, id, outcome: 'rejected', offer: 'grant-session' })
+    expect(wrong.error?.message).toMatch(/only applies to/)
+
+    const accepted = await client.result<{ outcome: string }>('approval/answer', { sessionId, id, outcome: 'allowed-once', offer: 'grant-session' })
+    expect(accepted.outcome).toBe('accepted')
+    await client.waitForIdle(sessionId)
+
+    // The SECOND identical call asked nobody: it was answered by the grant, and
+    // the decision says which one.
+    expect(client.frames('approval/asked', sessionId)).toHaveLength(2)
+    const decisions = client.frames('approval/decided', sessionId).map((frame) => frame.event.data)
+    expect(decisions[1]).toMatchObject({ outcome: 'allowed-once', decidedBy: 'grant' })
+    const grantFrame = client.frames('approval/grant', sessionId)[0]!.event.data as { id: string }
+    expect(decisions[1]).toMatchObject({ grantId: grantFrame.id })
+
+    // A person can see it and take it back.
+    const view = await client.result<{ grants: { id: string }[] }>('session/authority', { sessionId })
+    expect(view.grants.map((grant) => grant.id)).toEqual([grantFrame.id])
+    expect(await client.result<{ revoked: boolean }>('approval/revoke', { sessionId, grantId: grantFrame.id })).toEqual({ revoked: true })
+    expect(await client.result<{ revoked: boolean }>('approval/revoke', { sessionId, grantId: grantFrame.id })).toEqual({ revoked: false })
   })
 
   it('treats a disconnect as one client leaving, not as a shutdown', async () => {

@@ -33,6 +33,7 @@
 /** @typedef {DataOf<typeof import('../../core/approval/events.ts').APPROVAL_ASKED>} ApprovalAskedData */
 /** @typedef {DataOf<typeof import('../../core/approval/events.ts').APPROVAL_DECIDED>} ApprovalDecidedData */
 /** @typedef {DataOf<typeof import('../../core/approval/events.ts').APPROVAL_POLICY>} ApprovalPolicyData */
+/** @typedef {DataOf<typeof import('../../core/approval/events.ts').APPROVAL_GRANT>} ApprovalGrantData */
 /** @typedef {DataOf<typeof import('../../core/sandbox/events.ts').SANDBOX_MODE>} SandboxModeData */
 /** @typedef {DataOf<typeof import('../../core/sandbox/events.ts').SANDBOX_ACCEPTANCE>} SandboxAcceptanceData */
 /** @typedef {DataOf<typeof import('../../core/presets/index.ts').AUTHORITY_PRESET>} AuthorityPresetData */
@@ -139,6 +140,11 @@ export function describeRow(event) {
     case 'sandbox/acceptance': {
       const data = /** @type {SandboxAcceptanceData} */ (event.data)
       return note(`[shell enforcement: accepts ${data.accepts} under ${data.forMode} (${data.reason})]`)
+    }
+    case 'approval/grant': {
+      const data = /** @type {ApprovalGrantData} */ (event.data)
+      if (data.op === 'revoke') return note(`[grant revoked: ${data.id}]`)
+      return note(`[grant ${data.id}: ${data.toolName} run "${data.subject.command}" under ${data.subject.mode}/${data.subject.enforcement}]`)
     }
     case 'approval/policy':
       return note(`[approvals: ${/** @type {ApprovalPolicyData} */ (event.data).policy}]`)

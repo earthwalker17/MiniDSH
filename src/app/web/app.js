@@ -196,6 +196,9 @@ function renderView() {
     // And the literal record beside it. A bound that fired SAYS so and points
     // at the whole thing, rather than showing a shortened call as if it were
     // the call.
+    // The extra button appears only where the fold said the scope is
+    // available: the browser renders offers, it does not decide them.
+    $('allow-session').hidden = open.offers?.includes('grant-session') !== true
     const call = open.call
     $('approval-call').hidden = !call
     if (call) {
@@ -511,6 +514,7 @@ async function start() {
     })
   }
   $('allow').addEventListener('click', () => void answer('allowed-once'))
+  $('allow-session').addEventListener('click', () => void answer('allowed-once', 'grant-session'))
   $('deny').addEventListener('click', () => void answer('rejected'))
   $('settings-open').addEventListener('click', () => {
     state.settingsClosed = false
@@ -523,12 +527,18 @@ async function start() {
   })
 }
 
-async function answer(outcome) {
+/**
+ * @param {'allowed-once' | 'rejected'} outcome
+ * @param {'grant-session'} [offer] A scope the HOST offered on this approval. Never a third outcome:
+ *   the decision is still one-shot, and the scope is a second durable fact beside it.
+ */
+async function answer(outcome, offer) {
   const open = state.pendingApproval
   if (!open || !state.window) return
   $('approval-bar').hidden = true
   try {
-    const result = await state.wire.request('approval/answer', { sessionId: state.window.sessionId, id: open.id, outcome })
+    const params = { sessionId: state.window.sessionId, id: open.id, outcome, ...(offer ? { offer } : {}) }
+    const result = await state.wire.request('approval/answer', params)
     // Another client may have answered first; the durable decision is the truth.
     if (result.outcome === 'not-pending') fail(new Error('that approval was already answered'))
   } catch (error) {

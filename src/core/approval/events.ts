@@ -4,7 +4,7 @@
  * crash repair, the authority invariant — can name an approval fact without
  * importing the seam that decides one (which would import the session back).
  */
-import type { EffectIntent } from '../effects/events.ts'
+import { intentKey, type EffectIntent } from '../effects/events.ts'
 import { eventKind, matches, TOOL_CALL, type EventEnvelope } from '../session/types.ts'
 import { printableText } from '../text.ts'
 
@@ -51,11 +51,100 @@ export function isApprovalDecider(value: unknown): value is ApprovalDecider {
   return typeof value === 'string' && VALID_DECIDERS.has(value)
 }
 
-export const APPROVAL_DECIDED = eventKind<{ id: string; outcome: ApprovalOutcome; decidedBy?: ApprovalDecider }>('approval/decided')
+export const APPROVAL_DECIDED = eventKind<{ id: string; outcome: ApprovalOutcome; decidedBy?: ApprovalDecider; grantId?: string }>('approval/decided')
 /** `delegation`: the opening stamp of a child, pinned by its parent — and the pin every later stamp is held to. */
 export type ApprovalPolicyReason = 'initial' | 'change' | 'delegation'
 /** Log-only, like `sandbox/mode`: the LAST such event is the session policy. */
 export const APPROVAL_POLICY = eventKind<{ policy: ApprovalPolicy; reason: ApprovalPolicyReason }>('approval/policy')
+
+// ---- grants -----------------------------------------------------------------
+
+/**
+ * A standing consent, op-shaped like `inbox/spliced` rather than positional.
+ *
+ * Its identity is the tool plus the EXACT recorded subject (`intentKey`), which
+ * is the one point in the space upstream enumerated and declined to choose
+ * from — "exact call, path, command prefix, session, or time window". No
+ * prefixes and no patterns: those need a per-dialect parser that can refuse a
+ * compound form, and nothing here has one.
+ *
+ * Exact matching is fragile — quoting, a working directory, an environment
+ * prefix, a pipeline retried as its failing stage — and that is the safety
+ * argument rather than an objection to it. Upstream rejected exact matching
+ * for hard-matching a RETRY to a prior denial, where fragility means a
+ * legitimate retry is refused; here it means a near-miss ASKS AGAIN. So the
+ * claim is bounded and stated: a grant covers a repeated identical action, the
+ * test command re-run across a turn loop, and nothing else. It is not a policy
+ * language.
+ */
+export type ApprovalGrantOp =
+  | {
+      readonly op: 'grant'
+      readonly id: string
+      readonly toolName: string
+      readonly subject: EffectIntent
+      /** The `approval/asked` this consent came from — a grant is a fact about a consent that provably happened. */
+      readonly fromApproval: string
+    }
+  | { readonly op: 'revoke'; readonly id: string }
+
+export const APPROVAL_GRANT = eventKind<ApprovalGrantOp>('approval/grant')
+
+/** A live standing consent, as a surface lists one. */
+export interface ApprovalGrant {
+  readonly id: string
+  readonly toolName: string
+  readonly subject: EffectIntent
+}
+
+/**
+ * The authority facts that END every standing consent in a session.
+ *
+ * **Consent is to the world as it stood.** A grant minted under an escalation
+ * to `danger-full-access` would otherwise still match after a person typed
+ * `/sandbox read-only` — `resolvePolicy` checks only that the target is wider,
+ * and `sandbox.resolve` checks only the DELEGATION ceiling — so the narrowing
+ * would change nothing for exactly the command somebody worried about. One
+ * comparison in a walk that already happens, and it covers the cases a
+ * subject-only guard misses: a resume onto a differently-enforcing host writes
+ * `sandbox/mode{resume}`, and a preset writes through both setters.
+ */
+const AUTHORITY_KINDS: ReadonlySet<string> = new Set([APPROVAL_POLICY.type, 'sandbox/mode', 'sandbox/acceptance', 'authority/preset'])
+
+/**
+ * Every live grant, keyed by `intentKey`. A grant is live only if it was not
+ * revoked and NO authority event follows it.
+ */
+export function liveGrants(events: readonly EventEnvelope[]): Map<string, ApprovalGrant> {
+  const live = new Map<string, ApprovalGrant>()
+  for (const event of events) {
+    if (AUTHORITY_KINDS.has(event.type)) {
+      live.clear()
+      continue
+    }
+    if (!matches(event, APPROVAL_GRANT)) continue
+    if (event.data.op === 'revoke') {
+      const id = event.data.id
+      for (const [key, grant] of live) if (grant.id === id) live.delete(key)
+      continue
+    }
+    const key = intentKey(event.data.toolName, event.data.subject)
+    if (key !== undefined) live.set(key, { id: event.data.id, toolName: event.data.toolName, subject: event.data.subject })
+  }
+  return live
+}
+
+/** The live grant covering this exact action, if one stands. */
+export function grantFor(events: readonly EventEnvelope[], toolName: string, subject: EffectIntent): ApprovalGrant | undefined {
+  const key = intentKey(toolName, subject)
+  return key === undefined ? undefined : liveGrants(events).get(key)
+}
+
+/**
+ * What a HOST may offer beside a one-shot yes. A closed id, not a label: the
+ * words belong to each surface, and no surface may invent a scope.
+ */
+export type ApprovalOfferId = 'grant-session'
 
 /**
  * The delegation pin: the policy a delegated child opened under, when its
@@ -118,6 +207,12 @@ export interface OpenApproval {
   readonly callId?: string
   /** That call as the log recorded it — the literal record, beside the runtime's account of it. */
   readonly call?: ApprovedCall
+  /**
+   * What a surface may offer beside a one-shot yes, computed HERE from the log
+   * — never invented by the surface, and re-checked by the seam before any
+   * durable consequence. Empty is the common case.
+   */
+  readonly offers?: readonly ApprovalOfferId[]
 }
 
 /**
@@ -158,7 +253,30 @@ export function openApprovals(events: readonly EventEnvelope[]): OpenApproval[] 
       })
     } else if (matches(event, APPROVAL_DECIDED)) open.delete(event.data.id)
   }
-  return joinCalls([...open.values()], events)
+  return withOffers(joinCalls([...open.values()], events), events)
+}
+
+/**
+ * What each open approval may durably buy, as a fold over the log.
+ *
+ * In the fold and not in the host, so every surface and the audit agree, and so
+ * the seam can re-run the same function before writing anything — which is the
+ * operative meaning of "no surface invents a scope". Offerable needs a subject
+ * that can be keyed (so never a truncated one), a session that is not delegated
+ * (a child's authority is not its to extend), a policy that actually asks, and
+ * no live grant already covering it.
+ */
+function withOffers(open: OpenApproval[], events: readonly EventEnvelope[]): OpenApproval[] {
+  if (open.length === 0) return open
+  if (delegationPin(events) !== undefined) return open
+  if (effectiveApprovalPolicy(events) !== 'ask') return open
+  const live = liveGrants(events)
+  return open.map((entry) => {
+    if (entry.subject === undefined) return entry
+    const key = intentKey(entry.toolName, entry.subject)
+    if (key === undefined || live.has(key)) return entry
+    return { ...entry, offers: ['grant-session'] as const }
+  })
 }
 
 /**

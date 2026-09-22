@@ -7,7 +7,8 @@
  * mode/policy vocabularies would otherwise fold into a boundary nobody chose.
  */
 import type { Plugin } from '../../kernel/index.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
+import { intentKey, type EffectIntent } from '../effects/events.ts'
 import { INVARIANTS, type InvariantFailure, type InvariantInstaller } from '../invariants/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
 import { SESSION_EVENT } from '../session/store.ts'
@@ -34,12 +35,27 @@ interface Trace {
   acceptanceStamps: number
   /** A delegated child's acceptance cannot be renegotiated from inside the session. */
   acceptancePinned: boolean
+  /** Every open ask's subject key, so a grant can be held to one that provably happened. */
+  openSubjects: Map<string, string>
+  grantIds: Set<string>
   ceiling: SandboxMode | undefined
   pin: ApprovalPolicy | undefined
 }
 
 function freshTrace(): Trace {
-  return { lastSeq: -1, asked: new Set(), decided: new Set(), sandboxStamps: 0, policyStamps: 0, acceptanceStamps: 0, acceptancePinned: false, ceiling: undefined, pin: undefined }
+  return {
+    lastSeq: -1,
+    asked: new Set(),
+    decided: new Set(),
+    sandboxStamps: 0,
+    policyStamps: 0,
+    acceptanceStamps: 0,
+    acceptancePinned: false,
+    openSubjects: new Map(),
+    grantIds: new Set(),
+    ceiling: undefined,
+    pin: undefined,
+  }
 }
 
 /**
@@ -122,6 +138,12 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
       if (bad !== undefined) fail(`approval/asked for "${id}" carries a malformed subject: ${bad}`)
     }
     trace.asked.add(id)
+    // Remembered only while OPEN: a grant must name the ask it came from, and
+    // an ask already decided is not one anybody is consenting to now.
+    if (subject !== undefined && subjectFault(subject) === undefined) {
+      const key = intentKey(event.data.toolName, subject as EffectIntent)
+      if (key !== undefined) trace.openSubjects.set(id, key)
+    }
     return
   }
   if (matches(event, APPROVAL_DECIDED)) {
@@ -130,6 +152,38 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     if (!trace.asked.has(id)) fail(`approval/decided for "${id}" has no matching approval/asked`)
     if (trace.decided.has(id)) fail(`approval/decided for "${id}" was already decided`)
     trace.decided.add(id)
+    trace.openSubjects.delete(id)
+    return
+  }
+  if (matches(event, APPROVAL_GRANT)) {
+    const data: unknown = event.data
+    if (typeof data !== 'object' || data === null) fail('approval/grant is not an object')
+    const op = (data as { op?: unknown }).op
+    if (op === 'revoke') {
+      const id = (data as { id?: unknown }).id
+      if (typeof id !== 'string' || !trace.grantIds.has(id)) fail(`approval/grant revokes "${String(id)}", which this session never granted`)
+      return
+    }
+    if (op !== 'grant') fail(`approval/grant carries an unknown op ${JSON.stringify(op)}`)
+    const { id, toolName, subject, fromApproval } = data as { id?: unknown; toolName?: unknown; subject?: unknown; fromApproval?: unknown }
+    if (typeof id !== 'string' || id.length === 0) fail('approval/grant has no id')
+    if (typeof toolName !== 'string' || toolName.length === 0) fail('approval/grant has no toolName')
+    // A grant in a delegated session would extend an authority that session was
+    // never given, and its pin means nobody in it can be asked for one.
+    if (trace.pin !== undefined) fail('approval/grant in a delegated session, whose authority is not its own to extend')
+    const bad = subject === undefined ? 'missing' : subjectFault(subject)
+    if (bad !== undefined) fail(`approval/grant carries a malformed subject: ${bad}`)
+    const key = subject === undefined ? undefined : intentKey(String(toolName), subject as EffectIntent)
+    // A truncated subject has no key, so it could only ever match by prefix.
+    if (key === undefined) fail('approval/grant carries a subject that cannot be keyed (it was truncated)')
+    // The provenance rule: a grant is a fact about a consent that provably
+    // happened, in THIS log, for THIS exact subject, and is still open.
+    // Without it, `fromApproval` is convention and any mounted row could mint
+    // a standing consent for a subject nobody was ever asked about.
+    if (typeof fromApproval !== 'string' || trace.openSubjects.get(fromApproval) !== key) {
+      fail(`approval/grant names no open approval/asked with an identical subject ("${String(fromApproval)}")`)
+    }
+    if (typeof id === 'string') trace.grantIds.add(id)
   }
 }
 

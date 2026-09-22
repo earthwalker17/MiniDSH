@@ -18,6 +18,7 @@ import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
+import type { ApprovalOfferId, OpenApproval } from '../../core/approval/index.ts'
 import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
@@ -48,6 +49,24 @@ import { renderHistory, TerminalRenderer } from './render.ts'
 function confinementLine(view: AuthorityView): string {
   const accepted = view.accepts === 'full' ? '' : `, accepting ${view.accepts}`
   return `shell confinement: ${view.enforcement}${accepted}`
+}
+
+/**
+ * The one line that tells a person how to stop being asked per call — and it
+ * has to name the RIGHT answer for this host.
+ *
+ * It used to name `danger-full-access` unconditionally, which on a host with
+ * no confinement backend is advice to drop the in-process file fence as well:
+ * the only confinement such a host has. Where the shell cannot be sandboxed,
+ * accepting that is narrower and keeps the fence; where a scope is offered on
+ * this very ask, that is narrower still.
+ */
+function firstAskTip(offered: boolean, authority: AuthorityView | undefined): string {
+  if (offered) return 'tip: y allows this once; a allows this exact call for the rest of the session (/grants lists them, /revoke takes one back)\n'
+  if (authority !== undefined && authority.enforcement === 'none' && authority.accepts === 'full') {
+    return 'tip: this host cannot sandbox the shell. /accept none runs shell commands anyway and keeps file edits fenced; /preset danger-full-access drops the fence too\n'
+  }
+  return 'tip: approvals are one-shot; /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops these prompts\n'
 }
 
 /** How many sessions `/sessions` prints. A terminal has one screen; the CLI's own listing has all of them. */
@@ -96,7 +115,19 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
 
   let sessionId: string | undefined
   let status: 'idle' | 'running' = 'idle'
-  let pendingApproval: { id: string; toolName: string } | undefined
+  let pendingApproval: { id: string; toolName: string; offered: boolean } | undefined
+  /** The last authority the host published, so the first-ask tip can name what THIS host can do. */
+  let lastAuthority: AuthorityView | undefined
+  /**
+   * The open approvals from the last published view — the only place OFFERS
+   * live, because they are a fold and the durable frame is not.
+   *
+   * `publishView` runs in the same tick as the event broadcast, so by the time
+   * the prompt's microtask runs this names the ask that just arrived. Where a
+   * carrier splits the two writes it does not, and the prompt simply offers
+   * nothing extra — a missing affordance, never a missing question.
+   */
+  let lastPending: readonly OpenApproval[] = []
   let exiting = false
   let lastInterrupt = 0
   /** Until the attach page is rendered, live frames wait in the backlog. */
@@ -138,19 +169,26 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
    * the first would leave a standing `[y/N]` for a question that is already
    * answered, and the next line a person typed would be swallowed as its answer.
    */
-  const askApproval = (data: { id: string; toolName: string; reason?: string; subject?: EffectIntent }): void => {
+  const askApproval = (data: { id: string; toolName: string; reason?: string; subject?: EffectIntent; offers?: readonly ApprovalOfferId[] }): void => {
     if (answeredIds.has(data.id)) return
-    pendingApproval = { id: data.id, toolName: data.toolName }
+    pendingApproval = { id: data.id, toolName: data.toolName, offered: false }
     queueMicrotask(() => {
       if (pendingApproval?.id !== data.id || answeredIds.has(data.id)) return
+      // Offers come from the fold, never from here: a surface renders the
+      // scopes the runtime says are available and invents none. The attach
+      // path passes them directly; the live path finds them in the view.
+      const offered =
+        data.offers?.includes('grant-session') === true || lastPending.find((entry) => entry.id === data.id)?.offers?.includes('grant-session') === true
+      pendingApproval = { id: data.id, toolName: data.toolName, offered }
       if (!tipped) {
         tipped = true
-        out.write('tip: approvals are one-shot; /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops these prompts\n')
+        out.write(firstAskTip(offered, lastAuthority))
       }
       // The runtime's account of the call leads; the model's follows in
       // parentheses, where it reads as the claim it is.
       const says = data.subject ? ` — ${describeIntent(data.subject)}` : ''
-      out.write(`approve ${data.toolName}${says}${data.reason ? ` (${data.reason})` : ''}? [y/N] `)
+      const keys = offered ? '[y/N/a] ' : '[y/N] '
+      out.write(`approve ${data.toolName}${says}${data.reason ? ` (${data.reason})` : ''}? ${keys}`)
       promptStanding = true
     })
   }
@@ -190,6 +228,8 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       } else if (method === 'session.view') {
         const projected = params as { sessionId: string; view: SessionView }
         if (sessionId !== undefined && projected.sessionId !== sessionId) return
+        lastAuthority = projected.view.authority
+        lastPending = projected.view.pendingApprovals
         if (!attached) return
         const line = renderer.onView(projected.view)
         if (line) out.write(line)
@@ -224,9 +264,18 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       const approval = pendingApproval
       pendingApproval = undefined
       const answer = line.toLowerCase()
-      const outcome = answer === 'y' || answer === 'yes' ? 'allowed-once' : 'rejected'
+      // `a` is a yes that ALSO takes the scope the host offered on this
+      // approval. It is never a third outcome: the decision is still
+      // `allowed-once`, and the scope is a second durable fact beside it.
+      const always = approval.offered && (answer === 'a' || answer === 'always')
+      const outcome = always || answer === 'y' || answer === 'yes' ? 'allowed-once' : 'rejected'
       try {
-        const result = await client.request<ApprovalAnswerResult>('approval/answer', { sessionId, id: approval.id, outcome })
+        const result = await client.request<ApprovalAnswerResult>('approval/answer', {
+          sessionId,
+          id: approval.id,
+          outcome,
+          ...(always ? { offer: 'grant-session' } : {}),
+        })
         // Settled elsewhere before the answer landed: say so rather than let a
         // y/N vanish into a prompt nothing was waiting on.
         if (result.outcome === 'not-pending') out.write(`that approval (${approval.id}) is no longer pending\n`)
@@ -247,6 +296,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     // as an unrecognized command and fell through to the SANDBOX setter,
     // durably widening the wrong knob with no error.
     const command = line.split(/\s+/, 1)[0]
+    if (command === '/grants' || command === '/revoke') {
+      await manageGrants(line)
+      return
+    }
     if (command === '/sandbox' || command === '/ask' || command === '/accept' || command === '/preset') {
       await switchAuthority(line)
       return
@@ -404,6 +457,38 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     try {
       const route = await client.request<ModelResult>('session/model', params)
       out.write(`model: ${route.provider}/${route.model}${route.reasoningEffort ? ` · effort ${route.reasoningEffort}` : ''}\n`)
+    } catch (error) {
+      printError(error)
+    }
+    if (status === 'idle') prompt()
+  }
+
+  /**
+   * Lists or ends the standing consents this session holds.
+   *
+   * A grant is the only authority act here that is not a knob, so it needs a
+   * way to be seen and taken back — a consent nobody can enumerate is one
+   * nobody can withdraw. Both read the same fold every other surface reads.
+   */
+  async function manageGrants(line: string): Promise<void> {
+    const [command, value] = line.split(/\s+/, 2)
+    if (sessionId === undefined) {
+      out.write('no session yet - send a prompt first\n')
+      prompt()
+      return
+    }
+    try {
+      if (command === '/revoke') {
+        if (!value) out.write('usage: /revoke <grant-id>   (/grants lists them)\n')
+        else {
+          const { revoked } = await client.request<{ revoked: boolean }>('approval/revoke', { sessionId, grantId: value })
+          out.write(revoked ? `revoked ${value}\n` : `no live grant "${value}" in this session\n`)
+        }
+      } else {
+        const view = await client.request<AuthorityView>('session/authority', { sessionId })
+        if (view.grants.length === 0) out.write('no standing grants in this session\n')
+        for (const grant of view.grants) out.write(`${grant.id}  ${grant.toolName}  ${describeIntent(grant.subject)}\n`)
+      }
     } catch (error) {
       printError(error)
     }
