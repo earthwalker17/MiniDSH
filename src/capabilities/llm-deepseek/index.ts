@@ -35,6 +35,10 @@ export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
     // Validated at apply, so a bad reference fails the row loudly at settle
     // instead of surfacing as a missing key on the first paid request.
     const ref = credentialRef(config?.apiKeyEnv ?? 'DEEPSEEK_API_KEY')
+    // Declared, so anything that hands a child process an environment can
+    // withhold it — this row's own config may have renamed it, and nothing
+    // outside this row would otherwise know what it is called.
+    ctx.get(CREDENTIALS).declare(ref)
     const credentials = ctx.get(CREDENTIALS)
     const adapter = new DeepSeekAdapter({
       apiKeyRef: ref,

@@ -36,6 +36,20 @@ export interface Credentials {
    * ends in the docs. Never a value, never a partial one.
    */
   describe(ref: CredentialRef): string
+  /**
+   * Records that this deployment treats `ref` as a secret. Called by each row
+   * beside its own `credentialRef(...)`, at mount.
+   *
+   * It exists because nothing else can know the answer. A row's credential
+   * name is minted INSIDE that row and is overridable by its own config
+   * (`apiKeyEnv`), so a `composition.json` renaming `DEEPSEEK_API_KEY` to
+   * `CORP_LLM_CRED` defeats any list assembly hand-copies — and matches no
+   * name pattern either. The seam that owns what a reference IS is the only
+   * place that can own which ones exist.
+   */
+  declare(ref: CredentialRef): void
+  /** Every reference declared so far. By the time a tool runs, every row has mounted. */
+  declaredRefs(): readonly CredentialRef[]
 }
 
 export const CREDENTIALS = serviceKey<Credentials>('credentials')

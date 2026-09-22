@@ -30,9 +30,19 @@ class LocalCredentials implements Credentials {
   private readonly path: string | undefined
   private readonly logger: Logger
   private warned = false
+  /** What this deployment calls a secret, declared by the rows that mint them. */
+  private readonly declared = new Set<CredentialRef>()
   constructor(path: string | undefined, logger: Logger) {
     this.path = path
     this.logger = logger
+  }
+
+  declare(ref: CredentialRef): void {
+    this.declared.add(ref)
+  }
+
+  declaredRefs(): readonly CredentialRef[] {
+    return [...this.declared]
   }
 
   resolve(ref: CredentialRef): string | undefined {

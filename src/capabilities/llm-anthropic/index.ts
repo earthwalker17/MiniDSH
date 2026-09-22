@@ -36,6 +36,10 @@ export const anthropicPlugin: Plugin<AnthropicConfig | undefined> = {
   config: configSchema,
   apply(ctx, config) {
     const ref = credentialRef(config?.apiKeyEnv ?? 'ANTHROPIC_API_KEY')
+    // Declared, so anything that hands a child process an environment can
+    // withhold it — this row's own config may have renamed it, and nothing
+    // outside this row would otherwise know what it is called.
+    ctx.get(CREDENTIALS).declare(ref)
     const credentials = ctx.get(CREDENTIALS)
     const adapter = new AnthropicAdapter({
       apiKeyRef: ref,

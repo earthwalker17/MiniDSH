@@ -11,6 +11,7 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 import { EFFECT_RECORDED } from '../../core/effects/index.ts'
+import { CREDENTIALS } from '../../core/credentials/index.ts'
 import { canonicalPath, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL, type Shell, type ShellSession } from '../../core/shell/index.ts'
 import { CONFINEMENT_CHOICES, selectConfinement, type Confinement, type ConfinementChoice } from './confine/index.ts'
@@ -77,6 +78,10 @@ class ShellStdioProvider implements Shell {
     // outright when it lives under /tmp.
     const process = new ShellProcess(this.dialect, canonicalPath(agent.session.header.cwd), {
       confinement: this.confinement,
+      // Read per shell rather than at mount: every row has declared by the time
+      // a tool runs, and `tryGet` because a composition may mount no credential
+      // seam at all — one that has none has no declared name to withhold.
+      withheld: this.ctx.tryGet(CREDENTIALS)?.declaredRefs() ?? [],
       ...(this.config.shellPath === undefined ? {} : { shellPath: this.config.shellPath }),
       ...(this.config.maxCaptureChars === undefined ? {} : { maxCaptureChars: this.config.maxCaptureChars }),
     })

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SandboxExecutionPolicy } from '../../core/sandbox/index.ts'
-import { ShellProcess, type ShellDialect } from './process.ts'
+import { childEnvironment, ShellProcess, type ShellDialect } from './process.ts'
 
 const dialect: ShellDialect = process.platform === 'win32' ? 'pwsh' : 'bash'
 const binary = dialect === 'pwsh' ? 'pwsh' : 'bash'
@@ -123,6 +123,38 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
  * reaped the persistent child and left the escalated one — the command running
  * under the widest authority the session ever granted — alive behind it.
  */
+describe('the environment a child is given', () => {
+  it('withholds what this deployment declared a secret, what LOOKS like one, and its own identity', () => {
+    const before = { ...process.env }
+    process.env.CORP_LLM_CRED = 'renamed-by-config'
+    process.env.SOME_API_KEY = 'looks-like-one'
+    process.env.MINIDSH_HOME = '/somewhere'
+    process.env.ORDINARY_SETTING = 'kept'
+    try {
+      // `CORP_LLM_CRED` is the case a name pattern cannot catch and assembly
+      // cannot know: a row renamed its own `apiKeyEnv`, and only the credential
+      // seam it declared to can say so.
+      const env = childEnvironment(['CORP_LLM_CRED'], undefined)
+      expect(env.CORP_LLM_CRED).toBeUndefined()
+      expect(env.SOME_API_KEY).toBeUndefined()
+      expect(env.MINIDSH_HOME).toBeUndefined()
+      // And an ordinary child still works: PATH and the rest are untouched.
+      expect(env.ORDINARY_SETTING).toBe('kept')
+      expect(env.PATH ?? env.Path).toBeDefined()
+    } finally {
+      process.env = before
+    }
+  })
+
+  it('merges the caller overlay AFTER the scrub, so a forwarded value survives', () => {
+    // Nothing forwards one today; the ordering is what makes it possible
+    // later without reopening the scrub, and it is upstream's ordering too.
+    const env = childEnvironment(['SOME_KEY'], { TMPDIR: '/tmp', SOME_KEY: 'on purpose' })
+    expect(env.TMPDIR).toBe('/tmp')
+    expect(env.SOME_KEY).toBe('on purpose')
+  })
+})
+
 describe.skipIf(!available)('what enforcement a session accepts, where nothing confines', () => {
   it('refuses a confined mode by default, and runs it in the PERSISTENT shell once the session accepts unconfined', async () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
