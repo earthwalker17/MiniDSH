@@ -24,7 +24,7 @@ It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (
 Three things:
 
 1. **Useful software.** A coding agent that edits files and runs commands under an authority you set — which files it may write, and which actions need your approval — and can audit afterwards; that survives its process being killed and can be resumed or forked from its log; that manages its own context; that can hand a bounded task to a child or, with a vision plugin inserted, a visual check to a model that can see. Two providers ship (DeepSeek and Anthropic), and a session can switch models mid-conversation.
-2. **A reference architecture.** About twenty thousand lines of TypeScript in one package with one runtime dependency: four layers with a dependency rule enforced by a script in `pnpm check`, seventeen service contracts in core plus one in the application, each with stated ownership, twenty-nine durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
+2. **A reference architecture.** About twenty thousand lines of TypeScript in one package with one runtime dependency: four layers with a dependency rule enforced by a script in `pnpm check`, seventeen service contracts in core plus one in the application, each with stated ownership, thirty-one durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
 3. **A systems-engineering experiment.** Whether a project built almost entirely by coding-agent sessions can keep a global architecture intact across months, by making it explicit, inspectable and continuously falsified rather than letting sessions gradually invent it.
 
 The thesis is **fewer concepts and stronger invariants**, not fewer lines or more features.
@@ -34,7 +34,7 @@ The thesis is **fewer concepts and stronger invariants**, not fewer lines or mor
 Requirements:
 
 - **Node 24** or newer.
-- **Windows:** PowerShell 7 (`pwsh`). The shell tool runs `pwsh` only and refuses loudly, naming the remedy, when it is missing; it never falls back to PowerShell 5.1. Windows has no shell-confinement backend, so every shell command there costs one approval (see below).
+- **Windows:** PowerShell 7 (`pwsh`). The shell tool runs `pwsh` only and refuses loudly, naming the remedy, when it is missing; it never falls back to PowerShell 5.1. Windows has no shell-confinement backend, so a shell command there is refused until the session says it accepts that (`--accept none`, or `/accept none` in the terminal) — see below.
 - **Linux:** `bubblewrap` (`apt install bubblewrap`) if you want shell commands confined by the operating system instead of approved one by one. **macOS** needs nothing extra.
 - **A provider key:** `DEEPSEEK_API_KEY` for the default provider, `ANTHROPIC_API_KEY` for Anthropic — in the environment, or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}`. Only a key's *name* is ever logged; a run without one stops and names the key it expected.
 
@@ -45,7 +45,8 @@ minidsh chat --cwd path/to/repo   # interactive terminal (--cwd defaults to the 
 minidsh web  --cwd path/to/repo   # the same runtime in a browser; open the one URL it prints
 minidsh run "fix the failing test in src/slug.test.mjs" --approve
                                   # --approve answers every approval yes; without it a headless run
-                                  # refuses anything that needs one — on Windows, that is every shell command
+                                  # refuses anything that needs one (on Windows: add --accept none, which
+                                  # runs shell commands unconfined but keeps file edits fenced)
 minidsh run "review this module for unchecked inputs" --provider anthropic --model claude-sonnet-5
 minidsh run "summarize this repository" --json     # one JSON line per session event on stdout
 
@@ -56,7 +57,7 @@ minidsh config                            # the effective plugin composition, an
 minidsh --help
 ```
 
-In the terminal: `y`/`N` answers an approval; `/sandbox <read-only|workspace-write|danger-full-access>`, `/ask <ask|never>` and `/preset <name>` switch authority; `/model [<provider>/]<model> [effort]` switches the model; `/compact` shrinks context; `/history` pages back; `/sessions` lists recent sessions (`minidsh sessions list` has all of them); `/cancel` stops the running turn; `/exit` quits. Typing while a turn is running steers it.
+In the terminal: `y`/`N` answers an approval, and `a` — when it is offered — allows that exact call for the rest of the session (`/grants` lists what you have allowed, `/revoke <id>` takes one back); `/sandbox <read-only|workspace-write|danger-full-access>`, `/ask <ask|never>`, `/accept <full|none>` and `/preset <name>` switch authority; `/model [<provider>/]<model> [effort]` switches the model; `/compact` shrinks context; `/history` pages back; `/sessions` lists recent sessions (`minidsh sessions list` has all of them); `/cancel` stops the running turn; `/exit` quits. Typing while a turn is running steers it.
 
 Everything MiniDSH keeps lives under `~/.minidsh` (override with `MINIDSH_HOME`): `sessions/` (one JSONL log per session), `spill/` (oversized tool output, swept after 30 days), `attachments/` (images, never swept), `composition.json`, `settings.json` (the one file the runtime also writes, via the settings method on the wire), `credentials.json`, and an optional `AGENTS.md` that every session reads. A session is stored the moment it records its first prompt; nothing in the harness deletes a log.
 
@@ -64,7 +65,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 ## What you get
 
-**Authority you set, and a record you can read back.** A run defaults to `workspace-write` with approvals `ask`: file writes are restricted to the working directory, reads are unrestricted, and shell commands are confined by the operating system where it can (bubblewrap on Linux, Seatbelt on macOS; the harness probes that the backend works before claiming it). On a confined host an ordinary task costs nobody a decision. The modes are `read-only`, `workspace-write` and `danger-full-access`, which drops confinement and the file-write fence for the whole session; the first approval prompt says so. Approvals are answered in the terminal, in the browser, or by `--approve` on a headless run. Every session records the authority it starts under and every later switch, request and decision; `sessions show --audit` prints that history back. What confinement does not cover is in [Status and limitations](#status-and-limitations).
+**Authority you set, and a record you can read back.** A run defaults to `workspace-write` with approvals `ask`: file writes are restricted to the working directory, reads are unrestricted, and shell commands are confined by the operating system where it can (bubblewrap on Linux, Seatbelt on macOS; the harness probes that the backend works before claiming it). On a confined host an ordinary task costs nobody a decision; on one that cannot confine the shell, a session can say so on the record (`--accept none`) and keep the file-write fence, instead of reaching for `danger-full-access`, which drops both. **An approval shows what the runtime says the call will do** — the command itself and the authority it would run under — with the model's reason beside it rather than instead of it; and a yes can be extended to that exact call for the rest of the session, then taken back. Approvals are answered in the terminal, in the browser, or by `--approve` on a headless run. Every session records the authority it starts under and every later switch, request and decision; `sessions show --audit` prints that history back. What confinement does not cover is in [Status and limitations](#status-and-limitations).
 
 **Sessions that survive their process.** Everything the model was shown and did is one append-only JSONL log. Kill the process mid-turn and the next `resume` repairs the tail and continues under the authority the log recorded; `fork <id> --at <seq>` branches a session at any event. A second process cannot resume a session another one holds: a lease refuses it before a byte is appended. Because the model's history is derived from the log, a stored log can be replayed without an API key, as a test of the session that wrote it.
 
@@ -82,13 +83,13 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 **Version 1.0.0** is the smallest release a developer can install, point at a repository and use daily without reading the architecture. It is a small project with one maintainer. The full register of limitations is [ARCHITECTURE §13](docs/ARCHITECTURE.md); the ones most likely to matter first:
 
-- Windows has no shell-confinement backend and is not getting one. Every shell command there costs an approval and runs in a fresh shell (`cd` and environment changes do not persist), and a headless run without `--approve` cannot run a shell at all.
-- Confinement governs file effects only. A confined command reaches the network and reads the harness's environment, provider keys included.
+- Windows has no shell-confinement backend and is not getting one. By default a shell command there costs an approval and runs in a fresh shell (`cd` and environment changes do not persist); `--accept none` records that the session accepts an unconfined shell and runs it normally, with file edits still fenced.
+- Confinement governs file effects only. A confined command still reaches the network. Its environment is scrubbed of this deployment's provider keys, but that is defence in depth, not a boundary: reads are unfenced, so a credentials file stays readable to a command that looks.
 - The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. On a confined host the shell is unaffected because the OS bounds the whole process.
 - Tool execution is sequential and a delegated child is foreground; there are no background jobs.
 - No session deletion, search or rename; no OpenAI adapter; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven: it cannot import MiniDSH's own modules and must ship its own `package.json` and dependencies (BLUEPRINT §3).
 
-What comes next is the route in [BLUEPRINT §2](docs/BLUEPRINT.md): consent on the record and the Windows shell, then integrity and forensics.
+What comes next is the route in [BLUEPRINT §2](docs/BLUEPRINT.md): integrity and forensics — reading a stored log back with something other than the runtime that wrote it — then background jobs.
 
 ## The question it investigates
 
@@ -177,7 +178,7 @@ These are the experiment, each stated in ARCHITECTURE §12 with the reasoning th
 - **An own kernel instead of Cordis** — the two properties in five mechanisms and about nine hundred lines (see Architecture).
 - **One package with a dependency gate instead of hundreds.**
 - **Sequential, foreground, one child at a time:** no background jobs, parallel tool calls, continuable children or agent teams (DSH's own `minimal` preset ships none either).
-- **One protocol over three transports** (stdio, in-process, WebSocket; sixteen JSON-RPC methods) where DSH ships several protocol profiles.
+- **One protocol over three transports** (stdio, in-process, WebSocket; seventeen JSON-RPC methods) where DSH ships several protocol profiles.
 - **Two confinement backends, not four:** no Landlock (a native addon) and no Windows backend (DSH's own Windows backend can only ever report partial enforcement).
 - **A terminal client ships** (DSH removed its TUI in a note of 2026-08-04): the cheapest proof that the wire carries everything a user interface needs.
 - **History recall appears only when needed:** `history_read` covers only what this session's compactions summarized away and is hidden until the first compaction, where DSH's [session-query](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/session-query/tool-session-query/README.md) adds five tool schemas to every request.
@@ -193,7 +194,7 @@ ARCHITECTURE §12 carries the reasons.
 
 ### Not built
 
-PTC (DSH's programmatic tool calling); model-written dynamic packages; an MCP client; a Windows confinement backend and Landlock; session deletion; a session search index; per-user identity; agent teams. Each is in BLUEPRINT §2 with the reason; grants, background jobs and a desktop launcher are on its route.
+PTC (DSH's programmatic tool calling); model-written dynamic packages; an MCP client; a Windows confinement backend and Landlock; session deletion; a session search index; per-user identity; agent teams. Each is in BLUEPRINT §2 with the reason; background jobs, a browser tool and a desktop launcher are on its route.
 
 ## The architecture-first experiment
 

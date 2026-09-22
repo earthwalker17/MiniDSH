@@ -4,6 +4,20 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- **An approval says what the runtime will do, not what the model said about it.** The line a person answers now carries a *subject* the harness builds from the validated call arguments — the command, and the mode and enforcement it would run under — plus the whole call as the log recorded it, up to a bound past which the surfaces refuse the shortcut and point at `sessions show <id> --json` rather than hiding a command's tail. The model's justification sits beside that, never in place of it. Control characters in a subject are escaped rather than flattened, so two different commands can never render as one line.
+- **A yes can outlive one call without outliving the session.** Where the host offers it, `a` in the terminal (or the browser's button) extends a one-shot approval to that exact action — same tool, same command, same authority — for the rest of the session. It is a durable event, it is offered by the runtime rather than invented by a surface, it dies the moment any authority knob moves, and `/grants` and `/revoke <id>` list and withdraw it. A near-miss asks again: this is not a policy language.
+- **A session can accept the enforcement its host can actually deliver.** `--accept none` (or `/accept none`, or the browser's control, or `session/authority`) records that this session will run a shell command a host cannot confine — under its own sandbox mode, with the in-process file fence intact. On Windows, which has no confinement backend, that replaces paying a `danger-full-access` escalation per command, which used to drop the file fence as well. It is inert wherever a backend exists, it applies only to the mode it was given for, and a delegated child inherits it as a pin it cannot change.
+- **Decisions record who made them**: policy, a standing consent (and which one), a person, or an automatic answerer. `sessions show --audit` and both clients print it.
+- **An unattended run can approve exactly what a deployment declared.** `approval-headless` takes an `allow` list of exact subjects, answered `auto` — a middle rung between `--approve` (all of them) and the fail-closed default (none).
+- **Crash repair closes every bracket the log left open** (from the durable-execution work that preceded this): an interrupted delegation, an interrupted compaction, and the tool calls of an interrupted step, with a durable fact recorded between a tool's approval gate and its body so repair can tell "never started" from "outcome unknown". Effects that land — file writes and shell commands — are recorded by the provider that caused them, after the fact.
+
+### Security
+
+- **A shell child no longer inherits this deployment's provider keys.** The harness builds the child's environment instead of passing its own through, withholding every credential name a provider row declared (including one a config file renamed), every secret-shaped name, and every `MINIDSH_*`. This is defence in depth, not a boundary: reads are still unfenced, so a credentials file remains readable, and a secret that is neither declared nor name-matching still passes.
+- **A client can no longer answer an approval in a session it does not watch.** `approval/answer` now applies the same visibility rule that decides which connections are asked in the first place.
+
 ### Fixed
 
 - **A detached session refuses appends.** After a session was detached, an append still succeeded in memory while persistence had already closed its file and dropped the event without an error: the log in memory and the log on disk could part ways silently. The store now closes the session before `session/disposed`, and a later append throws `SESSION_CLOSED`.
