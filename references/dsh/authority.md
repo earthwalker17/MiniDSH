@@ -1,86 +1,84 @@
 # DSH reference: Authority: sandbox, approvals, grants
 
-> Pinned to `deepseek-ai/deepseek-harness@ddefc45f` (master, 2026-09-17, release 0.1.6-alpha.2); checked 2026-09-19. A map, not a copy: DSH changes weekly, so verify against the current repository before relying on any line here (see [the reading rules](../README.md)).
+> Pinned to `deepseek-ai/deepseek-harness@c36a83ff` (master, 2026-09-22); this area re-checked 2026-09-22 in S15. A map, not a copy: DSH changes weekly, so verify against the current repository before relying on any line here (see [the reading rules](../README.md)).
 
 ## What exists (at the pin)
 
 | Component | Path | Status | Purpose |
 | --- | --- | --- | --- |
-| sandbox seam | `packages/sandbox/sandbox` | default-mounted | `ctx.sandbox` contract plus the shared roots and escalation modules. |
-| sandbox-local | `packages/sandbox/sandbox-local` | default-mounted | Platform runner chain, functional probes, per-call wrap. |
-| sandbox-windows-acl | `packages/sandbox/sandbox-windows-acl` | default-mounted | win32 rung: `WRITE_RESTRICTED` token plus DACL grants over koffi FFI; partial. |
-| sandbox-policy | `packages/sandbox/sandbox-policy` | default-mounted | Deployment default, `sandbox/mode` fold, per-call `resolve()`. |
-| confined shell | `packages/shell/bash-sandbox`, `packages/shell/pwsh-sandbox`, `packages/shell/tool-bash` | default-mounted | Executors (pwsh on win32, bash elsewhere) and the tool carrying escalation fields. |
-| fs-sandbox | `packages/fs/fs-sandbox` | default-mounted | In-process fs fence under the same policy. |
-| user-approval | `packages/interaction/user-approval` | default-mounted | `ctx.approval`: closed outcomes, answerer waterfall, audit pair. |
-| permission-presets | `packages/interaction/permission-presets` | default-mounted | Named bundles of the two knobs; no enforcement. |
-| auto-review | `packages/experimental/auto-review` | experimental | Model reviewer replacing human approval; ships off, Web only. |
-| hooks bridges | `packages/hooks` | opt-in | Claude Code and Codex command hooks; no base row. |
-| guards | `packages/guard` | default-mounted | Repeat-call reminder and timeouts; not authority. |
-| `allow_always` | `.agents/notes/implemented/feature/2026-07-06-approval-seam.md` | proposed-only | Persistent grants; deferred, never advertised. |
+| sandbox seam | `packages/sandbox/sandbox` | default | `ctx.sandbox`, roots, escalation, `SandboxEnforcement`. |
+| sandbox-local | `packages/sandbox/sandbox-local` | default | Platform chains, probes, per-call wrap, `runnerCommand`. |
+| sandbox-windows-acl | `packages/sandbox/sandbox-windows-acl` | default | win32 rung: restricted token + Low integrity label; `partial`. |
+| sandbox-policy | `packages/sandbox/sandbox-policy` | default | Deployment default, `sandbox/mode` fold, `resolve()`, the model's mode sentence. |
+| confined shell | `packages/shell/{bash,pwsh}-sandbox`, `tool-bash` | default | Executors (pwsh on win32) and the escalation fields. |
+| fs-sandbox | `packages/fs/fs-sandbox` | default | In-process fs fence under the same policy. |
+| user-approval | `packages/interaction/user-approval` | default | `ctx.approval`: closed outcomes, answerer waterfall, audit pair. |
+| permission-presets | `packages/interaction/permission-presets` | default | Bundles of the two knobs, `/permission`, `custom`. |
+| tool presentation | `packages/core/tools/src/presentation.ts` | default | `ToolCallView` — a trusted structured call view, NOT wired to approval. |
+| auto-review | `packages/experimental/auto-review` | experimental, off | Model reviewer on `tools/pre-execute`, not an answerer. |
+| hooks bridges | `packages/hooks` | opt-in | Command hooks, also `tools/pre-execute`; no base row. |
+| subprocess scrub | `packages/subprocess/subprocess` | default | `scrubbedParentEnv()`: one credential scrub for every child. |
+| `allow_always` | `.agents/notes/implemented/feature/2026-07-06-approval-seam.md` | proposed only | Standing grants; deferred since 2026-07-06. |
 
 ## Mechanisms worth knowing
 
-- **Two knobs, file effects only**: sandbox mode (`read-only`, `workspace-write`, `danger-full-access`) governs file effects; "Network and process visibility are outside this vocabulary". Approval policy (`ask`, `never`) is separate. Base presets (read-only+ask, workspace-write+ask, danger-full-access+never) only bundle the two; replay reads the knob events. `docs/subsystems/sandbox.md`, `docs/subsystems/permission-presets.md`, `packages/bundle/base/cordis.patch.yml`
-- **Policy per call, folded from the log**: `resolve()` takes an approved explicit mode, else the last log-only `sandbox/mode` event, else the deployment default (package `read-only`; base bundle `workspace-write`, `DSH_PERMISSION_MODE` overrides); root is the immutable session cwd. The mode sentence rides runtime context; the system prompt "remains byte-identical across mode changes". `packages/sandbox/sandbox-policy/README.md`
-- **Writable roots differ by dialect**: `writableRoots()` gives workspace, `/tmp`, `os.tmpdir()` and feeds only Seatbelt and the fs fence. bwrap mounts a private `--tmpfs /tmp`; Landlock grants `/dev/null`, `/tmp`, workspace; Windows a private per-session temp, never the ambient one. `packages/sandbox/sandbox/src/roots.ts`, `packages/sandbox/sandbox-local/src/profiles.ts`
-- **Runner chain, reported enforcement**: linux bwrap then Landlock, darwin Seatbelt, win32 ACL runner; competitors are functionally probed once, a sole candidate is not. `confine()` reports `full` or `partial` (Windows, older Landlock ABIs) or rejects `SANDBOX_UNAVAILABLE`, never passthrough. Consumers test `runnerFailureRules` before `denialSignatures`. `packages/sandbox/sandbox-local/README.md`, `docs/subsystems/sandbox.md`
-- **Windows rung**: a `WRITE_RESTRICTED` token restricted to logon SID, Everyone, a deterministic workspace SID (standing ACE, never revoked, beyond `icacls`) and a random per-session temp SID. Everyone-writable objects and NTFS hard-link aliases stay writable; reads and sockets are open. `packages/sandbox/sandbox-windows-acl/README.md`
-- **Approval seam**: `ctx.approval.request()` needs an open turn and brackets the answerer waterfall with log-only `approval/asked` and `approval/decided`. Closed outcomes: `allowed-once`, `rejected`, `cancelled`, `unavailable` (any missing or misbehaving answerer). The request omits tool arguments; the UI attaches by `callId`. `never` rejects before any answerer. `docs/subsystems/approval.md`
-- **Escalation, not classification**: no command parsing or prefix rules. After a denial marker the model may retry once with `sandbox_permissions` (strictly wider, checked at execution) plus `justification`; approval precedes execution; rejection is final. One module serves bash and fs tools. `packages/sandbox/sandbox/src/escalation.ts`, `packages/shell/tool-bash/README.md`
-- **No standing grants**: nothing is stored between requests. `allow_always` is Deferred pending storage, scope identity ("call? path? prefix? session? time window?") and revocation; offering it early "manufactures doomed grants". Only a mode or preset switch widens durably. `.agents/notes/implemented/feature/2026-07-06-approval-seam.md`
-- **Auto review and hooks**: preset `auto` is Full access plus a pre-execute listener where the agent's own model judges each call; a failed review denies. "Model classification can be wrong"; it "provides no file sandbox". Hooks fail open on any exit code but 2. `packages/experimental/auto-review/README.md`, `packages/hooks/hook-protocol/README.md`
-- **Subagents**: delegation copies the parent's sandbox override and pins a durable `approval/policy` event (`never`, source `delegation`) on every in-process child log, continuable ones included. It reversed shipped approval inheritance, which left children blocked on no visible surface. `.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md`
-- **Network**: no confinement: bwrap carries `--unshare-pid` but no net unshare, Seatbelt is `(allow default)`, no domain allow-list found. The one proxy policy, which a project `.env` cannot set, is routing only. `packages/sandbox/sandbox-local/src/profiles.ts`, `.agents/notes/implemented/architecture/2026-08-27-outbound-proxy-policy.md`
+- **Two tiers, not one.** `tools/pre-execute` is a waterfall of POLICY listeners (`allow`/`deny`/`cancel`/`ask`); only `ask` reaches `ctx.approval.request()`, the ANSWERER tier, which ships two listeners. Auto-review and both hook bridges are tier one, and upstream calls neither a boundary — the reviewer registers `danger-full-access` + `never`, so it REPLACES the file sandbox; hooks fail open on any exit code but 2. `docs/tool-execution-pipeline.md`
+- **Two knobs, file effects only.** `never` is decided INSIDE the service before the waterfall, so a `prepend: true` listener cannot reopen the gate, and Settings' `defaultPreset` reaches session CREATION only, so replay can reconstruct which permission governed a call. `docs/subsystems/sandbox.md`, `packages/sandbox/sandbox-policy/src/session-mode.ts`
+- **Platform chains, then probes**: `{linux:['bwrap','landlock'], darwin:['seatbelt'], win32:['windows-acl']}`, a sole candidate selected unprobed. `confine()` never returns the original argv; `runnerCommand` skips probes and hard-codes `full` but still WRAPS — an operator assertion of a DIFFERENT enforcer, never of none. `packages/sandbox/sandbox-local/src/index.ts`
+- **`SandboxEnforcement` is `'full' | 'partial'` — no `none`.** windows-acl is the only `partial`, PTC reports it to the MODEL alone, and nothing asks a person to accept it — though the doc says a consumer needing the absolute promise must reject or surface the distinction. `docs/subsystems/sandbox.md`
+- **The Windows rung hardened twice in five days** (2026-09-18/19, issue #4581) with a Low mandatory label and a `FILE_DELETE_CHILD` deny, because `cmd /c del` had escaped both confined modes. Still `partial`: hard links alias past it, reads and network are open, and its ACEs and labels are STANDING — `icacls` cannot revoke them. `packages/sandbox/sandbox-windows-acl/README.md`
+- **The approval request carries no arguments, deliberately** — `{agent, toolName, callId?, reason?, signal?}` — because `callId` names an already-presented call and a second copy could drift; the durable pair carries no subject and no decider, and **nothing clamps, bounds or strips control characters from `reason`**. So a person consents to prose — for an escalation, `escalate sandbox to <mode>: <model justification>`, a trusted fact concatenated into model text — beside a slot whose renderer `JSON.parse`s the raw arguments IN THE BROWSER. Truncating that command was rejected: hiding its tail asks a person to consent to text they cannot read. `packages/interaction/user-approval/src/types.ts`, `.agents/notes/archived/bug-fix/2026-07-30-approval-panel-command-cap.md`
+- **A trusted structured call view DOES exist, one seam over**: `ToolCallView = Generic | Terminal | Diff`, from each tool's pure, replay-safe `presentCall(args)` over parsed arguments — a verb `kind`, `locations`, `cwd`, argument-derived `diffs`. Never wired to approval. `packages/core/tools/src/presentation.ts`
+- **Escalation, not classification**: no parser or prefix rule, a closed SCHEMA vocabulary whose strictly-wider check runs at execution, and a same-mode request that costs no prompt — where MiniDSH refuses one as `SANDBOX_NOT_WIDER`. `packages/sandbox/sandbox/src/escalation.ts`
+- **No standing grants.** `allowed-once` is the only grant, and none is persisted. Left open: a grant's scope identity "beyond the sandbox mode — exact call, path, command prefix, session, or time window", with a rejected alternative calling command-string identity fragile and saying to "Revisit only if `allow_always` grant storage ever needs machine-checkable scopes." `.agents/notes/implemented/feature/2026-07-06-approval-seam.md`
+- **Subagents: a seeded pin, not an enforced ceiling.** Capture runs before the child's first await, takes only the parent's EXPLICIT override — never deployment defaults or one-shot grants — and seeds both knobs `source: 'delegation'` onto the child's own log. But a later child switch still wins and `source` is never read: only the absence of a model-facing write path holds the line. The DEPTH ceiling is immutable, in the HEADER. `packages/subagent/subagent/src/child-agent.ts`
+- **Deterministic headless is composition.** `headless` mounts no approval channel, so every ask falls to `unavailable`; `sdk-minimal` removes the seam and pins `danger-full-access`. No auto-answer, no per-tool allow-list, no timeout anywhere. `packages/bundle/headless/cordis.patch.yml`
+- **One credential scrub, every child.** `scrubbedParentEnv()` drops `/KEY|PASSWORD|SECRET|TOKEN/i` and every `DSH_*`, and an explicit `env` merges AFTER so a caller can forward a secret on purpose; eight spawners outside `ctx.subprocess` import it rather than reimplement it. Stated holes: `*PASSPHRASE*`, `SSH_AUTH_SOCK` and a proxy URL carrying userinfo. `packages/subprocess/subprocess/src/index.ts`
+- **Network: no confinement.** bwrap carries `--unshare-pid` but no net unshare, Seatbelt is `(allow default)`, and presets expose `web_fetch` in every sandbox and approval mode without confirmation, pointing a deployment at `tools/pre-execute`. `docs/subsystems/web.md`
 
 ## Why it matters to MiniDSH
 
-- **S15, approval subject**: upstream keeps tool arguments out of the request and attaches by `callId`, so a structured subject on the runtime's record has NO oracle. Transfer: closed outcomes, one granting value, an asked/decided pair inside an open turn.
-- **S15, session-lifetime grants**: NO upstream oracle; MiniDSH would lead. Upstream's bar: storage, scope identity and revocation before any option is shown. Shape a grant like `sandbox/mode`: a durable event that folds.
-- **S15, shell-enforcement acceptance**: upstream FALSIFIED "no Windows backend story": a koffi-FFI restricted-token rung is the win32 default. It is partial, mutates workspace DACLs durably and leaves reads and sockets open, so a durable acceptance knob stays a deliberate difference. Transfer: enforcement is a reported per-call fact; "read-only" never means "no reads". Corrected: the gap is the Everyone SID in the restricting list, not an added ACE.
-- **S15 network stance, S18, S20**: Tavily search and CDP-driven Chrome have NO upstream confinement oracle. Transferable: a repository-controlled file never chooses the harness's network route.
-- **Writable roots (S15, S17, S20)**: "DSH adds `/tmp` and `os.tmpdir()`" holds only for Seatbelt and the fs fence. The workspace-only ceiling stands; if jobs or the browser need temp, copy the private per-session temp (TMP/TEMP rewritten).
-- **S14**: blocked-versus-broke is the distinction a shell effect record needs. Nothing read closes a crash between asked and decided: no oracle for that bracket.
-- **S21**: pinning children to `never` by a durable sourced event matches MiniDSH and covers continuable children. Routing child asks to a parent is deferred: no oracle.
-- **Prompt belief FALSIFIED**: MiniDSH recorded that DSH removed the sandbox sentence after measuring zero-tool turns. It moved into runtime context for cache stability; no measurement was found.
-- **Never a boundary**: a model reviewer or a fail-open hook, by upstream's own account.
+- **S15, the subject** (built): upstream's omission rests on an anti-drift argument MiniDSH answers rather than avoids — its subject comes from the same frozen, VALIDATED arguments the body receives, and neither harness has an argument-rewrite path. `ToolCallView` is the oracle for shape; MiniDSH attaches it to the approval record and keys its families to S14's "did" vocabulary rather than a verb enum.
+- **S15, grants** (built): nothing to copy, but upstream named the blocker — with no arguments on the record, `toolName` is the only key available — and named the unlock, "machine-checkable scopes". Transferable: a grant is reconstructable from the log that governed the call, it dies with the scope it was cut to, and no host to offer a scope means no grant rather than a fallback.
+- **S15, enforcement acceptance** (built): NO upstream artifact. Its historical answer to an empty win32 chain was to degrade the MODE until a rung existed, and its documented opt-out is composition — mount an honestly-unconfined executor. MiniDSH's durable per-session knob is the auditable form of that choice and keeps the fs fence a mode degradation drops.
+- **S15, the edges**: MiniDSH's "inherits the environment, provider keys included — deliberate" was NOT parity, so copy the scrub's shape. The deterministic stance belongs in the SERVICE, not a listener. Delegation: capture before the first await and seed the child's own log — MiniDSH ENFORCES what upstream only pins, which is a lead.
+- **S16/S18/S20**: `source: 'delegation'` written and never read is the shape of a provenance marker that survives replay, and post-mortem 0004 bounds what any authority fact derived from command output can claim. Tavily and CDP Chrome have no confinement oracle.
 
 ## Sources
 
 | Path | What it establishes | Checked |
 | --- | --- | --- |
-| `docs/subsystems/sandbox.md` | File-effects-only modes, fail-closed seam. | 2026-09-19 |
+| `docs/subsystems/sandbox.md` | Modes, fail-closed seam, `partial`. | 2026-09-22 |
+| `packages/sandbox/sandbox-local/src/index.ts` | Chains, probes, `runnerCommand`. | 2026-09-22 |
+| `packages/sandbox/sandbox-local/src/profiles.ts` | bwrap/Landlock/Seatbelt argv; no net unshare. | 2026-09-22 |
 | `packages/sandbox/sandbox/src/roots.ts` | `writableRoots()` and its two consumers. | 2026-09-19 |
-| `packages/sandbox/sandbox/src/escalation.ts` | Shared escalation ladder and markers. | 2026-09-19 |
-| `packages/sandbox/sandbox-local/README.md` | Runner chain, probes, partial cases. | 2026-09-19 |
-| `packages/sandbox/sandbox-local/src/profiles.ts` | bwrap, Landlock, Seatbelt arguments. | 2026-09-19 |
-| `packages/sandbox/sandbox-windows-acl/README.md` | Windows mechanism and limits. | 2026-09-19 |
-| `packages/sandbox/sandbox-policy/README.md` | Resolve precedence, context placement. | 2026-09-19 |
-| `docs/subsystems/approval.md` | Outcomes, policy, request, audit pair. | 2026-09-19 |
-| `.agents/notes/implemented/feature/2026-07-06-approval-seam.md` | `allow_always` deferred. | 2026-09-19 |
-| `docs/subsystems/permission-presets.md` | Preset service, `custom`, `auto`. | 2026-09-19 |
-| `packages/bundle/base/cordis.patch.yml` | Default rows, three presets. | 2026-09-19 |
-| `packages/shell/tool-bash/README.md` | Escalation as the model sees it. | 2026-09-19 |
-| `packages/experimental/auto-review/README.md` | Reviewer inputs and limits. | 2026-09-19 |
-| `packages/hooks/hook-protocol/README.md` | Merge order, fail-open failures. | 2026-09-19 |
-| `.agents/notes/implemented/feature/2026-08-10-subagent-approval-pinned-never.md` | Why children are pinned. | 2026-09-19 |
-| `.agents/notes/implemented/architecture/2026-08-27-outbound-proxy-policy.md` | Project `.env` refused. | 2026-09-19 |
+| `packages/sandbox/sandbox/src/escalation.ts` | The ladder, markers, same-mode return. | 2026-09-22 |
+| `packages/sandbox/sandbox-windows-acl/README.md` | Windows mechanism, boundaries, open gaps. | 2026-09-22 |
+| `packages/sandbox/sandbox-policy/src/session-mode.ts` | The durable knob shape and its one writer. | 2026-09-22 |
+| `packages/interaction/user-approval/src/index.ts` | Request shape, `never` in `decide()`, outcomes. | 2026-09-22 |
+| `docs/persistence-schema.json` | The durable payloads: no subject, no decider. | 2026-09-22 |
+| `packages/core/tools/src/presentation.ts` | `ToolCallView`, `presentCall`, replay-safety. | 2026-09-22 |
+| `packages/core/tools/src/index.ts` | The two tiers; no argument-rewrite variant. | 2026-09-22 |
+| `.agents/notes/archived/bug-fix/2026-07-30-approval-panel-command-cap.md` | Why truncating a consent line was rejected. | 2026-09-22 |
+| `.agents/notes/implemented/feature/2026-07-06-approval-seam.md` | `allow_always` deferred; the open scope question. | 2026-09-22 |
+| `.agents/notes/implemented/feature/2026-07-06-sandbox.md` | No persisted grant; composition as the opt-out. | 2026-09-22 |
+| `packages/subagent/subagent/src/child-agent.ts` | Capture-before-await; the seeded pin. | 2026-09-22 |
+| `packages/subprocess/subprocess/src/index.ts` | `scrubbedParentEnv`, its pattern, its holes. | 2026-09-22 |
+| `packages/experimental/auto-review/README.md` | Tier, inputs, fail-closed, stated limits. | 2026-09-22 |
+| `packages/bundle/base/cordis.patch.yml` | Default rows and presets. | 2026-09-22 |
+| `docs/postmortem/0004-landlock-partial-notice-misclassified-child-failures.md` | Stderr is forgeable attribution. | 2026-09-22 |
 
 ## Likely to go stale
 
-- Auto review's status and tiers: an optional bundle only since 2026-09-15.
-- No `allow_always`: Deferred, not rejected; a design can land any time.
-- A same-mode `sandbox_permissions` retry runs unapproved: a note dated 2026-09-16.
-- The three-preset base table: composition files move often; the service's own table has two.
-- Children pinned to `never`: a self-described pre-release note that already reversed one decision.
-- How the model learns the mode: `docs/subsystems/shell.md` still says from a denial marker only.
-- The Windows boundary list: FAT warnings and an ACE cleanup command are open.
+- The Windows rung moved twice in five days and leaves a cleanup command undecided: re-read before citing any boundary.
+- `allow_always`: deferred 2.5 months with nothing in `proposed/` — but deferred, not rejected.
+- Auto review's status and tier: experimental and optional only since 2026-09-15.
+- Whether `ToolCallView` ever reaches the approval request. The pieces are one wire apart.
 
 ## Not read
 
-- `docs/subsystems/filesystem.md`, `packages/fs/fs-sandbox/README.md`: the fs fence.
-- `packages/ssh/sandbox-ssh/README.md`, `packages/shell/tool-pwsh/README.md`: remote backend, win32 tool.
-- `packages/core/tools/README.md`: the `tools/pre-execute` decision surface (notes only so far).
-- Notes by filename only: `2026-09-16-user-terminal-permissions.md`, `2026-09-16-sandbox-same-mode.md`, `2026-08-08-windows-acl-restricted-token-sandbox.md` (why not AppContainer), archived `2026-07-30-current-sandbox-policy-context.md` (zero-tool-turn rationale?).
-- `packages/util/http-proxy/README.md`, `packages/web/tool-web/README.md`: proxy mount status, `web_fetch` validation.
-- User guides, `/permission`, approval rendering in Web and TUI; hooks in non-base bundles; Landlock and the network; Auto review's wording on unsafe allows.
+- The fs fence itself (`docs/subsystems/filesystem.md`, `packages/fs/fs-sandbox/`), the remote backend (`packages/ssh/sandbox-ssh/`) and the win32 tool (`packages/shell/tool-pwsh/`).
+- Whether any Host or Client component renders `enforcement` to a human (searched, none found, not exhaustively).
+- Whether any in-repo profile or fixture actually sets `runnerCommand`.
+- The behavioural tests behind the seam: `packages/interaction/user-approval/tests/`.
+- Whether hooks, skills or the workflow engine spawn children on a path bypassing `ctx.subprocess`.

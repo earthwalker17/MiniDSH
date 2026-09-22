@@ -4,6 +4,8 @@ A curated local map of DeepSeek Harness (DSH) for MiniDSH sessions. MiniDSH stud
 
 **Current pin:** `deepseek-ai/deepseek-harness@ddefc45fbc7f8e46dd73185e68295696d1297887` (`master`, 2026-09-17, release `0.1.6-alpha.2`). Written 2026-09-19 in S13 from one broad research pass (eight primary-source researchers, one per file) and spot-verified in the parent against a checkout of the pin.
 
+**Moved ahead of it:** [dsh/authority.md](dsh/authority.md) and the Authority rows of [assumptions.md](assumptions.md) are at `c36a83ff` (`master`, 2026-09-22), re-researched in S15. An ordinary session moves the pin only for the area it researched, so a file's own header is the authority on which commit it describes; the next `.5` moves the rest.
+
 ## The files
 
 | File | Area | Route sessions that start here |
