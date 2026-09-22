@@ -15,7 +15,7 @@ import { foldRequestContext, foldSessionTitle, matches, TOOL_RESULT, USER_MESSAG
 import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
-import { isSandboxMode, SANDBOX_MODES, type SandboxMode } from '../core/sandbox/index.ts'
+import { isSandboxMode, SANDBOX_MODES, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { presetTable } from '../core/presets/index.ts'
@@ -58,6 +58,7 @@ const FLAGS = {
   at: '--at seq',
   sandbox: '--sandbox mode',
   ask: '--ask ask|never',
+  accept: '--accept full|none',
   preset: '--preset name',
   'agent-preset': '--agent-preset name',
   port: '--port n',
@@ -73,13 +74,13 @@ const VALUE_FLAGS = new Set<string>((Object.keys(FLAGS) as FlagName[]).filter((n
 
 /** What each command takes, from which both its usage line and the general help are printed — one table, never two strings. */
 const COMMANDS: Readonly<Record<string, { readonly positional: string; readonly flags: readonly FlagName[] }>> = {
-  run: { positional: '"<task>"', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'preset', 'agent-preset', 'approve', 'json'] },
-  chat: { positional: '["<task>"]', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'agent-preset', 'approve'] },
-  resume: { positional: '<id> ["<task>"]', flags: ['headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'preset', 'agent-preset', 'approve', 'json'] },
-  fork: { positional: '<id> ["<task>"]', flags: ['at', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'preset', 'agent-preset', 'approve', 'json'] },
-  serve: { positional: '', flags: ['cwd', 'sandbox', 'ask', 'agent-preset', 'approve'] },
-  web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'agent-preset', 'approve'] },
-  config: { positional: '', flags: ['sandbox', 'ask', 'json'] },
+  run: { positional: '"<task>"', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
+  chat: { positional: '["<task>"]', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
+  resume: { positional: '<id> ["<task>"]', flags: ['headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
+  fork: { positional: '<id> ["<task>"]', flags: ['at', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
+  serve: { positional: '', flags: ['cwd', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
+  web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
+  config: { positional: '', flags: ['sandbox', 'ask', 'accept', 'json'] },
   sessions: { positional: 'list | show <id>', flags: ['json', 'audit'] },
 }
 
@@ -138,6 +139,7 @@ function usage(line: string): number {
 interface AuthorityFlags {
   readonly sandbox?: SandboxMode
   readonly approvalPolicy?: ApprovalPolicy
+  readonly accepts?: SandboxEnforcement
 }
 
 interface LoadedConfig {
@@ -228,6 +230,7 @@ function bootFields(plan: BootPlan): {
   logger: Logger
   sandbox?: SandboxMode
   approvalPolicy?: ApprovalPolicy
+  accepts?: SandboxEnforcement
 } {
   return { ...plan.home, agentDefaults: plan.settings.agent, agentSettingsBase: plan.settings.agentBase, agentOverrides: plan.settings.agentOverrides, configLayers: plan.loaded.layers, logger: stderrLogger, ...plan.authority }
 }
@@ -294,9 +297,14 @@ function authorityFlags(args: ParsedArgs): AuthorityFlags | string {
     return `--sandbox expects ${SANDBOX_MODES.join(' | ')}, got "${String(sandbox)}"`
   }
   if (ask !== undefined && !isApprovalPolicy(ask)) return `--ask expects ${APPROVAL_POLICIES.join(' | ')}, got "${String(ask)}"`
+  const accept = args.flags.get('accept')
+  // `partial` is not offered: no shipped backend reports it, so a flag value
+  // no run could exercise would be a promise with nothing behind it.
+  if (accept !== undefined && accept !== 'full' && accept !== 'none') return `--accept expects full | none, got "${String(accept)}"`
   return {
     ...(isSandboxMode(sandbox) ? { sandbox } : {}),
     ...(isApprovalPolicy(ask) ? { approvalPolicy: ask } : {}),
+    ...(accept === 'full' || accept === 'none' ? { accepts: accept } : {}),
   }
 }
 

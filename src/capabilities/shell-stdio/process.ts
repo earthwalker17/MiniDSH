@@ -1,5 +1,13 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { SandboxError, writableRoots, type SandboxEnforcement, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
+import {
+  DEFAULT_ACCEPTANCE,
+  meetsAcceptance,
+  SandboxError,
+  writableRoots,
+  type SandboxEnforcement,
+  type SandboxExecutionPolicy,
+  type SandboxMode,
+} from '../../core/sandbox/index.ts'
 import { ShellError, type ShellExecRequest, type ShellRunResult, type ShellSession } from '../../core/shell/index.ts'
 import { confinementRemedy, NO_CONFINEMENT, type Confinement } from './confine/index.ts'
 
@@ -152,15 +160,29 @@ export class ShellProcess implements ShellSession {
 
   /**
    * Deny-only, never negotiating: a confined policy this world cannot enforce
-   * refuses rather than running unconfined. Escalation is the tool job.
+   * for what the CALLER accepts refuses rather than running unconfined.
+   * Escalation is the tool's job.
+   *
+   * `accepts` defaults to `full`, which is the refusal this has always made.
+   * A session that durably accepts less (a host with no backend, where the
+   * alternative is an escalation per command) gets the command run and the
+   * enforcement it really got REPORTED — which is what lands in the effect
+   * record and what the audit reads.
+   *
+   * Note what this does NOT do: `ensureChild` wraps unconditionally, and
+   * `NO_CONFINEMENT.wrap` is the identity, so on a host with a working backend
+   * the command is still confined whatever anyone accepts. Acceptance relaxes
+   * a refusal; it never disables a boundary.
    */
-  private confine(policy: SandboxExecutionPolicy): SandboxEnforcement {
+  private confine(policy: SandboxExecutionPolicy, accepts: SandboxEnforcement): SandboxEnforcement {
     if (policy.mode === 'danger-full-access') return 'none'
     const enforcement = this.enforcementFor(policy.mode)
-    if (enforcement === 'none') {
+    if (!meetsAcceptance(enforcement, accepts)) {
       throw new SandboxError(
         'SANDBOX_UNAVAILABLE',
-        `this host has no confinement backend, so a command cannot run under "${policy.mode}" mode`,
+        enforcement === 'none'
+          ? `this host has no confinement backend, so a command cannot run under "${policy.mode}" mode`
+          : `this host enforces "${policy.mode}" only "${enforcement}", and this session requires "${accepts}"`,
       )
     }
     return enforcement
@@ -237,7 +259,7 @@ export class ShellProcess implements ShellSession {
   }
 
   private async runOne(request: ShellExecRequest): Promise<ShellRunResult> {
-    const enforcement = this.confine(request.policy)
+    const enforcement = this.confine(request.policy, request.accepts ?? DEFAULT_ACCEPTANCE)
     const sandbox = { mode: request.policy.mode, enforcement }
     // Nothing ran. It carries `aborted` for the same reason the cancelled
     // branch below does: 'nothing ran' must never read as 'ran and printed

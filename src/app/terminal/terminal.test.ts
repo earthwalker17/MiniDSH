@@ -116,7 +116,7 @@ describe('terminal render (pure)', () => {
   })
 
   it('renders the context pressure the host publishes, and says nothing when there is no news', () => {
-    const authority = { sandbox: 'workspace-write', approval: 'ask', enforcement: 'none' } as const
+    const authority = { sandbox: 'workspace-write', approval: 'ask', enforcement: 'none', accepts: 'full' } as const
     const quiet: SessionView = { status: 'idle', pendingApprovals: [], authority }
     const at = (projectedTokens: number): SessionView => ({
       ...quiet,

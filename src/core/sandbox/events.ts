@@ -114,3 +114,105 @@ export function delegationCeiling(events: readonly EventEnvelope[]): SandboxMode
   }
   return undefined
 }
+
+// ---- what enforcement a session accepts ------------------------------------
+
+/**
+ * The weakest enforcement this session accepts for a confined shell command,
+ * and the MODE it accepted it for.
+ *
+ * A host with no confinement backend refuses every confined command rather
+ * than running it unconfined, which is the right default and is what Windows
+ * costs today: two model steps, a human prompt and a throwaway child for every
+ * command. This is how a person says "I know this host cannot sandbox the
+ * shell; run the command anyway" — durably, per session, and on the record,
+ * rather than by dropping the whole session to `danger-full-access` and losing
+ * the in-process file fence with it.
+ *
+ * **`forMode` is not decoration.** The shell's refusal is mode-blind, so an
+ * acceptance without one would relax `read-only` exactly as it relaxes
+ * `workspace-write` — a session recorded `read-only` would run an unwrapped
+ * shell with full host write power, and a `read-only` delegated child, pinned
+ * `never` and unable to ask anyone anything, would inherit that from a parent
+ * that only ever accepted it for a wider mode. Recording the mode the
+ * acceptance was GIVEN FOR, and honouring it only for that mode, closes both
+ * with one mechanism: `/sandbox read-only` re-refuses, and a narrowed child's
+ * mode no longer matches its parent's.
+ *
+ * Deliberately NOT a field on `sandbox/mode`: that record's `enforcement` is a
+ * REPORTED host fact, this is a DECISION about the shell world, and a field on
+ * a written-only-when-changed record reads as absent for the life of any
+ * session that never rewrote it (§4).
+ */
+export const SANDBOX_ACCEPTANCE = eventKind<{ accepts: SandboxEnforcement; forMode: SandboxMode; reason: SandboxReason }>('sandbox/acceptance')
+
+/**
+ * The enforcement lattice, which runs the OTHER WAY from `RANK` above.
+ *
+ * `RANK` orders modes by permissiveness ascending (`read-only` is 0). Here the
+ * permissive end is `none`, so an implementer reaching for `narrowest` would
+ * invert the ceiling and let a delegation row configured `accepts: 'none'`
+ * read as a narrowing of a parent at `full`. Hence a separate rank and a
+ * separate verb.
+ */
+const ACCEPT_RANK: Readonly<Record<SandboxEnforcement, number>> = { full: 0, partial: 1, none: 2 }
+
+/** The stricter of two acceptances — what a delegation row may do to a parent's, and only that. */
+export function strictest(one: SandboxEnforcement, other: SandboxEnforcement): SandboxEnforcement {
+  return ACCEPT_RANK[one] <= ACCEPT_RANK[other] ? one : other
+}
+
+/** Whether what a world can deliver satisfies what a session accepts. */
+export function meetsAcceptance(delivered: SandboxEnforcement, accepted: SandboxEnforcement): boolean {
+  return ACCEPT_RANK[delivered] <= ACCEPT_RANK[accepted]
+}
+
+/** Nothing accepted is `full`: refuse what cannot be enforced, which is what every host did before this knob. */
+export const DEFAULT_ACCEPTANCE: SandboxEnforcement = 'full'
+
+/**
+ * What this session accepts for `mode` — the last acceptance recorded FOR THAT
+ * MODE, else the strict default. An acceptance for another mode is not an
+ * acceptance for this one.
+ */
+export function acceptanceFor(events: readonly EventEnvelope[], mode: SandboxMode): SandboxEnforcement {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!
+    if (matches(event, SANDBOX_ACCEPTANCE) && event.data.forMode === mode) return event.data.accepts
+  }
+  return DEFAULT_ACCEPTANCE
+}
+
+/**
+ * The acceptance THIS lifecycle opened under, for `mode` — the same rule
+ * `openingSandboxStamp` uses, and for the same consumer: the prompt's
+ * runtime-context block must be byte-stable for a lifecycle, so a mid-session
+ * `change` may not move it. A switch reaches the model as a message instead.
+ */
+export function openingAcceptance(events: readonly EventEnvelope[], liveStart: number, mode: SandboxMode): SandboxEnforcement {
+  let seeded = DEFAULT_ACCEPTANCE
+  for (const event of events) {
+    if (!matches(event, SANDBOX_ACCEPTANCE) || event.data.forMode !== mode) continue
+    if (event.seq >= liveStart) {
+      if (event.data.reason !== 'change') return event.data.accepts
+      break
+    }
+    seeded = event.data.accepts
+  }
+  return seeded
+}
+
+/**
+ * The delegation PIN: what a child was started accepting, when its FIRST
+ * acceptance says so. Unlike the mode, which is a ceiling a child may narrow,
+ * this cannot be changed at all — a child that cannot ask anyone anything has
+ * no legitimate in-session actor to renegotiate it, and narrowing is what the
+ * delegation row is for.
+ */
+export function delegationAcceptance(events: readonly EventEnvelope[]): { accepts: SandboxEnforcement; forMode: SandboxMode } | undefined {
+  for (const event of events) {
+    if (!matches(event, SANDBOX_ACCEPTANCE)) continue
+    return event.data.reason === 'delegation' ? { accepts: event.data.accepts, forMode: event.data.forMode } : undefined
+  }
+  return undefined
+}

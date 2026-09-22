@@ -32,7 +32,17 @@ import { AGENTS, type Agent } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_POLICY, openingApprovalPolicy, type ApprovalPolicy } from '../../core/approval/index.ts'
 import { createPluginMessage } from '../../core/llm/message.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
-import { openingSandboxStamp, SANDBOX, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
+import {
+  DEFAULT_ACCEPTANCE,
+  meetsAcceptance,
+  openingAcceptance,
+  SANDBOX,
+  SANDBOX_ACCEPTANCE,
+  SANDBOX_MODE,
+  type SandboxEnforcement,
+  type SandboxMode,
+} from '../../core/sandbox/index.ts'
+import { openingSandboxStamp } from '../../core/sandbox/events.ts'
 import { canonicalPath } from '../../core/sandbox/paths.ts'
 import type { SessionId } from '../../core/ids.ts'
 import { matches, SESSION_EVENT, type Session } from '../../core/session/index.ts'
@@ -91,8 +101,17 @@ function modeEffect(mode: SandboxMode, workspaceRoot: string | undefined): strin
  *             backend reports it today; the vocabulary carries it because a
  *             caller needing an absolute boundary must not read it as `full`.
  */
-function confinementLines(enforcement: SandboxEnforcement): string[] {
+function confinementLines(enforcement: SandboxEnforcement, accepts: SandboxEnforcement): string[] {
   if (enforcement === 'none') {
+    // The third world: this host cannot confine, and the session has said so on
+    // the record and asked for the command anyway. The sentence must not let a
+    // model read the mode as a shell boundary, because here it is not one.
+    if (meetsAcceptance('none', accepts)) {
+      return [
+        '- This host cannot confine shell commands, and this session accepts that: a shell command runs WITHOUT an OS sandbox.',
+        '  The sandbox mode still governs file edits made through the editor tool; it does not bound what a shell command can write.',
+      ]
+    }
     return [
       '- This host cannot confine shell commands, so the shell refuses to run under this mode.',
       '  Follow the escalation guidance a refusal returns rather than working around it.',
@@ -128,7 +147,11 @@ function authorityLines(ctx: Context, agent: Agent | undefined): string[] {
   // An agent with no stamp at all was not created through the registry; there is
   // nothing recorded to read, so the live world is the only honest answer.
   const enforcement: SandboxEnforcement = stamp?.enforcement ?? sandbox.enforcementFor(mode)
-  const confinement = mode === 'danger-full-access' ? [] : confinementLines(enforcement)
+  // Off the OPENING acceptance for the opening mode, for the reason the stamp
+  // itself is: this section is the cached prompt prefix, and a mid-session
+  // switch may not move it. A switch arrives as a message instead.
+  const accepts = agent ? openingAcceptance(agent.session.facts, agent.session.liveStart, mode) : DEFAULT_ACCEPTANCE
+  const confinement = mode === 'danger-full-access' ? [] : confinementLines(enforcement, accepts)
   return [
     `- Sandbox: ${mode}. ${modeEffect(mode, undefined)}`,
     ...confinement,
@@ -171,14 +194,14 @@ function approvalLines(ctx: Context, agent: Agent | undefined): string[] {
  */
 class SwitchNotes {
   private readonly ctx: Context
-  private readonly pending = new Map<SessionId, { session: Session; sandbox?: SandboxMode; approval?: ApprovalPolicy }>()
+  private readonly pending = new Map<SessionId, { session: Session; sandbox?: SandboxMode; approval?: ApprovalPolicy; accepts?: { accepts: SandboxEnforcement; forMode: SandboxMode } }>()
   private scheduled = false
 
   constructor(ctx: Context) {
     this.ctx = ctx
   }
 
-  note(session: Session, change: { sandbox?: SandboxMode; approval?: ApprovalPolicy }): void {
+  note(session: Session, change: { sandbox?: SandboxMode; approval?: ApprovalPolicy; accepts?: { accepts: SandboxEnforcement; forMode: SandboxMode } }): void {
     this.pending.set(session.id, { ...(this.pending.get(session.id) ?? { session }), ...change })
     if (this.scheduled) return
     this.scheduled = true
@@ -197,6 +220,13 @@ class SwitchNotes {
           lines.push(`Sandbox mode is now "${change.sandbox}". ${modeEffect(change.sandbox, statedRoot(change.session.header.cwd))}`)
         }
         if (change.approval !== undefined) lines.push(`Approvals are now "${change.approval}". ${policyEffect(change.approval)}`)
+        if (change.accepts !== undefined) {
+          lines.push(
+            meetsAcceptance('none', change.accepts.accepts)
+              ? `Under "${change.accepts.forMode}" this session now accepts an UNCONFINED shell: a shell command is not sandboxed, and the mode governs only file edits made through the editor tool.`
+              : `Under "${change.accepts.forMode}" this session now requires "${change.accepts.accepts}" enforcement: a shell command this host cannot confine that far is refused.`,
+          )
+        }
         // Each agent on its own: an inject that throws (an invariant rejecting
         // the splice, a session whose store is gone) must not cost every other
         // agent its note, and must not escape into the microtask queue, where an
@@ -250,6 +280,8 @@ export const contextRuntimePlugin: Plugin<ContextRuntimeConfig | undefined> = {
         if (event.data.reason === 'change') notes.note(session, { sandbox: event.data.mode })
       } else if (matches(event, APPROVAL_POLICY) && event.data.reason === 'change') {
         notes.note(session, { approval: event.data.policy })
+      } else if (matches(event, SANDBOX_ACCEPTANCE) && event.data.reason === 'change') {
+        notes.note(session, { accepts: { accepts: event.data.accepts, forMode: event.data.forMode } })
       }
     })
   },

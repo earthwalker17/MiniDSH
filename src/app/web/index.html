@@ -34,6 +34,15 @@
           <option value="ask">ask</option>
           <option value="never">never</option>
         </select>
+        <!--
+          What this session accepts from its execution world. `partial` is not
+          offered: no shipped backend reports it, so it would be a control with
+          nothing behind it.
+        -->
+        <select id="accepts" title="shell enforcement this session accepts">
+          <option value="full">enforced shell</option>
+          <option value="none">unconfined shell</option>
+        </select>
         <button id="compact" title="shrink the model's context">compact</button>
         <button id="cancel" title="stop the running turn">cancel</button>
       </header>

@@ -79,6 +79,22 @@ export interface ShellExecRequest {
    * confines nothing may ignore it. Set by the caller that took the consent.
    */
   readonly oneShot?: boolean
+  /**
+   * The weakest enforcement the CALLER accepts for this command, resolved from
+   * `ctx.sandbox` for the policy's mode (default `full`).
+   *
+   * A provider that cannot deliver at least this must refuse, exactly as it
+   * always has; what changes is that a session may durably say it accepts
+   * less, so a host with no backend can run a shell at all instead of costing
+   * an escalation per command. It never turns confinement OFF: a provider with
+   * a working backend still wraps, so this relaxes a refusal and nothing else.
+   *
+   * It rides the REQUEST rather than the policy because it is a decision about
+   * the shell world, and `SandboxExecutionPolicy` is the file-effect ceiling
+   * that `writableRoots`, `allowsWrite` and both confinement profiles are pure
+   * functions of.
+   */
+  readonly accepts?: SandboxEnforcement
 }
 
 export interface ShellRunResult {

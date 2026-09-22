@@ -196,6 +196,26 @@ describe.skipIf(!installed)(`OS confinement on ${process.platform}`, () => {
     expect(existsSync(target)).toBe(false)
   })
 
+  it('still confines when the session accepts less: acceptance relaxes a REFUSAL, never a boundary', async () => {
+    // The invariant that keeps the acceptance knob from being a back door, and
+    // the only host that can prove it. `ensureChild` wraps unconditionally and
+    // `NO_CONFINEMENT.wrap` is the identity, so where a backend exists the
+    // command is confined whatever anyone accepted — a session that says it
+    // would tolerate an unconfined shell does not thereby get one.
+    const ws = tempDir('minidsh-confine-ws-')
+    const outside = tempDir('minidsh-confine-out-')
+    const escape = join(outside, 'accepted.txt')
+    shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
+    const result = await shell.exec({
+      command: writeInto(escape),
+      policy: policyFor('workspace-write', ws),
+      accepts: 'none',
+      timeoutMs: 30_000,
+    })
+    expect(result.sandbox).toEqual({ mode: 'workspace-write', enforcement: 'full' })
+    expect(existsSync(escape)).toBe(false)
+  })
+
   it('does not wrap danger-full-access at all, and the write outside lands', async () => {
     const ws = tempDir('minidsh-confine-ws-')
     const outside = tempDir('minidsh-confine-out-')

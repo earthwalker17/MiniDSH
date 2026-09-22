@@ -18,7 +18,7 @@ import { messageText, restoreMessage } from '../core/llm/message.ts'
 import type { ContentBlock } from '../core/llm/index.ts'
 import { formatTokens } from '../core/metering/index.ts'
 import { AUTHORITY_PRESET } from '../core/presets/index.ts'
-import { SANDBOX_MODE } from '../core/sandbox/index.ts'
+import { SANDBOX_ACCEPTANCE, SANDBOX_MODE } from '../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 import { printableText } from '../core/text.ts'
 
@@ -86,6 +86,10 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     // Authority is visible where it changes: a surface that hides a widened
     // boundary is a surface that lets one happen quietly.
     return `[sandbox: ${mode} (${reason}; ${confinement(mode, enforcement)})]`
+  }
+  if (matches(event, SANDBOX_ACCEPTANCE)) {
+    const { accepts, forMode, reason } = event.data
+    return `[shell enforcement: accepts ${accepts} under ${forMode} (${reason})]`
   }
   if (matches(event, APPROVAL_POLICY)) return `[approvals: ${event.data.policy}]`
   if (matches(event, AGENT_OPTIONS)) {
@@ -203,6 +207,10 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       whole.set(event.data.callId, `${event.data.name} ${printableText(event.data.arguments)}`)
     } else if (matches(event, SANDBOX_MODE)) {
       lines.push(`${at(event.seq)}  sandbox     ${event.data.mode} (${event.data.reason}; ${confinement(event.data.mode, event.data.enforcement)})`)
+    } else if (matches(event, SANDBOX_ACCEPTANCE)) {
+      // An authority DECISION, so `--audit` owes it a line: a projection that
+      // showed the mode but not what unfenced the shell would be worse than none.
+      lines.push(`${at(event.seq)}  accepts     ${event.data.accepts} under ${event.data.forMode} (${event.data.reason})`)
     } else if (matches(event, APPROVAL_POLICY)) {
       lines.push(`${at(event.seq)}  approvals   ${event.data.policy} (${event.data.reason})`)
     } else if (matches(event, AUTHORITY_PRESET)) {

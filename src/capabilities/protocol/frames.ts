@@ -122,6 +122,13 @@ export interface AuthorityView {
   readonly sandbox: SandboxMode
   readonly approval: ApprovalPolicy
   readonly enforcement: SandboxEnforcement
+  /**
+   * The weakest enforcement this session ACCEPTS for a shell command under
+   * `sandbox` — a decision, where `enforcement` beside it is a host fact.
+   * `full` unless somebody said otherwise; weaker means a command this host
+   * cannot confine runs anyway, with only the in-process file fence left.
+   */
+  readonly accepts: SandboxEnforcement
   /** Derived from the pair against the preset table (`custom` = no match); absent when no presets capability is mounted. */
   readonly preset?: string
 }
@@ -131,6 +138,8 @@ export interface AuthorityParams {
   /** Either may be omitted; omitting all three reads the current authority without changing it. */
   readonly sandbox?: SandboxMode
   readonly approval?: ApprovalPolicy
+  /** What this session accepts from its execution world, for whatever mode it ends this call under. */
+  readonly accepts?: SandboxEnforcement
   /** A named preset over the pair; exclusive with `sandbox`/`approval`. */
   readonly preset?: string
 }

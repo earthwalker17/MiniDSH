@@ -12,7 +12,7 @@ import { INVARIANTS, type InvariantFailure, type InvariantInstaller } from '../i
 import { matches, type EventEnvelope } from '../session/index.ts'
 import { SESSION_EVENT } from '../session/store.ts'
 import type { Session } from '../session/session.ts'
-import { isSandboxMode, isWider, SANDBOX_MODE, type SandboxMode } from './index.ts'
+import { isSandboxMode, isWider, SANDBOX_ACCEPTANCE, SANDBOX_MODE, type SandboxMode } from './index.ts'
 import type { ApprovalPolicy } from '../approval/index.ts'
 
 const ENFORCEMENTS: ReadonlySet<string> = new Set(['full', 'partial', 'none'])
@@ -31,12 +31,15 @@ interface Trace {
   decided: Set<string>
   sandboxStamps: number
   policyStamps: number
+  acceptanceStamps: number
+  /** A delegated child's acceptance cannot be renegotiated from inside the session. */
+  acceptancePinned: boolean
   ceiling: SandboxMode | undefined
   pin: ApprovalPolicy | undefined
 }
 
 function freshTrace(): Trace {
-  return { lastSeq: -1, asked: new Set(), decided: new Set(), sandboxStamps: 0, policyStamps: 0, ceiling: undefined, pin: undefined }
+  return { lastSeq: -1, asked: new Set(), decided: new Set(), sandboxStamps: 0, policyStamps: 0, acceptanceStamps: 0, acceptancePinned: false, ceiling: undefined, pin: undefined }
 }
 
 /**
@@ -85,6 +88,22 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
       fail(`approval/policy "${String(policy)}" leaves the delegation pin "${trace.pin}"`)
     }
     trace.policyStamps += 1
+    return
+  }
+  if (matches(event, SANDBOX_ACCEPTANCE)) {
+    const { accepts, forMode, reason } = event.data
+    if (typeof accepts !== 'string' || !ENFORCEMENTS.has(accepts)) fail(`sandbox/acceptance carries an unknown enforcement ${JSON.stringify(accepts)}`)
+    if (!isSandboxMode(forMode)) fail(`sandbox/acceptance carries an unknown mode ${JSON.stringify(forMode)}`)
+    if (typeof reason !== 'string' || !SANDBOX_REASONS.has(reason)) fail(`sandbox/acceptance carries an unknown reason ${JSON.stringify(reason)}`)
+    if (reason === 'delegation') {
+      if (trace.acceptanceStamps > 0) fail('a delegation opening must be the first sandbox/acceptance of its session')
+      trace.acceptancePinned = true
+    } else if (trace.acceptancePinned) {
+      // A pin, not a ceiling: a child that cannot ask anyone anything has no
+      // actor with standing to renegotiate what it was started accepting.
+      fail('sandbox/acceptance changes what a delegated session was started accepting')
+    }
+    trace.acceptanceStamps += 1
     return
   }
   if (matches(event, APPROVAL_ASKED)) {

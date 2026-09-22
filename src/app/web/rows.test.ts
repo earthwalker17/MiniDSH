@@ -25,7 +25,7 @@ import { EFFECT_RECORDED } from '../../core/effects/index.ts'
 import { asCallId } from '../../core/ids.ts'
 import { createAssistantMessage, createPluginMessage, createToolResultMessage, createUserMessage } from '../../core/llm/message.ts'
 import { AUTHORITY_PRESET } from '../../core/presets/index.ts'
-import { SANDBOX_MODE } from '../../core/sandbox/index.ts'
+import { SANDBOX_ACCEPTANCE, SANDBOX_MODE } from '../../core/sandbox/index.ts'
 import {
   ASSISTANT_CHUNK,
   ASSISTANT_MESSAGE,
@@ -77,6 +77,7 @@ const SAMPLES: readonly Sample[] = [
   sample('TURN_END', 'error', TURN_END, { turn: 1, reason: { kind: 'error', code: 'MISSING_CREDENTIAL', message: 'set DEEPSEEK_API_KEY' } }),
   sample('TURN_END', 'interrupted', TURN_END, { turn: 1, reason: { kind: 'interrupted' } }),
   sample('SANDBOX_MODE', 'stamp', SANDBOX_MODE, { mode: 'workspace-write', enforcement: 'none', reason: 'initial' }),
+  sample('SANDBOX_ACCEPTANCE', 'accepted', SANDBOX_ACCEPTANCE, { accepts: 'none', forMode: 'workspace-write', reason: 'change' }),
   sample('APPROVAL_POLICY', 'policy', APPROVAL_POLICY, { policy: 'ask', reason: 'initial' }),
   sample('AGENT_OPTIONS', 'initial', AGENT_OPTIONS, { options: { provider: 'deepseek', model: 'deepseek-v4-flash' }, reason: 'initial' }),
   sample('AGENT_OPTIONS', 'change', AGENT_OPTIONS, { options: { provider: 'anthropic', model: 'claude-sonnet-5', reasoningEffort: 'high' }, reason: 'change' }),

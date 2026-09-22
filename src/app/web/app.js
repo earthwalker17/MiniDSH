@@ -169,16 +169,21 @@ function renderView() {
   // Session-scoped controls mean nothing without a session, and a knob showing
   // its first option reads as a setting that is in force. Disable until there
   // is something for them to act on.
-  for (const id of ['sandbox', 'approval', 'compact', 'cancel']) $(id).disabled = !view
+  for (const id of ['sandbox', 'approval', 'accepts', 'compact', 'cancel']) $(id).disabled = !view
   $('status').textContent = view ? (state.status ?? view.status) : ''
   $('context').textContent =
     view?.context && view.context.budgetTokens > 0
       ? `ctx ${Math.round(view.context.ratio * 100)}% · ${tokens(view.context.projectedTokens)}/${tokens(view.context.budgetTokens)}`
       : ''
   $('route').textContent = view?.route ? `${view.route.provider}/${view.route.model}` : view?.options ? `${view.options.provider}/${view.options.model}` : ''
-  $('authority').textContent = view ? `${view.authority.sandbox} · approvals ${view.authority.approval}${view.authority.preset ? ` · ${view.authority.preset}` : ''}` : ''
+  // The accepted enforcement is shown only when it is weaker than the
+  // default: saying what a host CAN do without saying what this session
+  // agreed to accept from it would hide the decision that matters.
+  const accepted = view && view.authority.accepts !== 'full' ? ` · shell ${view.authority.accepts}` : ''
+  $('authority').textContent = view ? `${view.authority.sandbox} · approvals ${view.authority.approval}${accepted}${view.authority.preset ? ` · ${view.authority.preset}` : ''}` : ''
   $('sandbox').value = view?.authority.sandbox ?? ''
   $('approval').value = view?.authority.approval ?? ''
+  $('accepts').value = view?.authority.accepts ?? ''
 
   const open = view?.pendingApprovals?.[0]
   state.pendingApproval = open
@@ -499,7 +504,7 @@ async function start() {
     state.workspaceId = event.target.value || undefined
     void refreshSessions().catch(fail)
   })
-  for (const knob of ['sandbox', 'approval']) {
+  for (const knob of ['sandbox', 'approval', 'accepts']) {
     $(knob).addEventListener('change', (event) => {
       if (!state.window) return
       void state.wire.request('session/authority', { sessionId: state.window.sessionId, [knob]: event.target.value }).catch(fail)

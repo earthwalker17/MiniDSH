@@ -214,6 +214,78 @@ describe('delegation through the full composition', () => {
     await handle.dispose()
   })
 
+  it('copies the parent acceptance down for the mode the child actually gets, and no wider', async () => {
+    const w = await world()
+    w.adapter.script(
+      assistantToolCall('call-1', 'subagent', { description: 'look', prompt: 'Look around.' }),
+      assistantText('looked'),
+      assistantText('done'),
+    )
+    const handle = await w.create()
+    // The parent accepts an unconfined shell for the mode it is running under.
+    w.root.get(SANDBOX).setAcceptance(handle.agent.session, 'none', 'workspace-write')
+    handle.agent.followup(createUserMessage('delegate'))
+    await handle.agent.whenIdle()
+
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    const child = storedEvents(w.sessionsRoot, start.childId)
+    // The child runs under the same mode, so it inherits the acceptance — which
+    // is the Windows win: a delegated child can run a shell at all.
+    expect(child.filter((event) => event.type === 'sandbox/acceptance').map((event) => event.data)).toEqual([
+      { accepts: 'none', forMode: 'workspace-write', reason: 'delegation' },
+    ])
+    await handle.dispose()
+  })
+
+  it('gives a NARROWED child nothing its parent accepted for a wider mode', async () => {
+    // The defect this closes: `confine` is mode-blind, so a bare acceptance
+    // copied down would hand a `read-only` verifier — pinned `never`, unable
+    // to ask anyone anything — an unconfined shell its parent never accepted
+    // for that mode. "Widening is not expressible" would become expressible by
+    // the parent's model choosing to delegate.
+    const w = await world([{ id: 'tool-subagent', config: { sandbox: 'read-only' } }])
+    w.adapter.script(
+      assistantToolCall('call-1', 'subagent', { description: 'look', prompt: 'Look around.' }),
+      assistantText('looked'),
+      assistantText('done'),
+    )
+    const handle = await w.create()
+    w.root.get(SANDBOX).setAcceptance(handle.agent.session, 'none', 'workspace-write')
+    handle.agent.followup(createUserMessage('delegate'))
+    await handle.agent.whenIdle()
+
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    const child = storedEvents(w.sessionsRoot, start.childId)
+    expect(child.filter((event) => event.type === 'sandbox/mode').map((event) => event.data)).toEqual([
+      { mode: 'read-only', enforcement: 'none', reason: 'delegation' },
+    ])
+    // Nothing recorded at all: the strict default needs no line, and the child
+    // is back to refusing what this host cannot confine.
+    expect(child.filter((event) => event.type === 'sandbox/acceptance')).toHaveLength(0)
+    await handle.dispose()
+  })
+
+  it('lets a row make a child STRICTER than its parent, and never the other way', async () => {
+    const w = await world([{ id: 'tool-subagent', config: { accepts: 'full' } }])
+    w.adapter.script(
+      assistantToolCall('call-1', 'subagent', { description: 'look', prompt: 'Look around.' }),
+      assistantText('looked'),
+      assistantText('done'),
+    )
+    const handle = await w.create()
+    w.root.get(SANDBOX).setAcceptance(handle.agent.session, 'none', 'workspace-write')
+    handle.agent.followup(createUserMessage('delegate'))
+    await handle.agent.whenIdle()
+
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    const child = storedEvents(w.sessionsRoot, start.childId)
+    // `strictest`, not `narrowest`: the enforcement lattice runs the other way,
+    // and an implementer who reached for the mode helper would have produced
+    // `none` here — the child getting the unconfined shell the row refused.
+    expect(child.filter((event) => event.type === 'sandbox/acceptance')).toHaveLength(0)
+    await handle.dispose()
+  })
+
   it('hides the delegation tool at the depth cap and refuses a call to it, so the limit is a fact about the world', async () => {
     // maxDepth 1: the child is already at the cap, so it never sees the tool.
     const w = await world([{ id: 'tool-subagent', config: { maxDepth: 1 } }])

@@ -130,6 +130,10 @@ describe('agent presets: a world visible to that agent alone', () => {
       setMode: () => 'danger-full-access',
       open: () => {},
       enforcementFor: () => 'none',
+      // As permissive as this stub can be, so the test measures the fence and
+      // not a shell refusal it never reaches.
+      acceptsFor: () => 'none',
+      setAcceptance: () => {},
       defaultMode: 'danger-full-access',
     }
     const adapter = new ScriptedAdapter().script(

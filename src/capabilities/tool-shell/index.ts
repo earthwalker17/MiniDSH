@@ -13,7 +13,17 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
-import { isWider, SANDBOX, SANDBOX_MODES, SandboxError, type Sandbox, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
+import {
+  isWider,
+  meetsAcceptance,
+  SANDBOX,
+  SANDBOX_MODES,
+  SandboxError,
+  type Sandbox,
+  type SandboxExecutionPolicy,
+  type SandboxMode,
+} from '../../core/sandbox/index.ts'
+import type { Session } from '../../core/session/index.ts'
 import { SHELL, type Shell, type ShellRunResult } from '../../core/shell/index.ts'
 import { excerptWithSpill, excerptWithoutSpill, SPILL } from '../../core/spill/index.ts'
 import { defineTool, TOOLS, type ToolContext } from '../../core/tools/index.ts'
@@ -46,7 +56,7 @@ const configSchema = z
  */
 function confinementGuidance(confining: boolean): string {
   if (!confining) {
-    return `* Commands run under this session's sandbox policy. A command that cannot be confined on this host is REFUSED and the result says so.
+    return `* Commands run under this session's sandbox policy. Where this host cannot confine a command, whether it is REFUSED or runs unconfined is this session's recorded choice — the runtime context states which, and a refusal says so in the result.
 * To run a refused command anyway, retry THE SAME command once with sandbox_permissions (the narrowest wider mode that suffices) and justification (why it is required). The user is asked to approve, and a grant covers that one call only.
 * Never work around a denial by rewriting the command to hide its effect.`
   }
@@ -139,7 +149,18 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
         // `callId` travels with the command so the PROVIDER can key its effect
         // record to this call (§4) — the executor is what knows the command
         // ran, its exit code and the enforcement it actually got.
-        const result = await shellSession.exec({ command: args.command, policy, callId: exec.callId, timeoutMs, signal: exec.signal, ...(escalated ? { oneShot: true } : {}) })
+        const result = await shellSession.exec({
+          command: args.command,
+          policy,
+          callId: exec.callId,
+          timeoutMs,
+          signal: exec.signal,
+          // What this session accepts for the mode this call runs under. The
+          // provider refuses anything weaker, exactly as it always has; the
+          // default is `full`, so nothing moves for a session that never decided.
+          accepts: sandbox.acceptsFor(agent.session, policy.mode),
+          ...(escalated ? { oneShot: true } : {}),
+        })
         // "Nothing ran" must never read as "ran and printed nothing".
         if (result.aborted) throw Object.assign(new Error('command not dispatched: the call was cancelled, or this shell was already disposed'), { code: 'ABORTED_BEFORE_DISPATCH' })
         // "The shell died" must never read as "the command printed nothing":
@@ -162,12 +183,12 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
         // once the process exits, so output too large to show inline is SAVED
         // and located rather than thrown away — through a store the composition
         // may or may not have mounted, hence `tryGet`.
-        return { output: bound(ctx, exec, result.output + notice + denialHint(shell, sandbox, result, escalated), excerpt), exitCode: result.exitCode ?? null }
+        return { output: bound(ctx, exec, result.output + notice + denialHint(shell, sandbox, agent.session, result, escalated), excerpt), exitCode: result.exitCode ?? null }
       } catch (error) {
         if (error instanceof SandboxError && error.code === 'SANDBOX_UNAVAILABLE') {
           // A reported fact, not a failure: the command never ran, and the model
           // is told the one legitimate way to ask for more.
-          return { output: refusal(sandbox, policy, error.message), exitCode: null }
+          return { output: refusal(sandbox, agent.session, policy, error.message), exitCode: null }
         }
         throw error
       }
@@ -208,7 +229,7 @@ async function resolvePolicy(args: Input, agent: Agent, exec: ToolContext, deps:
   }
   // Never spend someone's consent on a mode that still could not run: a grant
   // this host cannot honour would be refused anyway, one ask later.
-  if (!viableEscalations(deps.sandbox, base.mode).includes(target)) {
+  if (!viableEscalations(deps.sandbox, session, base.mode).includes(target)) {
     throw new SandboxError('SANDBOX_UNAVAILABLE', `"${target}" cannot be confined on this host either, so escalating to it would not let the command run`)
   }
   const outcome = await deps.approval.request({
@@ -240,14 +261,25 @@ async function resolvePolicy(args: Input, agent: Agent, exec: ToolContext, deps:
   return deps.sandbox.resolve({ session, mode: target })
 }
 
-/** The wider modes this host could actually run under — the only ones worth asking for. */
-function viableEscalations(sandbox: Sandbox, base: SandboxMode): SandboxMode[] {
-  return SANDBOX_MODES.filter((mode) => isWider(mode, base) && (mode === 'danger-full-access' || sandbox.enforcementFor(mode) !== 'none'))
+/**
+ * The wider modes this command could actually run under — the only ones worth
+ * asking for, so consent is never spent on a grant the host would refuse.
+ *
+ * `danger-full-access` is never confined, so it is always runnable; any other
+ * mode is runnable when what this host DELIVERS meets what this session
+ * ACCEPTS for it. A session that accepted an unconfined shell for
+ * `workspace-write` and then switched to `read-only` can therefore still
+ * escalate back into it, which a host-only check would miss.
+ */
+function viableEscalations(sandbox: Sandbox, session: Session, base: SandboxMode): SandboxMode[] {
+  return SANDBOX_MODES.filter(
+    (mode) => isWider(mode, base) && (mode === 'danger-full-access' || meetsAcceptance(sandbox.enforcementFor(mode), sandbox.acceptsFor(session, mode))),
+  )
 }
 
 /** One spelling of the one legitimate move, shared by a refusal and a kernel denial. */
-function escalationHint(sandbox: Sandbox, mode: SandboxMode): string | undefined {
-  const viable = viableEscalations(sandbox, mode)
+function escalationHint(sandbox: Sandbox, session: Session, mode: SandboxMode): string | undefined {
+  const viable = viableEscalations(sandbox, session, mode)
   if (viable.length === 0) return undefined
   return (
     `[escalation available — retry this exact command once with sandbox_permissions (the narrowest of ${viable.map((target) => `"${target}"`).join(', ')} that suffices) ` +
@@ -255,8 +287,8 @@ function escalationHint(sandbox: Sandbox, mode: SandboxMode): string | undefined
   )
 }
 
-function refusal(sandbox: Sandbox, policy: SandboxExecutionPolicy, reason: string): string {
-  const hint = escalationHint(sandbox, policy.mode)
+function refusal(sandbox: Sandbox, session: Session, policy: SandboxExecutionPolicy, reason: string): string {
+  const hint = escalationHint(sandbox, session, policy.mode)
   return hint === undefined ? `[sandbox: ${reason}]` : `[sandbox: ${reason}]\n${hint}`
 }
 
@@ -273,12 +305,12 @@ function refusal(sandbox: Sandbox, policy: SandboxExecutionPolicy, reason: strin
  * exactly like an ordinary missing directory. And it never fires on a command
  * that already spent someone's consent: one ask per escalation.
  */
-function denialHint(shell: Shell, sandbox: Sandbox, result: ShellRunResult, escalated: boolean): string {
+function denialHint(shell: Shell, sandbox: Sandbox, session: Session, result: ShellRunResult, escalated: boolean): string {
   if (escalated || result.exitCode === undefined || result.exitCode === 0) return ''
   const signatures = shell.denialSignatures
   if (signatures.length === 0) return ''
   const lower = result.output.toLowerCase()
   if (!signatures.some((signature) => lower.includes(signature))) return ''
-  const hint = escalationHint(sandbox, result.sandbox.mode)
+  const hint = escalationHint(sandbox, session, result.sandbox.mode)
   return hint === undefined ? '' : `\n[sandbox: the sandbox refused a file effect this command attempted]\n${hint}`
 }

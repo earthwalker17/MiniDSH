@@ -67,6 +67,8 @@ const unconfined = (root: string): SandboxExecutionPolicy => ({ mode: 'danger-fu
 
 const echoCmd = (text: string): string => (dialect === 'pwsh' ? `Write-Output '${text}'` : `echo '${text}'`)
 const pwdCmd = (): string => (dialect === 'pwsh' ? '(Get-Location).Path' : 'pwd')
+const setVar = (name: string, value: string): string => (dialect === 'pwsh' ? `$env:${name}='${value}'` : `export ${name}='${value}'`)
+const readVar = (name: string): string => (dialect === 'pwsh' ? `Write-Output $env:${name}` : `echo ${name}`)
 // A native non-zero exit (as `node --test` produces) propagates reliably via $LASTEXITCODE / $?.
 const failCmd = (): string => 'node -e "process.exit(3)"'
 
@@ -121,6 +123,34 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
  * reaped the persistent child and left the escalated one — the command running
  * under the widest authority the session ever granted — alive behind it.
  */
+describe.skipIf(!available)('what enforcement a session accepts, where nothing confines', () => {
+  it('refuses a confined mode by default, and runs it in the PERSISTENT shell once the session accepts unconfined', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess(dialect, dir)
+    const confined: SandboxExecutionPolicy = { mode: 'workspace-write', workspaceRoot: dir }
+
+    // The default is the refusal this provider has always made: a host with no
+    // backend does not run a confined command.
+    await expect(proc.exec({ command: echoCmd('nope'), policy: confined, timeoutMs: 30_000 })).rejects.toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE',
+    })
+
+    // With the session accepting it, the command runs — and REPORTS what it
+    // really got, which is what lands in the effect record and the audit.
+    const first = await proc.exec({ command: setVar('S15', 'kept'), policy: confined, accepts: 'none', timeoutMs: 30_000 })
+    expect(first.aborted).toBeUndefined()
+    expect(first.sandbox).toEqual({ mode: 'workspace-write', enforcement: 'none' })
+
+    // The PERSISTENT child, not a throwaway: an escalation goes to a one-shot
+    // child unconditionally, so the only thing that can carry state between two
+    // commands is the session's own shell. Reading back what the first command
+    // set is the one assertion a throwaway cannot pass.
+    const second = await proc.exec({ command: readVar('S15'), policy: confined, accepts: 'none', timeoutMs: 30_000 })
+    expect(second.output).toContain('kept')
+    expect(second.restarted).toBeUndefined()
+  })
+})
+
 describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
   it('runs beside the persistent shell and leaves its state alone', async () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-'))

@@ -19,10 +19,14 @@ import { AGENT_CREATED } from '../agent/events.ts'
 import type { Session } from '../session/index.ts'
 import { SHELL } from '../shell/index.ts'
 import {
+  acceptanceFor,
+  DEFAULT_ACCEPTANCE,
+  delegationAcceptance,
   delegationCeiling,
   effectiveSandboxMode,
   isWider,
   lastSandboxStamp,
+  SANDBOX_ACCEPTANCE,
   SANDBOX_MODE,
   SANDBOX_MODES,
   type SandboxEnforcement,
@@ -111,13 +115,31 @@ export interface Sandbox {
    * With an `opening`, the explicit form a creator uses BEFORE publication
    * (in `setup`): the child opens under the mode its parent had at
    * delegation, stamped `reason: 'delegation'` — which is also its ceiling.
+   * An `accepts` weaker than the default is recorded beside it as a PIN.
    * Refused if the session has already recorded a stamp.
    */
-  open(session: Session, opening?: { readonly mode: SandboxMode; readonly reason: 'delegation' }): void
+  open(session: Session, opening?: { readonly mode: SandboxMode; readonly reason: 'delegation'; readonly accepts?: SandboxEnforcement }): void
   /** The durable switch. Appends `sandbox/mode` iff the recorded stamp changes; refused past a delegation ceiling. */
   setMode(session: Session, mode: SandboxMode): SandboxMode
   /** What the mounted execution world can enforce for a mode on this host. */
   enforcementFor(mode: SandboxMode): SandboxEnforcement
+  /**
+   * The weakest enforcement this session accepts for a confined shell command
+   * under `mode` — `full` unless somebody said otherwise, which is every host
+   * that refuses what it cannot confine.
+   *
+   * Read per call by the caller that reaches the shell, and passed on the
+   * request rather than on the stamp: `SandboxExecutionPolicy` is the value
+   * `writableRoots`, `allowsWrite` and both confinement profiles are pure
+   * functions of, and a decision about the shell world does not belong in the
+   * ceiling both file families derive from.
+   */
+  acceptsFor(session: Session | undefined, mode: SandboxMode): SandboxEnforcement
+  /**
+   * The durable switch. Appends `sandbox/acceptance` iff it changes what
+   * `mode` accepts; refused on a delegated session, whose acceptance is pinned.
+   */
+  setAcceptance(session: Session, accepts: SandboxEnforcement, forMode: SandboxMode): void
   /** The deployment default, used by a session that has recorded nothing. */
   readonly defaultMode: SandboxMode
 }
@@ -127,14 +149,29 @@ export const SANDBOX = serviceKey<Sandbox>('sandbox')
 export interface SandboxConfig {
   /** Deployment default for sessions with no recorded mode (default `workspace-write`). */
   readonly mode?: SandboxMode | undefined
+  /**
+   * Deployment default for what a session accepts from its execution world
+   * (default `full`: refuse a confined command this host cannot confine).
+   * Weakening it here is a deployment-wide choice with no per-session record,
+   * which is why the durable knob exists; the row is authority-sensitive.
+   */
+  readonly accepts?: SandboxEnforcement | undefined
   /** Root for agent-less calls, which have no session cwd (default `process.cwd()`). */
   readonly workspaceRoot?: string | undefined
 }
 
-const configSchema = z.strictObject({ mode: z.enum(SANDBOX_MODES).optional(), workspaceRoot: z.string().min(1).optional() }).optional()
+const configSchema = z
+  .strictObject({
+    mode: z.enum(SANDBOX_MODES).optional(),
+    accepts: z.enum(['full', 'partial', 'none']).optional(),
+    workspaceRoot: z.string().min(1).optional(),
+  })
+  .optional()
 
 class SandboxService implements Sandbox {
   readonly defaultMode: SandboxMode
+  /** What a session with nothing recorded accepts. A deployment may weaken it; `minidsh config` flags the row that did. */
+  private readonly defaultAcceptance: SandboxEnforcement
   private readonly ctx: Context
   private readonly fallbackRoot: string
   private readonly roots = new WeakMap<Session, string>()
@@ -142,6 +179,7 @@ class SandboxService implements Sandbox {
   constructor(ctx: Context, config: SandboxConfig) {
     this.ctx = ctx
     this.defaultMode = config.mode ?? 'workspace-write'
+    this.defaultAcceptance = config.accepts ?? DEFAULT_ACCEPTANCE
     this.fallbackRoot = canonicalPath(config.workspaceRoot ?? process.cwd())
   }
 
@@ -180,7 +218,7 @@ class SandboxService implements Sandbox {
     return { mode, workspaceRoot }
   }
 
-  open(session: Session, opening?: { readonly mode: SandboxMode; readonly reason: 'delegation' }): void {
+  open(session: Session, opening?: { readonly mode: SandboxMode; readonly reason: 'delegation'; readonly accepts?: SandboxEnforcement }): void {
     if (opening === undefined) {
       this.record(session, effectiveSandboxMode(session.facts) ?? this.defaultMode)
       return
@@ -189,6 +227,32 @@ class SandboxService implements Sandbox {
       throw new SandboxError('SANDBOX_ALREADY_OPEN', `session ${session.id} has already recorded its opening sandbox mode`)
     }
     session.append(SANDBOX_MODE, { mode: opening.mode, enforcement: this.enforcementFor(opening.mode), reason: opening.reason })
+    // A child's acceptance is recorded only when it is not the strict default:
+    // a `full` line would say nothing the stamp above does not already imply,
+    // and every session would carry one. When it IS recorded it is a PIN —
+    // first, and unchangeable for the child's life.
+    if (opening.accepts !== undefined && opening.accepts !== DEFAULT_ACCEPTANCE) {
+      session.append(SANDBOX_ACCEPTANCE, { accepts: opening.accepts, forMode: opening.mode, reason: opening.reason })
+    }
+  }
+
+  acceptsFor(session: Session | undefined, mode: SandboxMode): SandboxEnforcement {
+    return session ? acceptanceFor(session.facts, mode) : this.defaultAcceptance
+  }
+
+  setAcceptance(session: Session, accepts: SandboxEnforcement, forMode: SandboxMode): void {
+    const pin = delegationAcceptance(session.facts)
+    // A delegated child may not renegotiate what it was started accepting: it
+    // cannot ask anyone anything, so there is no actor in that session with
+    // standing to. Narrowing is the delegation row's to express.
+    if (pin !== undefined) {
+      throw new SandboxError(
+        'SANDBOX_CEILING',
+        `session ${session.id} was delegated accepting "${pin.accepts}" enforcement for "${pin.forMode}" and cannot change it`,
+      )
+    }
+    if (acceptanceFor(session.facts, forMode) === accepts) return
+    session.append(SANDBOX_ACCEPTANCE, { accepts, forMode, reason: 'change' })
   }
 
   private assertUnderCeiling(session: Session, mode: SandboxMode): void {

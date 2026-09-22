@@ -39,6 +39,17 @@ import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
 import { renderHistory, TerminalRenderer } from './render.ts'
 
+/**
+ * The shell-confinement half of a status line: what this host CAN enforce, and
+ * — when it is weaker than the default — what this session has agreed to accept
+ * from it. Saying only the first would hide the decision that made an
+ * unconfined command possible in the first place.
+ */
+function confinementLine(view: AuthorityView): string {
+  const accepted = view.accepts === 'full' ? '' : `, accepting ${view.accepts}`
+  return `shell confinement: ${view.enforcement}${accepted}`
+}
+
 /** How many sessions `/sessions` prints. A terminal has one screen; the CLI's own listing has all of them. */
 const SESSIONS_SHOWN = 20
 
@@ -236,7 +247,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     // as an unrecognized command and fell through to the SANDBOX setter,
     // durably widening the wrong knob with no error.
     const command = line.split(/\s+/, 1)[0]
-    if (command === '/sandbox' || command === '/ask' || command === '/preset') {
+    if (command === '/sandbox' || command === '/ask' || command === '/accept' || command === '/preset') {
       await switchAuthority(line)
       return
     }
@@ -413,16 +424,29 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     }
     if (!value) {
       const usage =
-        command === '/ask' ? 'usage: /ask <ask|never>\n' : command === '/preset' ? 'usage: /preset <name>\n' : 'usage: /sandbox <read-only|workspace-write|danger-full-access>\n'
+        command === '/ask'
+          ? 'usage: /ask <ask|never>\n'
+          : command === '/accept'
+            ? 'usage: /accept <full|none>   (none: run shell commands this host cannot sandbox)\n'
+            : command === '/preset'
+              ? 'usage: /preset <name>\n'
+              : 'usage: /sandbox <read-only|workspace-write|danger-full-access>\n'
       out.write(usage)
       prompt()
       return
     }
-    const params = command === '/ask' ? { sessionId, approval: value } : command === '/preset' ? { sessionId, preset: value } : { sessionId, sandbox: value }
+    const params =
+      command === '/ask'
+        ? { sessionId, approval: value }
+        : command === '/accept'
+          ? { sessionId, accepts: value }
+          : command === '/preset'
+            ? { sessionId, preset: value }
+            : { sessionId, sandbox: value }
     try {
       const view = await client.request<AuthorityView>('session/authority', params)
       const preset = view.preset === undefined ? '' : ` · preset: ${view.preset}`
-      out.write(`sandbox: ${view.sandbox} (shell confinement: ${view.enforcement}) · approvals: ${view.approval}${preset}\n`)
+      out.write(`sandbox: ${view.sandbox} (${confinementLine(view)}) · approvals: ${view.approval}${preset}\n`)
     } catch (error) {
       printError(error)
     }

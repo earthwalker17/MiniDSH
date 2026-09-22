@@ -158,6 +158,36 @@ describe('the runtime-context section', () => {
     expect(assembled.system).toContain('enforces this mode only partially')
   })
 
+  it('tells a model that an ACCEPTED unconfined shell is not bounded by the mode', async () => {
+    // The third world, and the one a model must not misread: the mode is still
+    // recorded and still governs `ctx.fs`, but it no longer describes what a
+    // shell command can write. A sentence that let the two be confused is the
+    // whole risk of this knob.
+    const test = await harness('none')
+    const { agent } = await test.create()
+    test.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
+    // Its own lifecycle's opening acceptance is what the section reads, so a
+    // fresh agent is needed for the new value to appear.
+    const next = await test.create()
+    test.root.get(SANDBOX).setAcceptance(next.agent.session, 'none', 'workspace-write')
+    const system = (await test.root.get(PROMPT).assemble(next.agent)).system
+    // The section is the cached prefix and reads the OPENING acceptance, so a
+    // mid-lifecycle switch does not appear here at all — it arrives as a message.
+    expect(system).toContain('so the shell refuses to run under this mode')
+  })
+
+  it('stays byte-identical across an ACCEPTANCE change, which is an authority switch like any other', async () => {
+    const test = await harness('none')
+    const { agent } = await test.create()
+    const before = (await test.root.get(PROMPT).assemble(agent)).system
+    test.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
+    const after = (await test.root.get(PROMPT).assemble(agent)).system
+    // The cached prefix is keyed on this block. A knob that moved it would
+    // invalidate a provider prefix cache on every switch, which is the reason
+    // the other two knobs read their OPENING value too.
+    expect(after).toBe(before)
+  })
+
   it('says nothing about confinement under danger-full-access, which asks for none', async () => {
     const test = await harness('full', 'danger-full-access')
     const { agent } = await test.create()
@@ -270,6 +300,23 @@ describe('a switch reaches the model as a message', () => {
     const text = JSON.stringify(spliced[0]!.data)
     expect(text).toContain('danger-full-access')
     expect(text).toContain('Approvals are now')
+  })
+
+  it('announces an ACCEPTANCE switch, because the prompt section cannot', async () => {
+    // The section reads the OPENING acceptance so the cached prefix survives a
+    // switch — which means a mid-session change reaches the model only here.
+    const test = await harness('none')
+    const { agent } = await test.create()
+    test.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
+    await settleNotes()
+    const text = JSON.stringify(agent.session.events.filter((event) => event.type === 'inbox/spliced').at(-1)!.data)
+    expect(text).toContain('UNCONFINED shell')
+    expect(text).toContain('workspace-write')
+
+    // And the other direction reads as the refusal it restores.
+    test.root.get(SANDBOX).setAcceptance(agent.session, 'full', 'workspace-write')
+    await settleNotes()
+    expect(JSON.stringify(agent.session.events.filter((event) => event.type === 'inbox/spliced').at(-1)!.data)).toContain('is refused')
   })
 
   it('says nothing when a switch changes nothing', async () => {

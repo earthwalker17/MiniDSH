@@ -412,7 +412,15 @@ describe('protocol: the authority control plane', () => {
   it('reports what a new session would start under, and what this host can enforce', async () => {
     const { client } = await startHost(new ScriptedAdapter())
     const result = await client.result<{ defaultAuthority: { sandbox: string; approval: string; enforcement: string } }>('initialize')
-    expect(result.defaultAuthority).toEqual({ sandbox: 'workspace-write', approval: 'ask', enforcement: 'none', preset: 'workspace-write' })
+    // `accepts: 'full'` is the strict default: a host that cannot confine a
+    // command refuses it, which is what every host did before the knob existed.
+    expect(result.defaultAuthority).toEqual({
+      sandbox: 'workspace-write',
+      approval: 'ask',
+      enforcement: 'none',
+      accepts: 'full',
+      preset: 'workspace-write',
+    })
   })
 
   it('switches a live session and streams the switch as the durable event', async () => {
@@ -423,7 +431,7 @@ describe('protocol: the authority control plane', () => {
 
     const view = await client.result<{ sandbox: string; approval: string }>('session/authority', { sessionId, sandbox: 'read-only', approval: 'never' })
     // read-only + never matches no shipped preset: the derived value is `custom`.
-    expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none', preset: 'custom' })
+    expect(view).toEqual({ sandbox: 'read-only', approval: 'never', enforcement: 'none', accepts: 'full', preset: 'custom' })
 
     // Two stamps: the mode the session opened under, then the switch.
     const stamp = await client.waitFor(() => client.frames('sandbox/mode').at(1), 'the switch frame')
@@ -439,6 +447,36 @@ describe('protocol: the authority control plane', () => {
     const again = await client.result<{ sandbox: string }>('session/authority', { sessionId })
     expect(again.sandbox).toBe('read-only')
     expect(client.frames('sandbox/mode')).toHaveLength(2)
+  })
+
+  it('records an accepted enforcement against the mode it was accepted FOR, and only that mode', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+
+    const accepted = await client.result<{ accepts: string; sandbox: string }>('session/authority', { sessionId, accepts: 'none' })
+    expect(accepted).toMatchObject({ sandbox: 'workspace-write', accepts: 'none' })
+    expect(client.frames('sandbox/acceptance').map((frame) => frame.event.data)).toEqual([
+      { accepts: 'none', forMode: 'workspace-write', reason: 'change' },
+    ])
+
+    // Narrowing the mode leaves that acceptance behind: it was given for
+    // `workspace-write`, and `read-only` is a different question. Without this
+    // the shell's mode-blind refusal would be relaxed for a mode nobody
+    // accepted it for.
+    const narrowed = await client.result<{ accepts: string }>('session/authority', { sessionId, sandbox: 'read-only' })
+    expect(narrowed.accepts).toBe('full')
+
+    // And switching back finds it again: it was never revoked.
+    const back = await client.result<{ accepts: string }>('session/authority', { sessionId, sandbox: 'workspace-write' })
+    expect(back.accepts).toBe('none')
+    expect(client.frames('sandbox/acceptance')).toHaveLength(1)
+
+    // A value outside what a surface may set is refused in the wire's words.
+    const bad = await client.call('session/authority', { sessionId, accepts: 'partial' })
+    expect(bad.error?.code).toBe(-32602)
+    expect(bad.error?.message).toMatch(/must be full | none/)
   })
 
   it('refuses a mode outside the closed vocabulary', async () => {

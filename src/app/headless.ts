@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS, mergeAgentOptions, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
 import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
-import { SANDBOX, type SandboxMode } from '../core/sandbox/index.ts'
+import { effectiveSandboxMode, SANDBOX, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
 import { PRESETS } from '../core/presets/index.ts'
 import { SETTINGS } from '../core/settings/index.ts'
@@ -32,6 +32,13 @@ export interface BootOptions {
    */
   readonly sandbox?: SandboxMode
   readonly approvalPolicy?: ApprovalPolicy
+  /**
+   * What this run accepts from its execution world. `none` lets a host with no
+   * confinement backend run a shell at all, instead of charging an escalation
+   * per command — and leaves the in-process file fence in place, which
+   * dropping the whole session to `danger-full-access` would not.
+   */
+  readonly accepts?: SandboxEnforcement
   readonly sessionsRoot: string
   /** Store for oversized tool output; omitted mounts no store (hermetic tests). */
   readonly spillRoot?: string
@@ -184,9 +191,18 @@ function registerAgentSettings(root: Context, base: AgentOptions): void {
  * An explicitly requested authority is a durable switch on the agent session,
  * not just a composition default — so it also governs a resumed session.
  */
-export function applyAuthority(root: Context, handle: AgentHandle, options: BootOptions): void {
+export function applyAuthority(root: Context, handle: AgentHandle, options: BootOptions & { readonly preset?: string }): void {
   if (options.sandbox !== undefined) root.get(SANDBOX).setMode(handle.agent.session, options.sandbox)
   if (options.approvalPolicy !== undefined) root.get(APPROVAL).setPolicy(handle.agent.session, options.approvalPolicy)
+  // The preset before the acceptance and after the pair, because the pair and
+  // the preset are mutually exclusive at the CLI while the acceptance composes
+  // with both — and an acceptance is given FOR a mode, so it must see the mode
+  // this run ends up under, not the one it started from.
+  applyPreset(root, handle, options.preset)
+  if (options.accepts !== undefined) {
+    const sandbox = root.get(SANDBOX)
+    sandbox.setAcceptance(handle.agent.session, options.accepts, effectiveSandboxMode(handle.agent.session.facts) ?? sandbox.defaultMode)
+  }
 }
 
 /** A preset is the same durable act through the one selector; `applyAuthority` stays preset-ignorant. */
@@ -240,7 +256,6 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     })
     applyAuthority(root, handle, options)
-    applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()
@@ -271,7 +286,6 @@ export async function resumeTask(options: ContinueOptions, onEvent?: EventListen
   try {
     const handle = await root.get(AGENTS).resume(root, asSessionId(options.id), continueArgs(options))
     applyAuthority(root, handle, options)
-    applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()
@@ -283,7 +297,6 @@ export async function forkTask(options: ContinueOptions, onEvent?: EventListener
   try {
     const handle = await root.get(AGENTS).fork(root, asSessionId(options.id), options.boundary, continueArgs(options))
     applyAuthority(root, handle, options)
-    applyPreset(root, handle, options.preset)
     return await drive(handle, options.task)
   } finally {
     await root.dispose()

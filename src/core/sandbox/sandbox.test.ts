@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { AGENTS } from '../agent/index.ts'
+import { asSessionId } from '../ids.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, APPROVAL_REQUEST, type ApprovalOutcome } from '../approval/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
 import {
@@ -14,8 +15,11 @@ import {
   isInside,
   isWider,
   lastSandboxStamp,
+  meetsAcceptance,
   SANDBOX,
+  SANDBOX_ACCEPTANCE,
   SANDBOX_MODE,
+  strictest,
   writableRoots,
   type SandboxExecutionPolicy,
   type SandboxMode,
@@ -269,6 +273,87 @@ describe('the authority invariant', () => {
     harness = await coreHarness()
     const { agent } = await harness.create()
     expect(() => agent.session.append(APPROVAL_DECIDED, { id: 'approval-999', outcome: 'allowed-once' })).toThrowError(/no matching/)
+  })
+})
+
+describe('what enforcement a session accepts', () => {
+  it('orders the enforcement lattice the OTHER way from the mode lattice', () => {
+    // `narrowest` ranks modes by permissiveness ascending, so reaching for it
+    // here inverts the ceiling: a delegation row set to `none` would read as a
+    // narrowing of a parent at `full`, and the child would get the unconfined
+    // shell the parent refused. These assertions fail on that inversion.
+    expect(strictest('full', 'none')).toBe('full')
+    expect(strictest('none', 'full')).toBe('full')
+    expect(strictest('partial', 'none')).toBe('partial')
+    expect(strictest('full', 'partial')).toBe('full')
+    // And what a world delivers satisfies what a session accepts only when it
+    // is at least as strict.
+    expect(meetsAcceptance('full', 'none')).toBe(true)
+    expect(meetsAcceptance('none', 'full')).toBe(false)
+    expect(meetsAcceptance('none', 'none')).toBe(true)
+    expect(meetsAcceptance('partial', 'full')).toBe(false)
+  })
+
+  it('defaults to refusing what this host cannot confine', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    expect(harness.root.get(SANDBOX).acceptsFor(agent.session, 'workspace-write')).toBe('full')
+    // And records nothing: a line saying "full" would say what the default
+    // already says, on every session ever created.
+    expect(agent.session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(0)
+  })
+
+  it('applies an acceptance ONLY to the mode it was accepted for', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const sandbox = harness.root.get(SANDBOX)
+    sandbox.setAcceptance(agent.session, 'none', 'workspace-write')
+    expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe('none')
+    // The whole point: the shell's refusal is mode-blind, so an acceptance
+    // without a mode would unfence `read-only` too.
+    expect(sandbox.acceptsFor(agent.session, 'read-only')).toBe('full')
+    expect(sandbox.acceptsFor(agent.session, 'danger-full-access')).toBe('full')
+  })
+
+  it('is a durable last-wins fold per mode, and records nothing when nothing changes', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const sandbox = harness.root.get(SANDBOX)
+    sandbox.setAcceptance(agent.session, 'none', 'workspace-write')
+    sandbox.setAcceptance(agent.session, 'none', 'workspace-write')
+    expect(agent.session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(1)
+    sandbox.setAcceptance(agent.session, 'full', 'workspace-write')
+    expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe('full')
+    expect(agent.session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(2)
+  })
+
+  it('refuses to be renegotiated inside a delegated session, and refuses a forged one pre-commit', async () => {
+    harness = await coreHarness()
+    const sandbox = harness.root.get(SANDBOX)
+    const child = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      setup: (_childCtx, agent) => {
+        sandbox.open(agent.session, { mode: 'workspace-write', reason: 'delegation', accepts: 'none' })
+      },
+    })
+    try {
+      const session = child.agent.session
+      expect(sandbox.acceptsFor(session, 'workspace-write')).toBe('none')
+      // A pin, not a ceiling: a child that cannot ask anyone anything has no
+      // actor with standing to renegotiate what it was started accepting.
+      expect(() => sandbox.setAcceptance(session, 'full', 'workspace-write')).toThrowError(/cannot change it/)
+      // And whatever gets past the setter is refused before it enters the log.
+      expect(() => session.append(SANDBOX_ACCEPTANCE, { accepts: 'none', forMode: 'read-only', reason: 'change' })).toThrowError(
+        /delegated session was started accepting/,
+      )
+      expect(() => session.append(SANDBOX_ACCEPTANCE, { accepts: 'best-effort' as never, forMode: 'read-only', reason: 'change' })).toThrowError(
+        /unknown enforcement/,
+      )
+    } finally {
+      await child.dispose()
+    }
   })
 })
 

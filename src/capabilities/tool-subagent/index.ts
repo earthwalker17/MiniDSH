@@ -31,7 +31,16 @@ import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, ty
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
-import { effectiveSandboxMode, narrowest, SANDBOX, SANDBOX_MODES, type Sandbox, type SandboxMode } from '../../core/sandbox/index.ts'
+import {
+  effectiveSandboxMode,
+  narrowest,
+  SANDBOX,
+  SANDBOX_MODES,
+  strictest,
+  type Sandbox,
+  type SandboxEnforcement,
+  type SandboxMode,
+} from '../../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, foldLastAssistantText, foldLastTurnEnd, matches, type Session, type TurnEndReason } from '../../core/session/index.ts'
 import { defineTool, DELEGATION_TOOL, RECALL_TOOL, TOOLS, type ToolContext, type ToolRestriction, type Tools } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
@@ -77,6 +86,12 @@ export interface SubagentConfig {
    * `danger-full-access` parent. Widening is not expressible.
    */
   readonly sandbox?: SandboxMode | undefined
+  /**
+   * A ceiling on what the child may ACCEPT from its execution world, on top of
+   * the parent's. It can only make the child stricter: a verifier row set to
+   * `full` refuses an unconfined shell under a parent that accepts one.
+   */
+  readonly accepts?: SandboxEnforcement | undefined
 }
 
 const configSchema = z
@@ -89,6 +104,7 @@ const configSchema = z
     description: z.string().min(1).optional(),
     purpose: z.string().min(1).optional(),
     sandbox: z.enum(SANDBOX_MODES as [SandboxMode, ...SandboxMode[]]).optional(),
+    accepts: z.enum(['full', 'partial', 'none']).optional(),
   })
   .optional()
 
@@ -116,6 +132,7 @@ interface ResolvedConfig {
   readonly maxSteps: number
   readonly purpose: string
   readonly sandbox?: SandboxMode | undefined
+  readonly accepts?: SandboxEnforcement | undefined
   readonly toolFilter?: ToolRestriction | undefined
   readonly persona?: string | undefined
 }
@@ -166,9 +183,27 @@ function taggedToolNames(tools: Tools, tag: string): string[] {
  * stamping a narrower one would make the parent's audit line — the place a human
  * looks first — state a wider authority than was ever granted.
  */
-function captureAuthority(parent: Agent, sandbox: Sandbox, ceiling: SandboxMode | undefined): { readonly mode: SandboxMode } {
+function captureAuthority(
+  parent: Agent,
+  sandbox: Sandbox,
+  ceiling: SandboxMode | undefined,
+  acceptsCeiling: SandboxEnforcement | undefined,
+): { readonly mode: SandboxMode; readonly accepts: SandboxEnforcement } {
   const inherited = effectiveSandboxMode(parent.session.facts) ?? sandbox.defaultMode
-  return { mode: ceiling === undefined ? inherited : narrowest(inherited, ceiling) }
+  const mode = ceiling === undefined ? inherited : narrowest(inherited, ceiling)
+  // The parent's acceptance FOR THE CHILD'S MODE, not for the parent's. A
+  // child narrowed to `read-only` inherits nothing its parent accepted for
+  // `workspace-write`, so a row that narrows the mode cannot be handed an
+  // unconfined shell by a parent that never accepted one there — which is the
+  // only reason `SubagentConfig.sandbox` can still claim widening is not
+  // expressible. `strictest`, not `narrowest`: the enforcement lattice runs
+  // the other way, and the permissive end is `none`.
+  const inheritedAccepts = sandbox.acceptsFor(parent.session, mode)
+  // `undefined` is "this row adds no ceiling", exactly as it is for the mode
+  // above — NOT "the strict default", which would silently override a parent
+  // that had accepted something and make the row's absence louder than its
+  // presence.
+  return { mode, accepts: acceptsCeiling === undefined ? inheritedAccepts : strictest(inheritedAccepts, acceptsCeiling) }
 }
 
 /** How the child's turn ended; a child whose log holds no turn at all is its own error. */
@@ -209,7 +244,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     throw Object.assign(new Error(`delegation depth ${depth} exceeds the limit of ${deps.config.maxDepth}; do this work yourself`), { code: 'SUBAGENT_DEPTH' })
   }
   // Captured before the first await: a parent switch after this belongs to the parent's future.
-  const inherited = captureAuthority(parent, deps.sandbox, deps.config.sandbox)
+  const inherited = captureAuthority(parent, deps.sandbox, deps.config.sandbox, deps.config.accepts)
   const route = await resolveCallConfig(parent, { purpose: deps.config.purpose, signal: exec.callSignal })
   const agentOptions: AgentOptions = { ...route, maxSteps: deps.config.maxSteps }
   // The child keeps this tool only if it could still use it: at the cap it is
@@ -259,7 +294,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     // effect can run.
     ...(world === undefined ? {} : { world }),
     setup: (childCtx, child) => {
-      deps.sandbox.open(child.session, { mode: inherited.mode, reason: 'delegation' })
+      deps.sandbox.open(child.session, { mode: inherited.mode, reason: 'delegation', accepts: inherited.accepts })
       deps.approval.open(child.session, { policy: 'never', reason: 'delegation' })
       deps.ctx.get(TOOLS).restrict(childCtx, restriction)
       // `persona` first, because a SCOPED section shadows a same-named global
@@ -359,6 +394,7 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
         maxSteps: config?.maxSteps ?? 12,
         purpose: config?.purpose ?? DEFAULT_PURPOSE,
         ...(config?.sandbox === undefined ? {} : { sandbox: config.sandbox }),
+        ...(config?.accepts === undefined ? {} : { accepts: config.accepts }),
         ...(config?.toolFilter === undefined ? {} : { toolFilter: config.toolFilter }),
         ...(config?.persona === undefined ? {} : { persona: config.persona }),
       },

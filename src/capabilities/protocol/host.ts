@@ -37,7 +37,18 @@ import { PERSISTENCE, type StoredSessionSummary } from '../../core/persistence/i
 import { SETTINGS, SettingsError, type Settings } from '../../core/settings/index.ts'
 import type { JsonValue } from '../../core/json.ts'
 import { AUTHORITY_PRESET, PRESETS } from '../../core/presets/index.ts'
-import { canonicalPath, effectiveSandboxMode, isInside, isSandboxMode, SANDBOX, SANDBOX_MODE, SANDBOX_MODES } from '../../core/sandbox/index.ts'
+import {
+  acceptanceFor,
+  canonicalPath,
+  effectiveSandboxMode,
+  isInside,
+  isSandboxMode,
+  SANDBOX,
+  SANDBOX_ACCEPTANCE,
+  SANDBOX_MODE,
+  SANDBOX_MODES,
+  type SandboxEnforcement,
+} from '../../core/sandbox/index.ts'
 import {
   ASSISTANT_MESSAGE,
   REQUEST_CONTEXT,
@@ -80,6 +91,14 @@ import {
 const COLD_SOURCE_CACHE = 3
 
 /**
+ * The acceptance values a WIRE may set. `partial` is deliberately not offered:
+ * no shipped backend reports it, so a surface value no arc could exercise
+ * would be dead surface. The durable vocabulary keeps all three, so a backend
+ * that reports `partial` needs no format change.
+ */
+const ACCEPTANCES: ReadonlySet<string> = new Set(['full', 'none'])
+
+/**
  * The durable kinds that move a `SessionView`. Named from the kind tokens, so a
  * renamed event is a compile error rather than a view that quietly stops
  * updating. A surface `replace` is handled separately — it is an op, not a kind.
@@ -90,6 +109,7 @@ const VIEW_CHANGING: ReadonlySet<string> = new Set([
   APPROVAL_DECIDED.type,
   APPROVAL_POLICY.type,
   SANDBOX_MODE.type,
+  SANDBOX_ACCEPTANCE.type,
   AUTHORITY_PRESET.type,
   AGENT_OPTIONS.type,
   REQUEST_CONTEXT.type,
@@ -616,6 +636,7 @@ export class ProtocolHost {
       sandbox: sandbox.defaultMode,
       approval: this.ctx.get(APPROVAL).defaultPolicy,
       enforcement: sandbox.enforcementFor(sandbox.defaultMode),
+      accepts: sandbox.acceptsFor(undefined, sandbox.defaultMode),
     })
   }
 
@@ -637,8 +658,13 @@ export class ProtocolHost {
     if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
     // Only a SWITCH is refused on a child its parent is running. With no knobs
     // this method reads, and reads stay open — a human may watch a child.
-    if (params.sandbox !== undefined || params.approval !== undefined || params.preset !== undefined) {
+    if (params.sandbox !== undefined || params.approval !== undefined || params.accepts !== undefined || params.preset !== undefined) {
       this.assertDrivable(agent, 'session/authority')
+    }
+    // Validated here, in the wire's own words, for the reason the mode is: a
+    // value outside the closed vocabulary would reach a durable fact.
+    if (params.accepts !== undefined && !ACCEPTANCES.has(params.accepts as string)) {
+      throw new RpcFailure(INVALID_PARAMS, `session/authority: "accepts" must be ${[...ACCEPTANCES].join(' | ')}`)
     }
     if (params.sandbox !== undefined && !isSandboxMode(params.sandbox)) {
       throw new RpcFailure(INVALID_PARAMS, `session/authority: "sandbox" must be one of ${SANDBOX_MODES.join(' | ')}`)
@@ -668,7 +694,21 @@ export class ProtocolHost {
     // Read through the pure fold, never through `resolve` — resolving is the
     // audit act of an effect boundary, and looking is not an effect.
     const mode = effectiveSandboxMode(agent.session.facts) ?? sandbox.defaultMode
-    return this.withPreset({ sandbox: mode, approval: approval.policyFor(agent.session), enforcement: sandbox.enforcementFor(mode) })
+    // AFTER the mode, deliberately: an acceptance is given FOR a mode, and a
+    // client switching both in one call means the mode it is switching to.
+    if (params.accepts !== undefined) {
+      try {
+        sandbox.setAcceptance(agent.session, params.accepts as SandboxEnforcement, mode)
+      } catch (error) {
+        throw new RpcFailure(INVALID_PARAMS, error instanceof Error ? error.message : String(error))
+      }
+    }
+    return this.withPreset({
+      sandbox: mode,
+      approval: approval.policyFor(agent.session),
+      enforcement: sandbox.enforcementFor(mode),
+      accepts: sandbox.acceptsFor(agent.session, mode),
+    })
   }
 
   /**
@@ -960,6 +1000,9 @@ export class ProtocolHost {
       sandbox: mode,
       approval: effectiveApprovalPolicy(facts) ?? this.ctx.get(APPROVAL).defaultPolicy,
       enforcement: sandbox.enforcementFor(mode),
+      // From the LOG, like every other field here: a cold read has no agent,
+      // and a stored session's acceptance is as readable as its mode.
+      accepts: acceptanceFor(facts, mode),
     })
     const route = foldRequestContext(facts)
     const options = source.agent?.options ?? foldAgentOptions(facts)

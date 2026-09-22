@@ -34,6 +34,7 @@
 /** @typedef {DataOf<typeof import('../../core/approval/events.ts').APPROVAL_DECIDED>} ApprovalDecidedData */
 /** @typedef {DataOf<typeof import('../../core/approval/events.ts').APPROVAL_POLICY>} ApprovalPolicyData */
 /** @typedef {DataOf<typeof import('../../core/sandbox/events.ts').SANDBOX_MODE>} SandboxModeData */
+/** @typedef {DataOf<typeof import('../../core/sandbox/events.ts').SANDBOX_ACCEPTANCE>} SandboxAcceptanceData */
 /** @typedef {DataOf<typeof import('../../core/presets/index.ts').AUTHORITY_PRESET>} AuthorityPresetData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').AGENT_OPTIONS>} AgentOptionsData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').SUBAGENT_START>} SubagentStartData */
@@ -134,6 +135,10 @@ export function describeRow(event) {
     case 'sandbox/mode': {
       const data = /** @type {SandboxModeData} */ (event.data)
       return note(`[sandbox: ${data.mode} (${data.reason}; enforcement ${data.enforcement})]`)
+    }
+    case 'sandbox/acceptance': {
+      const data = /** @type {SandboxAcceptanceData} */ (event.data)
+      return note(`[shell enforcement: accepts ${data.accepts} under ${data.forMode} (${data.reason})]`)
     }
     case 'approval/policy':
       return note(`[approvals: ${/** @type {ApprovalPolicyData} */ (event.data).policy}]`)
