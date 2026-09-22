@@ -18,6 +18,7 @@ import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
+import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import { matches, type SessionEventFrame } from '../../core/session/index.ts'
@@ -114,14 +115,33 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
 
   /** Said once: the session-scoped answer to being asked per call, at the moment it is first needed. */
   let tipped = false
-  const askApproval = (data: { id: string; toolName: string; reason?: string }): void => {
+  /** Every id this client has seen decided — so a queued question is never printed at all. */
+  const answeredIds = new Set<string>()
+
+  /**
+   * Asked on a MICROTASK, and skipped if the decision has already landed.
+   *
+   * A decision the seam makes without consulting anyone — the durable `never`,
+   * and from S15 a matching grant — appends `asked` and `decided` in the same
+   * tick, so both frames reach this client before it yields. Printed eagerly,
+   * the first would leave a standing `[y/N]` for a question that is already
+   * answered, and the next line a person typed would be swallowed as its answer.
+   */
+  const askApproval = (data: { id: string; toolName: string; reason?: string; subject?: EffectIntent }): void => {
+    if (answeredIds.has(data.id)) return
     pendingApproval = { id: data.id, toolName: data.toolName }
-    if (!tipped) {
-      tipped = true
-      out.write('tip: approvals are one-shot; /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops these prompts\n')
-    }
-    out.write(`approve ${data.toolName}${data.reason ? ` (${data.reason})` : ''}? [y/N] `)
-    promptStanding = true
+    queueMicrotask(() => {
+      if (pendingApproval?.id !== data.id || answeredIds.has(data.id)) return
+      if (!tipped) {
+        tipped = true
+        out.write('tip: approvals are one-shot; /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops these prompts\n')
+      }
+      // The runtime's account of the call leads; the model's follows in
+      // parentheses, where it reads as the claim it is.
+      const says = data.subject ? ` — ${describeIntent(data.subject)}` : ''
+      out.write(`approve ${data.toolName}${says}${data.reason ? ` (${data.reason})` : ''}? [y/N] `)
+      promptStanding = true
+    })
   }
 
   const handleFrame = (frame: SessionEventFrame): void => {
@@ -138,7 +158,9 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     if (matches(frame.event, APPROVAL_ASKED)) {
       askApproval(frame.event.data)
     } else if (matches(frame.event, APPROVAL_DECIDED)) {
-      // Settled elsewhere (cancelled turn, another answerer): stop asking.
+      // Settled elsewhere (a cancelled turn, another answerer, a grant): stop
+      // asking, and remember, so a question still queued is never printed.
+      answeredIds.add(frame.event.data.id)
       if (pendingApproval?.id === frame.event.data.id) pendingApproval = undefined
     }
   }

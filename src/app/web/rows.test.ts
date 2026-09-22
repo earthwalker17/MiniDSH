@@ -83,7 +83,15 @@ const SAMPLES: readonly Sample[] = [
   sample('REQUEST_CONTEXT', 'route', REQUEST_CONTEXT, { provider: 'anthropic', model: 'claude-sonnet-5', contextWindow: 1_000_000 }),
   sample('AUTHORITY_PRESET', 'preset', AUTHORITY_PRESET, { name: 'workspace-write' }),
   sample('APPROVAL_ASKED', 'asked', APPROVAL_ASKED, { id: 'approval-7', toolName: 'pwsh', callId: 'c1', reason: 'run under "danger-full-access": tests' }),
+  sample('APPROVAL_ASKED', 'with a subject', APPROVAL_ASKED, {
+    id: 'approval-9',
+    toolName: 'pwsh',
+    callId: 'c2',
+    reason: 'run under "danger-full-access": tests',
+    subject: { effect: 'shell-command', command: 'pnpm check', mode: 'danger-full-access', enforcement: 'none' },
+  }),
   sample('APPROVAL_DECIDED', 'decided', APPROVAL_DECIDED, { id: 'approval-7', outcome: 'allowed-once' }),
+  sample('APPROVAL_DECIDED', 'decided by a person', APPROVAL_DECIDED, { id: 'approval-9', outcome: 'allowed-once', decidedBy: 'user' }),
   sample('EFFECT_RECORDED', 'fs write', EFFECT_RECORDED, { callId: 'c1', effect: 'fs-write', path: '/ws/notes.txt', bytes: 15, sha256: 'a1b2c3d4e5f6a7b8c9d0' }),
   sample('EFFECT_RECORDED', 'shell command', EFFECT_RECORDED, { callId: 'c1', effect: 'shell-command', exitCode: 0, durationMs: 1234, mode: 'workspace-write', enforcement: 'full' }),
   sample('EFFECT_RECORDED', 'shell command killed', EFFECT_RECORDED, { callId: 'c1', effect: 'shell-command', durationMs: 120_000, mode: 'read-only', enforcement: 'none', timedOut: true }),
@@ -143,6 +151,26 @@ describe('the browser row projection against the plain-text one', () => {
     expect(cases.size).toBeGreaterThan(10)
     const sampledTypes = new Set(SAMPLES.map((entry) => entry.event.type))
     expect([...cases].filter((type) => !sampledTypes.has(type))).toEqual([])
+  })
+
+  it('shows the consent SUBJECT and the decider in both projections', () => {
+    // The kind-level coverage check above cannot catch these: `subject` and
+    // `decidedBy` are new fields on kinds that already had a branch and a case,
+    // so one projection could render them and the other not, silently.
+    const find = (constant: string, label: string): EventEnvelope => SAMPLES.find((entry) => entry.constant === constant && entry.label === label)!.event
+    const askedRow = describeRow(find('APPROVAL_ASKED', 'with a subject'))!.text
+    const askedLine = transcriptLines([find('APPROVAL_ASKED', 'with a subject')]).join('')
+    for (const rendered of [askedRow, askedLine]) {
+      expect(rendered).toContain('pnpm check')
+      expect(rendered).toContain('danger-full-access')
+      // And the model's own words stay, beside the runtime's account.
+      expect(rendered).toContain('tests')
+    }
+    const decidedRow = describeRow(find('APPROVAL_DECIDED', 'decided by a person'))!.text
+    const decidedLine = transcriptLines([find('APPROVAL_DECIDED', 'decided by a person')]).join('')
+    for (const rendered of [decidedRow, decidedLine]) expect(rendered).toContain('user')
+    // An approval nobody decided says nothing about a decider, rather than guessing.
+    expect(describeRow(find('APPROVAL_DECIDED', 'decided'))!.text).not.toContain('by ')
   })
 
   it('says what the plain-text line says where a reader would compare them', () => {

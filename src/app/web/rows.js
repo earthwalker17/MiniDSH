@@ -120,10 +120,17 @@ export function describeRow(event) {
     }
     case 'approval/asked': {
       const data = /** @type {ApprovalAskedData} */ (event.data)
-      return note(`? ${data.toolName}${data.reason ? `: ${data.reason}` : ''}`)
+      // The subject is spelled here rather than imported: this file ships to a
+      // browser with no build step and shares nothing with the host but the
+      // wire. The two projections must agree on WHETHER an event is visible
+      // (`rows.test.ts`), never on its wording.
+      const says = data.subject ? ` run \`${data.subject.command}\` under ${data.subject.mode}/${data.subject.enforcement}` : ''
+      return note(`? ${data.toolName}${says}${data.reason ? `: ${data.reason}` : ''}`)
     }
-    case 'approval/decided':
-      return note(`! ${/** @type {ApprovalDecidedData} */ (event.data).outcome}`)
+    case 'approval/decided': {
+      const data = /** @type {ApprovalDecidedData} */ (event.data)
+      return note(`! ${data.outcome}${data.decidedBy ? ` (by ${data.decidedBy})` : ''}`)
+    }
     case 'sandbox/mode': {
       const data = /** @type {SandboxModeData} */ (event.data)
       return note(`[sandbox: ${data.mode} (${data.reason}; enforcement ${data.enforcement})]`)

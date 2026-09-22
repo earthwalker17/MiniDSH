@@ -25,7 +25,7 @@ import {
   effectiveApprovalPolicy,
   isApprovalPolicy,
   openApprovals,
-  type ApprovalOutcome,
+  type ApprovalAnswer,
   type ApprovalPrompt,
 } from '../../core/approval/index.ts'
 import { COMPACTION } from '../../core/compaction/index.ts'
@@ -195,7 +195,7 @@ function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: st
  */
 interface PendingApproval {
   readonly sessionId: string
-  readonly settle: (outcome: ApprovalOutcome) => void
+  readonly settle: (answer: ApprovalAnswer) => void
 }
 
 export class ProtocolHost {
@@ -356,11 +356,11 @@ export class ProtocolHost {
    * With nobody to ask, it delegates down the waterfall rather than hanging the
    * agent on a question no one will ever see.
    */
-  answerApproval(prompt: ApprovalPrompt, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
+  answerApproval(prompt: ApprovalPrompt, next: () => Promise<ApprovalAnswer>): Promise<ApprovalAnswer> {
     if (this.closed) return next()
     const underParent = this.parentRunning(prompt.agent.id, prompt.agent.session.header) !== undefined
     if (!this.anyReceiver(prompt.agent.id, underParent)) return next()
-    return new Promise<ApprovalOutcome>((resolve) => {
+    return new Promise<ApprovalAnswer>((resolve) => {
       this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, { sessionId: prompt.agent.id, settle: resolve })
     })
   }
@@ -406,7 +406,7 @@ export class ProtocolHost {
       case 'session/compact':
         return this.compact(record)
       case 'approval/answer':
-        return this.approvalAnswer(record)
+        return this.approvalAnswer(connection, record)
       case 'session/authority':
         return this.authority(record)
       case 'session/model':
@@ -1026,7 +1026,23 @@ export class ProtocolHost {
     return compaction.compactNow(agent)
   }
 
-  private approvalAnswer(params: Record<string, unknown>): ApprovalAnswerResult {
+  /**
+   * Answering takes the CONNECTION, because a client may only answer for a
+   * session it can see.
+   *
+   * Without that check the table is keyed by `sessionId:id` alone, so a client
+   * attached to session B could answer session A — a question it was never
+   * shown and cannot render. `receives` is the same predicate
+   * `settleUnwatchedApprovals` already uses to decide that nobody can answer,
+   * and the two disagreeing is what made this reachable: the host would settle
+   * a question `unavailable` for having no receiver while still accepting an
+   * answer to it from a non-receiver.
+   *
+   * It is not identity — there are no accounts here (§13) — but it is the
+   * difference between "a client that was shown this" and "any open socket",
+   * and it is what `decidedBy: 'user'` is allowed to mean.
+   */
+  private approvalAnswer(connection: ClientConnection, params: Record<string, unknown>): ApprovalAnswerResult {
     const sessionId = requireString(params, 'sessionId', 'approval/answer')
     const id = requireString(params, 'id', 'approval/answer')
     const outcome = params.outcome
@@ -1038,8 +1054,15 @@ export class ProtocolHost {
     // First answer wins, whichever client sent it; every other client learns
     // the outcome from the durable `approval/decided` event, not from here.
     if (!pending) return { outcome: 'not-pending' }
+    // `false`, for the reason `settleUnwatchedApprovals` passes `false`: a
+    // delegated child is pinned `never`, so its requests are refused inside the
+    // approval service before any answerer is consulted, and nothing delegated
+    // can be in this table.
+    if (!this.receives(connection, sessionId, false)) {
+      throw new RpcFailure(INVALID_PARAMS, `approval/answer: this connection does not watch session "${sessionId}"`)
+    }
     this.pendingApprovals.delete(key)
-    pending.settle(outcome)
+    pending.settle({ outcome, by: 'user' })
     return { outcome: 'accepted' }
   }
 

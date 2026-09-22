@@ -184,7 +184,9 @@ describe('approval policy: the strict unattended stance', () => {
     expect(consulted).toBe(false)
     const asked = agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!
     const decided = agent.session.events.find((event) => matches(event, APPROVAL_DECIDED))!
-    expect((decided.data as { id: string; outcome: string })).toEqual({ id: (asked.data as { id: string }).id, outcome: 'rejected' })
+    // `policy`, not a decider: the audit distinguishes the durable `never` from
+    // a person or a rule saying no, because only one of those can be argued with.
+    expect(decided.data).toEqual({ id: (asked.data as { id: string }).id, outcome: 'rejected', decidedBy: 'policy' })
   })
 
   it('opens with the deployment policy at creation, folds the last policy event, and records a switch only when it changes', async () => {

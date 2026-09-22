@@ -948,6 +948,44 @@ describe('protocol: more than one client', () => {
     expect(first.frames('approval/decided')[0]!.event.data.outcome).toBe('allowed-once')
   })
 
+  it('refuses an answer from a client that cannot see the session, and credits the one that can', async () => {
+    const gated = defineTool({
+      name: 'gated',
+      description: 'needs consent',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const { clients } = await startHost(adapter, {
+      extraClients: 1,
+      prepare: (root) => {
+        root.get(TOOLS).register(root, gated)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'gated' ? { kind: 'ask' } : next()))
+      },
+    })
+    const [first, second] = clients as [TestClient, TestClient]
+    const { sessionId } = await first.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    const asked = await first.waitFor(() => first.frames('approval/asked', sessionId)[0], 'the ask')
+    const id = asked.event.data.id as string
+
+    // The second client narrows to nothing: it no longer watches this session,
+    // so it is no longer a candidate answerer — and answering is candidacy.
+    await second.result('session/detach', {})
+    const refused = await second.call('approval/answer', { sessionId, id, outcome: 'allowed-once' })
+    expect(refused.error?.code).toBe(-32602)
+    expect(refused.error?.message).toMatch(/does not watch session/)
+    // Nothing was decided by that frame.
+    expect(first.frames('approval/decided', sessionId)).toHaveLength(0)
+
+    // The client that can see it answers, and the audit credits a person.
+    const accepted = await first.result<{ outcome: string }>('approval/answer', { sessionId, id, outcome: 'allowed-once' })
+    expect(accepted.outcome).toBe('accepted')
+    await first.waitForIdle(sessionId)
+    expect(first.frames('approval/decided', sessionId)[0]!.event.data).toMatchObject({ outcome: 'allowed-once', decidedBy: 'user' })
+  })
+
   it('treats a disconnect as one client leaving, not as a shutdown', async () => {
     const adapter = new ScriptedAdapter().script(assistantText('one'), assistantText('two'))
     const { host, clients } = await startHost(adapter, { extraClients: 1 })

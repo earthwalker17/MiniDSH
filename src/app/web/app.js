@@ -183,7 +183,21 @@ function renderView() {
   const open = view?.pendingApprovals?.[0]
   state.pendingApproval = open
   $('approval-bar').hidden = !open
-  if (open) $('approval-text').textContent = `allow ${open.toolName}${open.reason ? ` — ${open.reason}` : ''}?`
+  if (open) {
+    // The runtime's account of the call leads; the model's `reason` follows in
+    // parentheses, where it reads as the claim it is.
+    const says = open.subject ? ` — run \`${open.subject.command}\` under ${open.subject.mode}/${open.subject.enforcement}` : ''
+    $('approval-text').textContent = `allow ${open.toolName}${says}${open.reason ? ` (${open.reason})` : ''}?`
+    // And the literal record beside it. A bound that fired SAYS so and points
+    // at the whole thing, rather than showing a shortened call as if it were
+    // the call.
+    const call = open.call
+    $('approval-call').hidden = !call
+    if (call) {
+      const omitted = call.omittedChars ? `\n…${call.omittedChars} more characters — read the whole call with \`minidsh sessions show --json\`` : ''
+      $('approval-call').textContent = `${call.name} ${call.arguments}${omitted}`
+    }
+  }
 }
 
 /**

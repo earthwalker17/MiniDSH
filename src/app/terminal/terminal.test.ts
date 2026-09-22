@@ -6,7 +6,8 @@ import { PassThrough } from 'node:stream'
 import { z } from 'zod'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../../kernel/index.ts'
-import { APPROVAL } from '../../core/approval/index.ts'
+import { APPROVAL, type Approval } from '../../core/approval/index.ts'
+import type { ToolContext } from '../../core/tools/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createAssistantMessage, createUserMessage } from '../../core/llm/message.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
@@ -68,6 +69,11 @@ function terminalDriver(): TerminalDriver {
 }
 
 const SCRIPTED = { provider: 'scripted', model: 'scripted-model' }
+
+/** Bound once the terminal's host has booted, so a tool body can reach the seam. */
+let approvalOf: (exec: ToolContext) => Approval = () => {
+  throw new Error('no approval seam bound')
+}
 
 function scriptedBoot(adapter: ScriptedAdapter, prepare?: (root: Context) => void) {
   return {
@@ -218,6 +224,87 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     // The first ask carries the one tip that names the session-scoped answer, once.
     expect(driver.text().split('tip: approvals are one-shot')).toHaveLength(2)
     expect(driver.text().indexOf('tip: approvals')).toBeLessThan(driver.text().indexOf('approve touchy'))
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
+
+  it('prints no question for an approval the seam already decided', async () => {
+    // Under `never` the service appends `asked` and `decided` in one tick, so
+    // both frames reach this client before it yields. A prompt printed eagerly
+    // would stand over a settled question, and the next line typed would be
+    // swallowed as its answer instead of reaching the agent.
+    const touchy = defineTool({
+      name: 'touchy',
+      description: 'needs approval',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'touchy', {}), assistantText('refused and moved on'))
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      approvalPolicy: 'never',
+      ...scriptedBoot(adapter, (root) => {
+        root.get(TOOLS).register(root, touchy)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'touchy' ? { kind: 'ask', reason: 'careful' } : next()))
+      }),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    await driver.see('you> ')
+    driver.type('use the tool')
+    await driver.see('refused and moved on')
+    expect(driver.text()).toContain('! approval-')
+    expect(driver.text()).not.toContain('[y/N]')
+    // And the line the person types next is a prompt, not an answer to a ghost.
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+  })
+
+  it('leads the consent line with what the RUNTIME says the call will do', async () => {
+    // A tool that takes consent INSIDE its body, as `tool-shell` does: the
+    // subject is built from the validated arguments, the reason is the model's.
+    const risky = defineTool({
+      name: 'risky',
+      description: 'asks for itself',
+      input: z.object({ command: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      execute: async (args, exec) => {
+        await approvalOf(exec).request({
+          agent: exec.agent!,
+          toolName: 'risky',
+          callId: exec.callId,
+          reason: 'trust me',
+          subject: { effect: 'shell-command', command: args.command, mode: 'danger-full-access', enforcement: 'none' },
+        })
+        return { ok: true }
+      },
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'risky', { command: 'rm -rf /tmp/x' }), assistantText('done'))
+    let approval: Approval | undefined
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      ...scriptedBoot(adapter, (root) => {
+        approval = root.get(APPROVAL)
+        root.get(TOOLS).register(root, risky)
+      }),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    approvalOf = () => approval!
+    await driver.see('you> ')
+    driver.type('use the tool')
+    // The command a person consents to is on the line, ahead of the model's
+    // account of it — which is the whole point of the field.
+    await driver.see('approve risky — run `rm -rf /tmp/x` under danger-full-access/none (trust me)? [y/N] ')
+    driver.type('y')
+    await driver.see('done')
     driver.type('/exit')
     expect(await exitCode).toBe(0)
   })

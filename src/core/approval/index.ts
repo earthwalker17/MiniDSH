@@ -25,6 +25,7 @@ import {
   delegationPin,
   effectiveApprovalPolicy,
   isApprovalOutcome,
+  type ApprovalDecider,
   type ApprovalOutcome,
   type ApprovalPolicy,
 } from './events.ts'
@@ -90,6 +91,34 @@ export interface ApprovalPrompt extends ApprovalRequest {
   readonly id: string
 }
 
+/**
+ * What an answerer may return: the outcome, or the outcome plus a claim about
+ * WHO it came from.
+ *
+ * `by` is a claim, not a proof — it is code-equivalent trust, exactly as a
+ * preset-mounted answerer already is (§7). The protocol host says `user` only
+ * for an answer from a connection that may see the session; everything else is
+ * `auto`, including an answerer that says nothing, because one that does not
+ * claim a human did not have one.
+ */
+export type ApprovalAnswer = ApprovalOutcome | { readonly outcome: ApprovalOutcome; readonly by?: 'user' | 'auto' }
+
+/**
+ * One place where a raw answerer value becomes the durable decision.
+ *
+ * It DROPS `by` whenever it rewrites the outcome, so an audit can never read
+ * `{outcome: 'cancelled', decidedBy: 'user'}` — a person recorded as having
+ * cancelled a request the abort signal killed. And `cancelled`/`unavailable`
+ * carry no decider at all: nobody made that decision, and the outcome says so.
+ */
+function decide(answer: unknown, aborted: boolean): { outcome: ApprovalOutcome; by?: ApprovalDecider } {
+  if (aborted) return { outcome: 'cancelled' }
+  const shaped = typeof answer === 'object' && answer !== null ? (answer as { outcome?: unknown; by?: unknown }) : { outcome: answer }
+  const outcome = isApprovalOutcome(shaped.outcome) ? shaped.outcome : 'unavailable'
+  if (outcome !== 'allowed-once' && outcome !== 'rejected') return { outcome }
+  return { outcome, by: shaped.by === 'user' ? 'user' : 'auto' }
+}
+
 export interface Approval {
   request(request: ApprovalRequest): Promise<ApprovalOutcome>
   /** The durable switch. Appends `approval/policy` iff the policy actually changes; refused on a delegated session, whose policy is pinned. */
@@ -112,7 +141,7 @@ export interface Approval {
 export const APPROVAL = serviceKey<Approval>('approval')
 
 /** Answerer chain; first non-delegating listener wins. Default thunk returns `unavailable`. */
-export const APPROVAL_REQUEST = waterfallEvent<[prompt: ApprovalPrompt], Promise<ApprovalOutcome>>('approval/request')
+export const APPROVAL_REQUEST = waterfallEvent<[prompt: ApprovalPrompt], Promise<ApprovalAnswer>>('approval/request')
 
 class ApprovalService implements Approval {
   readonly defaultPolicy: ApprovalPolicy
@@ -177,31 +206,30 @@ class ApprovalService implements Approval {
     // The strict unattended stance: refuse without consulting anyone. Enforced
     // here, before dispatch, so no answerer can be composed around it.
     if (this.policyFor(session) === 'never') {
-      session.append(APPROVAL_DECIDED, { id, outcome: 'rejected' })
+      session.append(APPROVAL_DECIDED, { id, outcome: 'rejected', decidedBy: 'policy' })
       return 'rejected'
     }
     // The prompt carries the SAME reason and subject the log does: an answerer
     // must never be shown text a reader of the audit could not have seen.
     const prompt: ApprovalPrompt = { ...request, id, ...(reason === undefined ? {} : { reason }), ...(subject === undefined ? {} : { subject }) }
-    let outcome: ApprovalOutcome
+    let answered: unknown
     try {
       // Dispatched in the requesting agent's scope: an answerer registered through
       // one agent's context never answers for another agent. The seam, not the
       // answerer, owns cancellation: an aborted signal settles the request even
       // if an answerer (a disconnected client) never does.
-      const answer = Promise.resolve(request.agent.ctx.waterfall(APPROVAL_REQUEST, prompt, async () => 'unavailable' as ApprovalOutcome))
-      outcome = await settleOrCancel(answer, request.signal)
-      if (!isApprovalOutcome(outcome)) outcome = 'unavailable'
+      const answer = Promise.resolve(request.agent.ctx.waterfall(APPROVAL_REQUEST, prompt, async () => 'unavailable' as ApprovalAnswer))
+      answered = await settleOrCancel(answer, request.signal)
     } catch {
-      outcome = 'unavailable'
+      answered = 'unavailable'
     }
-    if (request.signal?.aborted) outcome = 'cancelled'
-    session.append(APPROVAL_DECIDED, { id, outcome })
+    const { outcome, by } = decide(answered, request.signal?.aborted === true)
+    session.append(APPROVAL_DECIDED, { id, outcome, ...(by === undefined ? {} : { decidedBy: by }) })
     return outcome
   }
 }
 
-function settleOrCancel(answer: Promise<ApprovalOutcome>, signal: AbortSignal | undefined): Promise<ApprovalOutcome> {
+function settleOrCancel(answer: Promise<ApprovalAnswer>, signal: AbortSignal | undefined): Promise<ApprovalAnswer> {
   if (!signal) return answer
   if (signal.aborted) {
     answer.catch(() => undefined)

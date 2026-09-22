@@ -12,7 +12,7 @@
 import { AGENT_OPTIONS, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../core/approval/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/compaction/index.ts'
-import { describeEffect, EFFECT_RECORDED } from '../core/effects/index.ts'
+import { describeEffect, describeIntent, EFFECT_RECORDED } from '../core/effects/index.ts'
 import { blockText } from '../core/llm/content.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
 import type { ContentBlock } from '../core/llm/index.ts'
@@ -99,8 +99,17 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     return `[route: ${provider}/${model}${contextWindow === undefined ? '' : ` · window ${formatTokens(contextWindow)}`}]`
   }
   if (matches(event, AUTHORITY_PRESET)) return `[preset: ${event.data.name}]`
-  if (matches(event, APPROVAL_ASKED)) return `? ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${printableText(event.data.reason)}` : ''}`
-  if (matches(event, APPROVAL_DECIDED)) return `! ${event.data.id} ${event.data.outcome}`
+  if (matches(event, APPROVAL_ASKED)) {
+    // The subject first: it is what the RUNTIME says will happen, where the
+    // reason is what the model says about it.
+    const { id, toolName, reason, subject } = event.data
+    const says = subject ? ` ${describeIntent(subject)}` : ''
+    return `? ${id} ${toolName}${says}${reason ? `: ${printableText(reason)}` : ''}`
+  }
+  if (matches(event, APPROVAL_DECIDED)) {
+    const by = event.data.decidedBy === undefined ? '' : ` (by ${event.data.decidedBy})`
+    return `! ${event.data.id} ${event.data.outcome}${by}`
+  }
   if (matches(event, SUBAGENT_START)) {
     const { childId, depth, provider, model, sandbox } = event.data
     return `[subagent ${childId} · depth ${depth} · ${provider}/${model} · ${sandbox}, approvals never]`
@@ -184,11 +193,14 @@ const DENIALS: ReadonlySet<string> = new Set([
  */
 export function auditLines(events: readonly EventEnvelope[]): string[] {
   const calls = new Map<string, string>()
+  /** The same calls, uncut, for the one line that may not summarize: an approval's own. */
+  const whole = new Map<string, string>()
   const at = (seq: number): string => String(seq).padStart(4)
   const lines: string[] = []
   for (const event of events) {
     if (matches(event, TOOL_CALL)) {
       calls.set(event.data.callId, `${event.data.name} ${preview(event.data.arguments, 100)}`)
+      whole.set(event.data.callId, `${event.data.name} ${printableText(event.data.arguments)}`)
     } else if (matches(event, SANDBOX_MODE)) {
       lines.push(`${at(event.seq)}  sandbox     ${event.data.mode} (${event.data.reason}; ${confinement(event.data.mode, event.data.enforcement)})`)
     } else if (matches(event, APPROVAL_POLICY)) {
@@ -197,11 +209,17 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       // The intent; the knob events that follow are the truth a reader folds.
       lines.push(`${at(event.seq)}  preset      ${event.data.name}`)
     } else if (matches(event, APPROVAL_ASKED)) {
-      const covered = event.data.callId ? calls.get(event.data.callId) : undefined
-      lines.push(`${at(event.seq)}  asked       ${event.data.id} ${event.data.toolName}${event.data.reason ? `: ${printableText(event.data.reason)}` : ''}`)
+      const { id, toolName, reason, subject, callId } = event.data
+      lines.push(`${at(event.seq)}  asked       ${id} ${toolName}${reason ? `: ${printableText(reason)}` : ''}`)
+      if (subject) lines.push(`                    says: ${describeIntent(subject)}`)
+      // Whole, not `preview`d: this is the record of what somebody approved,
+      // and an audit that shows 100 characters of it cannot answer the one
+      // question it exists for.
+      const covered = callId ? whole.get(callId) : undefined
       if (covered) lines.push(`                    for: ${covered}`)
     } else if (matches(event, APPROVAL_DECIDED)) {
-      lines.push(`${at(event.seq)}  decided     ${event.data.id} ${event.data.outcome}`)
+      const by = event.data.decidedBy === undefined ? '' : ` (by ${event.data.decidedBy})`
+      lines.push(`${at(event.seq)}  decided     ${event.data.id} ${event.data.outcome}${by}`)
     } else if (matches(event, COMPACTION_APPLIED)) {
       // A compaction rewrites what the model can see, which is the kind of act
       // this view exists for.

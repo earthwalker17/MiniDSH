@@ -188,6 +188,25 @@ button.ghost {
   background: #1d2433;
   color: var(--accent);
 }
+/*
+ * The call an approval covers. Scrollable and wrapping rather than clipped:
+ * consent to text a reader cannot reach is not consent, so a long command
+ * grows a scrollbar instead of an ellipsis.
+ */
+.banner.ask .call {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 7.5em;
+  overflow: auto;
+  margin: 0;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #151a24;
+  color: var(--fg);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 /* An ordinary outcome, not a failure: the same bar, without the alarm. */
 .banner.notice {
   background: #1e2429;

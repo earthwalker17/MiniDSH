@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { AGENTS } from '../agent/index.ts'
 import { intentKey, type EffectIntent } from '../effects/index.ts'
+import { TOOL_CALL, type EventEnvelope } from '../session/index.ts'
 import { matches } from '../session/index.ts'
-import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_REQUEST, type ApprovalOutcome } from './index.ts'
+import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_REQUEST, openApprovals, type ApprovalOutcome } from './index.ts'
 
 let harness: CoreHarness | undefined
 afterEach(async () => {
@@ -111,6 +112,49 @@ describe('approval seam', () => {
     expect('subject' in (asked.data as object)).toBe(false)
   })
 
+  it('records WHO decided, and nobody when nobody did', async () => {
+    harness = await coreHarness()
+    const approval = harness.root.get(APPROVAL)
+    const decided = (agent: { session: { events: readonly { type: string; data: unknown }[] } }): { outcome: string; decidedBy?: string } =>
+      agent.session.events.filter((event) => event.type === APPROVAL_DECIDED.type).at(-1)!.data as { outcome: string; decidedBy?: string }
+
+    // An answerer that claims a person.
+    const person = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async (prompt) => (prompt.toolName === 'claimed' ? { outcome: 'allowed-once' as const, by: 'user' as const } : 'rejected'))
+    await approval.request({ agent: person.agent, toolName: 'claimed' })
+    expect(decided(person.agent)).toEqual({ id: expect.any(String), outcome: 'allowed-once', decidedBy: 'user' })
+
+    // One that returns a bare outcome did not claim one, so it is not credited.
+    const bare = await harness.create()
+    await approval.request({ agent: bare.agent, toolName: 'bare' })
+    expect(decided(bare.agent)).toEqual({ id: expect.any(String), outcome: 'rejected', decidedBy: 'auto' })
+  })
+
+  it('never credits a decider for an outcome the seam itself rewrote', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const controller = new AbortController()
+    // An answerer that claims a person, racing a cancellation that wins.
+    harness.root.on(APPROVAL_REQUEST, async () => {
+      controller.abort()
+      return { outcome: 'allowed-once' as const, by: 'user' as const }
+    })
+    const outcome = await harness.root.get(APPROVAL).request({ agent, toolName: 'bash', signal: controller.signal })
+    expect(outcome).toBe('cancelled')
+    const decided = agent.session.events.find((event) => matches(event, APPROVAL_DECIDED))!.data
+    // Not `{outcome: 'cancelled', decidedBy: 'user'}`: a person recorded as
+    // having cancelled a request the signal killed is a false audit line.
+    expect(decided).toEqual({ id: expect.any(String), outcome: 'cancelled' })
+  })
+
+  it('credits nobody when nobody answered at all', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const outcome = await harness.root.get(APPROVAL).request({ agent, toolName: 'bash' })
+    expect(outcome).toBe('unavailable')
+    expect(agent.session.events.find((event) => matches(event, APPROVAL_DECIDED))!.data).toEqual({ id: expect.any(String), outcome: 'unavailable' })
+  })
+
   it('an answerer that never resolves is settled by the request signal as cancelled', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()
@@ -168,5 +212,56 @@ describe('approval seam', () => {
     expect(new Set(all.map((entry) => entry.id)).size).toBe(3)
     for (const entry of all) expect(entry.id).toBe(`approval-${entry.seq}`)
     await resumed.dispose()
+  })
+})
+
+describe('the open-approval fold', () => {
+  const envelope = (seq: number, type: string, data: unknown): EventEnvelope => ({ type, seq, time: 1, data }) as EventEnvelope
+  const asked = (seq: number, over: Record<string, unknown> = {}): EventEnvelope =>
+    envelope(seq, APPROVAL_ASKED.type, { id: `approval-${seq}`, toolName: 'bash', ...over })
+
+  it('joins the call an approval covers, so an answerer sees what was asked for', () => {
+    // A client holding a PAGE cannot do this join: the covered call can sit
+    // outside the page, or below it. The host folds it and sends the answer.
+    const open = openApprovals([
+      envelope(0, TOOL_CALL.type, { turn: 1, step: 1, callId: 'call-7', name: 'bash', arguments: '{"command":"rm -rf /tmp/x"}' }),
+      asked(1, { callId: 'call-7' }),
+    ])
+    expect(open).toHaveLength(1)
+    expect(open[0]!.callId).toBe('call-7')
+    expect(open[0]!.call).toEqual({ name: 'bash', arguments: '{"command":"rm -rf /tmp/x"}' })
+  })
+
+  it('bounds a joined call by SAYING what it left out, and strips what a terminal would obey', () => {
+    const ESC = String.fromCharCode(27)
+    const args = `${ESC}[2K${'y'.repeat(20_000)}`
+    const call = openApprovals([
+      envelope(0, TOOL_CALL.type, { turn: 1, step: 1, callId: 'c', name: 'bash', arguments: args }),
+      asked(1, { callId: 'c' }),
+    ])[0]!.call!
+    expect(call.arguments).toHaveLength(16_384)
+    expect(call.omittedChars).toBe(args.length - 16_384)
+    // Neutralized, not dropped: the escape is a space, so the length a bound
+    // measured is the length that was written.
+    expect(call.arguments.startsWith(' [2K')).toBe(true)
+  })
+
+  it('leaves an approval with no call alone, and costs nothing when none is open', () => {
+    expect(openApprovals([asked(0)])[0]!.call).toBeUndefined()
+    // A decided pair leaves nothing open, so the second pass never runs.
+    expect(
+      openApprovals([asked(0, { callId: 'c' }), envelope(1, APPROVAL_DECIDED.type, { id: 'approval-0', outcome: 'rejected' })]),
+    ).toEqual([])
+  })
+
+  it('carries the subject and the callId a surface renders from', () => {
+    const subject = { effect: 'shell-command' as const, command: 'ls', mode: 'workspace-write' as const, enforcement: 'none' as const }
+    expect(openApprovals([asked(0, { callId: 'c', reason: 'because', subject })])[0]).toEqual({
+      id: 'approval-0',
+      toolName: 'bash',
+      reason: 'because',
+      subject,
+      callId: 'c',
+    })
   })
 })

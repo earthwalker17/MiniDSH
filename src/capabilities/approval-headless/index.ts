@@ -5,7 +5,7 @@
  */
 import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'
-import { APPROVAL_REQUEST, type ApprovalOutcome } from '../../core/approval/index.ts'
+import { APPROVAL_REQUEST, type ApprovalAnswer } from '../../core/approval/index.ts'
 
 export interface ApprovalHeadlessConfig {
   readonly approve?: boolean | undefined
@@ -18,6 +18,8 @@ export const approvalHeadlessPlugin: Plugin<ApprovalHeadlessConfig | undefined> 
   config: configSchema,
   apply(ctx, config) {
     const approve = config?.approve ?? false
-    ctx.on(APPROVAL_REQUEST, async (_request, next): Promise<ApprovalOutcome> => (approve ? 'allowed-once' : next()))
+    // `auto`, and it says so: nobody was asked. An audit that recorded a flag
+    // as a person would be worse than one that recorded nothing.
+    ctx.on(APPROVAL_REQUEST, async (_request, next): Promise<ApprovalAnswer> => (approve ? { outcome: 'allowed-once', by: 'auto' } : next()))
   },
 }

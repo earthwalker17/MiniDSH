@@ -42,6 +42,12 @@
       <div id="error" class="banner error" hidden></div>
       <div id="approval-bar" class="banner ask" hidden>
         <span id="approval-text"></span>
+        <!--
+          The call is scrollable rather than truncated: hiding its tail would
+          ask somebody to consent to text they cannot read. `tabindex` so a
+          keyboard user can reach the scroll region before the buttons.
+        -->
+        <pre id="approval-call" class="call" tabindex="0" hidden></pre>
         <button id="allow">allow once</button>
         <button id="deny">deny</button>
       </div>
