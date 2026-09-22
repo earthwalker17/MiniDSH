@@ -114,9 +114,16 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     if (reason === 'delegation') {
       if (trace.acceptanceStamps > 0) fail('a delegation opening must be the first sandbox/acceptance of its session')
       trace.acceptancePinned = true
-    } else if (trace.acceptancePinned) {
+    } else if (trace.acceptancePinned || trace.pin !== undefined) {
       // A pin, not a ceiling: a child that cannot ask anyone anything has no
       // actor with standing to renegotiate what it was started accepting.
+      //
+      // `trace.pin` and not only the acceptance stamp, because a child whose
+      // parent accepted nothing records no acceptance — the strict default
+      // needs no line — and checking the stamp alone left exactly those
+      // children able to accept an unconfined shell. The approval pin is the
+      // fact every delegated session has, and the delegation opening itself
+      // is written before it, so it is still allowed through.
       fail('sandbox/acceptance changes what a delegated session was started accepting')
     }
     trace.acceptanceStamps += 1

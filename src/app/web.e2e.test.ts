@@ -67,6 +67,13 @@ const PROMPTS = [
   'Create a file at the relative path summary.txt (not an absolute path) whose only line is exactly "reconnected and finished" without the quotation marks.',
 ]
 
+/** The half of a published view this arc asserts: what a browser was shown to consent to. */
+interface PendingApprovalView {
+  readonly subject?: { readonly command: string }
+  readonly call?: { readonly arguments: string }
+  readonly offers?: readonly string[]
+}
+
 describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket', () => {
   it('two clients, one session, a real approval, backward paging, and a reconnect mid-turn', { timeout: 600_000 }, async () => {
     const workspace = tempDir('minidsh-web-e2e-ws-')
@@ -130,6 +137,22 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
     expect(observer.events('approval/decided', sessionId).length).toBe(driver.events('approval/decided', sessionId).length)
     // And the grant bought a real effect: outside the workspace, after consent.
     expect(readFileSync(granted, 'utf8')).toContain('ok')
+
+    // What a browser-shaped client was actually SHOWN, over the real socket:
+    // the runtime's account of the call and the literal record beside it. A
+    // person answering a bare tool name and a model-written sentence is the
+    // defect S15 exists to close, so the view is asserted, not just the log.
+    const shown = driver.views
+      .filter((entry) => entry.sessionId === sessionId)
+      .flatMap((entry) => (entry.view as { pendingApprovals?: PendingApprovalView[] }).pendingApprovals ?? [])
+    const offered = shown.find((entry) => entry.subject !== undefined)
+    expect(offered, 'no view ever carried a subject: the browser had only the model’s prose to render').toBeDefined()
+    expect(offered!.subject!.command, 'the subject names a command that does not write the granted path').toContain('granted.txt')
+    expect(offered!.call, 'the view carried no joined call, so a reader could not see what was asked for').toBeDefined()
+    expect(offered!.call!.arguments).toContain('sandbox_permissions')
+    // The scope was OFFERED — a keyable subject, a session that asks, no grant
+    // yet — even though this arc answers one-shot and never takes it.
+    expect(offered!.offers, 'the host offered no scope on an ask that could carry one').toContain('grant-session')
 
     // ---- one more turn, then page the whole transcript backwards ---------
     await driver.request('session/prompt', { sessionId, text: PROMPTS[2] })

@@ -327,6 +327,36 @@ describe('what enforcement a session accepts', () => {
     expect(agent.session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(2)
   })
 
+  it('refuses a child that RECORDED no acceptance just as firmly as one that did', async () => {
+    // The hole the live delegation arc found on its first run: a child whose
+    // parent accepted nothing records no acceptance of its own — the strict
+    // default needs no line — so keying the refusal on that stamp left exactly
+    // those children free to accept an unconfined shell their parent never had.
+    harness = await coreHarness()
+    const sandbox = harness.root.get(SANDBOX)
+    const child = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      setup: (_childCtx, agent) => {
+        sandbox.open(agent.session, { mode: 'workspace-write', reason: 'delegation' })
+        harness!.root.get(APPROVAL).open(agent.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    try {
+      const session = child.agent.session
+      expect(session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(0)
+      expect(() => sandbox.setAcceptance(session, 'none', 'workspace-write')).toThrowError(/cannot change it/)
+      // And pre-commit, off the approval pin every delegated session carries.
+      expect(() => session.append(SANDBOX_ACCEPTANCE, { accepts: 'none', forMode: 'workspace-write', reason: 'change' })).toThrowError(
+        /delegated session was started accepting/,
+      )
+      expect(sandbox.acceptsFor(session, 'workspace-write')).toBe('full')
+    } finally {
+      await child.dispose()
+    }
+  })
+
   it('refuses to be renegotiated inside a delegated session, and refuses a forged one pre-commit', async () => {
     harness = await coreHarness()
     const sandbox = harness.root.get(SANDBOX)

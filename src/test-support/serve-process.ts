@@ -153,8 +153,15 @@ export class ServeProcess {
     )
   }
 
-  /** Answers every approval frame as it arrives, the way a person at a terminal would. Returns a stop function. */
-  answerApprovals(outcome: 'allowed-once' | 'rejected'): () => void {
+  /**
+   * Answers every approval frame as it arrives, the way a person at a terminal
+   * would. Returns a stop function.
+   *
+   * With `offer`, it also takes the scope the HOST offered on that approval —
+   * the `a` key. The host refuses an offer it did not make, so passing one is
+   * a request, not an assertion, and the arc checks the consequence.
+   */
+  answerApprovals(outcome: 'allowed-once' | 'rejected', offer?: 'grant-session'): () => void {
     const answered = new Set<string>()
     const timer = setInterval(() => {
       for (const frame of this.frames) {
@@ -163,7 +170,8 @@ export class ServeProcess {
         const key = `${frame.sessionId}:${id}`
         if (answered.has(key)) continue
         answered.add(key)
-        void this.request('approval/answer', { sessionId: frame.sessionId, id, outcome }).catch(() => undefined)
+        const params = { sessionId: frame.sessionId, id, outcome, ...(offer === undefined ? {} : { offer }) }
+        void this.request('approval/answer', params).catch(() => undefined)
       }
     }, 50)
     return () => clearInterval(timer)

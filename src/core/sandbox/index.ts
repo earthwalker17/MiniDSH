@@ -241,14 +241,20 @@ class SandboxService implements Sandbox {
   }
 
   setAcceptance(session: Session, accepts: SandboxEnforcement, forMode: SandboxMode): void {
-    const pin = delegationAcceptance(session.facts)
-    // A delegated child may not renegotiate what it was started accepting: it
-    // cannot ask anyone anything, so there is no actor in that session with
-    // standing to. Narrowing is the delegation row's to express.
-    if (pin !== undefined) {
+    // The HEADER, not the recorded acceptance. A child whose parent accepted
+    // nothing records no acceptance of its own — the strict default needs no
+    // line — so keying the refusal on that stamp left exactly those children
+    // free to accept an unconfined shell their parent never had. The live
+    // delegation arc found it on its first run.
+    //
+    // A delegated session may not renegotiate this at all: it cannot ask
+    // anyone anything, so there is no actor in it with standing to, and
+    // narrowing is the delegation row's to express.
+    if (session.header.delegatedBy !== undefined) {
+      const pin = delegationAcceptance(session.facts)
       throw new SandboxError(
         'SANDBOX_CEILING',
-        `session ${session.id} was delegated accepting "${pin.accepts}" enforcement for "${pin.forMode}" and cannot change it`,
+        `session ${session.id} was delegated accepting "${pin?.accepts ?? DEFAULT_ACCEPTANCE}" enforcement and cannot change it`,
       )
     }
     if (acceptanceFor(session.facts, forMode) === accepts) return

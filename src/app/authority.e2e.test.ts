@@ -199,6 +199,106 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
     }
 
+    // ---- 4c. consent on the record ---------------------------------------
+    /**
+     * The three S15 claims, end to end, on the host that needs them.
+     *
+     * Both legs are unconfined-only and that is not a gap: on a host that
+     * confines, an ordinary command asks nobody (proved by 3a above), so there
+     * is no consent to key a grant to — and an acceptance is inert, which the
+     * WSL leg of `pnpm check` proves directly. The `confined` branch says what
+     * it could not exercise rather than passing quietly.
+     */
+    if (!confined) {
+      // (a) THE SUBJECT. The ask carries what the RUNTIME says the call will
+      // do, built from the validated arguments — not the model's account of
+      // why. Without this a person consents to a sentence the model wrote.
+      const firstAsk = dataOf<{ callId?: string; reason?: string; subject?: { command: string; mode: string; enforcement: string } }>(
+        serve.events('approval/asked', sessionId)[0]!,
+      )
+      const askedCall = serve.events('tool/call', sessionId).find((event) => dataOf<{ callId: string }>(event).callId === firstAsk.callId)
+      const askedArgs = JSON.parse(dataOf<{ arguments: string }>(askedCall!).arguments) as { command: string }
+      expect(firstAsk.subject, 'the escalation asked with no subject, so the consent line had only the model’s prose on it').toBeDefined()
+      expect(firstAsk.subject!.command, 'the subject names a different command from the call it covers').toBe(askedArgs.command)
+      expect(firstAsk.subject!.mode).toBe('danger-full-access')
+      // The model's words are beside the subject and never inside it.
+      expect(JSON.stringify(firstAsk.subject)).not.toContain(firstAsk.reason!.split(': ').slice(1).join(': '))
+
+      // (b) THE GRANT. A fresh session, so the count of asks in it is the
+      // whole claim: the same command twice, consented to once.
+      const granting = await serve.request<{ sessionId: string }>('session/prompt', {
+        text: 'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
+      })
+      const take = serve.answerApprovals('allowed-once', 'grant-session')
+      await serve.waitForCompletedTurn(granting.sessionId, 1)
+      const grants = serve.events('approval/grant', granting.sessionId).map((event) => dataOf<{ op: string; id: string }>(event))
+      expect(grants.filter((grant) => grant.op === 'grant'), 'the host offered no scope, so nothing was granted to test').toHaveLength(1)
+      const asksBefore = serve.events('approval/asked', granting.sessionId).length
+
+      // The SAME command again. A near-miss would ask again — that is the
+      // exact-key design — so the prompt pins the command verbatim.
+      await serve.request('session/prompt', {
+        sessionId: granting.sessionId,
+        text: 'Run exactly the same shell command again, byte for byte, and report exactly what it printed.',
+      })
+      await serve.waitForCompletedTurn(granting.sessionId, 2)
+      take()
+      const secondTurn = serve
+        .events('approval/decided', granting.sessionId)
+        .map((event) => dataOf<{ outcome: string; decidedBy?: string; grantId?: string }>(event))
+        .slice(asksBefore)
+      // Either the repeat matched the grant — decided by it, nobody asked — or
+      // the model did not repeat it verbatim, which is a premise about the
+      // model and not a claim about the runtime. Say which happened.
+      const byGrant = secondTurn.filter((decision) => decision.decidedBy === 'grant')
+      console.log(`[authority arc] second turn: ${secondTurn.length} decision(s), ${byGrant.length} answered by the grant`)
+      if (byGrant.length > 0) {
+        expect(byGrant[0]!.outcome).toBe('allowed-once')
+        expect(byGrant[0]!.grantId).toBe(grants[0]!.id)
+      } else {
+        expect(secondTurn.length, 'the repeat neither matched the grant nor asked: nothing was exercised').toBeGreaterThan(0)
+      }
+
+      // A person can see it and take it back, and the log says so.
+      const view = await serve.request<{ grants: { id: string }[] }>('session/authority', { sessionId: granting.sessionId })
+      expect(view.grants.map((grant) => grant.id)).toEqual([grants[0]!.id])
+      expect(await serve.request('approval/revoke', { sessionId: granting.sessionId, grantId: grants[0]!.id })).toEqual({ revoked: true })
+      expect(serve.events('approval/grant', granting.sessionId).map((event) => dataOf<{ op: string }>(event).op)).toEqual(['grant', 'revoke'])
+
+      // (c) ACCEPTANCE — the Windows fix, in its OWN session, because it makes
+      // the shell unfenced and this arc's other sessions assert the opposite.
+      const accepting = await serve.request<{ sessionId: string }>('session/prompt', { text: 'Say ready.' })
+      await serve.waitForCompletedTurn(accepting.sessionId, 1)
+      const accepted = await serve.request<{ accepts: string; sandbox: string }>('session/authority', {
+        sessionId: accepting.sessionId,
+        accepts: 'none',
+      })
+      expect(accepted).toMatchObject({ sandbox: 'workspace-write', accepts: 'none' })
+
+      const refuseAccepting = serve.answerApprovals('rejected')
+      await serve.request('session/prompt', {
+        sessionId: accepting.sessionId,
+        text: 'Run the shell command `node --version` and report exactly what it printed.',
+      })
+      await serve.waitForCompletedTurn(accepting.sessionId, 2)
+      refuseAccepting()
+      const ran = serve
+        .events('effect/recorded', accepting.sessionId)
+        .map((event) => dataOf<{ effect: string; mode?: string; enforcement?: string }>(event))
+        .filter((record) => record.effect === 'shell-command')
+      // `enforcement: 'none'` alone would pass on an escalated command, which
+      // every unconfined host already produces. The MODE is the claim: the
+      // command ran under the session's own authority, unescalated.
+      expect(ran, 'no shell command ran at all in the accepting session').not.toHaveLength(0)
+      expect(ran.some((record) => record.mode === 'workspace-write' && record.enforcement === 'none')).toBe(true)
+      // And nobody was asked for anything, which is the whole point: the
+      // escalation this host used to charge per command is gone.
+      expect(serve.events('approval/asked', accepting.sessionId), 'an accepting session still cost an approval').toHaveLength(0)
+      console.log(`[authority arc] accepting session ran ${ran.length} shell command(s) with 0 approvals`)
+    } else {
+      console.log('[authority arc] confined host: the grant and acceptance legs were not exercised (nothing asks, and acceptance is inert)')
+    }
+
     // ---- 4. a durable switch, and the next write is refused ----------------
     // Anything asked for from here is refused, the way a person saying no is.
     const refuseSwitch = serve.answerApprovals('rejected')

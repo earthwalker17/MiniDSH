@@ -115,6 +115,19 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     const pinned = await serve.request<{ approval: string }>('session/authority', { sessionId: childId, approval: 'ask' }).catch((error: Error) => error)
     expect(pinned).toBeInstanceOf(Error)
 
+    // Its ACCEPTANCE is a copy it cannot renegotiate either. A child that
+    // could weaken it would be buying itself an unconfined shell its parent
+    // never accepted — and being pinned `never`, it has nobody to ask.
+    const accepting = await serve
+      .request<{ accepts: string }>('session/authority', { sessionId: childId, accepts: 'none' })
+      .catch((error: Error) => error)
+    expect(accepting, 'a delegated child must not be able to change what it accepts').toBeInstanceOf(Error)
+    // The parent never accepted anything, so the child opened at the strict
+    // default and recorded no acceptance of its own: nothing to weaken.
+    expect(childEvents.filter((event) => event.type === 'sandbox/acceptance')).toHaveLength(0)
+    const childView = await serve.request<{ accepts: string }>('session/authority', { sessionId: childId })
+    expect(childView.accepts).toBe('full')
+
     // ---- the parent finishes the job ---------------------------------------
     await serve.request('session/prompt', { sessionId, text: 'Now write the token you reported into found.txt in the working directory, on one line.' })
     await serve.waitForCompletedTurn(sessionId, 2)
