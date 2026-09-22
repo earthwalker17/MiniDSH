@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SandboxExecutionPolicy } from '../../core/sandbox/index.ts'
 import { childEnvironment, ShellProcess, type ShellDialect } from './process.ts'
+import { NO_CONFINEMENT, type Confinement } from './confine/index.ts'
 
 const dialect: ShellDialect = process.platform === 'win32' ? 'pwsh' : 'bash'
 const binary = dialect === 'pwsh' ? 'pwsh' : 'bash'
@@ -208,6 +209,34 @@ describe.skipIf(!available)('what enforcement a session accepts, where nothing c
     expect(second.output).toContain('kept')
     expect(second.restarted).toBeUndefined()
   })
+})
+
+/**
+ * A host whose backend enforces only PARTIALLY. No shipped backend reports it,
+ * which is exactly why it needs a test: S15 changed what such a host does —
+ * before, `confine()` refused only `none`, so a `partial` command ran and was
+ * stamped `partial`; now the session's acceptance decides, and the default
+ * `full` refuses it. That is the stronger posture (upstream's own docs say a
+ * consumer needing the absolute promise "must reject or surface that
+ * distinction", and no shipped consumer of theirs rejects), but it is a
+ * deliberate behaviour change, and an untested one would have drifted back.
+ */
+describe.skipIf(!available)('a host that enforces only partially', () => {
+  const PARTIAL: Confinement = { ...NO_CONFINEMENT, id: 'bwrap', enforcement: 'partial' }
+
+  it('refuses a session that requires full enforcement, and runs for one that accepts partial', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'minidsh-partial-'))
+    dir = root
+    proc = new ShellProcess(dialect, root, { confinement: PARTIAL })
+    const confined: SandboxExecutionPolicy = { mode: 'workspace-write', workspaceRoot: root }
+
+    await expect(proc.exec({ command: echoCmd('nope'), policy: confined, timeoutMs: 30_000 })).rejects.toMatchObject({ code: 'SANDBOX_UNAVAILABLE' })
+
+    const ran = await proc.exec({ command: echoCmd('partial ok'), policy: confined, accepts: 'partial', timeoutMs: 30_000 })
+    expect(ran.output).toContain('partial ok')
+    // And it reports what it really got, not what was asked for.
+    expect(ran.sandbox).toEqual({ mode: 'workspace-write', enforcement: 'partial' })
+  }, SHELL_TEST_TIMEOUT_MS)
 })
 
 describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
