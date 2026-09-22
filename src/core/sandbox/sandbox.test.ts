@@ -242,6 +242,27 @@ describe('the authority invariant', () => {
     )
   })
 
+  it('refuses a forged SUBJECT, which would render as authority the runtime never resolved', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const before = agent.session.seq
+    // A subject is what a person consents to and what a grant is keyed on, so
+    // the closed family and the two closed authority vocabularies are held
+    // here for the same reason the mode vocabulary is.
+    const forge = (subject: unknown): void =>
+      void agent.session.append(APPROVAL_ASKED, { id: `approval-${agent.session.seq}`, toolName: 'bash', subject } as never)
+    expect(() => forge({ effect: 'network-request', url: 'https://x' })).toThrowError(/unknown effect/)
+    expect(() => forge({ effect: 'shell-command', command: 'ls', mode: 'unfenced', enforcement: 'none' })).toThrowError(/unknown mode/)
+    expect(() => forge({ effect: 'shell-command', command: 'ls', mode: 'workspace-write', enforcement: 'best-effort' })).toThrowError(
+      /unknown enforcement/,
+    )
+    expect(() => forge({ effect: 'shell-command', command: 42, mode: 'workspace-write', enforcement: 'none' })).toThrowError(
+      /command is not a string/,
+    )
+    expect(() => forge('ls -la')).toThrowError(/not an object/)
+    expect(agent.session.seq).toBe(before)
+  })
+
   it('refuses a decision with no matching request', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()

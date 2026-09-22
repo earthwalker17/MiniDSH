@@ -39,6 +39,24 @@ function freshTrace(): Trace {
   return { lastSeq: -1, asked: new Set(), decided: new Set(), sandboxStamps: 0, policyStamps: 0, ceiling: undefined, pin: undefined }
 }
 
+/**
+ * What is wrong with a would-be `EffectIntent`, or `undefined` when nothing is.
+ *
+ * Read as `unknown` because the payload may be forged: an invariant that
+ * trusted the type would check nothing. One family today, closed like the
+ * effect record it sits beside.
+ */
+function subjectFault(subject: unknown): string | undefined {
+  if (typeof subject !== 'object' || subject === null) return 'not an object'
+  const { effect, command, mode, enforcement, truncated } = subject as Record<string, unknown>
+  if (effect !== 'shell-command') return `unknown effect ${JSON.stringify(effect)}`
+  if (typeof command !== 'string') return 'command is not a string'
+  if (!isSandboxMode(mode)) return `unknown mode ${JSON.stringify(mode)}`
+  if (typeof enforcement !== 'string' || !ENFORCEMENTS.has(enforcement)) return `unknown enforcement ${JSON.stringify(enforcement)}`
+  if (truncated !== undefined && truncated !== true) return 'truncated is neither absent nor true'
+  return undefined
+}
+
 function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): void {
   trace.lastSeq = event.seq
 
@@ -73,6 +91,17 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     const id = event.data.id
     if (typeof id !== 'string' || id.length === 0) fail('approval/asked has no id')
     if (trace.asked.has(id)) fail(`approval/asked reuses the id "${id}"`)
+    // A subject is what a person consents to and what a grant is keyed on, so a
+    // malformed one is worse than none: it would render as authority the runtime
+    // never resolved. The closed families and the closed authority vocabularies
+    // are checked here for the same reason the mode vocabulary is.
+    // Typed by `matches`, read as `unknown` because a forged payload does not
+    // honour the type — the same reason `isApprovalOutcome` runs below.
+    const subject: unknown = event.data.subject
+    if (subject !== undefined) {
+      const bad = subjectFault(subject)
+      if (bad !== undefined) fail(`approval/asked for "${id}" carries a malformed subject: ${bad}`)
+    }
     trace.asked.add(id)
     return
   }

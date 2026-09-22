@@ -12,6 +12,7 @@ import { z } from 'zod'
 import { serviceKey, waterfallEvent, type Plugin } from '../../kernel/index.ts'
 import { AGENT_CREATED } from '../agent/events.ts'
 import type { Agent } from '../agent/types.ts'
+import { clampIntent, type EffectIntent } from '../effects/events.ts'
 import type { CallId } from '../ids.ts'
 import type { Session } from '../session/index.ts'
 import type { EventEnvelope } from '../session/types.ts'
@@ -46,6 +47,20 @@ export interface ApprovalRequest {
   readonly toolName: string
   readonly callId?: CallId
   readonly reason?: string
+  /**
+   * What the RUNTIME says this call will do, derived by trusted code from the
+   * call's VALIDATED arguments — never from model prose, which belongs in
+   * `reason` beside it. Clamped by the seam, like `reason`.
+   *
+   * It is a projection of the arguments the body will execute, not a second
+   * source of truth: the pipeline validates before the gate (`core/tools`), so
+   * a requester builds this from the same frozen value the body receives, and
+   * nothing in MiniDSH rewrites a call's arguments between the two.
+   *
+   * Absent where a requester has nothing trustworthy to say — and an ask with
+   * no subject can never be granted, which is the fail-closed direction.
+   */
+  readonly subject?: EffectIntent
   readonly signal?: AbortSignal
 }
 
@@ -142,11 +157,16 @@ class ApprovalService implements Approval {
     // lifetime (across resume and fork), with no in-memory counter to reset.
     const id = `approval-${session.seq}`
     const reason = request.reason === undefined ? undefined : safeReason(request.reason)
+    // Clamped HERE for the reason `reason` is: one place, before the log, so no
+    // future requester can reintroduce a control character into the line a
+    // person answers — and so the answerer and the audit see the same bytes.
+    const subject = request.subject === undefined ? undefined : clampIntent(request.subject)
     session.append(APPROVAL_ASKED, {
       id,
       toolName: request.toolName,
       ...(request.callId === undefined ? {} : { callId: request.callId }),
       ...(reason === undefined || reason.length === 0 ? {} : { reason }),
+      ...(subject === undefined ? {} : { subject }),
     })
     // A request cancelled before it could be asked is decided without consulting
     // anyone: no answerer should ever see a prompt whose outcome is already fixed.
@@ -160,9 +180,9 @@ class ApprovalService implements Approval {
       session.append(APPROVAL_DECIDED, { id, outcome: 'rejected' })
       return 'rejected'
     }
-    // The prompt carries the SAME reason the log does: an answerer must never
-    // be shown text a reader of the audit could not have seen.
-    const prompt: ApprovalPrompt = { ...request, id, ...(reason === undefined ? {} : { reason }) }
+    // The prompt carries the SAME reason and subject the log does: an answerer
+    // must never be shown text a reader of the audit could not have seen.
+    const prompt: ApprovalPrompt = { ...request, id, ...(reason === undefined ? {} : { reason }), ...(subject === undefined ? {} : { subject }) }
     let outcome: ApprovalOutcome
     try {
       // Dispatched in the requesting agent's scope: an answerer registered through

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { AGENTS } from '../agent/index.ts'
+import { intentKey, type EffectIntent } from '../effects/index.ts'
 import { matches } from '../session/index.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_REQUEST, type ApprovalOutcome } from './index.ts'
 
@@ -62,6 +63,52 @@ describe('approval seam', () => {
     const long = (second.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { reason: string }).reason
     expect(long).toHaveLength(300)
     expect(long.endsWith('…')).toBe(true)
+  })
+
+  it('clamps a SUBJECT the same way it clamps a reason, and shows the answerer what the log holds', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    let seen: EffectIntent | undefined
+    harness.root.on(APPROVAL_REQUEST, async (prompt): Promise<ApprovalOutcome> => {
+      seen = prompt.subject
+      return 'allowed-once'
+    })
+    const ESC = String.fromCharCode(27)
+    await harness.root.get(APPROVAL).request({
+      agent,
+      toolName: 'bash',
+      // The forgery moved from the reason into the field that replaces it.
+      subject: { effect: 'shell-command', command: `ls${ESC}[2Kapprove`, mode: 'workspace-write', enforcement: 'none' },
+    })
+    const asked = agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!
+    const subject = (asked.data as { subject?: EffectIntent }).subject!
+    expect(subject.command).toBe('ls [2Kapprove')
+    // The answerer is shown exactly the bytes a reader of the audit would see.
+    expect(seen).toEqual(subject)
+  })
+
+  it('records that an over-long subject was cut, so it can never key a grant', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
+    await harness.root.get(APPROVAL).request({
+      agent,
+      toolName: 'bash',
+      subject: { effect: 'shell-command', command: 'x'.repeat(5_000), mode: 'workspace-write', enforcement: 'none' },
+    })
+    const subject = (agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { subject: EffectIntent }).subject
+    expect(subject.command).toHaveLength(4_000)
+    expect(subject.truncated).toBe(true)
+    expect(intentKey('bash', subject)).toBeUndefined()
+  })
+
+  it('omits the subject entirely when a requester has nothing trustworthy to say', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
+    await harness.root.get(APPROVAL).request({ agent, toolName: 'upper' })
+    const asked = agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!
+    expect('subject' in (asked.data as object)).toBe(false)
   })
 
   it('an answerer that never resolves is settled by the request signal as cancelled', async () => {

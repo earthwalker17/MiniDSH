@@ -1,5 +1,7 @@
 /**
- * The effect VOCABULARY: what a call did, recorded by the code that did it.
+ * The effect VOCABULARY, in two halves: what a call DID, recorded by the code
+ * that did it, and what a call is ABOUT TO do, written by the code that is
+ * about to ask permission for it (`EffectIntent`, below).
  *
  * One log-only fact, `effect/recorded`, keyed through `data` by the `callId`
  * of the tool call that caused it (a log-only record may not carry
@@ -56,6 +58,103 @@ export type EffectRecord =
 export type EffectRecorded = { readonly callId: string } & EffectRecord
 
 export const EFFECT_RECORDED = eventKind<EffectRecorded>('effect/recorded')
+
+// ---- the "about to do" half ------------------------------------------------
+
+/**
+ * What a call is ABOUT TO do, written by trusted code from VALIDATED arguments
+ * — the other half of the vocabulary above, and the thing a person consents to.
+ *
+ * It exists because a consent line assembled from model prose asks someone to
+ * approve a description rather than an action: the shell tool's `reason` is
+ * `run under "X": <the model's justification>`, and nothing in it is checked
+ * against the command that will run. An intent is a PROJECTION of the
+ * arguments, never a second source of truth — the body executes the arguments,
+ * and a divergence between the two is a bug in whoever built the intent, not a
+ * thing the runtime reconciles.
+ *
+ * **Every intent names the authority its effect would run under.** That is what
+ * makes it usable as a grant key: consent to `rm -rf /tmp/x` under
+ * `workspace-write` is not consent to the same command under
+ * `danger-full-access`. A family that cannot state its authority is not
+ * grantable, and the next family must carry its own before it is.
+ *
+ * One family, deliberately, exactly as `EffectRecord` shipped closed at two: a
+ * second is a vocabulary change beside its first producer, not a registry.
+ */
+export type EffectIntent = {
+  readonly effect: 'shell-command'
+  /** The command as validated, never the model's prose about it. */
+  readonly command: string
+  readonly mode: SandboxMode
+  readonly enforcement: SandboxEnforcement
+  /** Set when `clampIntent` had to cut a field. A truncated intent is never grantable (`intentKey`). */
+  readonly truncated?: true
+}
+
+/**
+ * How long a field may be before the clamp cuts it.
+ *
+ * Generous on purpose: this is a consent line, and a person asked to approve
+ * a command must be shown the command (hiding its tail asks for consent to
+ * text they cannot read — upstream rejected a cap on its own approval panel
+ * for that reason). The bound exists so one durable record cannot be
+ * unbounded, not to summarize.
+ */
+const MAX_INTENT_CHARS = 4000
+
+/**
+ * Control-stripped and bounded, at the seam, before it reaches the log.
+ *
+ * The same rule `safeReason` applies to a requester's prose (§7), for the same
+ * reason: a terminal executes what it is written, and an intent is rendered
+ * straight into the line a person answers. `printableText` REPLACES rather
+ * than drops, so the length a clamp sees is the length that was written.
+ *
+ * Truncation is recorded rather than silent because the field is an identity,
+ * not only a rendering: two different commands sharing a 4000-character prefix
+ * would otherwise collide on one grant key. A cut intent keeps its (partial)
+ * rendering and loses its key — the fail-closed direction.
+ */
+export function clampIntent(intent: EffectIntent): EffectIntent {
+  const command = printableText(intent.command)
+  if (command.length <= MAX_INTENT_CHARS) return command === intent.command ? intent : { ...intent, command }
+  return { ...intent, command: command.slice(0, MAX_INTENT_CHARS), truncated: true }
+}
+
+/**
+ * The identity of `toolName` acting on `intent`, or `undefined` when there is
+ * none to be had.
+ *
+ * Explicit and length-prefixed rather than canonical JSON: the union is closed,
+ * so the key can be built field by field, and building it that way removes key
+ * order, an optional field's presence, a separator appearing inside a command,
+ * and a later field rename in one stroke. A generic canonicalizer would have to
+ * be audited against all four.
+ *
+ * `undefined` for a truncated intent, so a caller that forgets the rule gets a
+ * type error rather than a collision.
+ */
+export function intentKey(toolName: string, intent: EffectIntent): string | undefined {
+  if (intent.truncated === true) return undefined
+  const parts = [
+    'v1',
+    String(toolName.length),
+    toolName,
+    intent.effect,
+    intent.mode,
+    intent.enforcement,
+    String(intent.command.length),
+    intent.command,
+  ]
+  return parts.join('\0')
+}
+
+/** One intent as one clause, for the line a person answers. Pure, and safe in a terminal. */
+export function describeIntent(intent: EffectIntent): string {
+  const cut = intent.truncated === true ? ` […cut at ${MAX_INTENT_CHARS} characters]` : ''
+  return `run \`${intent.command}\`${cut} under ${intent.mode}/${intent.enforcement}`
+}
 
 function duration(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`

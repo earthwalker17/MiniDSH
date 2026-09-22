@@ -14,7 +14,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import type { Agent } from '../../core/agent/types.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_REQUEST, type ApprovalOutcome } from '../../core/approval/index.ts'
-import { SANDBOX, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
+import type { EffectIntent } from '../../core/effects/index.ts'
+import { effectiveSandboxMode, SANDBOX, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
 import { matches } from '../../core/session/index.ts'
 import { TOOLS, toolCall } from '../../core/tools/index.ts'
 import { SHELL, type Shell, type ShellExecRequest, type ShellSession } from '../../core/shell/index.ts'
@@ -143,7 +144,7 @@ class StubShell implements Shell {
   }
 }
 
-async function confinedSetup(answer: { output: string; exitCode: number }): Promise<Fixture & { shell: StubShell }> {
+async function confinedSetup(answer: { output: string; exitCode: number }, mode?: SandboxMode): Promise<Fixture & { shell: StubShell }> {
   workdir = mkdtempSync(join(tmpdir(), 'minidsh-shelltool-'))
   harness = await coreHarness()
   const shell = new StubShell(answer)
@@ -151,6 +152,9 @@ async function confinedSetup(answer: { output: string; exitCode: number }): Prom
   harness.root.plugin(toolShellPlugin, {})
   await harness.root.settle()
   const { agent } = await harness.create({ cwd: workdir })
+  // A durable switch, so what the escalation is measured against is the mode
+  // the session recorded rather than the deployment default.
+  if (mode !== undefined) harness.root.get(SANDBOX).setMode(agent.session, mode)
   const tools = harness.root.get(TOOLS)
   return {
     agent,
@@ -200,6 +204,40 @@ describe('the shell on a host that DOES confine', () => {
     expect(result.text).toContain('ran in a separate shell')
     // One ask per escalation: a command that already spent consent is finished.
     expect(approvals(agent).filter((entry) => entry.type === 'approval/asked')).toHaveLength(1)
+  })
+
+  it('asks with a SUBJECT the runtime built, not the sentence the model wrote', async () => {
+    const { agent, run } = await confinedSetup({ output: 'ran', exitCode: 0 })
+    harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
+    await run({ command: echoCmd, sandbox_permissions: 'danger-full-access', justification: 'the suite needs the network' })
+    const asked = agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as {
+      reason?: string
+      subject?: EffectIntent
+    }
+    // The command a person consents to is the command that will run — not a
+    // preview of it, and not the model's account of why it should.
+    expect(asked.subject).toEqual({
+      effect: 'shell-command',
+      command: echoCmd,
+      mode: 'danger-full-access',
+      enforcement: 'none',
+    })
+    // The model's words stay where they were, beside the subject and outside it.
+    expect(asked.reason).toContain('the suite needs the network')
+    expect(JSON.stringify(asked.subject)).not.toContain('the suite needs')
+    // And the mode named is the ESCALATION target, which is what would run —
+    // not the session mode the call started under.
+    expect(effectiveSandboxMode(agent.session.facts)).toBe('workspace-write')
+  })
+
+  it('names the enforcement the target would actually get, so a grant cannot cross hosts', async () => {
+    // On a host that confines, an escalation to workspace-write is enforced;
+    // the subject must say so rather than repeat the unconfined default.
+    const { agent, run } = await confinedSetup({ output: 'ran', exitCode: 0 }, 'read-only')
+    harness!.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalOutcome> => 'allowed-once')
+    await run({ command: echoCmd, sandbox_permissions: 'workspace-write', justification: 'write in the workspace' })
+    const subject = (agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { subject: EffectIntent }).subject
+    expect(subject).toMatchObject({ mode: 'workspace-write', enforcement: 'full' })
   })
 
   it('never asks twice: a denial on an already-escalated command carries no fresh hint', async () => {

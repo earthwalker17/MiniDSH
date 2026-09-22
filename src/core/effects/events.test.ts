@@ -4,7 +4,7 @@
  * somebody acts on, and every branch is asserted here.
  */
 import { describe, expect, it } from 'vitest'
-import { describeEffect, describeEffects, type EffectRecorded } from './events.ts'
+import { clampIntent, describeEffect, describeEffects, describeIntent, intentKey, type EffectIntent, type EffectRecorded } from './events.ts'
 
 const write = (over: Partial<Extract<EffectRecorded, { effect: 'fs-write' }>> = {}): EffectRecorded => ({
   callId: 'c1',
@@ -71,5 +71,82 @@ describe('describeEffects', () => {
     expect(sentence).toContain('/ws/f4.txt')
     expect(sentence).not.toContain('/ws/f5.txt')
     expect(sentence).toContain('and 2 more')
+  })
+})
+
+// ---- the "about to do" half ------------------------------------------------
+
+const intent = (over: Partial<EffectIntent> = {}): EffectIntent => ({
+  effect: 'shell-command',
+  command: 'pnpm check',
+  mode: 'danger-full-access',
+  enforcement: 'none',
+  ...over,
+})
+
+describe('clampIntent', () => {
+  it('neutralizes a command that would repaint the line a person is answering', () => {
+    // The `reason` forgery (see approval.test.ts) applied to the field that
+    // replaces it: an ESC in a command must not reach a terminal as an ESC.
+    const CR = String.fromCharCode(13)
+    const ESC = String.fromCharCode(27)
+    const clamped = clampIntent(intent({ command: `echo ok${CR}${ESC}[2Kapprove pwsh (list a file)` }))
+    const control = (ch: string): boolean => ch.codePointAt(0)! < 0x20 || (ch.codePointAt(0)! >= 0x7f && ch.codePointAt(0)! <= 0x9f)
+    expect([...clamped.command].some(control)).toBe(false)
+    expect(clamped.command).toContain('echo ok')
+    expect(clamped.truncated).toBeUndefined()
+  })
+
+  it('leaves an ordinary command identical, object included', () => {
+    const original = intent()
+    expect(clampIntent(original)).toBe(original)
+  })
+
+  it('cuts an over-long command and SAYS it cut one', () => {
+    const clamped = clampIntent(intent({ command: 'x'.repeat(5000) }))
+    expect(clamped.command).toHaveLength(4000)
+    expect(clamped.truncated).toBe(true)
+  })
+})
+
+describe('intentKey', () => {
+  it('separates two commands that differ only in the authority they would run under', () => {
+    const wide = intentKey('bash', intent({ mode: 'danger-full-access' }))
+    const narrow = intentKey('bash', intent({ mode: 'workspace-write' }))
+    const unconfined = intentKey('bash', intent({ enforcement: 'none' }))
+    const confined = intentKey('bash', intent({ enforcement: 'full' }))
+    expect(wide).not.toBe(narrow)
+    expect(unconfined).not.toBe(confined)
+    // Consent to a command under one tool is not consent under another.
+    expect(intentKey('bash', intent())).not.toBe(intentKey('pwsh', intent()))
+  })
+
+  it('cannot be collided by a command that contains the separator or the tool name', () => {
+    // Length prefixes are why: without them `bash` + `\0x` and `bas` + `h\0x`
+    // would flatten to the same string.
+    const a = intentKey('bash', intent({ command: 'a\u0000shell-command\u0000danger-full-access' }))
+    const b = intentKey('bash', intent({ command: 'a' }))
+    expect(a).not.toBe(b)
+    expect(intentKey('bash', intent({ command: 'ab' }))).not.toBe(intentKey('basha', intent({ command: 'b' })))
+  })
+
+  it('refuses a key for a truncated subject, so a cut command can never be granted', () => {
+    // Two different 4000-character commands sharing a prefix would otherwise be
+    // one grant. Losing the key is the fail-closed direction.
+    expect(intentKey('bash', clampIntent(intent({ command: 'x'.repeat(5000) })))).toBeUndefined()
+  })
+
+  it('is stable across calls, because a grant outlives the process that took it', () => {
+    expect(intentKey('bash', intent())).toBe(intentKey('bash', { ...intent() }))
+  })
+})
+
+describe('describeIntent', () => {
+  it('leads with the command and names the authority it would run under', () => {
+    expect(describeIntent(intent())).toBe('run `pnpm check` under danger-full-access/none')
+  })
+
+  it('says a cut command was cut, rather than showing a shortened one as whole', () => {
+    expect(describeIntent(clampIntent(intent({ command: 'x'.repeat(5000) })))).toContain('cut at 4000 characters')
   })
 })

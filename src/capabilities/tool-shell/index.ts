@@ -216,6 +216,19 @@ async function resolvePolicy(args: Input, agent: Agent, exec: ToolContext, deps:
     toolName: deps.toolName,
     callId: exec.callId,
     reason: `run under "${target}": ${args.justification}`,
+    // What the RUNTIME says this call will do, beside the model's account of
+    // why. `args` is the zod-validated input the body will execute (the
+    // pipeline validates before the gate), `target` is the mode this seam just
+    // checked is wider and viable, and `enforcementFor` is what the mounted
+    // world reports it can deliver. The model's `justification` stays in
+    // `reason` and never enters here: a subject a model can write is a subject
+    // a model can forge, which is the defect this whole field exists to close.
+    subject: {
+      effect: 'shell-command',
+      command: args.command,
+      mode: target,
+      enforcement: deps.sandbox.enforcementFor(target),
+    },
     // The caller's signal, not the body's: a person deciding must not be racing
     // this call's deadline.
     signal: exec.callSignal,

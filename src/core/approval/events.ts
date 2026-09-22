@@ -4,6 +4,7 @@
  * crash repair, the authority invariant — can name an approval fact without
  * importing the seam that decides one (which would import the session back).
  */
+import type { EffectIntent } from '../effects/events.ts'
 import { eventKind, matches, type EventEnvelope } from '../session/types.ts'
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
@@ -22,7 +23,13 @@ export function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
   return value === 'ask' || value === 'never'
 }
 
-export const APPROVAL_ASKED = eventKind<{ id: string; toolName: string; callId?: string; reason?: string }>('approval/asked')
+/**
+ * `reason` is the requester's PROSE, which for the shell comes from the model.
+ * `subject` is what the RUNTIME says the call will do, derived by trusted code
+ * from validated arguments (`core/effects`) — the half a person should be
+ * consenting to, and the only half a grant may be keyed on.
+ */
+export const APPROVAL_ASKED = eventKind<{ id: string; toolName: string; callId?: string; reason?: string; subject?: EffectIntent }>('approval/asked')
 export const APPROVAL_DECIDED = eventKind<{ id: string; outcome: ApprovalOutcome }>('approval/decided')
 /** `delegation`: the opening stamp of a child, pinned by its parent — and the pin every later stamp is held to. */
 export type ApprovalPolicyReason = 'initial' | 'change' | 'delegation'
@@ -69,6 +76,8 @@ export interface OpenApproval {
   readonly id: string
   readonly toolName: string
   readonly reason?: string
+  /** What the runtime says the call will do, when its requester said. */
+  readonly subject?: EffectIntent
 }
 
 /**
@@ -82,8 +91,8 @@ export function openApprovals(events: readonly EventEnvelope[]): OpenApproval[] 
   const open = new Map<string, OpenApproval>()
   for (const event of events) {
     if (matches(event, APPROVAL_ASKED)) {
-      const { id, toolName, reason } = event.data
-      open.set(id, { id, toolName, ...(reason === undefined ? {} : { reason }) })
+      const { id, toolName, reason, subject } = event.data
+      open.set(id, { id, toolName, ...(reason === undefined ? {} : { reason }), ...(subject === undefined ? {} : { subject }) })
     } else if (matches(event, APPROVAL_DECIDED)) open.delete(event.data.id)
   }
   return [...open.values()]
