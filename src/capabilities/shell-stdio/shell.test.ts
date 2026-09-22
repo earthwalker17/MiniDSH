@@ -68,7 +68,7 @@ const unconfined = (root: string): SandboxExecutionPolicy => ({ mode: 'danger-fu
 const echoCmd = (text: string): string => (dialect === 'pwsh' ? `Write-Output '${text}'` : `echo '${text}'`)
 const pwdCmd = (): string => (dialect === 'pwsh' ? '(Get-Location).Path' : 'pwd')
 const setVar = (name: string, value: string): string => (dialect === 'pwsh' ? `$env:${name}='${value}'` : `export ${name}='${value}'`)
-const readVar = (name: string): string => (dialect === 'pwsh' ? `Write-Output $env:${name}` : `echo ${name}`)
+const readVar = (name: string): string => (dialect === 'pwsh' ? `Write-Output $env:${name}` : `echo $${name}`)
 // A native non-zero exit (as `node --test` produces) propagates reliably via $LASTEXITCODE / $?.
 const failCmd = (): string => 'node -e "process.exit(3)"'
 

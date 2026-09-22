@@ -202,6 +202,10 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     const exitCode = runTerminal({
       cwd: tempDir('minidsh-term-cwd-'),
       sessionsRoot: tempDir('minidsh-term-sessions-'),
+      // Pinned unconfining, because the TIP under test is the one for a host
+      // that cannot sandbox the shell. Left to the platform this asserted
+      // Windows behaviour and failed under WSL, where bwrap reports `full`.
+      confinement: 'none',
       ...scriptedBoot(adapter, (root) => {
         root.get(TOOLS).register(root, touchy)
         root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'touchy' ? { kind: 'ask', reason: 'careful' } : next()))
