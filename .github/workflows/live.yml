@@ -75,7 +75,7 @@ jobs:
 
       # No `require-lockfile`: the first real run of check.yml warned that the
       # v2 action has no such input, and pnpm installs frozen under CI anyway.
-      - uses: pnpm/setup@v2
+      - uses: pnpm/setup@v3
         with:
           runtime: node@24.19.0
           cache: true
