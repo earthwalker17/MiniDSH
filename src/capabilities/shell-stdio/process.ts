@@ -77,9 +77,9 @@ const SECRET_SHAPED = /KEY|TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL/i
  * purpose; nothing does today. And the limit is real and stated (§13): this
  * withholds variables, it does not withhold credentials. Reads are never
  * fenced, so `~/.minidsh/credentials.json` is still readable, and
- * `HTTP(S)_PROXY`, `SSH_AUTH_SOCK` and `GOOGLE_APPLICATION_CREDENTIALS` are
- * kept deliberately because removing them breaks ordinary work. Defence in
- * depth, not a boundary.
+ * `HTTP(S)_PROXY` and `SSH_AUTH_SOCK` are kept deliberately because removing
+ * them breaks ordinary work. (`GOOGLE_APPLICATION_CREDENTIALS` matches the
+ * pattern and is withheld.) Defence in depth, not a boundary.
  */
 export function childEnvironment(declared: readonly string[], overlay: Readonly<Record<string, string>> | undefined): NodeJS.ProcessEnv {
   const withheld = new Set(declared)
@@ -124,7 +124,8 @@ function sessionOption(confined: boolean): { detached?: boolean } {
  * Two policies share a child exactly when a child spawned under one would be
  * indistinguishable from a child spawned under the other. Where nothing
  * confines, every policy collapses to one signature — so no policy change ever
- * costs a restart on a host with no backend, and `oneShot` is a no-op there.
+ * costs a restart on a host with no backend. A one-shot still gets its own
+ * throwaway child there: `exec` routes `oneShot` before any world comparison.
  * `danger-full-access` is never wrapped, so it collapses too.
  */
 function worldSignature(confinement: Confinement, policy: SandboxExecutionPolicy): string {

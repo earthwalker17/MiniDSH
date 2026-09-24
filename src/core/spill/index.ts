@@ -8,8 +8,8 @@
  * process exits — so it is saved, and the model is handed a bounded excerpt
  * plus the path it can read the rest from with the tools it already has.
  *
- * The bytes never enter the log, exactly as `docs/ARCHITECTURE.md` §11 rules for the
- * attachment plane. The durable `tool/result` carries the excerpt, which IS
+ * The bytes never enter the log, exactly as `docs/ARCHITECTURE.md` §5 rules for
+ * images (a reference plus a stored descriptor). The durable `tool/result` carries the excerpt, which IS
  * the truth of what the model saw; the full text sits beside the session log
  * under the same home, as durable as the log itself.
  *

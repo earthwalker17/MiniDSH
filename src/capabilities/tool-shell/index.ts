@@ -7,7 +7,8 @@
  * the refusal is reported to the model as a fact plus the escalation it may
  * ask for. Escalation is the model's own move — the SAME command, retried once
  * with the narrowest wider mode and a justification — and the approval seam is
- * the consent step. A grant covers that one call and is never persisted.
+ * the consent step. An approval covers that one call; a session grant
+ * (`approval/grant`, minted only by the seam) may answer a repeated identical ask.
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'

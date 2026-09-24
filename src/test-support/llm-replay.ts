@@ -2,7 +2,9 @@
  * Replay-from-the-log adapter. The model script is DERIVED from a recorded
  * session's `assistant/chunk` events (grouped by turn/step), so recording is
  * free: run the real agent once, harvest its JSONL, replay it keylessly.
- * `assertConsumed()` fails if any recorded step was not replayed.
+ * `assertConsumed()` fails if any recorded step was not replayed. A log that
+ * holds a REPAIRED interruption is not an oracle: replay runs the interrupted
+ * call to completion, which the recording never did.
  *
  * There are TWO scripts, because there are two kinds of call. Loop steps come
  * from `assistant/chunk`; out-of-loop calls (a compaction summary) come from

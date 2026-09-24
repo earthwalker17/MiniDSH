@@ -1,6 +1,6 @@
 /**
- * The numbers docs/ARCHITECTURE.md §14 cites, generated rather than typed, with a
- * statement of what each one counts — three hand-typed counts had drifted
+ * The line counts docs/BLUEPRINT.md §4 records (ARCHITECTURE §14 points there),
+ * generated rather than typed, with a statement of what each one counts — three hand-typed counts had drifted
  * three different ways by S8.5. Run: `node scripts/count-lines.ts`.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'

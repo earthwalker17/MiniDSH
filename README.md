@@ -85,7 +85,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 - Windows has no shell-confinement backend and is not getting one. By default a shell command there costs an approval and runs in a fresh shell (`cd` and environment changes do not persist); `--accept none` records that the session accepts an unconfined shell and runs it normally, with file edits still fenced.
 - Confinement governs file effects only. A confined command still reaches the network. Its environment is scrubbed of this deployment's provider keys, but that is defence in depth, not a boundary: reads are unfenced, so a credentials file stays readable to a command that looks.
-- The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. On a confined host the shell is unaffected because the OS bounds the whole process.
+- The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. A confined shell writes through such a link too, because the OS confines paths; under bubblewrap it cannot create a new one across the workspace boundary.
 - Tool execution is sequential and a delegated child is foreground; there are no background jobs.
 - No session deletion, search or rename; no OpenAI adapter; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven: it cannot import MiniDSH's own modules and must ship its own `package.json` and dependencies (BLUEPRINT §3).
 

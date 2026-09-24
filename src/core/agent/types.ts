@@ -52,7 +52,9 @@ export interface Agent {
    * The durable switch: merges `options` over the base, appends
    * `agent/options{reason: 'change'}` iff something actually changed, and
    * takes effect at the next step. Undefined values never clobber; a route
-   * change drops an effort the switch did not name (effort ids are adapter-owned).
+   * change drops every sampling knob the switch did not name (effort,
+   * temperature, maxTokens: `mergeAgentOptions`), since whether a model honours
+   * one is adapter-owned.
    */
   configure(options: Partial<AgentOptions>): AgentOptions
   /**

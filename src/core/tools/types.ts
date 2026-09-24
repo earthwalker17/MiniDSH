@@ -32,6 +32,7 @@ export interface ToolContext extends ToolExecution {
 export interface ToolResult {
   readonly isError: boolean
   readonly content: readonly ContentBlock[]
+  /** Not durable: the driver logs `content` only, so `value` never outlives this process. */
   readonly value?: JsonValue
   readonly error?: { readonly message: string; readonly info?: { readonly name: string; readonly code: string } }
   readonly additionalContexts?: readonly Message[]

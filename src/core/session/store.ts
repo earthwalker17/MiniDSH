@@ -42,6 +42,11 @@ export const SESSION_CREATED = emitEvent<[session: Session]>('session/created')
 /**
  * One durable event was appended (fire-and-forget, contained). Observers run
  * before the commit and may reject it; listeners run after.
+ *
+ * A listener may not append SYNCHRONOUSLY: a nested append would reach
+ * persistence, the protocol and the invariants before the event that caused
+ * it, so seqs N+1, N land out of order and the log reads `damaged` at the next
+ * resume. Queue the append on a microtask (ARCHITECTURE §4).
  */
 export const SESSION_EVENT = emitEvent<[session: Session, event: EventEnvelope]>('session/event')
 /** Awaited durability checkpoint. */

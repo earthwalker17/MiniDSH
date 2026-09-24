@@ -10,6 +10,10 @@
  * the caller then acts on, and it contains no link the operating system could
  * still follow somewhere else. A primitive that cannot establish a path's
  * identity refuses rather than answering by name.
+ *
+ * A HARD link is not a link to follow: it passes containment by name, and a
+ * write through one lands on the outside inode (ARCHITECTURE §13). Detecting
+ * it needs inode identity per write.
  */
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve as resolvePath } from 'node:path'

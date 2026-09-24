@@ -1,15 +1,13 @@
 /**
- * Documentation gates. Three rules, one script:
+ * Documentation gates. The documents are MAPS sized to what a session reads
+ * before it starts work (CLAUDE.md §5); this script is the only place their
+ * numbers live. Five rules, one script:
  *
- * 1. Size budgets. `docs/ARCHITECTURE.md` and `docs/BLUEPRINT.md` are reread
- *    at the start of every development session, so their size is a per-session
- *    cost; `README.md` is what a visitor reads first, so its size is the cost
- *    of a first impression. Each has a hard ceiling (CLAUDE.md §5); crossing it fails the gate,
- *    and crossing 90% of it prints a warning that says which document must be
- *    compacted before it grows again. The ceilings exist because the documents
- *    reached ~230 KB once (S8.5) and ~95 KB for the architecture alone (V1),
- *    and each time the fix was an emergency rewrite that lost contracts.
- *    `references/` (the DSH map) has a per-file and a folder ceiling too.
+ * 1. Size budgets. Every document a session reads at its start is a per-session
+ *    cost, so each has a hard ceiling set from a reading load, not from what
+ *    happens to exist: crossing it fails the gate, crossing 90% of it warns and
+ *    names the largest sections. `references/` (the DSH map) has a per-file and
+ *    a folder ceiling too.
  *
  * 2. Internal links. Every relative link, image and `blob/main/` URL in the
  *    repository's markdown and issue templates must name a file that exists,
@@ -25,6 +23,12 @@
  *    SECURITY and two issue-template links cite `docs/ARCHITECTURE.md` by
  *    section number and title, so its fourteen `## N.` headings are pinned.
  *
+ * 5. The map form of `docs/ARCHITECTURE.md`: no paragraph or bullet over
+ *    PARAGRAPH_MAX bytes and no table cell over CELL_MAX — a longer one is an
+ *    encyclopedia entry whose detail belongs in the owning code's comment — and
+ *    a per-section target whose overrun warns, so growth is caught in the
+ *    section where it happens rather than when the ceiling breaks.
+ *
  * Run: `node scripts/check-docs.ts` (part of `pnpm check`); `--sections` also
  * prints each budgeted document's `##` sections by size, the input a
  * compaction starts from (`.claude/skills/docs-maintenance/SKILL.md`).
@@ -34,13 +38,28 @@ import { dirname, join, relative, resolve } from 'node:path'
 
 const ROOT = resolve(import.meta.dirname, '..')
 
-/** Hard ceilings in bytes. Change them in CLAUDE.md §5 first; this is the enforcement. */
+/**
+ * Hard ceilings in bytes (~2.7 bytes per token for these documents). The
+ * startup read — CLAUDE, PROJECT, ARCHITECTURE, BLUEPRINT — is held near 40k
+ * tokens, which gives the architecture map ~20k. The procedure document is
+ * read only when compacting. A ceiling moves only with the user's agreement.
+ */
 const BUDGETS: Record<string, number> = {
-  'docs/ARCHITECTURE.md': 94 * 1024,
+  'docs/ARCHITECTURE.md': 56 * 1024,
   'docs/BLUEPRINT.md': 30 * 1024,
   'README.md': 32 * 1024,
 }
 const WARN_AT = 0.9
+
+/** The map form (rule 5). Section keys are the `## N.` numbers; 0 is the preamble. */
+const ARCHITECTURE = 'docs/ARCHITECTURE.md'
+const PARAGRAPH_MAX = 700
+const CELL_MAX = 450
+const SECTION_TARGETS: Record<number, number> = {
+  0: 1000, 1: 1050, 2: 1650, 3: 4900, 4: 5050, 5: 2000, 6: 3800, 7: 6250,
+  8: 4900, 9: 3150, 10: 2650, 11: 3350, 12: 2400, 13: 6300, 14: 2100,
+}
+const SECTION_WARN = 1.15
 
 /**
  * `references/` is a curated MAP of DeepSeek Harness, consulted by topic
@@ -51,6 +70,8 @@ const WARN_AT = 0.9
  */
 const REFERENCES_DIR = 'references'
 const REFERENCE_FILE_CEILING = 12 * 1024
+/** The ledger is one table across every area, read a section at a time. */
+const REFERENCE_FILE_OVERRIDES: Record<string, number> = { 'references/assumptions.md': 12 * 1024 }
 const REFERENCES_TOTAL_CEILING = 120 * 1024
 
 /** Cited by number and title from code and from other documents: renaming one is a repository-wide change, not an edit. */
@@ -142,19 +163,64 @@ for (const [file, ceiling] of Object.entries(BUDGETS)) {
   else console.log(`${file}: ${bytes} bytes (${pct}% of ${ceiling})`)
   if (SHOW_SECTIONS) {
     console.log(`  ${file}, by section:`)
-    for (const section of sections) console.log(`  ${String(section.bytes).padStart(6)}  ${section.heading}`)
+    for (const section of sections) {
+      const target = file === ARCHITECTURE ? SECTION_TARGETS[sectionNumber(section.heading)] : undefined
+      console.log(`  ${String(section.bytes).padStart(6)}${target === undefined ? '' : ` / ${target}`}  ${section.heading}`)
+    }
   }
 }
 
+/** `## 7. Authority` → 7; the preamble → 0. */
+function sectionNumber(heading: string): number {
+  return Number(/^## (\d+)\./.exec(heading)?.[1] ?? 0)
+}
+
 {
-  const headings = readFileSync(join(ROOT, 'docs/ARCHITECTURE.md'), 'utf8')
-    .split('\n')
-    .filter((line) => line.startsWith('## '))
+  const text = readFileSync(join(ROOT, ARCHITECTURE), 'utf8')
+  for (const section of sectionsOf(text)) {
+    const n = sectionNumber(section.heading)
+    const target = SECTION_TARGETS[n]
+    if (target !== undefined && section.bytes > target * SECTION_WARN) {
+      warnings.push(`${ARCHITECTURE} §${n}: ${section.bytes} bytes, over its ${target}-byte target by more than ${Math.round((SECTION_WARN - 1) * 100)}% — a map line per invariant, detail at the owning code (docs-maintenance skill)`)
+    }
+  }
+  // A paragraph or bullet is one block of consecutive prose lines; a list marker starts a new one.
+  const lines = text.split('\n')
+  let inFence = false
+  let block: { start: number; bytes: number } | undefined
+  const close = (): void => {
+    if (block && block.bytes > PARAGRAPH_MAX) failures.push(`${ARCHITECTURE}:${block.start}: a ${block.bytes}-byte paragraph or bullet (max ${PARAGRAPH_MAX}) — state the rule and its owner; the detail belongs in the owning code's comment`)
+    block = undefined
+  }
+  lines.forEach((line, i) => {
+    if (/^\s*```/.test(line)) {
+      close()
+      inFence = !inFence
+      return
+    }
+    if (inFence) return
+    if (/^\s*\|/.test(line)) {
+      close()
+      if (/^\s*\|(\s*:?-+:?\s*\|)+\s*$/.test(line)) return
+      for (const cell of line.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/)) {
+        const bytes = Buffer.byteLength(cell.trim(), 'utf8')
+        if (bytes > CELL_MAX) failures.push(`${ARCHITECTURE}:${i + 1}: a ${bytes}-byte table cell (max ${CELL_MAX})`)
+      }
+      return
+    }
+    if (line.trim() === '' || line.startsWith('#')) return close()
+    if (/^\s*([-*]|\d+\.)\s/.test(line)) close()
+    if (!block) block = { start: i + 1, bytes: 0 }
+    block.bytes += Buffer.byteLength(line, 'utf8') + 1
+  })
+  close()
+
+  const headings = lines.filter((line) => line.startsWith('## '))
   const missing = ARCHITECTURE_HEADINGS.filter((heading) => !headings.includes(heading))
   const extra = headings.filter((heading) => !ARCHITECTURE_HEADINGS.includes(heading))
-  for (const heading of missing) failures.push(`docs/ARCHITECTURE.md: heading "${heading}" is missing — code and other documents cite it by number and title`)
-  for (const heading of extra) failures.push(`docs/ARCHITECTURE.md: unexpected heading "${heading}" — a new section is a new citation target; add it to ARCHITECTURE_HEADINGS deliberately`)
-  if (missing.length === 0 && extra.length === 0 && headings.join('\n') !== ARCHITECTURE_HEADINGS.join('\n')) failures.push('docs/ARCHITECTURE.md: the fourteen headings are out of order')
+  for (const heading of missing) failures.push(`${ARCHITECTURE}: heading "${heading}" is missing — code and other documents cite it by number and title`)
+  for (const heading of extra) failures.push(`${ARCHITECTURE}: unexpected heading "${heading}" — a new section is a new citation target; add it to ARCHITECTURE_HEADINGS deliberately`)
+  if (missing.length === 0 && extra.length === 0 && headings.join('\n') !== ARCHITECTURE_HEADINGS.join('\n')) failures.push(`${ARCHITECTURE}: the fourteen headings are out of order`)
 }
 
 if (!existsSync(join(ROOT, REFERENCES_DIR))) failures.push(`${REFERENCES_DIR}/: missing (CLAUDE.md §4 names it as the DSH reference map)`)
@@ -165,8 +231,9 @@ else {
     const bytes = statSync(path).size
     total += bytes
     const rel = relative(ROOT, path).replace(/\\/g, '/')
-    if (bytes > REFERENCE_FILE_CEILING) failures.push(`${rel}: ${bytes} bytes exceeds the ${REFERENCE_FILE_CEILING}-byte ceiling for a reference file — curate it, a map is not a copy`)
-    if (SHOW_SECTIONS) console.log(`  ${String(bytes).padStart(6)}  ${rel}`)
+    const ceiling = REFERENCE_FILE_OVERRIDES[rel] ?? REFERENCE_FILE_CEILING
+    if (bytes > ceiling) failures.push(`${rel}: ${bytes} bytes exceeds its ${ceiling}-byte ceiling — curate it, a map is not a copy (docs-maintenance skill)`)
+    if (SHOW_SECTIONS) console.log(`  ${String(bytes).padStart(6)} / ${ceiling}  ${rel}`)
   }
   if (total > REFERENCES_TOTAL_CEILING) failures.push(`${REFERENCES_DIR}/: ${total} bytes exceeds its ${REFERENCES_TOTAL_CEILING}-byte ceiling`)
   else console.log(`${REFERENCES_DIR}/: ${total} bytes (${Math.round((total / REFERENCES_TOTAL_CEILING) * 100)}% of ${REFERENCES_TOTAL_CEILING})`)

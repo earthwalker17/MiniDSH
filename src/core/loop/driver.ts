@@ -347,6 +347,8 @@ export class ReactLoopAgent implements Agent {
     const assembled = await deps.prompt.assemble(this)
     const header = this.buildHeader(config, assembled)
     const folded = this.session.foldRequestHeader()
+    // Written only when it differs, so each request append-extends its
+    // predecessor: what a provider prefix cache rewards.
     if (!folded || JSON.stringify(folded) !== JSON.stringify(header)) {
       // A change surfacing at the first step of a resumed lifecycle is explained
       // by the resume (new composition, new tools) rather than a mid-run switch.

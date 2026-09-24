@@ -354,7 +354,8 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('tool-subagent', toolSubagentPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))
   // `maxBytes` is the deployment's prompt-budget choice, made here rather than
-  // defaulted inside the capability.
+  // defaulted inside the capability. Row order is load-bearing: this row's
+  // `agent/pre-step` listener must run before `compaction`'s, below.
   rows.push(
     defineRow('workspace-instructions', workspaceInstructionsPlugin, {
       maxBytes: 32_000,

@@ -321,6 +321,7 @@ class PluginInstance implements EffectOwner, PluginHandle {
     }
   }
 
+  /** Effects unwind before dependents unload, so a disposer must not read the services its plugin injected. */
   private async unload(): Promise<void> {
     if (this.state !== 'active' && this.state !== 'loading') return
     this.state = 'unloading'

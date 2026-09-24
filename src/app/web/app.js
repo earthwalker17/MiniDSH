@@ -9,6 +9,8 @@
  *   it shadowed are still there when you page back.
  * - Every switch it asks for becomes a durable event it then reads back, like
  *   any other surface.
+ * - No test imports this file: the DOM rendering is untested. The window rules
+ *   (`wire.js`) and the row projection (`rows.js`) are what the unit tests cover.
  */
 import { describeRow, tokens } from './rows.js'
 import { SessionWindow, Wire } from './wire.js'

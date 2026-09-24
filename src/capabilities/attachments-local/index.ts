@@ -196,6 +196,9 @@ class LocalAttachments implements Attachments {
   }
 
   /**
+   * A process killed between the staging write and the rename leaves its `.part`
+   * under `attachments/v1/tmp/`; nothing reclaims it.
+   *
    * Durable before the reference exists: write to a staging name, flush the file
    * itself, move it into place atomically, then flush the directory entry. A
    * synced file whose directory entry never reached storage is not durable, and

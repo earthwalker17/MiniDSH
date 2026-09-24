@@ -1,6 +1,7 @@
 /**
  * The approval seam. The model proposes an action; an answerer decides. The
- * default is fail-closed (`unavailable`), a grant is one-shot, and every
+ * default is fail-closed (`unavailable`), `allowed-once` covers one call (a
+ * standing consent is an `approval/grant` only this seam mints), and every
  * decision is an audit pair in the session log — never in the model transcript.
  *
  * The session also carries a durable `ApprovalPolicy`: `never` is the strict
