@@ -69,10 +69,10 @@ const SECTION_WARN = 1.15
  * before researching.
  */
 const REFERENCES_DIR = 'references'
-const REFERENCE_FILE_CEILING = 12 * 1024
-/** The ledger is one table across every area, read a section at a time. */
-const REFERENCE_FILE_OVERRIDES: Record<string, number> = { 'references/assumptions.md': 12 * 1024 }
-const REFERENCES_TOTAL_CEILING = 120 * 1024
+const REFERENCE_FILE_CEILING = 8 * 1024
+/** The ledger holds every verdict once, for all areas; a session reads one area's table of it. */
+const REFERENCE_FILE_OVERRIDES: Record<string, number> = { 'references/assumptions.md': 16 * 1024 }
+const REFERENCES_TOTAL_CEILING = 80 * 1024
 
 /** Cited by number and title from code and from other documents: renaming one is a repository-wide change, not an edit. */
 const ARCHITECTURE_HEADINGS = [
