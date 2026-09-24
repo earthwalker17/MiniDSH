@@ -45,10 +45,14 @@ const ROOT = resolve(import.meta.dirname, '..')
  * read only when compacting. A ceiling moves only with the user's agreement.
  */
 const BUDGETS: Record<string, number> = {
+  'docs/PROJECT.md': 26 * 1024,
   'docs/ARCHITECTURE.md': 56 * 1024,
   'docs/BLUEPRINT.md': 30 * 1024,
   'README.md': 32 * 1024,
+  '.claude/skills/docs-maintenance/SKILL.md': 8 * 1024,
 }
+/** The constitution's own rule (CLAUDE.md §5): under 200 lines. */
+const LINE_BUDGETS: Record<string, number> = { 'CLAUDE.md': 200 }
 const WARN_AT = 0.9
 
 /** The map form (rule 5). Section keys are the `## N.` numbers; 0 is the preamble. */
@@ -56,8 +60,8 @@ const ARCHITECTURE = 'docs/ARCHITECTURE.md'
 const PARAGRAPH_MAX = 700
 const CELL_MAX = 450
 const SECTION_TARGETS: Record<number, number> = {
-  0: 1000, 1: 1050, 2: 1650, 3: 4900, 4: 5050, 5: 2000, 6: 3800, 7: 6250,
-  8: 4900, 9: 3150, 10: 2650, 11: 3350, 12: 2400, 13: 6300, 14: 2100,
+  0: 1000, 1: 1050, 2: 1850, 3: 4900, 4: 5400, 5: 1900, 6: 4350, 7: 6450,
+  8: 4450, 9: 3250, 10: 2400, 11: 3350, 12: 2500, 13: 6650, 14: 2100,
 }
 const SECTION_WARN = 1.15
 
@@ -168,6 +172,12 @@ for (const [file, ceiling] of Object.entries(BUDGETS)) {
       console.log(`  ${String(section.bytes).padStart(6)}${target === undefined ? '' : ` / ${target}`}  ${section.heading}`)
     }
   }
+}
+
+for (const [file, max] of Object.entries(LINE_BUDGETS)) {
+  const lines = readFileSync(join(ROOT, file), 'utf8').split('\n').length
+  if (lines > max) failures.push(`${file}: ${lines} lines exceeds its ${max}-line budget`)
+  else console.log(`${file}: ${lines} lines (budget ${max})`)
 }
 
 /** `## 7. Authority` → 7; the preamble → 0. */
