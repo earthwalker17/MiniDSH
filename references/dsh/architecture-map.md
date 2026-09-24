@@ -35,7 +35,7 @@ A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 54 grou
 ## Open for the route
 
 - **S16, an audit of attempts.** "Model-visible means logged", yet process loss before settlement "leaves no durable attempt stream" and tail repair "remains a handle consumer responsibility". `docs/architecture.md`
-- **S16, provenance.** Unchecked whether upstream persists the composition a session ran under (old ARCH §12 said no; MiniDSH appends `composition/applied`). `docs/persistence-catalog.md`
+- **S16, provenance.** Unchecked whether upstream persists the composition a session ran under (no document leans on either answer now; MiniDSH appends `composition/applied`). `docs/persistence-catalog.md`
 - **S17, job ownership.** A preset's service must sit in an `isolate` realm; one read from outside it stays on the host, keyed by owner (a realm-scoped jobs registry answered "background jobs unavailable"). `packages/preset/agent-presets/presets/standard/agent.cordis.yml`
 - **S17, a held process.** fs and subprocess providers share one execution world: one swap moves Bash, PTY and LSP together. `docs/architecture.md`
 - **S22, one launcher.** `scripts/verify-application-entrypoints.ts` rejects a bin bypassing `dsh`.

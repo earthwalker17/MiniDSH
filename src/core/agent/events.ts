@@ -35,6 +35,11 @@ export const AGENT_INBOX_INSERTED = emitEvent<[agent: Agent, message: Message, t
 export const AGENT_INBOX_CLAIMED = emitEvent<[agent: Agent, message: Message]>('agent/inbox/claimed')
 export const AGENT_INBOX_DISCARDED = emitEvent<[agent: Agent, message: Message]>('agent/inbox/discarded')
 
+/**
+ * A listener may ADD to a batch, never create one: the driver ends a turn when
+ * its first step enters nothing, so filling an empty batch revives a turn that
+ * should have closed (ARCHITECTURE §6).
+ */
 export const AGENT_PRE_STEP = waterfallEvent<[context: PreStepContext], Promise<PreStepDecision>>('agent/pre-step')
 export const AGENT_REQUEST = waterfallEvent<[context: RequestContext], Promise<RequestContext['config']>>('agent/request')
 export const AGENT_REQUEST_ERROR = waterfallEvent<[context: RequestErrorContext], Promise<RequestErrorAction>>('agent/request-error')

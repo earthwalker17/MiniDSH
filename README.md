@@ -118,7 +118,7 @@ src/test-support/   scripted adapter, replay-from-log adapter, composition harne
 | from | may import |
 |---|---|
 | `kernel` | nothing internal |
-| `core/<x>` | `kernel`, other `core` contracts — except `core/loop`, which only `app` imports |
+| `core/<x>` | `kernel`, other `core` contracts — except `core/loop`, which only `app` and `test-support` import |
 | `capabilities/<x>` | `kernel`, `core` Definitions only; a provider never imports another provider or a consumer |
 | `app` | anything |
 
@@ -181,7 +181,7 @@ These are the experiment, each stated in ARCHITECTURE §12 with the reasoning th
 - **One protocol over three transports** (stdio, in-process, WebSocket; seventeen JSON-RPC methods) where DSH ships several protocol profiles.
 - **Two confinement backends, not four:** no Landlock (a native addon) and no Windows backend (DSH's own Windows backend can only ever report partial enforcement).
 - **A terminal client ships** (DSH removed its TUI in a note of 2026-08-04): the cheapest proof that the wire carries everything a user interface needs.
-- **History recall appears only when needed:** `history_read` covers only what this session's compactions summarized away and is hidden until the first compaction, where DSH's [session-query](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/session-query/tool-session-query/README.md) adds five tool schemas to every request.
+- **History recall appears only when needed:** `history_read` covers only what this session's compactions summarized away and is hidden until the first compaction, where DSH's [session-query](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/session-query/tool-session-query/README.md) would add five tool schemas to every request, which is why its tools are opt-in.
 
 ### Where it diverges
 
@@ -189,8 +189,7 @@ ARCHITECTURE §12 carries the reasons.
 
 - **The workspace root is the whole writable ceiling**, where DSH's `workspace-write` also grants an ephemeral `/tmp` ([sandbox-local](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/sandbox-local/README.md)).
 - **Whether the host can actually confine is probed and recorded when the agent is created**, and "no backend" is a supported, honestly reported state.
-- **A delegated child's starting authority is an enforced ceiling**, not just a copied approval policy; **the default model route and the current one are recorded separately**; **every session records the composition it runs under**; **an approval no connected client can answer is refused instead of hanging forever.**
-- **A confined child gets its own POSIX session on both backends**, closing the controlling-terminal escape on macOS as well as Linux.
+- **A delegated child's starting authority is an enforced ceiling**, not just a copied approval policy; **the default model route and the current one are recorded separately**; **an approval no connected client can answer is refused instead of hanging forever.**
 
 ### Not built
 

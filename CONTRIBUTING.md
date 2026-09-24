@@ -48,7 +48,7 @@ Set `MINIDSH_EXPECT_SHELL=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` o
 
 | Rule | Where |
 |---|---|
-| Dependency direction: `kernel` imports nothing internal; `core` imports `kernel` and other `core` contracts (nothing but `app` imports `core/loop`); a capability imports `kernel` and `core` Definitions, never another capability and never `app`; `app` imports anything | `scripts/check-deps.ts` |
+| Dependency direction: `kernel` imports nothing internal; `core` imports `kernel` and other `core` contracts (nothing but `app` and `test-support` imports `core/loop`); a capability imports `kernel` and `core` Definitions, never another capability and never `app`; `app` imports anything | `scripts/check-deps.ts` |
 | An event payload is read through `matches(event, KIND)`, never `event.data as {…}`, so a renamed field is a type error and not a `NaN` on a screen | `scripts/check-deps.ts` |
 | Core is acyclic at file level: each package's vocabulary (`events.ts`, `types.ts`) sits below its service | `scripts/check-deps.ts` |
 | The documents: size budgets (`node scripts/check-docs.ts --sections` prints them; a warning from 90%), the architecture document's pinned headings and map form; every internal link and `#fragment` in the repository's markdown and issue templates resolves; every table row has the header's cell count | `scripts/check-docs.ts` |
@@ -71,7 +71,7 @@ If a change needs state that must survive a restart, a resume or a fork, it is a
 
 ## Scope
 
-BLUEPRINT §2 lists what V1 deliberately does not do — background jobs and parallel tool calls, an MCP client, model-written extensions and PTC, a Windows confinement backend and Landlock, standing approval grants, session deletion, a session search index, per-user identity, a desktop shell — each with the reason; the README's *Not built* list is the same list. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
+BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (background jobs, parallel tool calls, a desktop launcher); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
 
 ## License and attribution
 

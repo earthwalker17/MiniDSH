@@ -24,11 +24,12 @@
 
 - **S16, an audit of attempts.** Post-mortem 0004: stderr is forgeable attribution, so an authority fact read from command output is only the command's own claim. `docs/postmortem/0004-landlock-partial-notice-misclassified-child-failures.md`
 - **S16, replay as a capability.** The permission that governed a call is reconstructable from the log: Settings' `defaultPreset` reaches session CREATION only, and the durable mode knob has one writer. `packages/sandbox/sandbox-policy/src/session-mode.ts`
+- **S16, provenance.** A child's knobs are seeded `source: 'delegation'` on its own log and never read: a replay-surviving marker with no reader. `packages/subagent/subagent/src/child-agent.ts`
 - **S17, a job that asks.** Upstream's unattended stance is composition, not a rule: `headless` mounts no approval channel, `sdk-minimal` removes the seam and pins `danger-full-access`, and nothing auto-answers or allow-lists per tool. `packages/bundle/headless/cordis.patch.yml`
 - **S18, web search.** No backend confines the network (bwrap unshares no net namespace, Seatbelt is `(allow default)`), so a deployment that wants `web_fetch` gated is pointed at `tools/pre-execute`. `packages/sandbox/sandbox-local/src/profiles.ts`
 - **S20, the browser process.** Eight spawners outside `ctx.subprocess` import `scrubbedParentEnv()` rather than reimplement it; a tool-launched Chrome is one more such spawner. `packages/subprocess/subprocess/src/index.ts`
 - **S22, tool display facts.** `ToolCallView = Generic | Terminal | Diff`, from each tool's pure, replay-safe `presentCall(args)` over parsed arguments (a verb `kind`, `locations`, `cwd`, derived `diffs`). `packages/core/tools/src/presentation.ts`
-- **Built in S14–S15** (the subject, grants, acceptance, the child environment, the delegation ceiling): MiniDSH's side is [ARCHITECTURE.md](../../docs/ARCHITECTURE.md) §7 and §12; upstream's is the Authority rows of [assumptions.md](../assumptions.md).
+- **Built in S14–S15** (the subject, grants, acceptance, the child environment, the delegation ceiling): MiniDSH's side is [ARCHITECTURE.md](../../docs/ARCHITECTURE.md) §7, §9 and §12; upstream's is the Authority rows of [assumptions.md](../assumptions.md).
 
 ## Sources
 

@@ -127,7 +127,7 @@ describe('agents.resume', () => {
   })
 
   /**
-   * The oracle for "a child killed mid-call must close" (BLUEPRINT §1). A host
+   * The oracle for "a child killed mid-call must close" (ARCHITECTURE §4). A host
    * death is not an exit path of the delegation tool, so before S14 the
    * parent's log could not explain its own unfinished business: the bracket
    * stayed open and the child's cost was summed nowhere.

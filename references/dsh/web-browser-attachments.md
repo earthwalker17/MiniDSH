@@ -27,6 +27,7 @@
 - **S20, screenshots.** An image block is admitted only after exact route-capability proof, else bounded diagnostic text; base64 never enters a session event. `packages/mcp/mcp-client/README.md`
 - **S20, authority.** Endpoint, mode, profile and native model are composition config, never tool arguments; Stagehand scrubs Chromium's environment but runs its model outside request capture and accounting. `packages/experimental/browser-use-stagehand-native/README.md`
 - **S21, parallel calls.** One Session's browser operations serialize through one queue. `packages/experimental/browser-use-runtime/README.md`
+- **S22, uploads.** The digest addresses the NORMALIZED image, not the uploaded bytes: decide what MiniDSH's addresses. `packages/attachment/attachment-local/README.md`
 
 ## Sources
 

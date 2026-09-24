@@ -73,8 +73,9 @@ const SECRET_SHAPED = /KEY|TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL/i
  * **Identity freshness**: `MINIDSH_*`, so a command cannot read — or nest a
  * harness against — this process's own home and route.
  *
- * The caller's overlay merges AFTER, so a future caller can forward a value on
- * purpose; nothing does today. And the limit is real and stated (§13): this
+ * The caller's overlay merges AFTER: today that is the confinement's `envFor`
+ * (the `TMPDIR` a profile granted), and a future caller may forward a value on
+ * purpose. And the limit is real and stated (§13): this
  * withholds variables, it does not withhold credentials. Reads are never
  * fenced, so `~/.minidsh/credentials.json` is still readable, and
  * `HTTP(S)_PROXY` and `SSH_AUTH_SOCK` are kept deliberately because removing

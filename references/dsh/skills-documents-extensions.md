@@ -28,7 +28,7 @@
 - **S19, shadowing.** Lower rank wins: project `.dsh/skills` (100), `.agents/skills` (200), then `customSkillDirs` (300), user homes (400/500), bundled (600); with no documented trust gate (`SAFETY.md` never mentions skills), a clone can shadow by name. `packages/skill/skill-filesystem/README.md`
 - **S19, discovery.** A malformed flag drops the skill; neither an incomplete snapshot (consumers keep the last-good view) nor a body is cached. `docs/subsystems/skills.md`
 - **S19, document skills.** Instructions plus `check_office.py`, a stdlib OOXML checker, for docx, pptx, xlsx (no PDF); no package installs; visual QA optional, its absence stated. `packages/skill/skill-office/README.md`
-- **Built (S14, S15).** Skill scripts run through the shell tool (`packages/skill/skill-filesystem/README.md`), so the recorded effect and the consent subject cover them: `docs/ARCHITECTURE.md` §12.
+- **Built (S14, S15).** Skill scripts run through the shell tool (`packages/skill/skill-filesystem/README.md`), so the recorded effect and the consent subject cover them: `docs/ARCHITECTURE.md` §4 and §7 (a script's own writes are not recorded, §13).
 
 ## Sources
 

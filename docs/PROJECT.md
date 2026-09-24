@@ -102,7 +102,7 @@ These sources are actively changing, and DSH's notes move between `proposed/`, `
 
 ## 4. “Self-Evolving” Should Be Treated Carefully
 
-DeepSeek Harness's `extensions` family lets an agent define and run dynamic packages inside its own runtime, which is sometimes summarised as self-evolution. The direction is useful, but the architectural claim should be more precise.
+DeepSeek Harness's `extensions` family lets an agent install and run dynamic packages inside its own runtime (since 2026-09-16 through a gated `plugin_manager`), which is sometimes summarised as self-evolution. The direction is useful, but the architectural claim should be more precise.
 
 A dynamically composable harness does not automatically solve:
 
@@ -320,7 +320,7 @@ It should not reimplement:
 - orchestration;
 - verification logic.
 
-DeepSeek Harness already documents a similar host/client/carrier separation and ships web, headless and an Electron desktop application as clients of one runtime.
+DeepSeek Harness already documents a similar host/client/carrier separation and ships web, headless and an Electron desktop application that share one runtime's code (the desktop carries its own copy and a private host).
 
 Reference:
 

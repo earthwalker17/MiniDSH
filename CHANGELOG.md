@@ -16,6 +16,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 ### Security
 
 - **A shell child no longer inherits this deployment's provider keys.** The harness builds the child's environment instead of passing its own through, withholding every credential name a provider row declared (including one a config file renamed), every secret-shaped name, and every `MINIDSH_*`. This is defence in depth, not a boundary: reads are still unfenced, so a credentials file remains readable, and a secret that is neither declared nor name-matching still passes.
+- **Documented: a confined shell writes through a hard link that already exists in the workspace**, because the operating system confines paths; the documents had said a confined host was unaffected. Measured under bubblewrap, which does refuse to create a new link across the workspace boundary.
 - **A client can no longer answer an approval in a session it does not watch.** `approval/answer` now applies the same visibility rule that decides which connections are asked in the first place.
 
 ### Fixed

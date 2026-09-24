@@ -25,9 +25,10 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 - **S17, subscription order.** The Host attaches every `$events` listener and sends one `ready` frame before the Client reads any baseline; notifications never replay. `packages/client/connection/README.md`
 - **S21, following a child.** A child is followed through a direct-parent subagent address on the same journal stream: another attach, not a new channel. `packages/api/session-controller/README.md`
 - **S22, fork on the wire.** Fork copies through the selected completed turn and rejects an anchor inside an unfinished one. `packages/api/session-controller/README.md`
+- **S22, prompt retries.** Idempotent on a client-minted `requestId`. `packages/api/session-controller/README.md`
 - **S22, display facts.** Commands stay Host-side: durable `command/run` and `command/done` events carry display facts as data, so clients never parse text. `docs/subsystems/commands.md`
 - **S22, the Desktop launcher.** No second protocol: the window loads packaged Web assets and forwards HTTP to the authenticated Web Host; one signed update unit, the single-instance lock before any profile I/O, recovery without a Host. `apps/desktop/README.md`
-- **Built.** Attach without a lower-bound cursor, bounded trace-free pages, tier-aware shedding, unseen approvals settling `unavailable`, the terminal client: ARCH §12; verdicts in [assumptions.md](../assumptions.md).
+- **Built.** Attach without a lower-bound cursor, bounded trace-free pages, tier-aware shedding, unseen approvals settling `unavailable`, the terminal client: ARCH §8, §12; verdicts in [assumptions.md](../assumptions.md).
 
 ## Sources
 

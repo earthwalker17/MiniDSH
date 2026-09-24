@@ -20,6 +20,7 @@
 
 - **S17, admission.** The collectability gate lives in the registry, not in producers: `start()` refuses unless an attached controller serves the owner, and errors past its per-owner cap. The registry owns identity (`<kind>-N`, predictable: authorize, never hide) and lifecycle; the producer owns resources. `docs/subsystems/jobs.md`
 - **S17, delivery.** Completion reaches the owner only through its inbox: injected when busy, a woken turn when idle, capped by `maxConsecutiveWakes` (3), refilled only by user input; a `reported` bit dedups. `packages/jobs/tool-jobs/README.md`
+- **S17, settlement.** First-wins; completion is announced LAST. `docs/subsystems/jobs.md`
 - **S17, the idle race.** A known defect: a settlement landing in the driver's retirement window is injected and nothing wakes. MiniDSH's claim-commit ordering must close that window for jobs. `packages/jobs/tool-jobs/README.md`
 - **S17, composition.** Base mounts the registries and tool rows on the host plane; the web-app bundle disables the tool rows, so a preset decides whether its agent can collect background work. `packages/bundle/web-app/cordis.patch.yml`
 - **S20, the dev server as a job.** A bash-kind job: shell's `start()` handle has no id or owner; the jobs registry and `tool-jobs` controller supply both (knowledge runs one way). `docs/subsystems/shell.md`

@@ -8,21 +8,21 @@ A curated local map of DeepSeek Harness (DSH) for MiniDSH sessions. MiniDSH stud
 
 | File | Area | Route sessions that start here |
 |---|---|---|
-| [dsh/architecture-map.md](dsh/architecture-map.md) | the two composition planes, the subsystem map, presets | every session: the entry map |
-| [dsh/session-durability.md](dsh/session-durability.md) | the session log, crash repair, format generations, locking, projections, replay | S16 |
-| [dsh/execution-jobs-agents.md](dsh/execution-jobs-agents.md) | loop, tool pipeline, jobs, subagents, teams, workflow, schedule | S17, S21 |
-| [dsh/authority.md](dsh/authority.md) | sandbox backends (Windows included), approvals, grants, presets, hooks, the model reviewer | S16, S20 |
-| [dsh/skills-documents-extensions.md](dsh/skills-documents-extensions.md) | skills, document tooling, deliverables, extensions, MCP, PTC | S19 |
-| [dsh/web-browser-attachments.md](dsh/web-browser-attachments.md) | web search and fetch, browser and computer use, the attachment plane | S18, S20 |
-| [dsh/llm-providers.md](dsh/llm-providers.md) | the LLM seam, adapters, the OpenAI path, model facts, retries | S18 |
-| [dsh/surfaces.md](dsh/surfaces.md) | host, clients, carriers, profiles, attach and paging, Desktop | S17, S22 |
+| [dsh/architecture-map.md](dsh/architecture-map.md) | the two composition planes, the subsystem map, presets | every session: the entry map; S16, S17, S22 |
+| [dsh/session-durability.md](dsh/session-durability.md) | the session log, crash repair, format generations, locking, projections, replay | S16, S17 |
+| [dsh/execution-jobs-agents.md](dsh/execution-jobs-agents.md) | loop, tool pipeline, jobs, subagents, teams, workflow, schedule | S17, S20, S21 |
+| [dsh/authority.md](dsh/authority.md) | sandbox backends (Windows included), approvals, grants, presets, hooks, the model reviewer | S16, S17, S18, S20, S22 |
+| [dsh/skills-documents-extensions.md](dsh/skills-documents-extensions.md) | skills, document tooling, deliverables, extensions, MCP, PTC | S16, S19 |
+| [dsh/web-browser-attachments.md](dsh/web-browser-attachments.md) | web search and fetch, browser and computer use, the attachment plane | S16, S18, S20, S21, S22 |
+| [dsh/llm-providers.md](dsh/llm-providers.md) | the LLM seam, adapters, the OpenAI path, model facts, retries | S16, S17, S18, S21 |
+| [dsh/surfaces.md](dsh/surfaces.md) | host, clients, carriers, profiles, attach and paging, Desktop | S17, S21, S22 |
 | [assumptions.md](assumptions.md) | the ledger: each claim a MiniDSH document leans on, its verdict at the pin, and where it is leaned on | every session that touches an area; every `.5` |
 
 Every area file has five sections: *What exists (at the pin)*, *Open for the route* (one fact and one upstream path per upcoming need), *Sources* (with check dates), *Likely to go stale*, *Not read*. Verdicts live only in the ledger.
 
 ## How a session uses this (CLAUDE.md §4)
 
-**An ordinary session** reads its area file and that area's ledger table FIRST, then researches only those parts of the CURRENT DSH, starting from *Sources* and *Likely to go stale*. When it finds a line here false, it fixes the line, re-dates the source row, and updates the ledger in the same commit. It does not re-research areas its task does not touch.
+**An ordinary session** reads every `**S<n>,` bullet for its session number under `dsh/` (the table's last column) and those areas' ledger tables FIRST, then researches only those parts of the CURRENT DSH, starting from *Sources* and *Likely to go stale*. When it finds a line here false, it fixes the line, re-dates the source row, and updates the ledger in the same commit. It does not re-research areas its task does not touch.
 
 **A `.5` hardening session** moves the pin, reruns every ledger row, works through each *Not read* list, and deletes what no longer matters to the route.
 
@@ -47,6 +47,7 @@ For a broad pass, a partial checkout is cheaper: `git fetch --depth 1 --filter=b
 
 - `docs/subsystems/web.md` and `packages/web` are **web search and fetch**, not the GUI, which is `packages/host`, `packages/client`, `packages/api` and `apps/web`.
 - `docs/api-gateway.md` is the UI-to-host RPC gateway, not LLM traffic.
+- Upstream "effect" means a FILE effect (`packages/deliverables/workspace-changes`) and "intent" the fs freshness waterfall: neither is MiniDSH's `effect/recorded` or `EffectIntent`.
 - `packages/terminal` is a persistent PTY for model tools, not a TUI. DSH ships no TUI.
 - `packages/preset` holds only per-session **agent presets** and the persona; the host plane is `packages/bundle/*/cordis.patch.yml` (older notes say `base.cordis.yml`).
 - "Profiles" (`web`, `headless`, `sdk`, `sdk-minimal`, `acp`, Electron's reserved `desktop`) are composition stacks, not wire protocols.

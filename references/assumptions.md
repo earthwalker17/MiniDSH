@@ -1,8 +1,8 @@
 # What MiniDSH believes about DSH: the ledger
 
-> Authority rows at `deepseek-ai/deepseek-harness@c36a83ff` (master, 2026-09-22, re-run in S15); every other row at `ddefc45f` (2026-09-17), checked 2026-09-20 for durability and delegation, 2026-09-19 for the rest. See [the reading rules](README.md).
+> Authority rows at `deepseek-ai/deepseek-harness@c36a83ff` (master, 2026-09-22, re-run in S15); every other row at `ddefc45f` (2026-09-17), checked 2026-09-20 for durability and delegation, 2026-09-19 for the rest, except the pruner row (S8.5, not re-run). See [the reading rules](README.md).
 
-A claim about a repository that changes weekly decays silently, so each claim a MiniDSH document leans on is a row here with the verdict it got when last checked. After a `falsified` or `partly`, the document in the last column says the corrected thing or stops saying it; a row no document leans on any more is deleted. Verdicts: `confirmed`, `partly` (true, with a correction that matters), `falsified`, `unverifiable`. ARCH = `docs/ARCHITECTURE.md`, BP = `docs/BLUEPRINT.md`, PROJ = `docs/PROJECT.md`; a bare source path is under `packages/`.
+A claim about a repository that changes weekly decays silently, so each claim a MiniDSH document leans on is a row here with the verdict it got when last checked. After a `falsified` or `partly`, the document in the last column says the corrected thing or stops saying it; a row that no document, or only the BP §4 record, leans on is deleted. Verdicts: `confirmed`, `partly` (true, with a correction that matters), `falsified`, `unverifiable`. ARCH = `docs/ARCHITECTURE.md`, BP = `docs/BLUEPRINT.md`, PROJ = `docs/PROJECT.md`; a bare source path is under `packages/`.
 
 ## Composition, presets, surfaces
 
@@ -22,13 +22,12 @@ A claim about a repository that changes weekly decays silently, so each claim a 
 
 | Assumption | Verdict | What is true at the pin | Source | Leaned on in |
 |---|---|---|---|---|
-| DSH salvages a torn log in place | confirmed | Write path only; readers never mutate; damage inside a committed frame has no salvage | `session/session-persistence-jsonl/README.md` | ARCH §4, route S16 |
-| DSH uses a write lock rather than a lease | confirmed | A kernel lock (`flock`, a Windows semaphore), no TTL; its docs call it a lease | `session/session-persistence-jsonl/README.md` | ARCH §12 |
-| There is no session deletion upstream | confirmed | "the seam has no deletion API"; a web archive UI exists, unread | `session/session-persistence-jsonl/README.md` | ARCH §13, BP §2 |
+| DSH salvages a torn log in place | confirmed | Write path only; readers never mutate; damage inside a committed frame has no salvage | `session/session-persistence-jsonl/README.md` | route S16 |
+| There is no session deletion upstream | confirmed | "the seam has no deletion API"; a web archive UI exists, unread | `session/session-persistence-jsonl/README.md` | BP §2 |
 | DSH mounts a projection store by default | confirmed | Registry plus a rebuildable fail-soft cache in base; `sdk-minimal` mounts the registry only | `bundle/base/cordis.patch.yml` | BP §3 (rename projection) |
 | `session-query` is mounted by no shipped composition | falsified | base mounts `session-query-sqlite` at `openAt: never` (search off); its model tools are opt-in for the per-request cost their README names | `bundle/base/cordis.patch.yml`, `session-query/tool-session-query/README.md` | ARCH §12 |
-| DSH has the same replay defect (first-request-order binding) | confirmed | A stated limitation, deferred until siblings run concurrently | `test-support/llm-replay/README.md` | ARCH §13, BP §3, route S21 |
-| A user interrupt parks work rather than killing it | partly | Only continuable children (`cancel` with `keepInbox`); claimed work is gone | `docs/subsystems/subagent.md` | BP §3 (background work) |
+| DSH has the same replay defect (first-request-order binding) | confirmed | A stated limitation, deferred until siblings run concurrently | `test-support/llm-replay/README.md` | ARCH §13, route S21 |
+| A user interrupt parks work rather than killing it | partly | Only continuable children (`cancel` with `keepInbox`); claimed work is gone | `docs/subsystems/subagent.md` | route S21 |
 | DSH's inbox is durable, as MiniDSH's is | confirmed | `agent/inbox/spliced` is persisted and log-only; `inserted`/`claimed`/`discarded` are runtime emits | `docs/persistence-catalog.md` | ARCH §4, route S17 |
 | No tool-lifecycle event beyond call and result | partly | `tool/ptc-dispatch-start`/`-dispatch` is that pair, for PTC SUB-calls, BEFORE their gate; repair closes neither | `core/tools/src/types.ts` | ARCH §4, §12 |
 | DSH's repair tells a call that died at its gate from one that ran | falsified | `tool/call` is logged before policy, the ask and guards, and repair answers `TOOL_OUTCOME_UNKNOWN` wherever one was logged: a crash mid-consent reads may-have-run | `core/session/src/repair.ts`, `docs/tool-execution-pipeline.md` | ARCH §12 |
@@ -61,7 +60,6 @@ Re-run 2026-09-22; the mechanisms are in [dsh/authority.md](dsh/authority.md).
 | Upstream's consent shows model prose, not the call | confirmed | The request omits arguments on purpose (`callId` names a presented call); an escalation reads `escalate sandbox to <mode>: <justification>` | `interaction/user-approval/src/types.ts` | ARCH §12 |
 | Upstream cannot express accepting unconfined execution | confirmed | `SandboxEnforcement` is `full \| partial`, no `none`; nothing asks a person to accept `partial`; win32 was once answered by degrading the MODE | `docs/subsystems/sandbox.md` | ARCH §12 |
 | A delegated child's authority is an enforced ceiling upstream | falsified | A seeded pin: a later child switch still wins. Only DEPTH is a real ceiling, in the header | `subagent/subagent/src/child-agent.ts` | ARCH §7, §12 |
-| A confined command inherits the harness environment, keys included, as upstream's does | falsified | `scrubbedParentEnv()` scrubs every child, and did before the old pin | `subprocess/subprocess/src/index.ts` | ARCH §13 |
 | An approval decision records who decided it | falsified | No decider field; the gateway knows and discards it | `docs/persistence-schema.json` | ARCH §7 |
 | A model-written approval reason is clamped before storage or display | falsified | No clamp, bound or control-character strip; the only bound is CSS | `interaction/user-approval/src/invariant.ts` | ARCH §7 |
 | The Windows backend is a restricted-token subsystem, permanently `partial`, with an `Everyone` ACE and a hard-link escape | partly | Token, `partial` and hard link confirmed; a Low label and a delete deny landed 2026-09-18/19. The gap is Everyone in the RESTRICTING list; ACEs are STANDING | `sandbox/sandbox-windows-acl/README.md` | ARCH §13, BP §2 |
