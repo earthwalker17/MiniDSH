@@ -21,7 +21,13 @@
  *    cell count. An unescaped `|` inside a code span is a column separator to
  *    every renderer, and a compaction once broke a §3 row that way invisibly.
  *
- * Run: `node scripts/check-docs.ts` (part of `pnpm check`).
+ * 4. The architecture headings. Code comments, the README, CONTRIBUTING,
+ *    SECURITY and two issue-template links cite `docs/ARCHITECTURE.md` by
+ *    section number and title, so its fourteen `## N.` headings are pinned.
+ *
+ * Run: `node scripts/check-docs.ts` (part of `pnpm check`); `--sections` also
+ * prints each budgeted document's `##` sections by size, the input a
+ * compaction starts from (`.claude/skills/docs-maintenance/SKILL.md`).
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -46,6 +52,24 @@ const WARN_AT = 0.9
 const REFERENCES_DIR = 'references'
 const REFERENCE_FILE_CEILING = 12 * 1024
 const REFERENCES_TOTAL_CEILING = 120 * 1024
+
+/** Cited by number and title from code and from other documents: renaming one is a repository-wide change, not an edit. */
+const ARCHITECTURE_HEADINGS = [
+  '## 1. Layers and dependency direction',
+  '## 2. Kernel (`src/kernel`)',
+  '## 3. Core contracts (`src/core`)',
+  '## 4. Canonical facts: the session log',
+  '## 5. LLM vocabulary and the two adapters',
+  '## 6. The loop and the tool pipeline',
+  '## 7. Authority',
+  '## 8. Surfaces',
+  '## 9. Composition, configuration and packaging',
+  '## 10. Verification',
+  '## 11. Where new things go',
+  '## 12. Divergences from DeepSeek Harness (the ones that still shape decisions)',
+  '## 13. Known limitations (current)',
+  '## 14. File map',
+]
 
 const REPO_BLOB = 'https://github.com/earthwalker17/MiniDSH/blob/main/'
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage'])
@@ -83,8 +107,21 @@ function slugsOf(markdown: string): Set<string> {
   return slugs
 }
 
+/** A document's `##` sections outside code fences, the preamble first, with their sizes in bytes. */
+function sectionsOf(markdown: string): { heading: string; bytes: number }[] {
+  const sections = [{ heading: '(preamble)', bytes: 0 }]
+  let inFence = false
+  for (const line of markdown.split('\n')) {
+    if (/^\s*```/.test(line)) inFence = !inFence
+    if (!inFence && line.startsWith('## ')) sections.push({ heading: line, bytes: 0 })
+    sections.at(-1)!.bytes += Buffer.byteLength(line, 'utf8') + 1
+  }
+  return sections.filter((section) => section.bytes > 0)
+}
+
 const failures: string[] = []
 const warnings: string[] = []
+const SHOW_SECTIONS = process.argv.includes('--sections')
 
 for (const [file, ceiling] of Object.entries(BUDGETS)) {
   const path = join(ROOT, file)
@@ -94,9 +131,30 @@ for (const [file, ceiling] of Object.entries(BUDGETS)) {
   }
   const bytes = statSync(path).size
   const pct = Math.round((bytes / ceiling) * 100)
-  if (bytes > ceiling) failures.push(`${file}: ${bytes} bytes exceeds its ${ceiling}-byte ceiling (${pct}%) — compact existing sections before adding`)
-  else if (bytes > ceiling * WARN_AT) warnings.push(`${file}: ${bytes} bytes is ${pct}% of its ${ceiling}-byte ceiling — compact before it grows again`)
+  const sections = sectionsOf(readFileSync(path, 'utf8'))
+  const largest = sections
+    .toSorted((a, b) => b.bytes - a.bytes)
+    .slice(0, 3)
+    .map((section) => `${section.heading.replace(/^## /, '')} ${section.bytes}`)
+    .join(', ')
+  if (bytes > ceiling) failures.push(`${file}: ${bytes} bytes exceeds its ${ceiling}-byte ceiling (${pct}%) — largest sections: ${largest}. Apply the docs-maintenance skill`)
+  else if (bytes > ceiling * WARN_AT) warnings.push(`${file}: ${bytes} bytes is ${pct}% of its ${ceiling}-byte ceiling — largest sections: ${largest}. Compact before it grows again (docs-maintenance skill)`)
   else console.log(`${file}: ${bytes} bytes (${pct}% of ${ceiling})`)
+  if (SHOW_SECTIONS) {
+    console.log(`  ${file}, by section:`)
+    for (const section of sections) console.log(`  ${String(section.bytes).padStart(6)}  ${section.heading}`)
+  }
+}
+
+{
+  const headings = readFileSync(join(ROOT, 'docs/ARCHITECTURE.md'), 'utf8')
+    .split('\n')
+    .filter((line) => line.startsWith('## '))
+  const missing = ARCHITECTURE_HEADINGS.filter((heading) => !headings.includes(heading))
+  const extra = headings.filter((heading) => !ARCHITECTURE_HEADINGS.includes(heading))
+  for (const heading of missing) failures.push(`docs/ARCHITECTURE.md: heading "${heading}" is missing — code and other documents cite it by number and title`)
+  for (const heading of extra) failures.push(`docs/ARCHITECTURE.md: unexpected heading "${heading}" — a new section is a new citation target; add it to ARCHITECTURE_HEADINGS deliberately`)
+  if (missing.length === 0 && extra.length === 0 && headings.join('\n') !== ARCHITECTURE_HEADINGS.join('\n')) failures.push('docs/ARCHITECTURE.md: the fourteen headings are out of order')
 }
 
 if (!existsSync(join(ROOT, REFERENCES_DIR))) failures.push(`${REFERENCES_DIR}/: missing (CLAUDE.md §4 names it as the DSH reference map)`)
@@ -108,6 +166,7 @@ else {
     total += bytes
     const rel = relative(ROOT, path).replace(/\\/g, '/')
     if (bytes > REFERENCE_FILE_CEILING) failures.push(`${rel}: ${bytes} bytes exceeds the ${REFERENCE_FILE_CEILING}-byte ceiling for a reference file — curate it, a map is not a copy`)
+    if (SHOW_SECTIONS) console.log(`  ${String(bytes).padStart(6)}  ${rel}`)
   }
   if (total > REFERENCES_TOTAL_CEILING) failures.push(`${REFERENCES_DIR}/: ${total} bytes exceeds its ${REFERENCES_TOTAL_CEILING}-byte ceiling`)
   else console.log(`${REFERENCES_DIR}/: ${total} bytes (${Math.round((total / REFERENCES_TOTAL_CEILING) * 100)}% of ${REFERENCES_TOTAL_CEILING})`)
