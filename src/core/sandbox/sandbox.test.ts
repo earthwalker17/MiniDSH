@@ -324,7 +324,11 @@ describe('what enforcement a session accepts', () => {
     const { agent } = await harness.create()
     const sandbox = harness.root.get(SANDBOX)
     expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe('none')
-    expect(acceptances(agent.session.events)).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'initial' }])
+    // Every mode a command can be confined under, the session's own first.
+    expect(acceptances(agent.session.events)).toEqual([
+      { accepts: 'none', forMode: 'workspace-write', reason: 'initial' },
+      { accepts: 'none', forMode: 'read-only', reason: 'initial' },
+    ])
     // The strict fold over the log alone now answers what the live session does.
     expect(acceptanceFor(agent.session.facts, 'workspace-write')).toBe('none')
 
@@ -347,21 +351,36 @@ describe('what enforcement a session accepts', () => {
     await child.dispose()
   })
 
-  it('stamps the default for each mode a session enters, never over what it recorded', async () => {
+  it('stamps the default once per confinable mode at the opening, never over what it recorded', async () => {
     harness = await coreHarness({ sandbox: { accepts: 'none' } })
     const { agent } = await harness.create()
     const sandbox = harness.root.get(SANDBOX)
     sandbox.setAcceptance(agent.session, 'full', 'workspace-write')
     sandbox.setMode(agent.session, 'read-only')
     sandbox.setMode(agent.session, 'workspace-write')
-    // The recorded `full` for workspace-write stands; read-only got its own line.
+    // The recorded `full` for workspace-write stands, and the mode switches add nothing.
     expect(acceptances(agent.session.events)).toEqual([
       { accepts: 'none', forMode: 'workspace-write', reason: 'initial' },
+      { accepts: 'none', forMode: 'read-only', reason: 'initial' },
       { accepts: 'full', forMode: 'workspace-write', reason: 'change' },
-      { accepts: 'none', forMode: 'read-only', reason: 'change' },
     ])
     expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe('full')
     expect(acceptanceFor(agent.session.facts, 'read-only')).toBe('none')
+  })
+
+  it('records the acceptance an escalation runs under before the escalation can happen', async () => {
+    // The docs review's probe: a read-only session under a `none` deployment
+    // escalates one command to workspace-write. `resolve` with a mode records
+    // nothing, so that mode's acceptance must already be on the record — a
+    // cold reader, or a resume on a strict host, would otherwise read `full`.
+    harness = await coreHarness({ sandbox: { accepts: 'none', mode: 'read-only' } })
+    const { agent } = await harness.create()
+    const sandbox = harness.root.get(SANDBOX)
+    const before = agent.session.events.length
+    expect(sandbox.resolve({ session: agent.session, mode: 'workspace-write' }).mode).toBe('workspace-write')
+    expect(agent.session.events.length).toBe(before)
+    expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe(acceptanceFor(agent.session.facts, 'workspace-write'))
+    expect(acceptanceFor(agent.session.facts, 'workspace-write')).toBe('none')
   })
 
   it('stamps `resume` when a session recorded under a strict host is picked up by a weakened one', async () => {
@@ -383,7 +402,10 @@ describe('what enforcement a session accepts', () => {
       const resumed = await harness.root.get(AGENTS).resume(harness.root, id)
       // What this lifecycle actually runs under is on the record, so a later
       // cold reader — or a resume on a strict host — reads the same answer.
-      expect(acceptances(resumed.agent.session.events)).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'resume' }])
+      expect(acceptances(resumed.agent.session.events)).toEqual([
+      { accepts: 'none', forMode: 'workspace-write', reason: 'resume' },
+      { accepts: 'none', forMode: 'read-only', reason: 'resume' },
+    ])
       await resumed.dispose()
     } finally {
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })

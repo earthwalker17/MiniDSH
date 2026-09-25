@@ -269,6 +269,16 @@ describe('persistence-jsonl: what a reader is told about the bytes it could not 
     expect(stored.integrity?.stop?.reason).toMatch(/NUL bytes .* power cut after the last sync/)
   })
 
+  it('reads a zero-filled END of file as a torn tail, which a resume sidecars', async () => {
+    // The common power-cut shape: the size reached the disk and the data did
+    // not, so the tail is zeros with no newline. Like any unterminated
+    // fragment it is torn, not damage; only zeros FOLLOWED by a surviving line
+    // stop the prefix (above).
+    const { id } = await storedWith(`${'\u0000'.repeat(512)}`)
+    const stored = root!.get(PERSISTENCE).load(id)!
+    expect({ damaged: stored.damaged, tail: stored.integrity?.tail }).toEqual({ damaged: undefined, tail: 'torn' })
+  })
+
   it('calls a single stray NUL corruption, not a power cut', async () => {
     const { id } = await storedWith(`{"type":"turn/start","seq":3,"time":1,"data":{"turn":"\u00002"}}\n`)
     expect(root!.get(PERSISTENCE).load(id)!.integrity?.stop?.reason).toBe('a NUL byte inside a line (corruption)')

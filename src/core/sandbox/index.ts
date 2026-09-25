@@ -322,20 +322,31 @@ class SandboxService implements Sandbox {
   }
 
   /**
-   * The acceptance in force, written down beside the mode it governs when a
-   * DEPLOYMENT weakened it — the same discipline as the mode's own opening
-   * stamp and the approval policy's, so a stored log says what its session
-   * accepted without the host that ran it. Nothing is written under the strict
-   * default (a line saying `full` would say what the fold already answers),
-   * nothing for a mode the log already records (a resume keeps what was
-   * recorded), and nothing in a delegated child, whose pin governs every mode.
-   * `reason` is the mode stamp's, or `resume` when this lifecycle picked up a
-   * session whose stamp still stands.
+   * The acceptance in force, written down when a DEPLOYMENT weakened it — the
+   * same discipline as the mode's own opening stamp and the approval
+   * policy's, so a stored log says what its session accepted without the host
+   * that ran it.
+   *
+   * For EVERY mode a command can be confined under, not only the session's
+   * own: an approved escalation runs one command under a wider mode the
+   * session never switched into (`resolve` with a mode records nothing), and
+   * stamping it there would end every standing grant (`sandbox/acceptance`
+   * is an authority event), so it is written at the opening, before any grant
+   * can exist. Nothing is written under the strict default (a line saying
+   * `full` would say what the fold already answers), nothing for a mode the
+   * log already records (a resume keeps what was recorded), and nothing in a
+   * delegated child, whose pin is recorded by `open` and whose every other
+   * mode is strict. `reason` is the mode stamp's, or `resume` when this
+   * lifecycle picked up a session whose stamp still stands.
    */
   private stampAcceptance(session: Session, mode: SandboxMode, reason: SandboxReason): void {
     if (this.defaultAcceptance === DEFAULT_ACCEPTANCE || session.header.delegatedBy !== undefined) return
-    if (recordedAcceptance(session.facts, mode) !== undefined) return
-    session.append(SANDBOX_ACCEPTANCE, { accepts: this.defaultAcceptance, forMode: mode, reason })
+    for (const confinable of [mode, ...SANDBOX_MODES.filter((other) => other !== mode)]) {
+      // Never confined, so nothing about it is accepted.
+      if (confinable === 'danger-full-access') continue
+      if (recordedAcceptance(session.facts, confinable) !== undefined) continue
+      session.append(SANDBOX_ACCEPTANCE, { accepts: this.defaultAcceptance, forMode: confinable, reason })
+    }
   }
 }
 

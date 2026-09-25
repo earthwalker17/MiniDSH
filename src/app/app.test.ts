@@ -80,7 +80,11 @@ describe('headless runner (real composition, scripted model)', () => {
     const accepted = stored.split('\n').filter((line) => line.includes('"sandbox/acceptance"')).map((line) => (JSON.parse(line) as { data: unknown }).data)
     // One line, the opening stamp: the explicit switch `applyAuthority` makes
     // finds it already recorded, so a resume on a strict host keeps it.
-    expect(accepted).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'initial' }])
+    // Every confinable mode, the session's own first: an escalation must not run under an unrecorded acceptance.
+    expect(accepted).toEqual([
+      { accepts: 'none', forMode: 'workspace-write', reason: 'initial' },
+      { accepts: 'none', forMode: 'read-only', reason: 'initial' },
+    ])
   })
 
   /**

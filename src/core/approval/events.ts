@@ -118,8 +118,8 @@ const AUTHORITY_KINDS: ReadonlySet<string> = new Set([APPROVAL_POLICY.type, 'san
 export function liveGrants(events: readonly EventEnvelope[]): Map<string, ApprovalGrant> {
   const live = new Map<string, ApprovalGrant>()
   // A grant is written BEFORE the decision it came from (so the decision can
-  // name it), and the log is not fsynced, so a crash can keep the grant and
-  // lose the decision. Repair then closes that ask `cancelled` — nobody
+  // name it), with no checkpoint between the two, so a crash can keep the
+  // grant and lose the decision. Repair then closes that ask `cancelled` — nobody
   // consented — while the grant would go on answering for the rest of the
   // session. A consent is only live once its own ask is recorded as allowed,
   // which is the same rule the pre-commit invariant states from the other side.

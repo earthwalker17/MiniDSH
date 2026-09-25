@@ -477,8 +477,9 @@ export class ReactLoopAgent implements Agent {
        * when — and only when — an effect could follow. Without it, absence of
        * the record would not prove absence of the body, and repair would have
        * to read every logged call as outcome-unknown, which is where it
-       * started. The write is cheap: an append already reached the descriptor,
-       * and a flush here only surfaces a failure the provider remembered.
+       * started. The flush is a real sync under a `synced` store — milliseconds,
+       * inside the call's deadline (`tools/registry.ts`) — and it is what lets a
+       * synced lifecycle read a missing dispatch as "never ran" after a power cut.
        *
        * A lost write sets `lost` HERE rather than leaving the pipeline to
        * return an error result on its own, because the turn must end the way

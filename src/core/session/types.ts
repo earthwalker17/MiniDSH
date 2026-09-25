@@ -119,8 +119,9 @@ export const TOOL_CALL = eventKind<{ turn: number; step: number; callId: string;
  * guard, rejected at an approval, or cancelled before dispatch.
  *
  * A call with a `tool/call` and no `tool/dispatch` provably did not reach its
- * body — but only in a log that records dispatches at all, which is why the
- * repair rule falls back to "unknown" for a log that has never written one.
+ * body — but only in a lifecycle whose `session/lifecycle` claims both that
+ * its driver writes one and that its checkpoints were synced; repair reads
+ * every other lifecycle's missing dispatch as "unknown" (`repair.ts`).
  *
  * **It sits AFTER the gate.** DSH's nearest event, `tool/ptc-dispatch-start`,
  * is log-only and keyed by call id in the same way, but means "the pipeline

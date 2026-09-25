@@ -493,7 +493,10 @@ describe('protocol: the authority control plane', () => {
     await client.waitForIdle(sessionId)
     // The session never creates itself here, so the row default is its only
     // path in — and the log now names it, so a cold reader needs no host.
-    expect(client.frames('sandbox/acceptance').map((frame) => frame.event.data)).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'initial' }])
+    expect(client.frames('sandbox/acceptance').map((frame) => frame.event.data)).toEqual([
+      { accepts: 'none', forMode: 'workspace-write', reason: 'initial' },
+      { accepts: 'none', forMode: 'read-only', reason: 'initial' },
+    ])
     const knob = await client.result<{ accepts: string }>('session/authority', { sessionId })
     const attached = await client.result<{ view: { authority: { accepts: string } } }>('session/attach', { sessionId })
     expect({ knob: knob.accepts, view: attached.view.authority.accepts }).toEqual({ knob: 'none', view: 'none' })
