@@ -33,6 +33,7 @@ import { APPROVAL, APPROVAL_POLICY, openingApprovalPolicy, type ApprovalPolicy }
 import { createPluginMessage } from '../../core/llm/message.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import {
+  DEFAULT_ACCEPTANCE,
   meetsAcceptance,
   openingAcceptance,
   SANDBOX,
@@ -155,7 +156,11 @@ function authorityLines(ctx: Context, agent: Agent | undefined): string[] {
   // Off the OPENING acceptance for the opening mode, for the reason the stamp
   // itself is: this section is the cached prompt prefix, and a mid-session
   // switch may not move it. A switch arrives as a message instead.
-  const accepts = agent ? openingAcceptance(agent.session.facts, agent.session.liveStart, mode, sandbox.acceptsFor(undefined, mode)) : sandbox.acceptsFor(undefined, mode)
+  // The fallback is the one `acceptsFor` uses for this kind of session — the
+  // deployment's for a top-level one, strict for a delegated child — so the
+  // prompt never tells a child it accepts what its shell then refuses.
+  const fallback = agent?.session.header.delegatedBy !== undefined ? DEFAULT_ACCEPTANCE : sandbox.acceptsFor(undefined, mode)
+  const accepts = agent ? openingAcceptance(agent.session.facts, agent.session.liveStart, mode, fallback) : fallback
   const confinement = mode === 'danger-full-access' ? [] : confinementLines(enforcement, accepts)
   return [
     `- Sandbox: ${mode}. ${modeEffect(mode, undefined)}`,

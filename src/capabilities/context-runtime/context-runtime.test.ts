@@ -21,6 +21,7 @@ import { authorityInvariantPlugin } from '../../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../../core/session/index.ts'
 import { SHELL, type Shell, type ShellSession } from '../../core/shell/index.ts'
 import { toolsPlugin } from '../../core/tools/index.ts'
+import { asSessionId } from '../../core/ids.ts'
 import { contextRuntimePlugin } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -288,6 +289,44 @@ describe('the runtime-context section', () => {
     expect(system).toContain('Sandbox: read-only')
     expect(system).toContain('Approvals: never')
     expect(system).not.toContain('Sandbox: workspace-write')
+    await resumed.dispose()
+  })
+
+  it('tells a resumed child the acceptance its shell will apply, never the deployment’s', async () => {
+    // A child pinned `none` for workspace-write narrows to read-only, then is
+    // picked up by a deployment that accepts `none`. Its read-only mode has no
+    // acceptance line, and the shell answers strict for a delegated session;
+    // falling back to the deployment here told the model its commands would
+    // run unconfined while every one of them was refused.
+    const first = await harness('none')
+    const child = await first.root.get(AGENTS).create(first.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      setup: (_childCtx, delegated) => {
+        first.root.get(SANDBOX).open(delegated.session, { mode: 'workspace-write', reason: 'delegation', accepts: 'none' })
+        first.root.get(APPROVAL).open(delegated.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    first.root.get(SANDBOX).setMode(child.agent.session, 'read-only')
+    const seed = child.agent.session.forkSeed()
+    const id = child.agent.id
+    await child.dispose()
+
+    const test = await harness('none', 'workspace-write', 'none')
+    const resumed = await test.root.get(AGENTS).create(test.root, {
+      cwd: process.cwd(),
+      sessionId: id,
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      seed,
+      origin: 'resumed',
+    })
+    expect(test.root.get(SANDBOX).acceptsFor(resumed.agent.session, 'read-only')).toBe('full')
+    const system = (await test.root.get(PROMPT).assemble(resumed.agent)).system
+    expect(system).toContain('Sandbox: read-only')
+    expect(system).toContain('so the shell refuses to run under this mode')
+    expect(system).not.toContain('a shell command runs WITHOUT an OS sandbox')
     await resumed.dispose()
   })
 })

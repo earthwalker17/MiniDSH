@@ -242,16 +242,19 @@ class SandboxService implements Sandbox {
   }
 
   /**
-   * A delegated child falls back to its PIN, never to the deployment: the pin
-   * is what it was started accepting, and a mode it narrows into (a resumed
-   * child may) has no line of its own. Falling back to the deployment there
-   * let a child pinned `full`, resumed under a `none` deployment, accept an
-   * unconfined `read-only` shell nobody had given it.
+   * A delegated child falls back to the STRICT default, never to the
+   * deployment and never to its pin: its pin is recorded for the mode it was
+   * given for (`open`), and a mode it narrows into (a resumed child may) was
+   * accepted by nobody. The deployment fallback let a child pinned `full`,
+   * resumed under a `none` deployment, accept an unconfined `read-only` shell;
+   * the pin fallback (S16's first fix) let a child pinned `none` for
+   * `workspace-write` carry it into `read-only` — the widening `forMode`
+   * exists to prevent. With this, a child's answer is exactly the fold of its
+   * own log, which is what every cold reader computes.
    */
   acceptsFor(session: Session | undefined, mode: SandboxMode): SandboxEnforcement {
     if (!session) return this.defaultAcceptance
-    if (session.header.delegatedBy !== undefined) return acceptanceFor(session.facts, mode, delegationAcceptance(session.facts)?.accepts ?? DEFAULT_ACCEPTANCE)
-    return acceptanceFor(session.facts, mode, this.defaultAcceptance)
+    return acceptanceFor(session.facts, mode, session.header.delegatedBy !== undefined ? DEFAULT_ACCEPTANCE : this.defaultAcceptance)
   }
 
   setAcceptance(session: Session, accepts: SandboxEnforcement, forMode: SandboxMode): void {

@@ -436,6 +436,31 @@ describe('what enforcement a session accepts', () => {
     }
   })
 
+  it('never lets a child pinned `none` carry that pin into a mode it narrows into', async () => {
+    // The other direction of the same hole: falling back to the PIN for every
+    // mode re-opened exactly the read-only widening `forMode` exists to stop.
+    // The live answer must be the cold fold of the log, which is strict here.
+    harness = await coreHarness()
+    const sandbox = harness.root.get(SANDBOX)
+    const child = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      setup: (_childCtx, delegated) => {
+        sandbox.open(delegated.session, { mode: 'workspace-write', reason: 'delegation', accepts: 'none' })
+        harness!.root.get(APPROVAL).open(delegated.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    try {
+      sandbox.setMode(child.agent.session, 'read-only')
+      expect(sandbox.acceptsFor(child.agent.session, 'read-only')).toBe('full')
+      expect(sandbox.acceptsFor(child.agent.session, 'read-only')).toBe(acceptanceFor(child.agent.session.facts, 'read-only'))
+      expect(sandbox.acceptsFor(child.agent.session, 'workspace-write')).toBe('none')
+    } finally {
+      await child.dispose()
+    }
+  })
+
   it('applies an acceptance ONLY to the mode it was accepted for', async () => {
     harness = await coreHarness()
     const { agent } = await harness.create()
