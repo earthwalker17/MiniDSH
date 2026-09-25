@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -8,7 +8,7 @@ import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
 import { SESSIONS, SESSION_TITLE, TURN_END, TURN_START, USER_MESSAGE, foldSessionTitle, repairInterruptedTail, type Sessions } from '../../core/session/index.ts'
 import { sessionPlugin } from '../../core/session/index.ts'
-import { persistenceJsonlPlugin } from './index.ts'
+import { persistenceJsonlPlugin, unreadableHeader } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 
@@ -267,6 +267,27 @@ describe('persistence-jsonl: what a reader is told about the bytes it could not 
     const stored = root!.get(PERSISTENCE).load(id)!
     expect(stored.damaged).toBe(true)
     expect(stored.integrity?.stop?.reason).toMatch(/NUL bytes .* power cut after the last sync/)
+  })
+
+  it('calls a single stray NUL corruption, not a power cut', async () => {
+    const { id } = await storedWith(`{"type":"turn/start","seq":3,"time":1,"data":{"turn":"\u00002"}}\n`)
+    expect(root!.get(PERSISTENCE).load(id)!.integrity?.stop?.reason).toBe('a NUL byte inside a line (corruption)')
+  })
+
+  it('says why a file under an id reads as no session, where load can only say there is none', async () => {
+    const { id, base } = await storedWith('')
+    expect(unreadableHeader(base, id)).toBeUndefined()
+    expect(unreadableHeader(base, 'absent')).toBeUndefined()
+    for (const [bytes, reason] of [
+      [Buffer.alloc(0), 'the file is empty'],
+      [Buffer.alloc(512), 'NUL bytes where the header line should be'],
+      [Buffer.from('{"kind":"sess'), 'its header line is unterminated'],
+      [Buffer.from('{"type":"turn/start"}\n'), 'its first line is not a session header'],
+    ] as const) {
+      writeFileSync(fileFor(base, 'broken'), bytes)
+      expect(root!.get(PERSISTENCE).load('broken')).toBeUndefined()
+      expect(unreadableHeader(base, 'broken')).toBe(reason)
+    }
   })
 })
 

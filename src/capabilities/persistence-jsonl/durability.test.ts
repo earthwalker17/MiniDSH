@@ -23,6 +23,9 @@ const control = vi.hoisted(() => ({
   calls: 0,
   dirSyncs: 0,
   log: [] as string[],
+  /** Descriptors opened on a `.torn` sidecar, and whether their writes come back short (a full disk). */
+  sidecars: new Set<number>(),
+  shortSidecar: false,
 }))
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -45,8 +48,18 @@ vi.mock('node:fs', async (importOriginal) => {
       actual.fsync(fd, callback)
     },
     fsyncSync: (fd: number) => {
-      control.log.push('fsyncSync')
+      control.log.push(actual.fstatSync(fd).isDirectory() ? 'fsyncSync:dir' : 'fsyncSync')
       actual.fsyncSync(fd)
+    },
+    openSync: (path: realFs.PathLike, flags?: realFs.OpenMode, mode?: realFs.Mode) => {
+      const fd = actual.openSync(path, flags ?? 'r', mode)
+      if (String(path).endsWith('.torn')) control.sidecars.add(fd)
+      return fd
+    },
+    writeSync: (fd: number, buffer: NodeJS.ArrayBufferView, ...rest: unknown[]) => {
+      // libuv returns the partial total, not an error, when ENOSPC hits mid-buffer.
+      if (control.shortSidecar && control.sidecars.has(fd) && rest.length === 0) return actual.writeSync(fd, (buffer as Buffer).subarray(0, 40))
+      return (actual.writeSync as (...args: unknown[]) => number)(fd, buffer, ...rest)
     },
     truncateSync: (path: realFs.PathLike, length?: number) => {
       control.log.push('truncateSync')
@@ -76,6 +89,8 @@ beforeEach(() => {
   control.calls = 0
   control.dirSyncs = 0
   control.log = []
+  control.sidecars = new Set()
+  control.shortSidecar = false
 })
 
 afterEach(async () => {
@@ -148,6 +163,8 @@ describe('persistence-jsonl: a resolved flush is on stable storage', () => {
     const sizeWithWrite = readFileSync(file).length
     const second = session.flush()
     await ticks()
+    // It waits for the sync in flight to finish rather than starting another beside it.
+    expect(control.held).toHaveLength(1)
     control.held.shift()!.release()
     await first
     expect(await settled(second)).toBe(false)
@@ -173,6 +190,21 @@ describe('persistence-jsonl: a resolved flush is on stable storage', () => {
     await flushing
     await new Promise((resolve) => setImmediate(resolve))
     expect(control.log.filter((entry) => entry === `closeSync:${held.fd}`)).toHaveLength(1)
+  })
+
+  it('refuses a flush whose write no sync covered before the session was detached', async () => {
+    const { sessions, session } = await materialized()
+    control.hold = true
+    const first = session.flush()
+    await ticks()
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+    const second = session.flush()
+    await ticks()
+    await sessions.detach(session)
+    control.held.shift()!.release()
+    await first
+    // The sync it waited on started before its write, and the file is closed now.
+    await expect(second).rejects.toSatisfy(persistFailure(/detached before its writes were synced/))
   })
 
   it('remembers a failed sync, quarantines the file, and fails every later flush', async () => {
@@ -208,8 +240,22 @@ describe('persistence-jsonl: a resolved flush is on stable storage', () => {
     const stored = root!.get(PERSISTENCE).load('torn')!
     control.log = []
     sessions.create({ cwd: stored.header.cwd, id: stored.header.id, createdAt: stored.header.createdAt, seed: stored.events, origin: 'resumed' })
-    const order = control.log.filter((entry) => entry === 'fsyncSync' || entry === 'truncateSync')
-    expect(order).toEqual(['fsyncSync', 'truncateSync'])
+    const order = control.log.filter((entry) => entry.startsWith('fsyncSync') || entry === 'truncateSync')
+    // The fragment, then (POSIX) the new sidecar's name, then the truncate.
+    expect(order).toEqual(process.platform === 'win32' ? ['fsyncSync', 'truncateSync'] : ['fsyncSync', 'fsyncSync:dir', 'truncateSync'])
     expect(readFileSync(`${file}.torn`, 'utf8')).toContain('{"type":"assistant/chu')
+  })
+
+  it('leaves the log untouched when the sidecar write comes back short', async () => {
+    const { sessions, session, file } = await materialized('short')
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+    await sessions.detach(session)
+    appendFileSync(file, '{"type":"assistant/chunk","seq":3,"time":1,"data":{"text":"the fragment a reader would want back"}')
+    const before = readFileSync(file)
+    const stored = root!.get(PERSISTENCE).load('short')!
+    control.shortSidecar = true
+    const resumed = sessions.create({ cwd: stored.header.cwd, id: stored.header.id, createdAt: stored.header.createdAt, seed: stored.events, origin: 'resumed' })
+    await expect(resumed.flush()).rejects.toSatisfy(persistFailure(/wrote 40 of \d+ bytes of the torn tail/))
+    expect(readFileSync(file).equals(before)).toBe(true)
   })
 })

@@ -27,6 +27,7 @@ import {
   appendFileSync,
   close as fsClose,
   closeSync,
+  existsSync,
   fdatasync,
   fsync,
   fsyncSync,
@@ -46,7 +47,7 @@ import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { PERSISTENCE, type Persistence, type StoredIntegrity, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
+import { PERSISTENCE, type Persistence, type StoredIntegrity, type StoredLease, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
 import {
   SESSION_CREATED,
   SESSION_DISPOSED,
@@ -97,13 +98,14 @@ interface ScanResult {
 /**
  * Why a terminated line is not the next event, or `undefined` when it is.
  *
- * A NUL gets its own words because it is the one shape with a known cause: a
- * power cut after the last sync can leave a zero-filled region where lines had
- * not reached the disk (`JSON.stringify` never emits a raw NUL), which is not
- * the bit rot or hand edit every other reason here means.
+ * A RUN of NULs gets its own words because it is the one shape with a known
+ * cause: a power cut after the last sync can leave a zero-filled region where
+ * lines had not reached the disk (`JSON.stringify` never emits a raw NUL). A
+ * stray NUL byte is corruption like any other, and is named as such.
  */
 function lineFault(line: string, expectedSeq: number): { reason: string } | { event: EventEnvelope } {
-  if (line.includes('\u0000')) return { reason: 'NUL bytes where a line should be (the signature of a power cut after the last sync)' }
+  if (line.includes(NUL_RUN)) return { reason: 'a run of NUL bytes where a line should be (the signature of a power cut after the last sync)' }
+  if (line.includes('\u0000')) return { reason: 'a NUL byte inside a line (corruption)' }
   let parsed: unknown
   try {
     parsed = JSON.parse(line)
@@ -116,6 +118,9 @@ function lineFault(line: string, expectedSeq: number): { reason: string } | { ev
   if (event.seq !== expectedSeq) return { reason: `seq ${event.seq} where ${expectedSeq} was expected` }
   return { event }
 }
+
+/** Eight zero bytes: a filesystem zero-fills whole blocks, and no string this writer emits holds even one. */
+const NUL_RUN = '\u0000'.repeat(8)
 
 /** Scans a session file line by line, tracking exact byte offsets. */
 function scanSessionFile(file: string): ScanResult | undefined {
@@ -203,23 +208,42 @@ function holderIsDead(holder: LeaseHolder): boolean {
   }
 }
 
-/** Who holds a stored log's write lease, as a cold reader may state it without touching the lock. */
-export interface LeaseStatus {
-  readonly pid: number
-  readonly host: string
-  readonly acquiredAt?: number
-  /** Probed on this host (`kill(pid, 0)`); `unknown` for another host, which cannot be probed. */
-  readonly alive: boolean | 'unknown'
+/**
+ * Why `<root>/<id>.jsonl` exists and still reads as no session — an empty
+ * file, a zero-filled or unterminated first line, a first line that is not a
+ * session header — or `undefined` when there is no such file or its header
+ * reads. `load` answers "no such session" for both, and a cold reader must
+ * not: a power cut at creation zero-fills exactly the header.
+ */
+export function unreadableHeader(root: string, id: string): string | undefined {
+  let buffer: Buffer
+  try {
+    buffer = readFileSync(join(root, `${encodeURIComponent(id)}.jsonl`))
+  } catch {
+    return undefined
+  }
+  if (buffer.length === 0) return 'the file is empty'
+  const nl = buffer.indexOf(0x0a)
+  const first = buffer.subarray(0, nl === -1 ? buffer.length : nl)
+  if (first.includes(0)) return 'NUL bytes where the header line should be'
+  if (nl === -1) return 'its header line is unterminated'
+  try {
+    const parsed = JSON.parse(first.toString('utf8')) as Partial<HeaderLine>
+    if (parsed.kind === 'session' && typeof parsed.id === 'string' && typeof parsed.createdAt === 'number' && typeof parsed.version === 'number') return undefined
+  } catch {
+    // Named below.
+  }
+  return 'its first line is not a session header'
 }
 
 /**
- * The lease on `<root>/<id>.jsonl`, read and never taken, removed or reclaimed:
- * what a cold reader needs to say "this log is still being written" rather
- * than read an append in flight as a torn tail. `undefined` when no lock (or
- * an unreadable one) is there.
+ * The lease on a stored log, read and never taken, removed or reclaimed: what
+ * a cold reader needs to say "this log is still being written" rather than
+ * read an append in flight as a torn tail. `undefined` when no lock (or an
+ * unreadable one) is there.
  */
-export function readLease(root: string, id: string): LeaseStatus | undefined {
-  const holder = readLeaseHolder(`${join(root, `${encodeURIComponent(id)}.jsonl`)}.lock`)
+function readLease(file: string): StoredLease | undefined {
+  const holder = readLeaseHolder(`${file}.lock`)
   if (!holder) return undefined
   const alive = holder.host !== hostname() ? 'unknown' : !holderIsDead(holder)
   return { pid: holder.pid, host: holder.host, ...(typeof holder.acquiredAt === 'number' ? { acquiredAt: holder.acquiredAt } : {}), alive }
@@ -392,13 +416,25 @@ function syncDirectory(dir: string): Promise<void> {
   })
 }
 
+/** The same, for the one synchronous path that needs it: a new `.torn` sidecar's name, before the truncate it pays for. */
+function syncDirectorySync(dir: string): void {
+  const fd = openSync(dir, 'r')
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
 class JsonlArchive implements Persistence {
   /**
    * A resolved flush is on stable storage: `onFlush` syncs the file (and, once,
-   * its directory on POSIX). Measured 2026-09-26, append + `fdatasync` of one
-   * log line: Windows NTFS p50 3.6 ms / p95 4.4 ms, WSL 2 ext4 p50 8-10 ms /
-   * p95 11 ms; a flush with nothing new to sync costs no syscall at all. A tool
-   * call pays two (after `tool/call`, after `tool/dispatch`), a step one more.
+   * its directory on POSIX). Measured 2026-09-26 over several runs, append +
+   * `fdatasync` of one log line: Windows NTFS p50 0.7–3.6 ms / p95 0.9–4.4 ms,
+   * WSL 2 ext4 p50 2.4–10 ms / p95 4.7–20 ms — the spread is the host's load.
+   * A flush with nothing new to sync costs no syscall at all. A tool call pays
+   * up to two (after `tool/call`, after `tool/dispatch`), a step one more, and
+   * every turn end and every resume one.
    */
   readonly durability = 'synced' as const
   private readonly root: string
@@ -646,17 +682,23 @@ class JsonlArchive implements Persistence {
       // a delimiter keeps fragments from successive crashes individually
       // recoverable (a torn fragment never ends in a newline). ONE append, so
       // a failure between sidecar and truncate cannot leave half a record —
-      // and SYNCED before the truncate, or a power cut could keep the
-      // truncation (journaled metadata) and lose the fragment it moved.
+      // its byte count checked, because a full disk makes `writeSync` return
+      // short rather than throw — and SYNCED before the truncate, name and
+      // all, or a power cut could keep the truncation (journaled metadata)
+      // and lose the fragment it moved.
       const torn = readFileSync(file).subarray(scan.validBytes)
       const sidecar = `${file}.torn`
+      const created = !existsSync(sidecar)
       const fd = openSync(sidecar, 'a')
       try {
-        writeSync(fd, Buffer.concat([Buffer.from(`# torn ${new Date().toISOString()} (${torn.length} bytes)\n`), torn, Buffer.from('\n')]))
+        const record = Buffer.concat([Buffer.from(`# torn ${new Date().toISOString()} (${torn.length} bytes)\n`), torn, Buffer.from('\n')])
+        const written = writeSync(fd, record)
+        if (written !== record.length) throw new Error(`session ${session.id}: wrote ${written} of ${record.length} bytes of the torn tail to its sidecar; refusing to truncate`)
         fsyncSync(fd)
       } finally {
         closeSync(fd)
       }
+      if (created && process.platform !== 'win32') syncDirectorySync(dirname(file))
       truncateSync(file, scan.validBytes)
     }
     const delta = session.events.slice(scan.events.length)
@@ -739,8 +781,9 @@ class JsonlArchive implements Persistence {
     const target = opened.gen
     while (opened.synced < target) {
       // Detached since (disposal closes the descriptor): there is no file left
-      // to sync through, and nothing flushes a detached session.
-      if (this.open.get(session) !== opened) return
+      // to sync through. Resolving here would say a write is on stable storage
+      // that no sync ever covered — the one claim this method exists to make.
+      if (this.open.get(session) !== opened) throw new Error(`session ${session.id}: detached before its writes were synced`)
       opened.syncing ??= this.sync(session, opened).finally(() => {
         opened.syncing = undefined
       })
@@ -784,7 +827,14 @@ class JsonlArchive implements Persistence {
       tail: scan.tail === 'none' ? 'none' : scan.tail === 'torn-line' ? 'torn' : 'damaged',
       ...(scan.stop === undefined ? {} : { stop: scan.stop }),
     }
-    return { header: scan.header, events: scan.events, integrity, ...(scan.tail === 'invalid' ? { damaged: true as const } : {}) }
+    const lease = readLease(file)
+    return {
+      header: scan.header,
+      events: scan.events,
+      integrity,
+      ...(scan.tail === 'invalid' ? { damaged: true as const } : {}),
+      ...(lease === undefined ? {} : { lease }),
+    }
   }
 
   list(): StoredSessionSummary[] {
