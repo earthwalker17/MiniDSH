@@ -255,7 +255,13 @@ describe('the web surface, driven as a browser drives it', () => {
     }
     // The text streamed as chunks AND landed durably.
     expect(notifications.some((one) => (one.params.event as { type: string } | undefined)?.type === 'assistant/chunk')).toBe(true)
-    const attached = await call<{ page: { events: { type: string }[] }; view: { status: string } }>('session/attach', { sessionId })
+    // `turn/end` is appended before the turn's last checkpoint, which is a real
+    // sync since S16 (milliseconds under WSL), so idle follows it, not with it.
+    let attached = await call<{ page: { events: { type: string }[] }; view: { status: string } }>('session/attach', { sessionId })
+    while (attached.view.status !== 'idle' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      attached = await call('session/attach', { sessionId })
+    }
     expect(attached.page.events.some((event) => event.type === 'assistant/message')).toBe(true)
     expect(attached.view.status).toBe('idle')
 
