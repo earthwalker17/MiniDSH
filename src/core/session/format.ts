@@ -15,9 +15,18 @@
  * reader that ignores it becomes more conservative: narrower authority,
  * `TOOL_OUTCOME_UNKNOWN` rather than `TOOL_NOT_STARTED`, a refusal rather than
  * a run. A new fact kind usually is (an older reader skips it as an opaque
- * fact); a new surface kind, a new envelope field, a changed meaning, or a fact
- * that NARROWS authority or that repair must honour is not, and bumps
- * `SESSION_FORMAT_VERSION` with an in-memory migration for reading.
+ * fact); a new surface kind, a new envelope field, a changed meaning, or a
+ * fact whose ABSENCE an older reader would read less conservatively — one that
+ * narrows authority, or that repair must honour — is not, and bumps
+ * `SESSION_FORMAT_VERSION` with an in-memory migration for reading. A new
+ * VALUE of a lifecycle claim is additive: repair trusts only the values it
+ * knows (`session/lifecycle`).
+ *
+ * **What 1.0.0 cannot do with an S16 log.** It reads and continues one (the
+ * format is unchanged), but not a SALVAGED fork whose seed answered a block
+ * with no logged call under `SalvagedError` or `InFluxError`: its session
+ * invariant admits only `TOOL_NOT_STARTED` there, so it refuses the seed.
+ * That refusal is the conservative direction, and needs no bump.
  *
  * **Inside a declared format, a malformed line is damage, not format.** A
  * writer that follows the rule above never writes an envelope key or a surface
@@ -65,5 +74,17 @@ export function envelopeFault(raw: unknown): string | undefined {
     return `a surface operation on "${record.type}", which is not a surface kind`
   }
   if (surface && record.surfaceOp === undefined) return `a "${record.type}" with no surface operation`
+  if (record.surfaceOp !== undefined && !isSurfaceOp(record.surfaceOp)) return 'a malformed surface operation'
+  if (record.sourceEventSeqs !== undefined && !(Array.isArray(record.sourceEventSeqs) && record.sourceEventSeqs.every(isSeq))) return 'malformed source event seqs'
   return undefined
+}
+
+const isSeq = (value: unknown): boolean => typeof value === 'number' && Number.isInteger(value) && value >= 0
+
+function isSurfaceOp(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const op = value as Record<string, unknown>
+  const keys = Object.keys(op).length
+  if (op.op === 'append') return keys === 1
+  return op.op === 'replace' && keys === 3 && isSeq(op.start) && isSeq(op.end)
 }

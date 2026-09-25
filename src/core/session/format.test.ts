@@ -6,16 +6,20 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { assistantText } from '../../test-support/scripted-adapter.ts'
 import { AGENTS } from '../agent/index.ts'
-import { asSessionId } from '../ids.ts'
-import { createUserMessage } from '../llm/message.ts'
+import { asCallId, asSessionId } from '../ids.ts'
+import { createAssistantMessage, createUserMessage } from '../llm/message.ts'
 import {
+  ASSISTANT_MESSAGE,
   END_SEED,
   envelopeFault,
   SESSION_FORMAT_VERSION,
   SESSION_LIFECYCLE,
   SessionFormatError,
   SESSIONS,
+  STEP_START,
+  TOOL_CALL,
   TURN_START,
+  repairInterruptedTail,
   type EventEnvelope,
 } from './index.ts'
 
@@ -38,6 +42,11 @@ describe('the envelope is closed', () => {
     expect(envelopeFault({ type: 'turn/start', seq: 0, time: 1 })).toBe('no payload')
     expect(envelopeFault({ type: 'turn/start', seq: 1.5, time: 1, data: {} })).toBe('no integer seq')
     expect(envelopeFault({ type: 'turn/start', seq: 0, time: 'x', data: {} })).toBe('no timestamp')
+    // The surface fields are the envelope's too: a range the seed cannot place, or seqs that are not seqs.
+    expect(envelopeFault({ type: 'user/message', seq: 3, time: 1, data: {}, surfaceOp: { op: 'replace', start: 0 } })).toBe('a malformed surface operation')
+    expect(envelopeFault({ type: 'user/message', seq: 3, time: 1, data: {}, surfaceOp: { op: 'append', extra: 1 } })).toBe('a malformed surface operation')
+    expect(envelopeFault({ type: 'user/message', seq: 3, time: 1, data: {}, surfaceOp: { op: 'append' }, sourceEventSeqs: 'x' })).toBe('malformed source event seqs')
+    expect(envelopeFault({ type: 'user/message', seq: 3, time: 1, data: {}, surfaceOp: { op: 'append' }, sourceEventSeqs: [-1] })).toBe('malformed source event seqs')
     expect(envelopeFault({ seq: 0, time: 1, data: {} })).toBe('no event type')
     expect(envelopeFault([1, 2])).toBe('not an event envelope')
     expect(envelopeFault({ type: 'future/surface', seq: 0, time: 1, data: {}, surfaceOp: { op: 'append' } })).toMatch(/surface operation on "future\/surface"/)
@@ -93,7 +102,26 @@ describe('session/lifecycle: first in its lifecycle, once', () => {
     expect(() => twice.append(SESSION_LIFECYCLE, record)).toThrowError(/at seq 1 is not the first fact of its lifecycle \(seq 0\)/)
 
     const forged = sessions.create({ cwd: '/w' })
-    expect(() => forged.append(SESSION_LIFECYCLE, { origin: 'new', durability: 'fsynced' as never })).toThrowError(/unknown durability/)
+    expect(() => forged.append(SESSION_LIFECYCLE, { origin: 'new', durability: 1 as never })).toThrowError(/durability is not a string/)
+  })
+
+  it('admits a claim value this build does not know, and repair reads it as no claim', async () => {
+    // A later build may record a new durability or origin without a format
+    // bump: this reader must neither refuse the log nor trust the claim.
+    harness = await coreHarness()
+    const sessions = harness.root.get(SESSIONS)
+    const later = sessions.create({ cwd: '/w' })
+    later.append(SESSION_LIFECYCLE, { origin: 'migrated' as never, dispatch: true, durability: 'synced-batch' as never })
+    later.append(TURN_START, { turn: 1 })
+    later.append(STEP_START, { turn: 1, step: 1 })
+    later.append(
+      ASSISTANT_MESSAGE,
+      { turn: 1, step: 1, message: createAssistantMessage([{ type: 'tool-call', id: asCallId('c1'), name: 'bash', arguments: '{}' }], 'p', 'm') },
+      { surfaceOp: { op: 'append' } },
+    )
+    later.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' })
+    const [result] = repairInterruptedTail(later.events)
+    expect((result!.data as { error: { code: string } }).error.code).toBe('TOOL_OUTCOME_UNKNOWN')
   })
 
   it('is written by the creation transaction first, for every lifecycle, with the driver claiming dispatch', async () => {

@@ -177,8 +177,8 @@ export class Session {
       seq: raw.seq,
       time: raw.time,
       data: snapshotJson(raw.data),
-      ...(raw.surfaceOp ? { surfaceOp: snapshotJson(raw.surfaceOp) } : {}),
-      ...(raw.sourceEventSeqs ? { sourceEventSeqs: raw.sourceEventSeqs.slice() } : {}),
+      ...(raw.surfaceOp !== undefined ? { surfaceOp: snapshotJson(raw.surfaceOp) } : {}),
+      ...(raw.sourceEventSeqs !== undefined ? { sourceEventSeqs: raw.sourceEventSeqs.slice() } : {}),
     }
     return deepFreeze(event)
   }

@@ -2,6 +2,7 @@ import type { Plugin } from '../../kernel/index.ts'
 import { firstViolation, INVARIANTS, type InvariantFailure, type InvariantInstaller, type LogViolation } from '../invariants/index.ts'
 import type { Session } from './session.ts'
 import { SESSION_EVENT } from './store.ts'
+import { CONSERVATIVE_ERROR_NAMES } from './repair.ts'
 import { Surface } from './surface.ts'
 import {
   ASSISTANT_CHUNK,
@@ -12,6 +13,7 @@ import {
   SESSION_LIFECYCLE,
   STEP_END,
   STEP_START,
+  SURFACE_TYPES,
   TOOL_CALL,
   TOOL_DISPATCH,
   TOOL_RESULT,
@@ -36,8 +38,6 @@ function freshTrace(): Trace {
   return { lastSeq: -1, openTurn: undefined, openStep: undefined, nextTurn: 1, nextStep: 1, pending: new Set(), segmentStart: 0 }
 }
 
-const ORIGINS: ReadonlySet<string> = new Set(['new', 'seeded', 'resumed'])
-
 const STEP_SCOPED = new Set([ASSISTANT_CHUNK.type, ASSISTANT_MESSAGE.type, TOOL_CALL.type, TOOL_DISPATCH.type, TOOL_RESULT.type, REQUEST_HEADER.type])
 
 /** Validates one event against the running trace; throws via `fail` on violation. */
@@ -55,11 +55,17 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     // per segment: a record appended mid-lifecycle would vouch for events its
     // writer never wrote.
     if (event.seq !== trace.segmentStart) fail(`session/lifecycle at seq ${event.seq} is not the first fact of its lifecycle (seq ${trace.segmentStart})`)
+    //
+    // Types, not vocabularies: a later build may record a value this one does
+    // not know without bumping the format (format.ts), and repair already
+    // reads anything but `dispatch: true` and `durability: 'synced'` as no
+    // claim — the conservative reading an older reader owes a newer log.
     const data: unknown = event.data
-    const { origin, dispatch, durability } = (typeof data === 'object' && data !== null ? data : {}) as Record<string, unknown>
-    if (typeof origin !== 'string' || !ORIGINS.has(origin)) fail(`session/lifecycle carries an unknown origin ${JSON.stringify(origin)}`)
-    if (dispatch !== undefined && dispatch !== true) fail('session/lifecycle dispatch is neither absent nor true')
-    if (durability !== undefined && durability !== 'synced') fail(`session/lifecycle carries an unknown durability ${JSON.stringify(durability)}`)
+    if (typeof data !== 'object' || data === null) throw new Error('session/lifecycle carries no record')
+    const { origin, dispatch, durability } = data as Record<string, unknown>
+    if (typeof origin !== 'string') fail('session/lifecycle origin is not a string')
+    if (dispatch !== undefined && typeof dispatch !== 'boolean') fail('session/lifecycle dispatch is not a boolean')
+    if (durability !== undefined && typeof durability !== 'string') fail('session/lifecycle durability is not a string')
     return
   }
 
@@ -111,9 +117,9 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     }
     if (matches(event, TOOL_RESULT)) {
       // Repair answers blocks that never logged a call: as not started, or —
-      // salvaging a damaged prefix, which may have lost the call line itself —
-      // as unknown under its own name.
-      const synthetic = event.data.error?.code === 'TOOL_NOT_STARTED' || event.data.error?.name === 'SalvagedError'
+      // salvaging a damaged prefix, or forking one a live writer holds — as
+      // unknown under that context's own name.
+      const synthetic = event.data.error?.code === 'TOOL_NOT_STARTED' || CONSERVATIVE_ERROR_NAMES.has(event.data.error?.name ?? '')
       if (!synthetic && !trace.pending.has(event.data.callId)) fail(`tool/result for "${event.data.callId}" has no pending tool/call`)
       trace.pending.delete(event.data.callId)
     }
@@ -154,9 +160,14 @@ const installSessionInvariant: InvariantInstaller = (ctx, fail) => {
 
 /**
  * The session's structure over a whole stored log, cold (§4): what seeding it
- * would check (`Surface` placement, replace ranges and citations) and what the
+ * would check (`Surface` placement, replace ranges and citations), what the
  * live invariant holds every append to (seqs, turn and step nesting, call
- * pairing, the lifecycle record's position). The first violation, or none.
+ * pairing, the lifecycle record's position), and the one payload shape every
+ * projection of the log reads first — a surface event's message. The first
+ * violation, or none.
+ *
+ * Other payloads are their owners' to judge, and nothing checks them all yet:
+ * a log this calls sound can still carry a fact whose owner's fold refuses it.
  */
 export function checkSessionLog(events: readonly EventEnvelope[]): LogViolation | undefined {
   const trace = freshTrace()
@@ -168,9 +179,29 @@ export function checkSessionLog(events: readonly EventEnvelope[]): LogViolation 
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error))
     }
+    if (SURFACE_TYPES.has(event.type)) {
+      // Thrown, not `fail`ed: a shape fault is a malformed payload, which a
+      // reader stops folding at.
+      const data: unknown = event.data
+      const fault = messageFault(typeof data === 'object' && data !== null ? (data as Record<string, unknown>).message : undefined)
+      if (fault !== undefined) throw new Error(fault)
+    }
     validate(trace, event, fail)
     surface.apply(event)
   })
+}
+
+/** What is wrong with a stored message's shape, as far as history projection and repair read it. */
+function messageFault(message: unknown): string | undefined {
+  if (typeof message !== 'object' || message === null) return 'no message'
+  const { id, role, content } = message as Record<string, unknown>
+  if (typeof id !== 'string' || typeof role !== 'string') return 'a message without an id or role'
+  if (!Array.isArray(content)) return 'a message whose content is not a list'
+  for (const block of content as unknown[]) {
+    if (typeof block !== 'object' || block === null || typeof (block as { type?: unknown }).type !== 'string') return 'a content block without a type'
+    if ((block as { type: string }).type === 'tool-call' && typeof (block as { id?: unknown }).id !== 'string') return 'a tool call without an id'
+  }
+  return undefined
 }
 
 /** Registers the session relational-trace invariant. Mount only where invariants run. */
