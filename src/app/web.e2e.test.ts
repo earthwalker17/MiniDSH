@@ -54,7 +54,9 @@ function tempDir(prefix: string): string {
  * for a path that embedded the workspace it decided in.
  */
 const PROMPTS = [
-  'Create a file at the relative path notes.txt (not an absolute path) whose only line is exactly "the browser drove this" without the quotation marks, then read it back and tell me what it says.',
+  // The editor, named: a model that wrote it with the shell on Windows paid an
+  // escalation for it, and that turn-1 consent was the first subject shown.
+  'Using the file editor tool, create a file at the relative path notes.txt (not an absolute path) whose only line is exactly "the browser drove this" without the quotation marks, then read it back and tell me what it says.',
   // The consent this arc answers over the socket, with no --approve anywhere.
   // It asks for an effect OUTSIDE the workspace, which needs authority this
   // session does not have on either kind of host: where the shell cannot be
@@ -126,6 +128,8 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
       'Using the shell tool (not the file editor), run one command that writes the word ok into the file at the absolute path ' +
       granted.replace(/\\/g, '/') +
       ". If a tool refuses, follow the guidance it gives you."
+    // What was shown for THIS consent: only the views published from here on.
+    const turnTwoViews = driver.views.length
     await driver.request('session/prompt', { sessionId, text: PROMPTS[1] })
     await driver.waitForCompletedTurn(sessionId, 2)
     // No --approve anywhere: the effect needed authority this session did not
@@ -143,6 +147,7 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
     // person answering a bare tool name and a model-written sentence is the
     // defect S15 exists to close, so the view is asserted, not just the log.
     const shown = driver.views
+      .slice(turnTwoViews)
       .filter((entry) => entry.sessionId === sessionId)
       .flatMap((entry) => (entry.view as { pendingApprovals?: PendingApprovalView[] }).pendingApprovals ?? [])
     const offered = shown.find((entry) => entry.subject !== undefined)
