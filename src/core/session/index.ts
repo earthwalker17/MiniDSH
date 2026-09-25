@@ -34,4 +34,4 @@ export {
   type Sessions,
   type CreateSessionOptions,
 } from './store.ts'
-export { sessionInvariantPlugin } from './invariant.ts'
+export { checkSessionLog, sessionInvariantPlugin } from './invariant.ts'

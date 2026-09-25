@@ -1,7 +1,8 @@
 import type { Plugin } from '../../kernel/index.ts'
-import { INVARIANTS, type InvariantFailure, type InvariantInstaller } from '../invariants/index.ts'
+import { firstViolation, INVARIANTS, type InvariantFailure, type InvariantInstaller, type LogViolation } from '../invariants/index.ts'
 import type { Session } from './session.ts'
 import { SESSION_EVENT } from './store.ts'
+import { Surface } from './surface.ts'
 import {
   ASSISTANT_CHUNK,
   ASSISTANT_MESSAGE,
@@ -148,6 +149,27 @@ const installSessionInvariant: InvariantInstaller = (ctx, fail) => {
     const next = staged.get(session)
     staged.delete(session)
     if (next && next.lastSeq === event.seq) traces.set(session, next)
+  })
+}
+
+/**
+ * The session's structure over a whole stored log, cold (§4): what seeding it
+ * would check (`Surface` placement, replace ranges and citations) and what the
+ * live invariant holds every append to (seqs, turn and step nesting, call
+ * pairing, the lifecycle record's position). The first violation, or none.
+ */
+export function checkSessionLog(events: readonly EventEnvelope[]): LogViolation | undefined {
+  const trace = freshTrace()
+  const surface = new Surface()
+  return firstViolation(events, (index, fail) => {
+    const event = events[index]!
+    try {
+      surface.validate(event)
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error))
+    }
+    validate(trace, event, fail)
+    surface.apply(event)
   })
 }
 

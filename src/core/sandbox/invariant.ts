@@ -9,7 +9,7 @@
 import type { Plugin } from '../../kernel/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
 import { intentKey, type EffectIntent } from '../effects/events.ts'
-import { INVARIANTS, type InvariantFailure, type InvariantInstaller } from '../invariants/index.ts'
+import { firstViolation, INVARIANTS, type InvariantFailure, type InvariantInstaller, type LogViolation } from '../invariants/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
 import { SESSION_EVENT } from '../session/store.ts'
 import type { Session } from '../session/session.ts'
@@ -235,6 +235,17 @@ const installAuthorityInvariant: InvariantInstaller = (ctx, fail) => {
     staged.delete(session)
     if (next && next.lastSeq === event.seq) traces.set(session, next)
   })
+}
+
+/**
+ * The authority plane over a whole stored log, cold (§4): the closed
+ * vocabularies, one decision per ask, a delegated session held to its
+ * ceiling and pins, and every grant's provenance. The first violation, or
+ * none — the same rules this file's observer refuses a live append over.
+ */
+export function checkAuthorityLog(events: readonly EventEnvelope[]): LogViolation | undefined {
+  const trace = freshTrace()
+  return firstViolation(events, (index, fail) => validate(trace, events[index]!, fail))
 }
 
 /** Registers the authority invariant. Mount only where invariants run. */

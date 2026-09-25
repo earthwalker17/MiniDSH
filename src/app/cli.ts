@@ -11,9 +11,10 @@
  */
 import { createRoot, describeConfigError, type Logger } from '../kernel/index.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
-import { foldRequestContext, foldSessionTitle, matches, TOOL_RESULT, USER_MESSAGE } from '../core/session/index.ts'
-import { PERSISTENCE, type Persistence } from '../core/persistence/index.ts'
-import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
+import { foldRequestContext, foldSessionTitle, matches, SessionFormatError, TOOL_RESULT, USER_MESSAGE } from '../core/session/index.ts'
+import { PERSISTENCE, type Persistence, type StoredSession } from '../core/persistence/index.ts'
+import { repairTail } from '../core/agent/index.ts'
+import { persistenceJsonlPlugin, readLease } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { statSync } from 'node:fs'
@@ -28,6 +29,7 @@ import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
 import { auditLines, describeEvent } from './present.ts'
+import { inspectLines, inspectStored, verdictExitCode, verifyAttachments, verifyLines, verifyStored } from './inspect.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
 import { startWebHost } from './web.ts'
@@ -82,7 +84,19 @@ const COMMANDS: Readonly<Record<string, { readonly positional: string; readonly 
   serve: { positional: '', flags: ['cwd', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   config: { positional: '', flags: ['sandbox', 'ask', 'accept', 'json'] },
-  sessions: { positional: 'list | show <id>', flags: ['json', 'audit'] },
+  sessions: { positional: 'list | show <id> | inspect <id> | verify <id>', flags: ['json', 'audit'] },
+}
+
+/**
+ * `sessions` is four readers under one command, and a flag one of them does
+ * not take is refused rather than ignored (`verify --audit` would otherwise
+ * print a verdict and silently not the audit that was asked for).
+ */
+const SESSION_SUBCOMMANDS: Readonly<Record<string, readonly FlagName[]>> = {
+  list: [],
+  show: ['json', 'audit'],
+  inspect: ['json'],
+  verify: ['json'],
 }
 
 function usageFor(command: string): string {
@@ -739,7 +753,10 @@ async function configCommand(args: ParsedArgs): Promise<number> {
  * read exactly where `run`/`resume` write — a layer that repoints the store
  * must not split the CLI's read path from its write path.
  */
-async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence, attachments: Attachments | undefined) => T): Promise<T> {
+async function withPersistence<T>(
+  plan: BootPlan,
+  use: (persistence: Persistence, attachments: Attachments | undefined, storeRoot: string) => T | Promise<T>,
+): Promise<T> {
   const effective = plan.effective
   for (const warning of plan.warnings) stderrLogger.warn(warning)
   const row = effective.rows.find((entry) => entry.plugin.name === 'persistence-jsonl' && entry.disabled !== true)
@@ -753,11 +770,61 @@ async function withPersistence<T>(plan: BootPlan, use: (persistence: Persistence
   const attachmentRow = effective.rows.find((entry) => entry.plugin.name === 'attachments-local' && entry.disabled !== true)
   if (attachmentRow) root.plugin(attachmentRow.plugin, attachmentRow.config)
   await root.settle()
+  const storeRoot = (row?.config as { root?: string } | undefined)?.root ?? plan.home.sessionsRoot
   try {
-    return use(root.get(PERSISTENCE), root.tryGet(ATTACHMENTS))
+    return await use(root.get(PERSISTENCE), root.tryGet(ATTACHMENTS), storeRoot)
   } finally {
     await root.dispose()
   }
+}
+
+/** A stored log, or the line saying why there is none to read: absent, or of a newer format (which is not damage). */
+function readStored(persistence: Persistence, id: string): StoredSession | string {
+  try {
+    return persistence.load(id) ?? `no session "${id}"`
+  } catch (error) {
+    if (error instanceof SessionFormatError) return error.message
+    throw error
+  }
+}
+
+/**
+ * `sessions verify` and `sessions inspect`: COLD reads. The store is loaded,
+ * never attached — no lease is taken and nothing is repaired or written; a
+ * lease someone else holds is read, not touched, and only qualifies what an
+ * open turn or an unterminated line means. `verify` is the exit-code contract
+ * (`verdictExitCode`); `inspect` is a report and exits 0 whenever it could read.
+ */
+async function coldReadCommand(args: ParsedArgs, plan: BootPlan, sub: 'inspect' | 'verify'): Promise<number> {
+  const id = args.positional[1]
+  if (!id) return usage(`usage: ${usageFor('sessions')}`)
+  const json = args.flags.get('json') === true
+  return withPersistence(plan, async (persistence, attachments, storeRoot) => {
+    const read = readStored(persistence, id)
+    if (typeof read === 'string') {
+      const verdict = read.startsWith('no session') ? 'not-found' : 'unsupported'
+      if (json) process.stdout.write(`${JSON.stringify({ sessionId: id, verdict, message: read })}\n`)
+      else process.stderr.write(`${read}\n`)
+      return 1
+    }
+    const lease = readLease(storeRoot, id)
+    const checked = verifyStored(read, lease)
+    const verification = { ...checked, findings: [...checked.findings, ...(await verifyAttachments(read.events, attachments))] }
+    if (sub === 'verify') {
+      if (json) {
+        process.stdout.write(
+          `${JSON.stringify({ sessionId: read.header.id, verdict: verification.verdict, inFlux: verification.inFlux, findings: verification.findings, closers: verification.closers })}\n`,
+        )
+      } else {
+        for (const line of verifyLines(read.header.id, verification)) process.stdout.write(`${line}\n`)
+      }
+      return verdictExitCode(verification.verdict)
+    }
+    const inspection = inspectStored(read, verification, lease)
+    if (json) process.stdout.write(`${JSON.stringify(inspection)}\n`)
+    else for (const line of inspectLines(inspection)) process.stdout.write(`${line}\n`)
+    return 0
+  })
 }
 
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
@@ -767,6 +834,12 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   // flag, so `--sandbox` is a usage error rather than something ignored.
   const plan = await prepareBoot(args, 'none', 'optional')
   if (typeof plan === 'string') return usage(plan)
+  const allowed = sub === undefined ? undefined : SESSION_SUBCOMMANDS[sub]
+  if (allowed === undefined) return usage(`usage: ${usageFor('sessions')}`)
+  for (const name of args.flags.keys()) {
+    if (!(allowed as readonly string[]).includes(name)) return usage(`--${name} is not a flag of "sessions ${sub}"`)
+  }
+  if (sub === 'inspect' || sub === 'verify') return coldReadCommand(args, plan, sub)
   if (sub === 'list') {
     return withPersistence(plan, (persistence) => {
       const stored = persistence.list()
@@ -793,14 +866,17 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
     const id = args.positional[1]
     if (!id) return usage(`usage: ${usageFor('sessions')}`)
     return withPersistence(plan, (persistence, attachments) => {
-      const stored = persistence.load(id)
-      if (!stored) {
-        process.stderr.write(`no session "${id}"\n`)
+      const read = readStored(persistence, id)
+      if (typeof read === 'string') {
+        process.stderr.write(`${read}\n`)
         return 1
       }
+      const stored = read
       if (args.flags.get('audit') === true) {
-        process.stdout.write(`authority of ${stored.header.id} (cwd ${stored.header.cwd})\n`)
-        for (const line of auditLines(stored.events)) process.stdout.write(`${line}\n`)
+        process.stdout.write(`authority and effects of ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        // A crashed log nobody resumed yet: the call in flight is only a line
+        // once something repairs it, so the audit shows what a resume would say.
+        for (const line of auditLines(stored.events, stored.damaged ? [] : repairTail(stored.events))) process.stdout.write(`${line}\n`)
       } else if (args.flags.get('json') === true) {
         for (const event of stored.events) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, event })}\n`)
         // Machine readers must see damage too: a trailer object (no `event` field) a frame consumer skips.

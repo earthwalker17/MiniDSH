@@ -203,6 +203,28 @@ function holderIsDead(holder: LeaseHolder): boolean {
   }
 }
 
+/** Who holds a stored log's write lease, as a cold reader may state it without touching the lock. */
+export interface LeaseStatus {
+  readonly pid: number
+  readonly host: string
+  readonly acquiredAt?: number
+  /** Probed on this host (`kill(pid, 0)`); `unknown` for another host, which cannot be probed. */
+  readonly alive: boolean | 'unknown'
+}
+
+/**
+ * The lease on `<root>/<id>.jsonl`, read and never taken, removed or reclaimed:
+ * what a cold reader needs to say "this log is still being written" rather
+ * than read an append in flight as a torn tail. `undefined` when no lock (or
+ * an unreadable one) is there.
+ */
+export function readLease(root: string, id: string): LeaseStatus | undefined {
+  const holder = readLeaseHolder(`${join(root, `${encodeURIComponent(id)}.jsonl`)}.lock`)
+  if (!holder) return undefined
+  const alive = holder.host !== hostname() ? 'unknown' : !holderIsDead(holder)
+  return { pid: holder.pid, host: holder.host, ...(typeof holder.acquiredAt === 'number' ? { acquiredAt: holder.acquiredAt } : {}), alive }
+}
+
 /** The header line is small by construction; a bounded read is all a listing needs. */
 const HEADER_READ_BYTES = 64 * 1024
 /**

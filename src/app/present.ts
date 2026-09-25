@@ -196,18 +196,49 @@ const DENIALS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * The audit projection: what this session was permitted to do, when, and every
- * time someone was asked. An escalation names only its tool, so the command it
- * covered is joined in from the `tool/call` its `callId` points at — the same
- * join a reader would otherwise do by hand.
+ * The audit projection: what this session was permitted to do, when, every
+ * time someone was asked — and, since S16, what its calls DID and what they
+ * were refused. An escalation names only its tool, so the command it covered
+ * is joined in from the `tool/call` its `callId` points at — the same join a
+ * reader would otherwise do by hand.
+ *
+ * `pending` are the closers a resume WOULD append to a crashed log nobody has
+ * resumed yet (`repairTail`): shown marked, because the call in flight when
+ * the process died is the one line an audit of that log most needs, and it
+ * exists only once something repairs it.
  */
-export function auditLines(events: readonly EventEnvelope[]): string[] {
+export function auditLines(events: readonly EventEnvelope[], pending: readonly EventEnvelope[] = []): string[] {
   const calls = new Map<string, string>()
   /** The same calls, uncut, for the one line that may not summarize: an approval's own. */
   const whole = new Map<string, string>()
   const at = (seq: number): string => String(seq).padStart(4)
   const lines: string[] = []
-  for (const event of events) {
+  const stored = events.length
+  for (const event of [...events, ...pending]) {
+    const pendingLine = event.seq >= stored
+    const before = lines.length
+    audit(event, pendingLine)
+    // A closer nobody has written yet is marked on every line it produced.
+    if (pendingLine) for (let i = before; i < lines.length; i++) lines[i] += ' (on resume)'
+  }
+  return lines
+
+  function audit(event: EventEnvelope, pendingLine: boolean): void {
+    if (matches(event, EFFECT_RECORDED)) {
+      // What the call DID, from the provider that did it: a command a kernel
+      // refused under confinement shows here as one that ran and failed, and a
+      // write shows the bytes that landed.
+      lines.push(`${at(event.seq)}  effect      ${describeEffect(event.data)}${calls.has(event.data.callId) ? ` (${calls.get(event.data.callId)})` : ''}`)
+      return
+    }
+    if (matches(event, TOOL_RESULT) && event.data.error?.code === 'TOOL_OUTCOME_UNKNOWN') {
+      lines.push(`${at(event.seq)}  unknown     ${calls.get(event.data.callId) ?? event.data.callId} — its outcome was lost with the process`)
+      return
+    }
+    if (pendingLine && matches(event, TOOL_RESULT)) {
+      lines.push(`${at(event.seq)}  not run     ${calls.get(event.data.callId) ?? event.data.callId}`)
+      return
+    }
     if (matches(event, TOOL_CALL)) {
       calls.set(event.data.callId, `${event.data.name} ${preview(event.data.arguments, 100)}`)
       whole.set(event.data.callId, `${event.data.name} ${printableText(event.data.arguments)}`)
@@ -259,5 +290,4 @@ export function auditLines(events: readonly EventEnvelope[]): string[] {
       if (error && DENIALS.has(error.code)) lines.push(`${at(event.seq)}  denied      ${error.code} (${calls.get(event.data.callId) ?? ''})`)
     }
   }
-  return lines
 }

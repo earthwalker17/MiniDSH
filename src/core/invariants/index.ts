@@ -12,6 +12,43 @@ import { KernelError, serviceKey, type Context, type Disposer, type Plugin, type
 
 export type InvariantFailure = (message: string) => never
 
+/** The first thing a whole-log check found wrong, at the seq it found it. */
+export interface LogViolation {
+  readonly seq: number
+  readonly message: string
+  /** The payload could not even be read as its kind: a type error, not a broken rule. */
+  readonly malformed?: true
+}
+
+class CheckFailure extends Error {}
+
+/**
+ * Runs one invariant's own per-event step over a STORED log, cold, and
+ * reports the first violation instead of throwing — the same rules the
+ * pre-commit observer holds a live session to, for a reader that is not the
+ * runtime that wrote it. First only: each step is a left fold whose state
+ * after a violation means nothing. Total: a stored payload is untrusted input,
+ * so a step that throws on its shape is reported as malformed at that seq.
+ */
+export function firstViolation(
+  events: readonly { readonly seq: number }[],
+  step: (index: number, fail: InvariantFailure) => void,
+): LogViolation | undefined {
+  const fail: InvariantFailure = (message) => {
+    throw new CheckFailure(message)
+  }
+  for (let index = 0; index < events.length; index++) {
+    try {
+      step(index, fail)
+    } catch (error) {
+      const seq = events[index]!.seq
+      if (error instanceof CheckFailure) return { seq, message: error.message }
+      return { seq, message: `malformed payload: ${error instanceof Error ? error.message : String(error)}`, malformed: true }
+    }
+  }
+  return undefined
+}
+
 export interface InvariantInstaller {
   (ctx: Context, fail: InvariantFailure): void | Promise<void>
   readonly inject?: readonly ServiceKey<unknown>[]
