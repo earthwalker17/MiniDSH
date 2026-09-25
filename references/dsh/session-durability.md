@@ -22,10 +22,9 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalo
 
 ## Open for the route
 
-- **Built in S16** (format rule, lifecycle record, synced checkpoints, cold verify/inspect, salvage): MiniDSH's side is ARCH §4 and §12. Upstream at the pin: an unknown kind is refused unless `ignorable`, envelope and header keys closed, `SessionFormatUnsupportedError` distinct from corruption (`packages/session/session-persistence/src/errors.ts`); no writer provenance is recorded (`docs/persistence-catalog.md`); fsync per batch plus the directory at creation on POSIX, nothing for a directory on Windows (`packages/session/session-persistence-jsonl/src/index.ts`); no stored-log verifier (`packages/experimental/inspector` is a CDP tool for a live host); replay test-only, tools really run (`packages/test-support/llm-replay/README.md`).
-- **S16, still open:** a provider idempotency key off `exec.callId` is upstream's other answer to an uncertain effect (`packages/session/session-checkpoint-policy/README.md:115`); a raw-mode (uncompressed) log detects damage by a `turn/end` heuristic, not a frame checksum (`packages/session/session-persistence-jsonl/src/format.ts`).
+- **Open after S16 (S16.5 or later):** a provider idempotency key off `exec.callId` is upstream's other answer to an uncertain effect (`packages/session/session-checkpoint-policy/README.md:115`); a raw-mode (uncompressed) log detects damage by a `turn/end` heuristic, not a frame checksum (`packages/session/session-persistence-jsonl/src/format.ts`).
 - **S17, job brackets.** Repair reads turn, step and tool events only; a plugin's opener before the last `session/end-seed` is dead, judged by the plugin whose vocabulary it is. `docs/subsystems/persistence.md`
-- **Built in S14 and S15** (dispatch fact, effect records, bracket closers, consent on the record): MiniDSH's side is ARCH §12, verdicts in [assumptions.md](../assumptions.md).
+- **Built in S14–S16** (dispatch fact, effect records, bracket closers, consent on the record; the format rule, lifecycle record, synced checkpoints, cold readers, salvage): MiniDSH's side is ARCH §4 and §12, verdicts in [assumptions.md](../assumptions.md); the upstream facts S16 read are the rows dated 2026-09-26 below.
 
 ## Sources
 
@@ -34,7 +33,11 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalo
 | `docs/subsystems/session.md` | Envelope, turn ends, fork | 2026-09-19 |
 | `docs/subsystems/persistence.md` | Handles, barriers, repair ownership, refusal | 2026-09-19 |
 | `packages/core/session/src/repair.ts` | Recovery codes, closer order | 2026-09-19 |
-| `packages/core/session/src/types.ts` | Format constant, `ignorable` | 2026-09-19 |
+| `packages/core/session/src/types.ts` | Format constant; an unknown kind refused unless `ignorable` | 2026-09-26 |
+| `packages/session/session-persistence/src/errors.ts` | `SessionFormatUnsupportedError`, distinct from corruption; envelope and header keys closed | 2026-09-26 |
+| `packages/session/session-persistence-jsonl/src/index.ts` | fsync per batch; the directory at creation on POSIX, none on Windows | 2026-09-26 |
+| `packages/session/session-persistence-jsonl/src/format.ts` | Raw-mode damage by a `turn/end` heuristic | 2026-09-26 |
+| `packages/experimental/inspector` | A CDP tool for a live host: no stored-log verifier | 2026-09-26 |
 | `packages/session/session-persistence-jsonl/README.md` | Frames, fsync, torn tail, lock, no delete | 2026-09-19 |
 | `packages/session/session-checkpoint-policy/README.md` | Barriers; intent, not exactly-once | 2026-09-19 |
 | `packages/bundle/base/cordis.patch.yml` | Default rows | 2026-09-19 |
@@ -46,7 +49,7 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalo
 | `docs/persistence-catalog.md` | What persists: THE authority; no writer field | 2026-09-26 |
 | `docs/subsystems/session-projection.md` | Folds, cache checkpoints, no deletion | 2026-09-19 |
 | `docs/subsystems/session-query.md` | Event windows, traces, lineage | 2026-09-19 |
-| `packages/test-support/llm-replay/README.md` | Test-only; first-call order | 2026-09-19 |
+| `packages/test-support/llm-replay/README.md` | Test-only, tools really run; first-call order | 2026-09-26 |
 
 ## Likely to go stale
 
@@ -61,4 +64,3 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalo
 - Exist, not re-read: backend `src/storage.ts`, `src/zstd.ts`, `src/generation.ts`; `native/system/README.md`; `.agents/notes/implemented/architecture/`.
 - How resume rebuilds the inbox projection; web archive semantics; cache row collection; when `SessionOwnershipLostError` fires.
 - `docs/postmortem` 0001-0004 beyond their titles; `scripts/migrate-sessions-to-v4.ts` and its failure classifier.
-- Whether any composition record persists upstream (ARCH once called one absent, unsourced): the catalog would say.
