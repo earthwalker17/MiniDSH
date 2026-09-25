@@ -38,7 +38,21 @@ import type { Context, Disposer } from '../kernel/index.ts'
 import { AGENT_OPTIONS } from '../core/agent/index.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
 import { foldAuxCalls, LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/aux-call.ts'
-import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, REQUEST_HEADER, TOOL_CALL, TOOL_DISPATCH, TOOL_RESULT, TURN_END, type EventEnvelope } from '../core/session/index.ts'
+import {
+  ASSISTANT_CHUNK,
+  ASSISTANT_MESSAGE,
+  CONSERVATIVE_ERROR_NAMES,
+  END_SEED,
+  matches,
+  REQUEST_CONTEXT,
+  REQUEST_HEADER,
+  SESSION_LIFECYCLE,
+  TOOL_CALL,
+  TOOL_DISPATCH,
+  TOOL_RESULT,
+  TURN_END,
+  type EventEnvelope,
+} from '../core/session/index.ts'
 import { TOOLS_EXECUTE, type ToolExecution, type ToolResult } from '../core/tools/index.ts'
 
 /**
@@ -194,20 +208,31 @@ const answerKey = (turn: number, step: number, callId: string): string => `${tur
  * Every recorded tool result, by (turn, step, callId) — a call id is unique
  * only within a step, and a replay that drives the same prompts reproduces the
  * recording's turn and step numbering.
+ *
+ * Whether a missing dispatch means "no body ran" is a property of the WRITER,
+ * so it is decided per lifecycle segment (between `session/end-seed`s): a
+ * segment whose record claims `dispatch`, or that holds a `tool/dispatch`,
+ * records them; a 1.0.0 segment of a log a later build resumed does not.
  */
 export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, RecordedAnswer> {
   const names = new Map<string, string>()
   const dispatched = new Set<string>()
-  let recordsDispatch = false
-  for (const event of events) {
-    if (matches(event, TOOL_CALL)) names.set(answerKey(event.data.turn, event.data.step, event.data.callId), event.data.name)
+  /** Per event index, the segment it lies in; per segment, whether its writer records dispatches. */
+  const segmentOf: number[] = []
+  const recordsDispatch: boolean[] = [false]
+  events.forEach((event, index) => {
+    if (matches(event, END_SEED)) recordsDispatch.push(false)
+    const segment = recordsDispatch.length - 1
+    segmentOf[index] = segment
+    if (matches(event, SESSION_LIFECYCLE) && event.data.dispatch === true) recordsDispatch[segment] = true
+    else if (matches(event, TOOL_CALL)) names.set(answerKey(event.data.turn, event.data.step, event.data.callId), event.data.name)
     else if (matches(event, TOOL_DISPATCH)) {
-      recordsDispatch = true
+      recordsDispatch[segment] = true
       dispatched.add(answerKey(event.data.turn, event.data.step, event.data.callId))
     }
-  }
+  })
   const answers = new Map<string, RecordedAnswer>()
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     if (!matches(event, TOOL_RESULT)) continue
     const key = answerKey(event.data.turn, event.data.step, event.data.callId)
     const block = event.data.message.content[0]
@@ -218,7 +243,7 @@ export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, R
       content,
       ...(event.data.error === undefined ? {} : { error: { message: event.data.error.code, info: event.data.error } }),
     }
-    const bodied = recordsDispatch ? (dispatched.has(key) ? 'yes' : 'no') : event.data.error === undefined ? 'yes' : 'unknown'
+    const bodied = recordsDispatch[segmentOf[index]!] === true ? (dispatched.has(key) ? 'yes' : 'no') : event.data.error === undefined ? 'yes' : 'unknown'
     answers.set(key, { name: names.get(key) ?? '', result, bodied })
   }
   return answers
@@ -228,7 +253,7 @@ export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, R
 function repairedInterruption(events: readonly EventEnvelope[]): boolean {
   return events.some(
     (event) =>
-      (matches(event, TOOL_RESULT) && (event.data.error?.name === 'InterruptedError' || event.data.error?.name === 'SalvagedError')) ||
+      (matches(event, TOOL_RESULT) && (event.data.error?.name === 'InterruptedError' || CONSERVATIVE_ERROR_NAMES.has(event.data.error?.name ?? ''))) ||
       (matches(event, TURN_END) && event.data.reason.kind === 'interrupted'),
   )
 }
