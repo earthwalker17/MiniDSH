@@ -18,12 +18,28 @@
  * the log names, and each provider's window is answered from the log's own
  * `request/context` records — so a replay meters exactly what the recording
  * metered without a key for either provider.
+ *
+ * **Effects.** By default (`run`) tool bodies run for real, so a replay
+ * reproduces the WORLD as well as the decisions, and the arcs assert it. With
+ * `recorded` a `tools/execute` around-middleware answers every call that
+ * reaches a body with the result the recording logged for the same
+ * (turn, step, callId), never calling `next()` — so nothing touches the disk,
+ * no `tool/dispatch` is written (S14 put that fact inside the terminal
+ * continuation exactly so a middleware answering here cannot claim a body ran)
+ * and a recording replays on any machine, whatever its paths. What it
+ * provably does NOT reproduce: every fact a body or provider writes (effects,
+ * approvals asked inside a body, subagent brackets, spill, attachments), a
+ * tool's `concludesTurn` or deferred context (unlogged; no shipped tool sets
+ * them), and a gate that needs an answerer (no shipped gate asks). A log that
+ * holds a repaired interruption is refused, and so are `children`: no child
+ * ever runs when the delegating call's result is served.
  */
 import type { Context, Disposer } from '../kernel/index.ts'
 import { AGENT_OPTIONS } from '../core/agent/index.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
 import { foldAuxCalls, LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/aux-call.ts'
-import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, REQUEST_HEADER, type EventEnvelope } from '../core/session/index.ts'
+import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, REQUEST_HEADER, TOOL_CALL, TOOL_DISPATCH, TOOL_RESULT, TURN_END, type EventEnvelope } from '../core/session/index.ts'
+import { TOOLS_EXECUTE, type ToolExecution, type ToolResult } from '../core/tools/index.ts'
 
 /**
  * How a retried step replays.
@@ -156,6 +172,61 @@ function byModel<T>(routed: ReadonlyMap<string, T>): ReadonlyMap<string, T> {
   return out
 }
 
+/** How a replayed call reaches the world: its body runs, or the recording answers for it. */
+export type ReplayEffects = 'run' | 'recorded'
+
+/** One recorded tool call's answer, as the driver logged it. */
+interface RecordedAnswer {
+  readonly name: string
+  readonly result: ToolResult
+  /** Whether a body answered it: the recording has its `tool/dispatch` (or, in a log from before the fact existed, it succeeded). */
+  readonly bodied: boolean
+}
+
+const answerKey = (turn: number, step: number, callId: string): string => `${turn}:${step}:${callId}`
+
+/**
+ * Every recorded tool result, by (turn, step, callId) — a call id is unique
+ * only within a step, and a replay that drives the same prompts reproduces the
+ * recording's turn and step numbering.
+ */
+export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, RecordedAnswer> {
+  const names = new Map<string, string>()
+  const dispatched = new Set<string>()
+  let recordsDispatch = false
+  for (const event of events) {
+    if (matches(event, TOOL_CALL)) names.set(answerKey(event.data.turn, event.data.step, event.data.callId), event.data.name)
+    else if (matches(event, TOOL_DISPATCH)) {
+      recordsDispatch = true
+      dispatched.add(answerKey(event.data.turn, event.data.step, event.data.callId))
+    }
+  }
+  const answers = new Map<string, RecordedAnswer>()
+  for (const event of events) {
+    if (!matches(event, TOOL_RESULT)) continue
+    const key = answerKey(event.data.turn, event.data.step, event.data.callId)
+    const block = event.data.message.content[0]
+    const content = block?.type === 'tool-result' ? block.content : event.data.message.content
+    const isError = block?.type === 'tool-result' && block.isError === true
+    const result: ToolResult = {
+      isError,
+      content,
+      ...(event.data.error === undefined ? {} : { error: { message: event.data.error.code, info: event.data.error } }),
+    }
+    answers.set(key, { name: names.get(key) ?? '', result, bodied: recordsDispatch ? dispatched.has(key) : event.data.error === undefined })
+  }
+  return answers
+}
+
+/** A log that repair answered is not an oracle: its synthetic results say what nobody's body did. */
+function repairedInterruption(events: readonly EventEnvelope[]): boolean {
+  return events.some(
+    (event) =>
+      (matches(event, TOOL_RESULT) && (event.data.error?.name === 'InterruptedError' || event.data.error?.name === 'SalvagedError')) ||
+      (matches(event, TURN_END) && event.data.reason.kind === 'interrupted'),
+  )
+}
+
 /** A recorded out-of-loop call: its purpose travels with its chunks, so a replay can refuse to serve one purpose's record to another's request. */
 interface AuxGroup {
   readonly purpose: string
@@ -168,9 +239,13 @@ class ReplayScript {
   private readonly auxScript: AuxGroup[]
   private cursor = 0
   private auxCursor = 0
-  constructor(script: StreamChunk[][], auxScript: AuxGroup[]) {
+  /** The recording's tool answers, and which of them the effect-free middleware has served. */
+  readonly answers: Map<string, RecordedAnswer>
+  readonly served = new Set<string>()
+  constructor(script: StreamChunk[][], auxScript: AuxGroup[], answers: Map<string, RecordedAnswer>) {
     this.script = script
     this.auxScript = auxScript
+    this.answers = answers
   }
 
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
@@ -255,7 +330,22 @@ class ReplayDispatch {
     return this.for(request).stream(request)
   }
 
+  /** The recording a session was bound to by its first model request, if it has made one. */
+  bound(sessionId: string): ReplayScript | undefined {
+    return this.bySession.get(sessionId)
+  }
+
+  /**
+   * The first way the replay left its recording, kept until `assertConsumed`:
+   * a throw inside `tools/execute` becomes an ordinary error RESULT, so the
+   * middleware cannot fail the replay by throwing — it records why instead.
+   */
+  mismatch: string | undefined
+
+  effects: ReplayEffects = 'run'
+
   assertConsumed(): void {
+    if (this.mismatch !== undefined) throw new Error(`llm-replay: the replay left its recording: ${this.mismatch}`)
     this.sources.forEach((source, index) => {
       const which = this.sources.length === 1 ? '' : ` (log ${index})`
       if (source.consumed() !== source.total()) {
@@ -263,6 +353,10 @@ class ReplayDispatch {
       }
       if (source.auxConsumed() !== source.auxTotal()) {
         throw new Error(`llm-replay: replayed ${source.auxConsumed()} of ${source.auxTotal()} recorded out-of-loop calls${which}`)
+      }
+      if (this.effects === 'recorded') {
+        const owed = [...source.answers].filter(([key, answer]) => answer.bodied && !source.served.has(key)).map(([key]) => key)
+        if (owed.length > 0) throw new Error(`llm-replay: ${owed.length} recorded tool answer(s) were never asked for${which}: ${owed.join(', ')}`)
       }
     })
   }
@@ -321,6 +415,36 @@ class ReplayAdapter implements LlmAdapter {
   }
 }
 
+/**
+ * The effect-free middleware: the recording's answer for the call that just
+ * reached its body, found by the (turn, step) of the replayed session's own
+ * `tool/call` for it — which the driver appended moments before. `next` is
+ * never called: the body does not run, and no `tool/dispatch` is written.
+ */
+async function answerFromRecording(shared: ReplayDispatch, execution: ToolExecution, _next: () => Promise<ToolResult>): Promise<ToolResult> {
+  const refuse = (why: string): ToolResult => {
+    shared.mismatch ??= why
+    return { isError: true, content: [{ type: 'text', text: `Error: llm-replay: ${why}` }], error: { message: why, info: { name: 'ReplayMismatch', code: 'REPLAY_MISMATCH' } } }
+  }
+  const session = execution.agent?.session
+  if (!session) return refuse(`call ${execution.callId} (${execution.name}) has no agent session to replay for`)
+  const script = shared.bound(session.id)
+  if (!script) return refuse(`session ${session.id} called a tool before it ever asked for a model`)
+  let call: { turn: number; step: number } | undefined
+  for (let i = session.facts.length - 1; i >= 0 && call === undefined; i--) {
+    const event = session.facts[i]!
+    if (matches(event, TOOL_CALL) && event.data.callId === execution.callId) call = { turn: event.data.turn, step: event.data.step }
+  }
+  if (!call) return refuse(`call ${execution.callId} (${execution.name}) reached a body with no tool/call on the record`)
+  const key = answerKey(call.turn, call.step, execution.callId)
+  const answer = script.answers.get(key)
+  if (!answer) return refuse(`call ${key} (${execution.name}) reached a body, and the recording answered no such call`)
+  if (answer.name !== execution.name) return refuse(`call ${key} is "${execution.name}" here and "${answer.name}" in the recording`)
+  if (!answer.bodied) return refuse(`call ${key} (${execution.name}) reached a body here, and the recording refused it before one`)
+  script.served.add(key)
+  return answer.result
+}
+
 export interface ReplayHandle {
   dispose: Disposer
   assertConsumed(): void
@@ -350,17 +474,30 @@ export function installLlmReplay(
     providers?: readonly string[]
     contextWindow?: number
     attempts?: ReplayAttempts
+    /** `run` (default): bodies run for real. `recorded`: the recording answers every call; nothing touches the world. */
+    effects?: ReplayEffects
   },
 ): ReplayHandle {
+  const effects = options.effects ?? 'run'
+  if (effects === 'recorded') {
+    if ((options.children ?? []).length > 0) {
+      throw new Error("llm-replay: an effect-free replay never runs a child — the delegating call's recorded result answers for it; pass no children")
+    }
+    if (repairedInterruption(options.events)) {
+      throw new Error("llm-replay: this log holds a repaired interruption, so its recorded results are not all a body's; it is no oracle")
+    }
+  }
   const logs = [options.events, ...(options.children ?? [])]
   const sources = logs.map(
     (events) =>
       new ReplayScript(
         deriveReplayScript(events, options.attempts),
         foldAuxCalls(events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) })),
+        recordedAnswers(events),
       ),
   )
   const shared = new ReplayDispatch(sources)
+  shared.effects = effects
   // Every log's routes, windows and modalities: a child may take a route its
   // parent never did — which is exactly what a vision verifier does.
   const windows = new Map<string, number>()
@@ -373,6 +510,7 @@ export function installLlmReplay(
   const providers = named.length > 0 ? named : ['deepseek']
   const llm = owner.get(LLM)
   const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, modalities, options.contextWindow ?? 1_000_000)))
+  if (effects === 'recorded') disposers.push(owner.on(TOOLS_EXECUTE, (execution, next) => answerFromRecording(shared, execution, next)))
   return {
     dispose: async () => {
       for (const dispose of disposers) await dispose()

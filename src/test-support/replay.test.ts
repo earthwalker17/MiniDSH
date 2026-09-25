@@ -352,3 +352,71 @@ describe('replay answers a recorded route from the log', () => {
     await replay.dispose()
   })
 })
+
+describe('llm-replay: effects recorded', () => {
+  /** A tool whose body counts, so a replay that ran it cannot hide. */
+  function counting(): { tool: typeof echo; runs: { value: number } } {
+    const runs = { value: 0 }
+    const tool = defineTool({
+      name: 'echo',
+      description: 'echo',
+      input: z.object({ text: z.string() }),
+      output: z.object({ echoed: z.string() }),
+      execute: (args) => {
+        runs.value += 1
+        return { echoed: `${args.text} (live)` }
+      },
+      render: (_args, value) => [{ type: 'text', text: value.echoed }],
+    })
+    return { tool, runs }
+  }
+
+  async function replayed(events: readonly import('../core/session/index.ts').EventEnvelope[], withTool = true) {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const replay = installLlmReplay(harness.root, { events, provider: 'replay', effects: 'recorded' })
+    const { tool, runs } = counting()
+    if (withTool) harness.root.get(TOOLS).register(harness.root, tool)
+    const handle = await harness.root.get(AGENTS).create(harness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    handle.agent.followup(createUserMessage('run it'))
+    await handle.agent.whenIdle()
+    return { replay, runs, handle }
+  }
+
+  it('answers every call from the recording: no body runs and no tool/dispatch is written', async () => {
+    const recorded = await record()
+    const { replay, runs, handle } = await replayed(recorded.events)
+    replay.assertConsumed()
+    expect(runs.value).toBe(0)
+    const types = handle.agent.session.events.map((event) => event.type)
+    expect(types).not.toContain('tool/dispatch')
+    // The recorded answer, not the live body's.
+    const result = handle.agent.session.events.find((event) => event.type === 'tool/result')!
+    expect(JSON.stringify(result.data)).toContain('pong')
+    expect(JSON.stringify(result.data)).not.toContain('(live)')
+    await handle.dispose()
+  })
+
+  it('fails the oracle when the replay refuses a call the recording answered with a body', async () => {
+    const recorded = await record()
+    // No echo tool registered here: the replay answers UNKNOWN_TOOL before any
+    // body, so the recorded answer is never asked for.
+    const { replay, handle } = await replayed(recorded.events, false)
+    expect(() => replay.assertConsumed()).toThrowError(/recorded tool answer\(s\) were never asked for: 1:1:c1/)
+    await handle.dispose()
+  })
+
+  it('refuses a log with a repaired interruption, and refuses children', async () => {
+    const recorded = await record()
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const repaired = [
+      ...recorded.events,
+      { type: 'turn/end', seq: recorded.events.length, time: 1, data: { turn: 2, reason: { kind: 'interrupted' } } },
+    ]
+    expect(() => installLlmReplay(harness.root, { events: repaired, provider: 'replay', effects: 'recorded' })).toThrowError(/repaired interruption/)
+    expect(() => installLlmReplay(harness.root, { events: recorded.events, children: [recorded.events], provider: 'replay', effects: 'recorded' })).toThrowError(
+      /never runs a child/,
+    )
+  })
+})
