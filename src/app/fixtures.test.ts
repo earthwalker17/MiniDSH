@@ -12,7 +12,8 @@
  * that carry weight are the others: every recorded answer was asked for, and
  * the replay wrote no `tool/dispatch` and no `effect/recorded` — no body ran.
  */
-import { appendFileSync, copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -23,7 +24,7 @@ import { PERSISTENCE, type StoredSession } from '../core/persistence/index.ts'
 import { matches, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { coreHarness, type CoreHarness } from '../test-support/harness.ts'
-import { installLlmReplay, type ReplayHandle } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedAnswers, type ReplayHandle } from '../test-support/llm-replay.ts'
 import { runTask } from './headless.ts'
 import { inspectStored, verifyStored } from './inspect.ts'
 
@@ -33,11 +34,15 @@ interface Fixture {
   readonly name: string
   /** The writer declared synced checkpoints and dispatch recording (S16+). */
   readonly synced: boolean
+  /** The build its composition record names; absent for one that names none. */
+  readonly writer?: string
+  /** The recorded bytes: a fixture is evidence, and re-recording one is a reviewed change to this line. */
+  readonly sha256: string
 }
 
 const FIXTURE_LIST: readonly Fixture[] = [
-  { name: 'minidsh-1.0.0.jsonl', synced: false },
-  { name: 'minidsh-s16.jsonl', synced: true },
+  { name: 'minidsh-1.0.0.jsonl', synced: false, sha256: 'ebc66550f4143d9edc239664bd3940b98df68f4dc889d4d89a42398cbcedb667' },
+  { name: 'minidsh-s16.jsonl', synced: true, writer: 'minidsh 1.1.0-dev', sha256: '0fdee43ba7b08f289c9612f6d532a8d02e42840b0ba7f48b912f71992af25e08' },
 ]
 
 let dirs: string[] = []
@@ -88,6 +93,8 @@ describe.each(FIXTURE_LIST)('the stored log $name', (fixture) => {
     const inspection = inspectStored(stored, verification)
     // 1.0.0 wrote no lifecycle record: its segment claims nothing, so repair reads it conservatively.
     expect(inspection.lifecycles[0]?.record).toEqual(fixture.synced ? { origin: 'new', dispatch: true, durability: 'synced' } : undefined)
+    // And names the build that wrote it, which 1.0.0 did not record.
+    expect(inspection.lifecycles[0]?.writer).toBe(fixture.writer)
     expect(inspection.turns).toEqual({ total: 1, notCompleted: [] })
     expect(inspection.authority.mode).toBe('workspace-write')
   })
@@ -194,13 +201,39 @@ describe('the fixtures themselves', () => {
   })
 
   it('are left exactly as recorded: a fixture is evidence, never edited', () => {
-    // Copy-then-read round trip through the store must not change a byte; a
-    // store that normalized a real log on read would be rewriting evidence.
     for (const fixture of FIXTURE_LIST) {
-      const dir = tempDir('minidsh-fixture-copy-')
-      const target = join(dir, fixture.name)
-      copyFileSync(join(FIXTURES, fixture.name), target)
-      expect(readFileSync(target).equals(readFileSync(join(FIXTURES, fixture.name)))).toBe(true)
+      expect(createHash('sha256').update(readFileSync(join(FIXTURES, fixture.name))).digest('hex'), fixture.name).toBe(fixture.sha256)
     }
+  })
+
+  it('are read cold without a byte, a lease or a sidecar changing', async () => {
+    // A store that normalized a real log on read, or took its lease, would be
+    // rewriting evidence: load, verify and inspect a staged copy and compare.
+    for (const fixture of FIXTURE_LIST) {
+      const { store, id, file } = staged(fixture)
+      const before = { bytes: readFileSync(file), mtime: statSync(file).mtimeMs }
+      const stored = await load(store, id)
+      inspectStored(stored, verifyStored(stored))
+      expect(readFileSync(file).equals(before.bytes)).toBe(true)
+      expect(statSync(file).mtimeMs).toBe(before.mtime)
+      expect({ lock: existsSync(`${file}.lock`), torn: existsSync(`${file}.torn`) }).toEqual({ lock: false, torn: false })
+    }
+  })
+
+  it('decide per lifecycle whether a result proves a body ran, so a later build resuming 1.0.0 changes nothing before it', () => {
+    // 1.0.0 recorded no dispatches, so its results are judged the old way; a
+    // later segment that does record them must not reclassify those as "no".
+    const old = events(staged(FIXTURE_LIST[0]!).lines)
+    const before = recordedAnswers(old)
+    const n = old.length
+    const later: EventEnvelope[] = [
+      ...old,
+      { type: 'session/end-seed', seq: n, time: 1, data: {} },
+      { type: 'session/lifecycle', seq: n + 1, time: 1, data: { origin: 'resumed', dispatch: true, durability: 'synced' } },
+      { type: 'tool/dispatch', seq: n + 2, time: 1, data: { turn: 9, step: 1, callId: 'later' } },
+    ]
+    const after = recordedAnswers(later)
+    expect(before.size).toBeGreaterThan(0)
+    for (const [key, answer] of before) expect(after.get(key)?.bodied, key).toBe(answer.bodied)
   })
 })
