@@ -84,6 +84,11 @@ describe('the composition descriptor', () => {
     // Configs never appear in the descriptor rows.
     expect(describeComposition(rows, ['built-in']).rows).toEqual([{ id: 'x', plugin: 'plugin-x' }])
   })
+
+  it('names the build that composed it, so a stored log can say which MiniDSH wrote each segment', async () => {
+    const { VERSION } = await import('./version.ts')
+    expect(describeComposition([], ['built-in']).writer).toBe(`minidsh ${VERSION}`)
+  })
 })
 
 describe('the disk vocabulary', () => {

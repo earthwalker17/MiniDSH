@@ -1,8 +1,9 @@
 import type { Context, Disposer, Plugin } from '../../kernel/index.ts'
 import { AGENT_OPTIONS, AGENTS, foldAgentOptions, sameAgentOptions, type AgentFactory, type AgentHandle, type CreateAgentOptions } from '../agent/index.ts'
 import { LLM } from '../llm/index.ts'
+import { PERSISTENCE } from '../persistence/index.ts'
 import { PROMPT } from '../prompt/index.ts'
-import { SESSIONS } from '../session/index.ts'
+import { SESSION_LIFECYCLE, SESSIONS } from '../session/index.ts'
 import { TOOLS } from '../tools/index.ts'
 import { ReactLoopAgent } from './driver.ts'
 
@@ -37,6 +38,19 @@ class LoopFactory implements AgentFactory {
       ...(options.delegationDepth === undefined ? {} : { delegationDepth: options.delegationDepth }),
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
       ...(options.createdAt === undefined ? {} : { createdAt: options.createdAt }),
+    })
+    // The lifecycle's first fact, before anything it governs: what THIS driver
+    // and the mounted store guarantee about what follows, so a reader that is
+    // not this process can tell what an absent fact proves (§4). `dispatch`
+    // is this driver's own claim (`executeTools` writes `tool/dispatch`
+    // through `onDispatch`, durable before every body); `durability` is only
+    // ever what the provider DECLARED.
+    const durability = this.ctx.tryGet(PERSISTENCE)?.durability
+    session.append(SESSION_LIFECYCLE, {
+      origin: session.origin,
+      dispatch: true,
+      ...(durability === undefined ? {} : { durability }),
+      ...(options.salvage === undefined ? {} : { salvage: options.salvage }),
     })
     const agent = new ReactLoopAgent(session, options.agentOptions, options.world)
     // The scope resolves services through the loop context and is keyed by the agent itself.

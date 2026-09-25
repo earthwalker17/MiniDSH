@@ -19,8 +19,14 @@ export interface CompositionAppliedRow {
 }
 
 export interface CompositionApplied {
-  /** sha256/16 over the effective rows including canonicalized JSON-safe configs. */
+  /** sha256/16 over the writer and the effective rows including canonicalized JSON-safe configs. */
   readonly hash: string
+  /**
+   * The build that composed it (`minidsh 1.1.0`), hashed with the rows so an
+   * upgrade re-stamps the record at its first resume: a reader attributes each
+   * segment of a log to the last record at or before it. Absent before S16.
+   */
+  readonly writer?: string
   /** The layer names that produced the rows, in application order. */
   readonly layers: readonly string[]
   readonly rows: readonly CompositionAppliedRow[]

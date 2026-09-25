@@ -97,6 +97,8 @@ export interface CreateAgentOptions {
   /** The preset name the world was composed from, recorded in the header. */
   readonly agentPreset?: string
   readonly createdAt?: number
+  /** Set by a salvaging fork: where its damaged source stopped reading, recorded on this lifecycle's `session/lifecycle`. */
+  readonly salvage?: import('../session/index.ts').SalvageRecord
   /**
    * A creation that is cancelled before it publishes rolls back unannounced:
    * a delegating tool call aborted mid-setup leaves no agent, no session file.
@@ -154,6 +156,13 @@ export interface ResumeAgentOptions {
 export interface ForkAgentOptions extends ResumeAgentOptions {
   /** Explicit child session id; minted otherwise. */
   readonly sessionId?: SessionId
+  /**
+   * Fork a DAMAGED stored log from its readable prefix instead of refusing it.
+   * The source is never written or leased; the prefix is repaired fully
+   * conservatively (§4) and the fork records where its seed stopped. Ignored
+   * for a source that is not damaged.
+   */
+  readonly salvage?: boolean
 }
 
 // ---- pre-step / request interception --------------------------------------

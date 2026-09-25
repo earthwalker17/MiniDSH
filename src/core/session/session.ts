@@ -1,6 +1,7 @@
 import { asSessionId, type SessionId } from '../ids.ts'
 import { deepFreeze, snapshotJson } from '../json.ts'
 import type { Message } from '../llm/types.ts'
+import { envelopeFault, SessionFormatError } from './format.ts'
 import { deriveEventMessage, foldRequestHeader, Surface } from './surface.ts'
 import {
   END_SEED,
@@ -72,9 +73,8 @@ export class Session {
   private closed = false
 
   constructor(header: SessionHeader, host: SessionHost, seed?: readonly EventEnvelope[], origin?: SessionOrigin) {
-    if (header.version !== SESSION_FORMAT_VERSION) {
-      throw new Error(`session ${header.id}: version ${header.version} != ${SESSION_FORMAT_VERSION}`)
-    }
+    // Only a log of this writer's own format is continued in place (`format.ts`).
+    if (header.version !== SESSION_FORMAT_VERSION) throw new SessionFormatError(header.id, header.version)
     this.header = deepFreeze({ ...header, id: asSessionId(header.id) })
     this.origin = origin ?? (seed && seed.length > 0 ? 'seeded' : 'new')
     this.host = host
@@ -167,6 +167,11 @@ export class Session {
 
   private freezeEnvelope(raw: EventEnvelope): EventEnvelope {
     // Seed events arrive already-shaped; re-snapshot data to guarantee JSON-losslessness and freeze.
+    // A field outside the envelope is REFUSED, not dropped: a store stops its
+    // readable prefix at such a line, so reaching one here means a caller built
+    // a seed no stored log could have produced.
+    const fault = envelopeFault(raw)
+    if (fault !== undefined) throw new Error(`seed event ${String(raw.seq)}: ${fault}`)
     const event: EventEnvelope = {
       type: raw.type,
       seq: raw.seq,

@@ -197,6 +197,63 @@ describe('persistence-jsonl: resume attach', () => {
   })
 })
 
+describe('persistence-jsonl: what a reader is told about the bytes it could not read', () => {
+  /** A stored balanced turn, closed, then `tail` appended raw. */
+  async function storedWith(tail: string): Promise<{ id: string; base: string }> {
+    const { sessions, base } = await mount()
+    sessions.create({ cwd: '/w', id: asSessionId('diag') })
+    appendTurn(sessions, 'diag', 1)
+    await sessions.detach(sessions.get(asSessionId('diag'))!)
+    appendFileSync(fileFor(base, 'diag'), tail)
+    return { id: 'diag', base }
+  }
+
+  it('reports a clean log and a torn one as readable, with their sizes', async () => {
+    const { id, base } = await storedWith('')
+    const clean = root!.get(PERSISTENCE).load(id)!
+    const size = readFileSync(fileFor(base, id)).length
+    expect(clean.integrity).toEqual({ bytes: size, readableBytes: size, tail: 'none' })
+    appendFileSync(fileFor(base, id), '{"type":"assistant/chu')
+    expect(root!.get(PERSISTENCE).load(id)!.integrity).toEqual({ bytes: size + 22, readableBytes: size, tail: 'torn' })
+  })
+
+  it('names the line, the byte and the reason reading stopped at', async () => {
+    const bad = '{"type":"x","seq":99,"time":1,"data":{}}\n'
+    const { id, base } = await storedWith(bad)
+    const size = readFileSync(fileFor(base, id)).length
+    const stored = root!.get(PERSISTENCE).load(id)!
+    expect(stored.damaged).toBe(true)
+    // Header + three events, so the bad line is line 5.
+    expect(stored.integrity?.stop).toEqual({ line: 5, byte: size - bad.length, reason: 'seq 99 where 3 was expected' })
+    expect(stored.integrity?.readableBytes).toBe(size - bad.length)
+  })
+
+  it('treats a line outside the envelope as damage, not as a newer format, so the prefix stays readable', async () => {
+    // Inside a declared format only corruption produces these: a writer that
+    // needed a new envelope field or surface kind would have bumped the header.
+    for (const [line, reason] of [
+      ['{"type":"turn/start","seq":3,"time":1,"data":{"turn":2},"causedBy":1}', /envelope field this format does not have \("causedBy"\)/],
+      ['{"type":"turn/start","seq":3,"time":1,"data":{"turn":2},"surfaceOp":{"op":"append"}}', /surface operation on "turn\/start"/],
+      ['{"type":"tool/resulu","seq":3,"time":1,"data":{},"surfaceOp":{"op":"append"}}', /surface operation on "tool\/resulu"/],
+      ['{"type":"turn/start","seq":3,"time":1}', /no payload/],
+    ] as const) {
+      await root?.dispose()
+      if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+      const { id } = await storedWith(`${line}\n`)
+      const stored = root!.get(PERSISTENCE).load(id)!
+      expect({ damaged: stored.damaged, events: stored.events.length }).toEqual({ damaged: true, events: 3 })
+      expect(stored.integrity?.stop?.reason).toMatch(reason)
+    }
+  })
+
+  it('names a NUL run as the signature of a power cut, not as bit rot', async () => {
+    const { id } = await storedWith(`${'\u0000'.repeat(40)}{"type":"turn/start","seq":4,"time":1,"data":{"turn":2}}\n`)
+    const stored = root!.get(PERSISTENCE).load(id)!
+    expect(stored.damaged).toBe(true)
+    expect(stored.integrity?.stop?.reason).toMatch(/NUL bytes .* power cut after the last sync/)
+  })
+})
+
 describe('persistence-jsonl: the read Definition', () => {
   it('lists stored headers newest first, loads by id, and skips foreign .jsonl files', async () => {
     const { sessions, base } = await mount()

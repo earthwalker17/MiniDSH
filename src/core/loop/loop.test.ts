@@ -255,6 +255,7 @@ describe('agent loop: turn/step lifecycle', () => {
     // Every raw stream chunk is logged; collapse them to check the skeleton.
     const skeleton = types(agent.session.events).filter((type, index, all) => type !== 'assistant/chunk' || all[index - 1] !== 'assistant/chunk')
     expect(skeleton).toEqual([
+      'session/lifecycle', // what this driver and store guarantee, before anything they govern
       'agent/options', // the base route, recorded at creation
       'approval/policy', // the opening authority, recorded at creation
       'sandbox/mode',
@@ -299,7 +300,7 @@ describe('agent loop: turn/step lifecycle', () => {
     agent.followup(createUserMessage('hi'))
     await agent.whenIdle()
     // The claim is committed with the block that consumed it: durable = live.
-    expect(types(agent.session.events)).toEqual(['agent/options', 'approval/policy', 'sandbox/mode', 'inbox/spliced', 'turn/start', 'request/context', 'inbox/spliced', 'turn/end'])
+    expect(types(agent.session.events)).toEqual(['session/lifecycle', 'agent/options', 'approval/policy', 'sandbox/mode', 'inbox/spliced', 'turn/start', 'request/context', 'inbox/spliced', 'turn/end'])
     expect((agent.session.events.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('blocked')
     expect(harness.adapter.calls).toHaveLength(0)
   })
@@ -460,7 +461,7 @@ describe('agent loop: ownership', () => {
     agent.inject(createPluginMessage('test', 'remember: be brief'))
     // Injection alone does not wake the driver; its durable insert is the only fact.
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(agent.session.events.map((event) => event.type)).toEqual(['agent/options', 'approval/policy', 'sandbox/mode', 'inbox/spliced'])
+    expect(agent.session.events.map((event) => event.type)).toEqual(['session/lifecycle', 'agent/options', 'approval/policy', 'sandbox/mode', 'inbox/spliced'])
     agent.followup(createUserMessage('hi'))
     await agent.whenIdle()
     const userMessages = agent.session.deriveMessages().filter((message) => message.role === 'user')

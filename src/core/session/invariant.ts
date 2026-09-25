@@ -5,8 +5,10 @@ import { SESSION_EVENT } from './store.ts'
 import {
   ASSISTANT_CHUNK,
   ASSISTANT_MESSAGE,
+  END_SEED,
   matches,
   REQUEST_HEADER,
+  SESSION_LIFECYCLE,
   STEP_END,
   STEP_START,
   TOOL_CALL,
@@ -25,11 +27,15 @@ interface Trace {
   nextTurn: number
   nextStep: number
   pending: Set<string>
+  /** Where the current lifecycle segment began: 0, or just after a `session/end-seed`. */
+  segmentStart: number
 }
 
 function freshTrace(): Trace {
-  return { lastSeq: -1, openTurn: undefined, openStep: undefined, nextTurn: 1, nextStep: 1, pending: new Set() }
+  return { lastSeq: -1, openTurn: undefined, openStep: undefined, nextTurn: 1, nextStep: 1, pending: new Set(), segmentStart: 0 }
 }
+
+const ORIGINS: ReadonlySet<string> = new Set(['new', 'seeded', 'resumed'])
 
 const STEP_SCOPED = new Set([ASSISTANT_CHUNK.type, ASSISTANT_MESSAGE.type, TOOL_CALL.type, TOOL_DISPATCH.type, TOOL_RESULT.type, REQUEST_HEADER.type])
 
@@ -37,6 +43,24 @@ const STEP_SCOPED = new Set([ASSISTANT_CHUNK.type, ASSISTANT_MESSAGE.type, TOOL_
 function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): void {
   if (event.seq !== trace.lastSeq + 1) fail(`seq ${event.seq} is not contiguous (expected ${trace.lastSeq + 1})`)
   trace.lastSeq = event.seq
+
+  if (matches(event, END_SEED)) {
+    trace.segmentStart = event.seq + 1
+    return
+  }
+  if (matches(event, SESSION_LIFECYCLE)) {
+    // Crash repair trusts this record's claims about everything after it in
+    // its segment, so it may only OPEN a segment — which also makes it once
+    // per segment: a record appended mid-lifecycle would vouch for events its
+    // writer never wrote.
+    if (event.seq !== trace.segmentStart) fail(`session/lifecycle at seq ${event.seq} is not the first fact of its lifecycle (seq ${trace.segmentStart})`)
+    const data: unknown = event.data
+    const { origin, dispatch, durability } = (typeof data === 'object' && data !== null ? data : {}) as Record<string, unknown>
+    if (typeof origin !== 'string' || !ORIGINS.has(origin)) fail(`session/lifecycle carries an unknown origin ${JSON.stringify(origin)}`)
+    if (dispatch !== undefined && dispatch !== true) fail('session/lifecycle dispatch is neither absent nor true')
+    if (durability !== undefined && durability !== 'synced') fail(`session/lifecycle carries an unknown durability ${JSON.stringify(durability)}`)
+    return
+  }
 
   if (matches(event, TURN_START)) {
     if (trace.openTurn !== undefined) fail(`turn/start ${event.data.turn} while turn ${trace.openTurn} is open`)

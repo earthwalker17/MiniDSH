@@ -15,6 +15,7 @@ import type { Context, Plugin } from '../kernel/index.ts'
 import { snapshotJson } from '../core/json.ts'
 import type { CompositionApplied } from '../capabilities/composition-record/index.ts'
 import { applyPatches, builtinPlugins, type Patch, type Row } from './compose.ts'
+import { VERSION } from './version.ts'
 
 const diskRowSchema = z.strictObject({
   id: z.string().min(1),
@@ -226,9 +227,11 @@ export function describeComposition(rows: readonly Row[], layers: readonly strin
     }
     return { id: row.id, plugin: row.plugin.name, disabled: row.disabled === true, config, ...(opaque ? { opaqueConfig: true } : {}) }
   })
-  const hash = createHash('sha256').update(JSON.stringify(canonical(hashed))).digest('hex').slice(0, 16)
+  const writer = `minidsh ${VERSION}`
+  const hash = createHash('sha256').update(JSON.stringify(canonical({ writer, rows: hashed }))).digest('hex').slice(0, 16)
   return {
     hash,
+    writer,
     layers: [...layers],
     rows: rows.map((row) => ({ id: row.id, plugin: row.plugin.name, ...(row.disabled === true ? { disabled: true } : {}) })),
   }

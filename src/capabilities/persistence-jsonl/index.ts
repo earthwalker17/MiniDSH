@@ -12,8 +12,9 @@
  * ATTACHES to its existing file append-only at publication (the whole-file
  * snapshot is the fresh/fork path and must never run for a resume). A torn
  * final line — the expected crash artifact — is preserved in a `.torn`
- * sidecar, never silently destroyed; deeper corruption (a mid-file parse error
- * or seq gap) marks the stored session `damaged` on read and refuses attach.
+ * sidecar, never silently destroyed; deeper corruption (a mid-file parse error,
+ * a seq gap, a line that is not an event envelope) marks the stored session
+ * `damaged` on read, names where and why in its `integrity`, and refuses attach.
  *
  * Single-writer per stored session is this provider's guarantee: publication
  * takes a `<file>.lock` write lease held until disposal — materialized or not —
@@ -27,13 +28,15 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { PERSISTENCE, type Persistence, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
+import { PERSISTENCE, type Persistence, type StoredIntegrity, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
 import {
   SESSION_CREATED,
   SESSION_DISPOSED,
   SESSION_EVENT,
   SESSION_FLUSH,
   SESSION_FORMAT_VERSION,
+  SessionFormatError,
+  envelopeFault,
   foldSessionTitle,
   type EventEnvelope,
   type Session,
@@ -62,11 +65,38 @@ interface ScanResult {
   readonly events: EventEnvelope[]
   /** Byte length of the accepted prefix (each accepted line including its newline). */
   readonly validBytes: number
+  /** The file's size. */
+  readonly bytes: number
   /**
    * `torn-line`: an unterminated final fragment (crash artifact; safe to
-   * sidecar). `invalid`: terminated garbage or a seq gap — deeper corruption.
+   * sidecar). `invalid`: a terminated line that is not the next event —
+   * deeper corruption, named in `stop`.
    */
   readonly tail: 'none' | 'torn-line' | 'invalid'
+  readonly stop?: { readonly line: number; readonly byte: number; readonly reason: string }
+}
+
+/**
+ * Why a terminated line is not the next event, or `undefined` when it is.
+ *
+ * A NUL gets its own words because it is the one shape with a known cause: a
+ * power cut after the last sync can leave a zero-filled region where lines had
+ * not reached the disk (`JSON.stringify` never emits a raw NUL), which is not
+ * the bit rot or hand edit every other reason here means.
+ */
+function lineFault(line: string, expectedSeq: number): { reason: string } | { event: EventEnvelope } {
+  if (line.includes('\u0000')) return { reason: 'NUL bytes where a line should be (the signature of a power cut after the last sync)' }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return { reason: 'not JSON' }
+  }
+  const fault = envelopeFault(parsed)
+  if (fault !== undefined) return { reason: fault }
+  const event = parsed as EventEnvelope
+  if (event.seq !== expectedSeq) return { reason: `seq ${event.seq} where ${expectedSeq} was expected` }
+  return { event }
 }
 
 /** Scans a session file line by line, tracking exact byte offsets. */
@@ -81,9 +111,12 @@ function scanSessionFile(file: string): ScanResult | undefined {
   const events: EventEnvelope[] = []
   let validBytes = 0
   let tail: ScanResult['tail'] = 'none'
+  let stop: ScanResult['stop']
   let offset = 0
+  let lineNo = 0
   let first = true
   while (offset < buffer.length) {
+    lineNo += 1
     const nl = buffer.indexOf(0x0a, offset)
     const terminated = nl !== -1
     const end = terminated ? nl : buffer.length
@@ -107,39 +140,27 @@ function scanSessionFile(file: string): ScanResult | undefined {
       }
       first = false
     } else if (line.trim() !== '') {
-      let accepted = false
-      try {
-        const event = JSON.parse(line) as EventEnvelope
-        if (event.seq === events.length) {
-          events.push(event)
-          accepted = true
-        }
-      } catch {
-        // Terminated but unparseable: not a torn append; fall through to invalid.
-      }
-      if (!accepted) {
+      const read = lineFault(line, events.length)
+      if ('reason' in read) {
         tail = 'invalid'
+        stop = { line: lineNo, byte: offset, reason: read.reason }
         break
       }
+      events.push(read.event)
     }
     validBytes = lineEnd
     offset = lineEnd
   }
   if (!header) return undefined
-  return { header, events, validBytes, tail }
+  return { header, events, validBytes, bytes: buffer.length, tail, ...(stop === undefined ? {} : { stop }) }
 }
 
 /**
- * A stored log written by a NEWER format is refused loudly (a throw, never
- * `damaged`): silently resuming it under this version would rewrite its header
- * to the current constant and discard whatever the newer format meant.
+ * A stored log of a NEWER format is refused loudly and distinctly from damage:
+ * nothing is wrong with it, this reader just cannot faithfully read it.
  */
-function refuseFutureVersion(header: SessionHeader): void {
-  if (header.version > SESSION_FORMAT_VERSION) {
-    throw new Error(
-      `session ${header.id}: stored log has format version ${header.version}, but this MiniDSH reads at most ${SESSION_FORMAT_VERSION}`,
-    )
-  }
+function refuseFutureVersion(header: SessionHeader, file: string): void {
+  if (header.version > SESSION_FORMAT_VERSION) throw new SessionFormatError(header.id, header.version, file)
 }
 
 /** Parses a lock file's holder; `undefined` for a missing or malformed one. */
@@ -492,7 +513,9 @@ class JsonlArchive implements Persistence {
       this.snapshot(session, file)
       return
     }
-    refuseFutureVersion(scan.header)
+    // Continued in place only at this writer's own format: an older log is
+    // read and forked, never extended with events of a format it lacks.
+    if (scan.header.version !== SESSION_FORMAT_VERSION) throw new SessionFormatError(scan.header.id, scan.header.version, file)
     if (scan.tail === 'invalid') throw new Error(`session ${session.id}: stored log is damaged; refusing to attach`)
     if (scan.header.id !== session.id || scan.header.createdAt !== session.header.createdAt) {
       throw new Error(`session ${session.id}: stored header does not match the resumed session; refusing to attach`)
@@ -592,10 +615,17 @@ class JsonlArchive implements Persistence {
   }
 
   load(id: string): StoredSession | undefined {
-    const scan = scanSessionFile(this.fileFor(id))
+    const file = this.fileFor(id)
+    const scan = scanSessionFile(file)
     if (!scan) return undefined
-    refuseFutureVersion(scan.header)
-    return { header: scan.header, events: scan.events, ...(scan.tail === 'invalid' ? { damaged: true as const } : {}) }
+    refuseFutureVersion(scan.header, file)
+    const integrity: StoredIntegrity = {
+      bytes: scan.bytes,
+      readableBytes: scan.validBytes,
+      tail: scan.tail === 'none' ? 'none' : scan.tail === 'torn-line' ? 'torn' : 'damaged',
+      ...(scan.stop === undefined ? {} : { stop: scan.stop }),
+    }
+    return { header: scan.header, events: scan.events, integrity, ...(scan.tail === 'invalid' ? { damaged: true as const } : {}) }
   }
 
   list(): StoredSessionSummary[] {

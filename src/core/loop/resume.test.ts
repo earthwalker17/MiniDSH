@@ -387,6 +387,8 @@ describe('crash repair closes the committed surface, not just the logged calls',
       'step/end',
       'turn/end',
       'session/end-seed',
+      // This lifecycle's own first fact, before anything it governs.
+      'session/lifecycle',
       // A log from before opening records existed gets them at pickup: the
       // base route first (the factory's act), then the two authority knobs.
       'agent/options',

@@ -13,6 +13,7 @@ import type { SessionId } from '../ids.ts'
 import type { Message, ModelModality, TokenUsage } from '../llm/types.ts'
 import type { JsonValue } from '../json.ts'
 
+/** The format a log's header carries and this reader reads; when it must change, and what is damage instead, is `format.ts`. */
 export const SESSION_FORMAT_VERSION = 0
 
 export type SurfaceOp = { readonly op: 'append' } | { readonly op: 'replace'; readonly start: number; readonly end: number }
@@ -131,6 +132,48 @@ export const TOOL_DISPATCH = eventKind<{ turn: number; step: number; callId: str
 export const TOOL_RESULT = eventKind<{ turn: number; step: number; callId: string; message: Message; error?: { name: string; code: string } }>('tool/result')
 export const END_SEED = eventKind<Record<string, never>>('session/end-seed')
 
+/**
+ * The first fact of every lifecycle: what its writer guarantees about the
+ * events that follow it, so a reader other than that writer can tell what an
+ * ABSENT fact proves. A lifecycle is a segment of the log: from seq 0, or from
+ * just after a `session/end-seed`, to the next one.
+ *
+ * - `dispatch`: this lifecycle's driver writes `tool/dispatch`, durable, before
+ *   every tool body (`core/loop/factory.ts` is its only writer; a Tools
+ *   provider that ran a body without awaiting `ToolCall.onDispatch` would make
+ *   the claim false).
+ * - `durability: 'synced'`: every resolved `session/flush` put what preceded it
+ *   on stable storage, which is what the persistence provider DECLARED
+ *   (`Persistence.durability`). Absent: no claim; a power cut may have lost
+ *   lines a checkpoint had already passed.
+ * - `salvage`: this lifecycle is a fork of a DAMAGED log's readable prefix, so
+ *   its seed's closers are conservative placeholders, not facts.
+ *
+ * Crash repair reads the claims of the open turn's segment (§4) — never from
+ * the mere presence of this record — and the session invariant holds it to its
+ * position: first in its segment, once. The persistence row sits in the spine
+ * (`app/compose.ts`), so the provider that declared `synced` cannot be swapped
+ * out under a live agent.
+ */
+export interface LifecycleRecord {
+  /** How this lifecycle began: a new session, a fork (`seeded`), or a resume. */
+  readonly origin: SessionOrigin
+  readonly dispatch?: true
+  readonly durability?: 'synced'
+  readonly salvage?: SalvageRecord
+}
+
+/** Where a salvaged fork's seed stopped reading its damaged source. */
+export interface SalvageRecord {
+  /** The damaged source's file size, and how much of it was a readable prefix. */
+  readonly bytes: number
+  readonly readableBytes: number
+  /** The 1-based line reading stopped at, and why. */
+  readonly stop: { readonly line: number; readonly reason: string }
+}
+
+export const SESSION_LIFECYCLE = eventKind<LifecycleRecord>('session/lifecycle')
+
 /** The three surface event type strings, hardcoded because the session owns them. */
 export const SURFACE_TYPES: ReadonlySet<string> = new Set([USER_MESSAGE.type, ASSISTANT_MESSAGE.type, TOOL_RESULT.type])
 
@@ -178,9 +221,10 @@ export interface SessionHeader {
 
 /**
  * How this live session came to exist — deliberately NOT part of the durable
- * header (a resumed session's header is identical to its stored one). A
- * persistence provider keys its publication behavior on it: `resumed` attaches
- * to the existing store append-only; everything else is a fresh write.
+ * header (a resumed session's header is identical to its stored one); each
+ * lifecycle's `session/lifecycle` record carries it instead. A persistence
+ * provider keys its publication behavior on it: `resumed` attaches to the
+ * existing store append-only; everything else is a fresh write.
  */
 export type SessionOrigin = 'new' | 'seeded' | 'resumed'
 

@@ -211,7 +211,9 @@ describe('persistence-jsonl: format version at the read boundary', () => {
     const rootA = await mountRoot()
     const future = { kind: 'session', version: 1, id: 'future', createdAt: 1, cwd: '/w' }
     writeFileSync(join(base(), 'future.jsonl'), `${JSON.stringify(future)}\n`)
-    expect(() => rootA.get(PERSISTENCE).load('future')).toThrow(/format version 1.*at most 0/)
+    // A format refusal, not damage: nothing is wrong with the log, and the error says which way to go.
+    expect(() => rootA.get(PERSISTENCE).load('future')).toThrow(/format 1, and this MiniDSH reads format 0 — it was written by a newer MiniDSH/)
+    expect(() => rootA.get(PERSISTENCE).load('future')).toThrow(expect.objectContaining({ code: 'SESSION_FORMAT_UNSUPPORTED', found: 1 }))
 
     const versionless = { kind: 'session', id: 'older', createdAt: 1, cwd: '/w' }
     writeFileSync(join(base(), 'older.jsonl'), `${JSON.stringify(versionless)}\n`)
