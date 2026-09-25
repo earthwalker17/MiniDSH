@@ -1008,9 +1008,11 @@ export class ProtocolHost {
       sandbox: mode,
       approval: effectiveApprovalPolicy(facts) ?? this.ctx.get(APPROVAL).defaultPolicy,
       enforcement: sandbox.enforcementFor(mode),
-      // From the LOG, like every other field here: a cold read has no agent,
-      // and a stored session's acceptance is as readable as its mode.
-      accepts: acceptanceFor(facts, mode),
+      // A live session through the same fold `session/authority` answers with,
+      // so the two cannot disagree; a stored one from its LOG alone, which
+      // names a weakened default since S16 (`stampAcceptance`) — a cold read
+      // must not borrow the reading host's deployment default.
+      accepts: source.agent === undefined ? acceptanceFor(facts, mode) : sandbox.acceptsFor(source.agent.session, mode),
       grants: [...liveGrants(facts).values()],
     })
     const route = foldRequestContext(facts)

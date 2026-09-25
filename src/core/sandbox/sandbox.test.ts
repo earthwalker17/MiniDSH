@@ -2,14 +2,20 @@
  * The authority plane: one stamp, derived roots, a durable mode that folds out
  * of the log, and the closed vocabulary the invariant defends.
  */
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { persistenceJsonlPlugin } from '../../capabilities/persistence-jsonl/index.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
+import { assistantText } from '../../test-support/scripted-adapter.ts'
+import { createUserMessage } from '../llm/message.ts'
 import { AGENTS } from '../agent/index.ts'
 import { asSessionId } from '../ids.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, APPROVAL_REQUEST, type ApprovalOutcome } from '../approval/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
 import {
+  acceptanceFor,
   allowsWrite,
   effectiveSandboxMode,
   isInside,
@@ -36,6 +42,9 @@ const policy = (mode: SandboxMode, root = ROOT): SandboxExecutionPolicy => ({ mo
 
 const stamps = (events: readonly EventEnvelope[]) =>
   events.filter((event) => matches(event, SANDBOX_MODE)).map((event) => event.data as { mode: string; enforcement: string; reason: string })
+
+const acceptances = (events: readonly EventEnvelope[]) =>
+  events.filter((event) => matches(event, SANDBOX_ACCEPTANCE)).map((event) => event.data as { accepts: string; forMode: string; reason: string })
 
 describe('sandbox policy: one stamp, derived roots', () => {
   it('derives the writable allow-list from the mode, so no two worlds can disagree', () => {
@@ -306,21 +315,22 @@ describe('what enforcement a session accepts', () => {
   /**
    * The deployment default is what `serve`, `web` and `chat` reach through:
    * they do not create the session themselves, so `--accept` can only arrive
-   * as a row default. It was read into the service and consulted for nobody —
-   * `initialize` advertised it while every session refused — so the flag was
-   * silently a no-op on exactly the host that needs it.
+   * as a row default. Since S16 a weakened default is also WRITTEN into the
+   * session beside its mode, so the log alone says what it accepted — a cold
+   * reader has no deployment to fall back on, and a resume keeps it.
    */
-  it('lets a deployment weaken the default, and pins a child against it', async () => {
+  it('stamps a weakened deployment default beside the mode it governs, and pins a child against it', async () => {
     harness = await coreHarness({ sandbox: { accepts: 'none' } })
     const { agent } = await harness.create()
     const sandbox = harness.root.get(SANDBOX)
     expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe('none')
-    // Still a DEFAULT, not a stamp: nothing is recorded until somebody decides.
-    expect(agent.session.events.filter((event) => matches(event, SANDBOX_ACCEPTANCE))).toHaveLength(0)
+    expect(acceptances(agent.session.events)).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'initial' }])
+    // The strict fold over the log alone now answers what the live session does.
+    expect(acceptanceFor(agent.session.facts, 'workspace-write')).toBe('none')
 
-    // And the hazard the fallback creates, closed: a child whose row pins it to
-    // `full` records that `full`, because otherwise the fold would fall through
-    // to the deployment's `none` and the delegation would WIDEN the child.
+    // A child whose row pins it to `full` records that `full`, because
+    // otherwise the fold would fall through to the deployment's `none` and the
+    // delegation would WIDEN the child.
     const child = await harness.root.get(AGENTS).create(harness.root, {
       cwd: process.cwd(),
       agentOptions: { provider: 'scripted', model: 'scripted-model' },
@@ -331,7 +341,99 @@ describe('what enforcement a session accepts', () => {
       },
     })
     expect(sandbox.acceptsFor(child.agent.session, 'read-only')).toBe('full')
+    // Its pin is the only acceptance it carries: the default stamp is never
+    // written into a delegated session, whose pin governs every mode.
+    expect(acceptances(child.agent.session.events)).toEqual([{ accepts: 'full', forMode: 'read-only', reason: 'delegation' }])
     await child.dispose()
+  })
+
+  it('stamps the default for each mode a session enters, never over what it recorded', async () => {
+    harness = await coreHarness({ sandbox: { accepts: 'none' } })
+    const { agent } = await harness.create()
+    const sandbox = harness.root.get(SANDBOX)
+    sandbox.setAcceptance(agent.session, 'full', 'workspace-write')
+    sandbox.setMode(agent.session, 'read-only')
+    sandbox.setMode(agent.session, 'workspace-write')
+    // The recorded `full` for workspace-write stands; read-only got its own line.
+    expect(acceptances(agent.session.events)).toEqual([
+      { accepts: 'none', forMode: 'workspace-write', reason: 'initial' },
+      { accepts: 'full', forMode: 'workspace-write', reason: 'change' },
+      { accepts: 'none', forMode: 'read-only', reason: 'change' },
+    ])
+    expect(sandbox.acceptsFor(agent.session, 'workspace-write')).toBe('full')
+    expect(acceptanceFor(agent.session.facts, 'read-only')).toBe('none')
+  })
+
+  it('stamps `resume` when a session recorded under a strict host is picked up by a weakened one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'minidsh-accept-'))
+    try {
+      const strict = await coreHarness()
+      strict.root.plugin(persistenceJsonlPlugin, { root: dir })
+      await strict.root.settle()
+      strict.adapter.script(assistantText('ok'))
+      const first = await strict.create()
+      const id = first.agent.id
+      first.agent.followup(createUserMessage('hi'))
+      await first.agent.whenIdle()
+      await strict.dispose()
+
+      harness = await coreHarness({ sandbox: { accepts: 'none' } })
+      harness.root.plugin(persistenceJsonlPlugin, { root: dir })
+      await harness.root.settle()
+      const resumed = await harness.root.get(AGENTS).resume(harness.root, id)
+      // What this lifecycle actually runs under is on the record, so a later
+      // cold reader — or a resume on a strict host — reads the same answer.
+      expect(acceptances(resumed.agent.session.events)).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'resume' }])
+      await resumed.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    }
+  })
+
+  it('records a child pinned `none` under a `none` deployment, so its log alone says so', async () => {
+    harness = await coreHarness({ sandbox: { accepts: 'none' } })
+    const sandbox = harness.root.get(SANDBOX)
+    const child = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      setup: (_childCtx, delegated) => {
+        sandbox.open(delegated.session, { mode: 'workspace-write', reason: 'delegation', accepts: 'none' })
+        harness!.root.get(APPROVAL).open(delegated.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    try {
+      // S15 compared the pin against the deployment and wrote nothing here, so
+      // a cold fold read `full` for a child that ran an unconfined shell.
+      expect(acceptances(child.agent.session.events)).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'delegation' }])
+      expect(acceptanceFor(child.agent.session.facts, 'workspace-write')).toBe('none')
+    } finally {
+      await child.dispose()
+    }
+  })
+
+  it('never lets a child fall back to the deployment for a mode it narrows into', async () => {
+    // The hole: a child pinned `full` (strict parent) resumed under a `none`
+    // deployment narrows itself to read-only. Its read-only mode has no line of
+    // its own, and the deployment fallback answered `none` — an unconfined
+    // read-only shell for a session that was started refusing one.
+    harness = await coreHarness({ sandbox: { accepts: 'none' } })
+    const sandbox = harness.root.get(SANDBOX)
+    const child = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      setup: (_childCtx, delegated) => {
+        sandbox.open(delegated.session, { mode: 'workspace-write', reason: 'delegation', accepts: 'full' })
+        harness!.root.get(APPROVAL).open(delegated.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    try {
+      sandbox.setMode(child.agent.session, 'read-only')
+      expect(sandbox.acceptsFor(child.agent.session, 'read-only')).toBe('full')
+    } finally {
+      await child.dispose()
+    }
   })
 
   it('applies an acceptance ONLY to the mode it was accepted for', async () => {

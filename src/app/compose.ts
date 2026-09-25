@@ -333,7 +333,16 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('prompt', promptPlugin))
   rows.push(defineRow('approval', approvalPlugin, options.approvalPolicy === undefined ? {} : { policy: options.approvalPolicy }))
   rows.push(defineRow('approval-headless', approvalHeadlessPlugin, { approve: options.approve ?? false }))
-  rows.push(defineRow('sandbox', sandboxPlugin, options.sandbox === undefined ? {} : { mode: options.sandbox }))
+  rows.push(
+    defineRow('sandbox', sandboxPlugin, {
+      ...(options.sandbox === undefined ? {} : { mode: options.sandbox }),
+      // `--accept` on `serve`, `web` and `chat` arrives ONLY here: those
+      // commands do not create the sessions they host. S15 read it into the
+      // service and this row dropped it, so the flag was a no-op on exactly the
+      // host that needs it; `app.test.ts` now pins the row.
+      ...(options.accepts === undefined ? {} : { accepts: options.accepts }),
+    }),
+  )
   if (withInvariants) rows.push(defineRow('authority-invariant', authorityInvariantPlugin))
   rows.push(defineRow('authority-presets', authorityPresetsPlugin, {}))
   rows.push(defineRow('fs', fsLocalPlugin))

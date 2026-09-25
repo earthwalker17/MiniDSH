@@ -88,8 +88,9 @@ describe('the shell under a mode this host cannot enforce', () => {
   it('refuses the command and reports the escalation the model may ask for', async () => {
     const { agent, run } = await setup()
     const result = await run({ command: echoCmd })
-    // A reported fact, not a tool failure: nothing ran.
-    expect(result.isError).toBe(false)
+    // Nothing ran, and the durable record says so with a code the audit reads.
+    expect(result.isError).toBe(true)
+    expect(result.code).toBe('SANDBOX_UNAVAILABLE')
     expect(result.text).toContain('[sandbox:')
     expect(result.text).toContain('no confinement backend')
     expect(result.text).toContain('sandbox_permissions')

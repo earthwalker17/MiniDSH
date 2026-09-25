@@ -59,6 +59,31 @@ describe('headless runner (real composition, scripted model)', () => {
   })
 
   /**
+   * `--accept` reached `serve`, `web` and `chat` only as a row default, and
+   * `compose()` dropped it on the way to the row, so the flag did nothing on
+   * the host that needs it. Through the FULL composition, and to the log.
+   */
+  it('carries a weakened acceptance into the sandbox row and records it in the session it governs', async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const { bootComposition } = await import('./headless.ts')
+    const { SANDBOX } = await import('../core/sandbox/index.ts')
+    const root = await bootComposition({ sessionsRoot, accepts: 'none', logger: silent, ...scripted(new ScriptedAdapter()) })
+    try {
+      expect(root.get(SANDBOX).acceptsFor(undefined, 'workspace-write')).toBe('none')
+    } finally {
+      await root.dispose()
+    }
+    const result = await runTask({ task: 'hi', cwd, model: 'scripted-model', sessionsRoot, accepts: 'none', logger: silent, ...scripted(new ScriptedAdapter().script(assistantText('ok'))) })
+    expect(result.exitCode).toBe(0)
+    const stored = readFileSync(join(sessionsRoot, `${encodeURIComponent(result.sessionId)}.jsonl`), 'utf8')
+    const accepted = stored.split('\n').filter((line) => line.includes('"sandbox/acceptance"')).map((line) => (JSON.parse(line) as { data: unknown }).data)
+    // One line, the opening stamp: the explicit switch `applyAuthority` makes
+    // finds it already recorded, so a resume on a strict host keeps it.
+    expect(accepted).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'initial' }])
+  })
+
+  /**
    * A cross-capability claim, tested against the FULL composition: the
    * composition record, the opening authority stamps and the persistence
    * provider all act at agent creation, and only their interplay decides

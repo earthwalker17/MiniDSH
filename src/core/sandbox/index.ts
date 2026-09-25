@@ -26,6 +26,7 @@ import {
   effectiveSandboxMode,
   isWider,
   lastSandboxStamp,
+  recordedAcceptance,
   SANDBOX_ACCEPTANCE,
   SANDBOX_MODE,
   SANDBOX_MODES,
@@ -115,7 +116,7 @@ export interface Sandbox {
    * With an `opening`, the explicit form a creator uses BEFORE publication
    * (in `setup`): the child opens under the mode its parent had at
    * delegation, stamped `reason: 'delegation'` — which is also its ceiling.
-   * An `accepts` weaker than the default is recorded beside it as a PIN.
+   * Its `accepts` is recorded beside it as a PIN unless everything is strict.
    * Refused if the session has already recorded a stamp.
    */
   open(session: Session, opening?: { readonly mode: SandboxMode; readonly reason: 'delegation'; readonly accepts?: SandboxEnforcement }): void
@@ -152,8 +153,9 @@ export interface SandboxConfig {
   /**
    * Deployment default for what a session accepts from its execution world
    * (default `full`: refuse a confined command this host cannot confine).
-   * Weakening it here is a deployment-wide choice with no per-session record,
-   * which is why the durable knob exists; the row is authority-sensitive.
+   * A weakened default is stamped into each top-level session beside its mode
+   * (`stampAcceptance`), so the log names it and a resume keeps it, as it
+   * keeps the mode; the row is authority-sensitive.
    */
   readonly accepts?: SandboxEnforcement | undefined
   /** Root for agent-less calls, which have no session cwd (default `process.cwd()`). */
@@ -227,20 +229,29 @@ class SandboxService implements Sandbox {
       throw new SandboxError('SANDBOX_ALREADY_OPEN', `session ${session.id} has already recorded its opening sandbox mode`)
     }
     session.append(SANDBOX_MODE, { mode: opening.mode, enforcement: this.enforcementFor(opening.mode), reason: opening.reason })
-    // A child's acceptance is recorded only when it differs from what this
-    // deployment would answer anyway: an identical line would say nothing, and
-    // every session would carry one. The comparison is against the DEPLOYMENT
-    // default, not the strict one — under a deployment that accepts `none`, a
-    // child pinned `full` by its row must record that `full`, or the fold
-    // would fall through to the deployment's answer and widen the child.
-    // When it IS recorded it is a PIN: first, and unchangeable for its life.
-    if (opening.accepts !== undefined && opening.accepts !== this.defaultAcceptance) {
+    // A child's acceptance is a PIN — first, and unchangeable for its life —
+    // and it is recorded unless both it and this deployment are the strict
+    // default, so the child's log alone says what it accepted. Comparing
+    // against the deployment alone (S15) left a child pinned `none` under a
+    // `none` deployment with no line, which a cold reader folds as `full`; and
+    // `acceptsFor` below never falls back to the deployment for a child, so a
+    // child pinned `full` under a `none` deployment needs its line too.
+    if (opening.accepts !== undefined && !(opening.accepts === DEFAULT_ACCEPTANCE && this.defaultAcceptance === DEFAULT_ACCEPTANCE)) {
       session.append(SANDBOX_ACCEPTANCE, { accepts: opening.accepts, forMode: opening.mode, reason: opening.reason })
     }
   }
 
+  /**
+   * A delegated child falls back to its PIN, never to the deployment: the pin
+   * is what it was started accepting, and a mode it narrows into (a resumed
+   * child may) has no line of its own. Falling back to the deployment there
+   * let a child pinned `full`, resumed under a `none` deployment, accept an
+   * unconfined `read-only` shell nobody had given it.
+   */
   acceptsFor(session: Session | undefined, mode: SandboxMode): SandboxEnforcement {
-    return session ? acceptanceFor(session.facts, mode, this.defaultAcceptance) : this.defaultAcceptance
+    if (!session) return this.defaultAcceptance
+    if (session.header.delegatedBy !== undefined) return acceptanceFor(session.facts, mode, delegationAcceptance(session.facts)?.accepts ?? DEFAULT_ACCEPTANCE)
+    return acceptanceFor(session.facts, mode, this.defaultAcceptance)
   }
 
   setAcceptance(session: Session, accepts: SandboxEnforcement, forMode: SandboxMode): void {
@@ -297,10 +308,31 @@ class SandboxService implements Sandbox {
   private record(session: Session, mode: SandboxMode): void {
     const enforcement = this.enforcementFor(mode)
     const last = lastSandboxStamp(session.facts)
-    if (last && last.mode === mode && last.enforcement === enforcement) return
+    if (last && last.mode === mode && last.enforcement === enforcement) {
+      this.stampAcceptance(session, mode, 'resume')
+      return
+    }
     // Same mode, different enforcement: the session was picked up on another host.
     const reason: SandboxReason = !last ? 'initial' : last.mode === mode ? 'resume' : 'change'
     session.append(SANDBOX_MODE, { mode, enforcement, reason })
+    this.stampAcceptance(session, mode, reason)
+  }
+
+  /**
+   * The acceptance in force, written down beside the mode it governs when a
+   * DEPLOYMENT weakened it — the same discipline as the mode's own opening
+   * stamp and the approval policy's, so a stored log says what its session
+   * accepted without the host that ran it. Nothing is written under the strict
+   * default (a line saying `full` would say what the fold already answers),
+   * nothing for a mode the log already records (a resume keeps what was
+   * recorded), and nothing in a delegated child, whose pin governs every mode.
+   * `reason` is the mode stamp's, or `resume` when this lifecycle picked up a
+   * session whose stamp still stands.
+   */
+  private stampAcceptance(session: Session, mode: SandboxMode, reason: SandboxReason): void {
+    if (this.defaultAcceptance === DEFAULT_ACCEPTANCE || session.header.delegatedBy !== undefined) return
+    if (recordedAcceptance(session.facts, mode) !== undefined) return
+    session.append(SANDBOX_ACCEPTANCE, { accepts: this.defaultAcceptance, forMode: mode, reason })
   }
 }
 

@@ -126,6 +126,8 @@ async function startHost(
     /** Mounts the settings store; omitted, the composition has none and the host uses its config value. */
     settingsStorePath?: string
     agentDefaults?: { provider: string; model: string }
+    /** The deployment's acceptance, as `serve --accept` sets it. */
+    accepts?: 'full' | 'none'
   },
 ): Promise<{ host: ProtocolHostHandle; client: TestClient; clients: TestClient[]; sessionsRoot: string }> {
   const clients = Array.from({ length: 1 + (extra?.extraClients ?? 0) }, () => new TestClient())
@@ -140,6 +142,7 @@ async function startHost(
     ...(extra?.agentPreset === undefined ? {} : { agentPreset: extra.agentPreset }),
     ...(extra?.settingsStorePath === undefined ? {} : { settingsStorePath: extra.settingsStorePath }),
     ...(extra?.agentDefaults === undefined ? {} : { agentDefaults: extra.agentDefaults }),
+    ...(extra?.accepts === undefined ? {} : { accepts: extra.accepts }),
     patches: [{ id: 'llm-deepseek', disabled: true }],
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
@@ -481,6 +484,19 @@ describe('protocol: the authority control plane', () => {
     const bad = await client.call('session/authority', { sessionId, accepts: 'partial' })
     expect(bad.error?.code).toBe(-32602)
     expect(bad.error?.message).toMatch(/must be full | none/)
+  })
+
+  it('opens a wire session under the deployment acceptance, records it, and shows one answer in the view and the knob', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('hi'))
+    const { client } = await startHost(adapter, { accepts: 'none' })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    // The session never creates itself here, so the row default is its only
+    // path in — and the log now names it, so a cold reader needs no host.
+    expect(client.frames('sandbox/acceptance').map((frame) => frame.event.data)).toEqual([{ accepts: 'none', forMode: 'workspace-write', reason: 'initial' }])
+    const knob = await client.result<{ accepts: string }>('session/authority', { sessionId })
+    const attached = await client.result<{ view: { authority: { accepts: string } } }>('session/attach', { sessionId })
+    expect({ knob: knob.accepts, view: attached.view.authority.accepts }).toEqual({ knob: 'none', view: 'none' })
   })
 
   it('refuses a mode outside the closed vocabulary', async () => {

@@ -142,9 +142,9 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
       ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
       // The deployment default, so that a session this process does not create
       // — every session `serve`, `web` and `chat` open over the wire — opens
-      // under the flag too. `applyAuthority` records the per-session fact on
-      // the paths that DO own a creation; the two agree because both read the
-      // same value, and the recorded one always wins the fold.
+      // under the flag too. The sandbox stamps a weakened default into every
+      // session it opens, so the log names it either way, and `applyAuthority`
+      // on a path that owns its creation finds it already recorded.
       ...(options.accepts === undefined ? {} : { accepts: options.accepts }),
     }),
     ...(options.extraBaseRows ?? []),

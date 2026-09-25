@@ -187,9 +187,13 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
         return { output: bound(ctx, exec, result.output + notice + denialHint(shell, sandbox, agent.session, result, escalated), excerpt), exitCode: result.exitCode ?? null }
       } catch (error) {
         if (error instanceof SandboxError && error.code === 'SANDBOX_UNAVAILABLE') {
-          // A reported fact, not a failure: the command never ran, and the model
-          // is told the one legitimate way to ask for more.
-          return { output: refusal(sandbox, agent.session, policy, error.message), exitCode: null }
+          // The command never ran, and the model is told the one legitimate way
+          // to ask for more. A CODED result since S16, where S3 returned it as
+          // a successful value: a refusal is an authority decision, and as a
+          // value it reached the durable record as a ✓ with no code, so no
+          // audit could see the command a model never escalated (the fs
+          // fence's refusal has always been `FS_SANDBOX_DENIED`).
+          throw new SandboxError('SANDBOX_UNAVAILABLE', refusal(sandbox, agent.session, policy, error.message))
         }
         throw error
       }

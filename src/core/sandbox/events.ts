@@ -176,11 +176,16 @@ export const DEFAULT_ACCEPTANCE: SandboxEnforcement = 'full'
  * acceptance for this one.
  */
 export function acceptanceFor(events: readonly EventEnvelope[], mode: SandboxMode, fallback: SandboxEnforcement = DEFAULT_ACCEPTANCE): SandboxEnforcement {
+  return recordedAcceptance(events, mode) ?? fallback
+}
+
+/** The last acceptance the log RECORDED for `mode`, or `undefined` when it records none — what a cold reader can state without a deployment to fall back on. */
+export function recordedAcceptance(events: readonly EventEnvelope[], mode: SandboxMode): SandboxEnforcement | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]!
     if (matches(event, SANDBOX_ACCEPTANCE) && event.data.forMode === mode) return event.data.accepts
   }
-  return fallback
+  return undefined
 }
 
 /**
