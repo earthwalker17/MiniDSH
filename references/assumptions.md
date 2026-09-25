@@ -1,6 +1,6 @@
 # What MiniDSH believes about DSH: the ledger
 
-> Authority rows at `deepseek-ai/deepseek-harness@c36a83ff` (master, 2026-09-22, re-run in S15); every other row at `ddefc45f` (2026-09-17), checked 2026-09-20 for durability and delegation, 2026-09-19 for the rest, except the pruner row (S8.5, not re-run). See [the reading rules](README.md).
+> Authority rows at `deepseek-ai/deepseek-harness@c36a83ff` (master, 2026-09-22, re-run in S15); the two format rows at `477b4f42` (2026-09-24, S16); every other row at `ddefc45f` (2026-09-17), checked 2026-09-20 for durability and delegation, 2026-09-19 for the rest, except the pruner row (S8.5, not re-run). See [the reading rules](README.md).
 
 A claim about a repository that changes weekly decays silently, so each claim a MiniDSH document leans on is a row here with the verdict it got when last checked. After a `falsified` or `partly`, the document in the last column says the corrected thing or stops saying it; a row that no document, or only the BP §4 record, leans on is deleted. Verdicts: `confirmed`, `partly` (true, with a correction that matters), `falsified`, `unverifiable`. ARCH = `docs/ARCHITECTURE.md`, BP = `docs/BLUEPRINT.md`, PROJ = `docs/PROJECT.md`; a bare source path is under `packages/`.
 
@@ -22,7 +22,6 @@ A claim about a repository that changes weekly decays silently, so each claim a 
 
 | Assumption | Verdict | What is true at the pin | Source | Leaned on in |
 |---|---|---|---|---|
-| DSH salvages a torn log in place | confirmed | Write path only; readers never mutate; damage inside a committed frame has no salvage | `session/session-persistence-jsonl/README.md` | route S16 |
 | There is no session deletion upstream | confirmed | "the seam has no deletion API"; a web archive UI exists, unread | `session/session-persistence-jsonl/README.md` | BP §2 |
 | DSH mounts a projection store by default | confirmed | Registry plus a rebuildable fail-soft cache in base; `sdk-minimal` mounts the registry only | `bundle/base/cordis.patch.yml` | BP §3 (rename projection) |
 | `session-query` is mounted by no shipped composition | falsified | base mounts `session-query-sqlite` at `openAt: never` (search off); its model tools are opt-in for the per-request cost their README names | `bundle/base/cordis.patch.yml`, `session-query/tool-session-query/README.md` | ARCH §12 |
@@ -35,7 +34,8 @@ A claim about a repository that changes weekly decays silently, so each claim a 
 | Repair reaches the whole unfinished log | falsified | ONE step, at the tail: the pending map clears at `step/end`; no open turn, no closers | `core/session/src/repair.ts` | ARCH §4 |
 | Upstream repair closes no bracket but its own | confirmed | Turn, step and tool events only; a plugin's opener before the last `session/end-seed` is dead, judged by its owner | `docs/subsystems/persistence.md` | ARCH §12, route S17 |
 | A child can be joined back to its delegating CALL | falsified | Nothing does: "no delegation records, receipt, Header field, descriptor field, or Session format is added" | `docs/subsystems/subagent.md` | ARCH §4, §12 |
-| DSH formats are additive like MiniDSH's version 0 | falsified | Immutable generations v0..v3, frozen migrations, fsync per batch, checksummed frames; an unknown kind is REQUIRED unless marked ignorable | `docs/subsystems/persistence.md` | ARCH §12, route S16 |
+| DSH formats are additive like MiniDSH's version 0 | falsified (re-run S16 at `477b4f42`) | Immutable generations v0..v4 (writer v4, released v3), frozen migrations, fsync per batch, checksummed frames; an unknown kind is REQUIRED unless marked ignorable | `docs/subsystems/persistence.md` | ARCH §12 |
+| Upstream records which writer produced a log | falsified (S16, `477b4f42`) | The header holds version, id, times, lineage and preset only; the persistence catalog has no writer or package field | `docs/persistence-catalog.md` | ARCH §12 |
 
 ## Execution, jobs, delegation
 

@@ -51,8 +51,11 @@ minidsh run "review this module for unchecked inputs" --provider anthropic --mod
 minidsh run "summarize this repository" --json     # one JSON line per session event on stdout
 
 minidsh sessions list                     # what is stored, by name
-minidsh sessions show <id> --audit        # what this session was allowed to do, and when
+minidsh sessions show <id> --audit        # what this session was allowed to do, and what each call did
+minidsh sessions verify <id>              # is the stored log intact? (exit 0 yes; reads it without resuming it)
+minidsh sessions inspect <id>             # its lifecycles, authority, and what a resume would append
 minidsh resume <id> "continue"            # pick a stored session up; fork <id> --at <seq> branches it at an event number
+                                          # (fork <id> --salvage branches a damaged log from what is still readable)
 minidsh config                            # the effective plugin composition, and which file set each entry
 minidsh --help
 ```
@@ -89,7 +92,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 - Tool execution is sequential and a delegated child is foreground; there are no background jobs.
 - No session deletion, search or rename; no OpenAI adapter; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven: it cannot import MiniDSH's own modules and must ship its own `package.json` and dependencies (BLUEPRINT §3).
 
-What comes next is the route in [BLUEPRINT §2](docs/BLUEPRINT.md): integrity and forensics — reading a stored log back with something other than the runtime that wrote it — then background jobs.
+What comes next is the route in [BLUEPRINT §2](docs/BLUEPRINT.md): the 1.1 release candidate, then background jobs.
 
 ## The question it investigates
 

@@ -43,7 +43,7 @@ Eighteen service keys: seventeen `core` (below) + app-only `app-composition`; `l
 | ctx key | owns | must not own |
 |---|---|---|
 | `sessions` | `Session`: header + append-only log (§4) + surface; commit = validate → observe → push → deliver, so an invariant rejects before commit; **session publication follows agent publication** (`publish`); `repairInterruptedTail` (§4) | persistence backends, UI state, model |
-| `persistence` | READ Definition: `load(id)` → the readable prefix (`damaged?`); `list()` newest-first, each titled from a bounded prefix | the write path (a provider owns format, materialization, attach); repair; deletion |
+| `persistence` | READ Definition: `load(id)` → the readable prefix (`damaged?`, `integrity`: where reading stopped and why); `list()` newest-first, each titled from a bounded prefix; `durability`, the flush guarantee it declares (§4) | the write path (a provider owns format, materialization, attach); repair; deletion |
 | `credentials` | `CredentialRef`: a validated env-var NAME, all that config, logs and errors carry; `resolve` fresh per call; `declare`/`declaredRefs`: the refs treated as secret (§9) | storing or logging values; which layers exist |
 | `presets` | key `authority-presets`: `presetTable` (`custom` reserved), pure `presetFor`, the log-only `authority/preset` intent (§7) | enforcement; knobs; a `defaultPreset` |
 | `llm` | the provider-neutral vocabulary and a deployment-global adapter registry (§5); `stream` = the `llm/stream` waterfall, whose terminal continuation picks the adapter | API keys, session state, default model |
@@ -57,29 +57,30 @@ Eighteen service keys: seventeen `core` (below) + app-only `app-composition`; `l
 | `attachments` | content-addressed `AttachmentRef`; `saveImage/readImage/hostPath`; **an image is validated and durably committed before its owning session event is appended** (§5) | normalization; retention; who may look |
 | `spill` | output with NO OTHER HOME: `save` → `{path, bytes}`; head/tail excerpt renderers | threshold (each tool's own) |
 | `settings` | REMOTE-writable defaults: `register/describe/read/write` (`expectedRevision`, §8); two layers merged one level deep; `settings/changed` | store; authority; composition; anything a resumed session recorded |
-| `agents` | `create/resume/fork/get/list`. **Creation is a TRANSACTION**: session unpublished → agent + scope → opening `agent/options` → `world` → `setup` → register → publish; a failure rolls back unannounced. `configure` is the durable route switch (§4); `resume` = `load` (refusing `damaged`) → `repairTail` (§4) → seed → the same transaction; `fork` refuses a boundary below a delegated child's opening stamps (§7) | driver |
+| `agents` | `create/resume/fork/get/list`. **Creation is a TRANSACTION**: session unpublished → agent + scope → opening `agent/options` → `world` → `setup` → register → publish; a failure rolls back unannounced. `configure` is the durable route switch (§4); `resume` = `load` (refusing `damaged`) → `repairTail` (§4) → seed → the same transaction; `fork` needs a child's opening stamps in its seed (§7), or `salvage`s a damaged prefix | driver |
 | `invariants` | `register(owner, name, installer)`: deployment-global, config-selected, validating pre-commit via `observe` | product logic |
-| `loop` | the driver and its durability checkpoints (§6); registers itself as the agent factory | anything extensions do |
+| `loop` | the driver and its durability checkpoints (§6); registers itself as the agent factory, which writes each lifecycle's `session/lifecycle` first (§4) | anything extensions do |
 
 ## 4. Canonical facts: the session log
 
 The log is the single source of truth: `{type, seq, time, data}`, `seq === log.length`, frozen at append.
 
 - **Three tiers** (`core/session/types.ts`). **Surface** kinds (`user/message`, `assistant/message`, `tool/result`) carry `surfaceOp` and `sourceEventSeqs` (a fact carries neither); model history is their fold (`deriveEventMessage`). Every other kind is a log-only **fact**, except **trace** (`TRACE_TYPES`), never folded at runtime (folds walk `Session.facts`). A new kind is a fact, or trace if nothing folds it.
-- **Vocabulary: 31 kinds**, by owner under `core/`. session: `turn/start|end`, `step/start|end`, `user/message`, `assistant/chunk|message`, `tool/call|dispatch|result`, `request/header|context`, `session/title`, `session/end-seed`; agent: `agent/options`, `inbox/spliced`, `subagent/start|end` (the PARENT's log); approval: `approval/asked|decided|grant|policy`; sandbox: `sandbox/mode|acceptance`; presets: `authority/preset`; compaction: `compaction/start|applied|end`; effects: `effect/recorded`; llm: `llm/aux-call`; plus `composition/applied` (`capabilities/composition-record`); fields live at each declaration.
-- **Format.** `SESSION_FORMAT_VERSION = 0`, additive; a newer stored version refuses at load and attach; an unknown kind loads as an opaque fact only while it carries neither surface field (§13).
+- **Vocabulary: 32 kinds**, by owner under `core/`. session: `turn/start|end`, `step/start|end`, `user/message`, `assistant/chunk|message`, `tool/call|dispatch|result`, `request/header|context`, `session/title|end-seed|lifecycle`; agent: `agent/options`, `inbox/spliced`, `subagent/start|end` (the PARENT's log); approval: `approval/asked|decided|grant|policy`; sandbox: `sandbox/mode|acceptance`; presets: `authority/preset`; compaction: `compaction/start|applied|end`; effects: `effect/recorded`; llm: `llm/aux-call`; plus `composition/applied` (`capabilities/composition-record`); fields live at each declaration.
+- **Format** (`core/session/format.ts`): the header's `version` alone. A writer continues only its own format, forks an older one, refuses a newer one (`SessionFormatError`, not damage); a change is additive only if an older reader ignoring it grows more conservative. A line outside the closed envelope is damage.
+- **Every lifecycle opens with `session/lifecycle`** (seq 0, or right after its `session/end-seed`): `dispatch` (a durable `tool/dispatch` precedes every body), `durability: 'synced'` (the store's declared flush guarantee), `salvage`. Readers use its claims, never its presence (`core/session/types.ts`).
 - **Arrival versus rewrite.** A `user/message` that ARRIVES sits inside an open turn; one that REPLACES a range is a rewrite and may land between turns (`core/session/invariant.ts`).
 - **The route is one fact in two records.** `agent/options` is the BASE (`configure` writes `change`); `request/context` the EFFECTIVE route per step (§6), written on any difference. Every reader takes the window and modalities from the log; the live adapter only for a log that predates the field. A role rewrites header and context, never the base. `request/header` is written only on change, so each request append-extends the last (prefix caches). A field added to a written-on-change record reads as absent in any session that never rewrites it.
 - **The header** (`SessionHeader`, JSONL line 1) is immutable identity and lineage: fork `parentId`/`seedLength`, delegation `delegatedBy`/`delegatedByCallId`/`delegationDepth`, `agentPreset`; carried through resume and fork (`core/session/types.ts`).
 - **Opening facts.** `agent/options{initial}`, `approval/policy{initial}`, `sandbox/mode{initial}` and `composition/applied` land before publication; a delegated child's are §7's.
 - **The durable inbox** is `inbox/spliced`, op-shaped (`core/agent`). A claim commits after the entered `user/message`s, so a pre-step crash re-delivers, never loses; a resumed agent wakes iff a waking insert is queued, a fork never.
 - **Crash repair closes everything the log left open** (`core/agent/repair.ts`). Resume and cold fork run a STATIC list, innermost first: unpaired `subagent/start` → `subagent/end{interrupted}`; unpaired `compaction/start` → `compaction/end{declined: unclosed}`; then the session's own `repairInterruptedTail` (`core/session/repair.ts`). Closers are pure, sharing one timestamp, so a cold read and a durable repair produce identical bytes; they state only what the log proves (no `usage` on `subagent/end{interrupted}`).
-- **A synthetic result states the evidence, in order**: no `tool/call` ⇒ `TOOL_NOT_STARTED`; a `tool/dispatch` or a recorded effect ⇒ `TOOL_OUTCOME_UNKNOWN`; neither, in a log that records dispatches AND kept an event written after the call ⇒ `TOOL_NOT_STARTED`; else `TOOL_OUTCOME_UNKNOWN`. Both third-row conditions are load-bearing (`classify`). An unknown result names that call's effects recorded in the step.
+- **A synthetic result states the evidence, in order**: no `tool/call` ⇒ `TOOL_NOT_STARTED`; a `tool/dispatch` or a recorded effect ⇒ `TOOL_OUTCOME_UNKNOWN`; neither, where the open turn's own lifecycle claims `dispatch` and `synced` ⇒ `TOOL_NOT_STARTED`; else `TOOL_OUTCOME_UNKNOWN` (`classify`). Under `salvage` (a damaged prefix, not a crash suffix) every owed call is unknown. An unknown result names that call's effects recorded in the step.
 - **An effect is recorded by the code that caused it, after it happens** (`core/effects/events.ts`). `fs-local` and `shell-stdio` append `effect/recorded` (`fs-write | shell-command`, keyed by `callId`) from values they computed. **Presence is proof; absence proves nothing.** Closed families, no exactly-once (§13). `EffectIntent` is the "about to do" half: never logged alone, only a consent's `subject` and a grant's identity (§7).
 - **A `session/event` listener may not append synchronously.** A nested append reaches persistence before its cause (seqs N+1, N: `damaged` at resume); queue it on a microtask.
 - **Model-visible ⟺ logged.** Every request equals `deriveMessages()` plus the folded `request/header`; checked in the `llm/stream` preflight (`core/loop/invariant.ts`).
-- **Persistence is a subscriber** (`persistence-jsonl`): `sessions/<id>.jsonl` (§9), materialized on a session's first conversation fact. A torn final line moves to `.torn`; deeper corruption is `damaged` and refuses attach. `session/flush` rethrows a remembered write error, every time. **No `fsync`**: the modelled failure is a crash, which the page cache survives (§13).
-- **Single writer per stored session.** A `<id>.jsonl.lock` lease is held from publication to disposal, reclaimed only from a holder provably dead on this host, else refused by name. **Reads never lock**; a resume flushes inside the creation transaction, so a held lease rejects it before paid work.
+- **Persistence is a subscriber** (`persistence-jsonl`): `sessions/<id>.jsonl` (§9), materialized on a session's first conversation fact. A torn final line moves to `.torn`; deeper corruption is `damaged` and refuses attach. **A resolved `session/flush` is on stable storage**: the file is `fdatasync`ed by a sync that started after the flush's last write, a new log's directory once on POSIX; a failed write or sync fails every later flush (§13).
+- **Single writer per stored session.** A `<id>.jsonl.lock` lease is held from publication to disposal, reclaimed only from a holder provably dead on this host, else refused by name. **Reads never lock**; a resume flushes inside the creation transaction, so a held lease rejects it before paid work. Attach compares every stored event by value.
 
 ## 5. LLM vocabulary and the two adapters
 
@@ -134,7 +135,7 @@ The model proposes, policy decides, the effect boundary enforces; every decision
 - **Spawn-time binding.** A backend wraps the persistent child once, under the session's policy; a durable `setMode` replaces it. An approved one-shot escalation is a throwaway child, wrapped under the escalated mode like any spawn (only `danger-full-access` runs unwrapped), leading its own POSIX process group, each reaped at disposal (`shell-stdio/process.ts`).
 - **The escalation path.** A refusal is a fact with one legitimate move: the SAME command once more with `sandbox_permissions` (strictly wider) and a `justification`, `ctx.approval` consenting to that call. An unstartable binary is `SHELL_UNAVAILABLE`, a failing wrapper `SANDBOX_UNAVAILABLE`. Under a backend the kernel's refusal reads as a failing command; the backend's denial words earn a hint, never a classification (`tool-shell`; §13).
 - **Consent is to the runtime's record.** An ask's `subject` is an `EffectIntent` (§4) the REQUESTER builds from validated arguments, naming the authority the effect would run under (`tool-shell`: `{command, mode, enforcement}`). The model's `justification` stays in `reason`, neutralized and clamped, never in the subject. The seam escapes subjects injectively (`escaped`); a cut one is `truncated` and has no `intentKey` (`core/effects/events.ts`). `openApprovals` joins each ask to its `tool/call`; past 16,384 characters the surfaces send a person to `sessions show --json` rather than hide the call's tail.
-- **Acceptance.** The `enforcement` beside a stamp is a HOST fact of the shell world; `sandbox/acceptance{accepts, forMode, reason}` is a DECISION, `full` (default) or `none`, for exactly `forMode`, because `confine()` is mode-blind and a bare `accepts` would void `read-only` too (`core/sandbox/events.ts`). It rides `ShellExecRequest.accepts` per call (`acceptsFor`); it relaxes the REFUSAL, never a backend (`wrap()` is unconditional), and the fs fence and ceiling stand. `--accept` sets the row's default: its only path into a wire-opened session.
+- **Acceptance.** The `enforcement` beside a stamp is a HOST fact of the shell world; `sandbox/acceptance{accepts, forMode, reason}` is a DECISION, `full` (default) or `none`, for exactly `forMode`, because `confine()` is mode-blind and a bare `accepts` would void `read-only` too (`core/sandbox/events.ts`). It rides `ShellExecRequest.accepts` per call (`acceptsFor`); it relaxes the REFUSAL, never a backend (`wrap()` is unconditional), and the fs fence and ceiling stand. `--accept` sets the row's default: its only path into a wire-opened session. A weakened default is stamped beside each mode stamp; a child falls back to its pin (`stampAcceptance`, `acceptsFor`).
 - **A consent may outlive one call, never its session.** `approval/grant` is log-only, identified by `toolName` plus the exact subject's `intentKey`: a REPEATED IDENTICAL action, not a policy language. It is live only once its own ask is `allowed-once`, and until any `approval/policy`, `sandbox/mode`, `sandbox/acceptance` or `authority/preset` follows (`core/approval/events.ts`). The fold runs inside `request` before `approval/asked` is appended, so a granted call is never shown as open.
 - **Offers are the fold's.** `openApprovals` computes `offers` and the seam re-runs it before it mints; only the host reports taking one (`approval/answer{offer}`), so headless mints none. There is no public `grant`; `grants`/`revoke` (`approval/revoke` on the wire) show and take one back.
 - **A record is not a fence.** `effect/recorded` (§4) sits beside the boundary; losing one loses evidence, never containment.
@@ -148,7 +149,8 @@ The model proposes, policy decides, the effect boundary enforces; every decision
 
 A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval` for the catalog and authority control), owns transport and process exit, renders from `session/event` and holds no authority state: a switch it asks for is a durable event it reads back. Plain-text surfaces share `app/present.ts`, which neutralizes control characters.
 
-- **Headless CLI** (`app/cli.ts`): `run "<task>"`, `resume <id> "<task>" --headless`, `fork <id> "<task>" [--at seq] --headless` exit 0 iff the turn completed, 2 on a usage failure. An unlisted flag is refused; `--json` streams the wire's `{sessionId, event}` frame; explicit authority flags are a durable switch (§9). `minidsh config` shows the effective composition (§9), `sessions show --audit` the authority timeline (§7).
+- **Headless CLI** (`app/cli.ts`): `run "<task>"`, `resume <id> "<task>" --headless`, `fork <id> "<task>" [--at seq] --headless` exit 0 iff the turn completed, 2 on a usage failure. An unlisted flag is refused; `--json` streams the wire's `{sessionId, event}` frame; explicit authority flags are a durable switch (§9). `minidsh config` shows the effective composition (§9), `sessions show --audit` the authority timeline and each call's effects (§7).
+- **Cold readers** (`app/inspect.ts`): `sessions verify <id>` exits 0 for `ok`/`interrupted`/`torn`, 1 for `damaged`/`invalid`/`unsupported`; `sessions inspect` reports lifecycles, a resume's closers and the authority the log folds to. Neither leases nor repairs. `fork --salvage` forks a damaged log's readable prefix.
 
 **Protocol** (`capabilities/protocol`; params and results are typed in `frames.ts`): JSON-RPC 2.0; one plugin, one host, N carriers (stdio, in-process, WebSocket). Control-plane methods act only on a LIVE session.
 
@@ -208,12 +210,13 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 - **Runtime invariants run in every test and live**: `compose()` mounts them by default.
 - **Cross-capability claims are tested against the full composition** (`app.test.ts` over `bootComposition`).
 - **Gates.** `pnpm check` plus a packed-tarball install smoke on Ubuntu, macOS and Windows (`check.yml`). A leg may not pass having proved nothing: `MINIDSH_EXPECT_CONFINEMENT=1` (Linux, macOS) fails a skipped confinement test, `MINIDSH_EXPECT_SHELL=1` a missing dialect.
+- **Fixtures.** A real 1.0.0 log and a real S16 log (`test-support/fixtures/sessions`) are verified, repaired, salvaged and replayed with `effects: 'recorded'` (no body runs) inside `pnpm check`.
 - **Live arcs.** `pnpm test:e2e` (`live.yml` by hand only): seven over `minidsh serve` stdio, `web` over `minidsh web`; each replays a log keylessly.
 
 | arc | what it proves |
 |---|---|
-| `live` | a mid-turn SIGKILL repaired (`TOOL_OUTCOME_UNKNOWN` iff a `tool/dispatch` names the call), finished by a second process |
-| `authority` | an edit lands, its `effect/recorded` sha256 matching; one outside is refused and absent; the shell branches on reported enforcement (unconfined: escalate, approve; confined: no host file, all approvals `rejected`); `read-only` refuses a write |
+| `live` | a mid-turn SIGKILL repaired (`TOOL_OUTCOME_UNKNOWN` iff a `tool/dispatch` names the call), finished by a second process; a cold `verify` between them predicts its closers exactly |
+| `authority` | an edit lands, its `effect/recorded` sha256 matching; one outside is refused and absent; the shell branches on reported enforcement (unconfined: escalate, approve; confined: no host file, all approvals `rejected`); `read-only` refuses a write; cold `inspect` equals the live authority |
 | `composition` | a disk composition loads a module tool; `settings.json` picks the route |
 | `context` | a real budget crossing compacts, the replace citing exactly the shadowed seqs; AGENTS.md obeyed; a spilled value read back |
 | `routing` | DeepSeek → Anthropic mid-session, one route fact; a `compaction` role |
@@ -263,6 +266,8 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | a consent subject for one | an `EffectIntent` from validated args, naming its AUTHORITY (§7) |
 | a durable step in the tool pipeline | `ToolCall.onDispatch`: cannot replace the body (§6) |
 | a session's name | BUILT: `core/session/title` (§4); the `session-title` row writes it |
+| a whole-log check | a pure `check*Log` beside the owner's invariant; `app/inspect.ts` composes |
+| a format change | the rule in `core/session/format.ts` |
 
 No row here → an architecture question first.
 
@@ -276,7 +281,7 @@ MiniDSH's decision and its reason; upstream's mechanism and each claim's verdict
 - **Consent.** A trusted `subject` where the requester can state one and the joined call on every ask, where upstream shows model prose; exact-subject session grants, upstream's open scope question; acceptance of `none`, which upstream cannot express.
 - **Confinement.** bwrap and Seatbelt; no Landlock (a native launcher this no-build tree cannot carry), no Windows backend (§13); probed even alone, as `enforcement` is recorded before any command runs.
 - **The ceiling.** `writableRoots` is the workspace root alone, for both families; DSH adds the temp roots, where MiniDSH's test workspaces live.
-- **Durability.** A durable `tool/dispatch` after the gate, where DSH writes none for a top-level call, and a recorded effect, where DSH keeps host snapshots; plain JSONL under a write lease, where DSH writes checksummed, fsynced generations.
+- **Durability.** A durable `tool/dispatch` after the gate, where DSH writes none for a top-level call, and a recorded effect, where DSH keeps host snapshots; plain JSONL under a write lease with synced checkpoints and a per-lifecycle record of what its writer guaranteed, where DSH fsyncs checksummed generations per batch and records no writer.
 - **Delegation and routing.** An enforced delegation ceiling where DSH trusts a seeded pin; `subagent/start|end` in the parent's log, every unpaired bracket closed by repair (DSH closes only its own tail turn), `delegatedByCallId` (DSH declines the question), model roles over a durable base route.
 - **Context.** No tool-result pruner (the tools bound their output); recall gated, not opt-in, over this session's shadowed spans only.
 - **Surfaces.** A terminal ships (DSH deleted its TUI) as a protocol client over an in-process carrier.
@@ -300,7 +305,6 @@ Know these before changing the code near them. One line each; the owning code sa
 - The `shell` row is outside the spine (`app/compose.ts`): a live `reconfigure` lets `enforcementFor`, and a stamp record, answer for a world no command runs in.
 - A shell child's environment withholds variables, not credentials (§9): an undeclared secret not named like one passes, `SSH_AUTH_SOCK` and the proxy variables stay, `credentials.json` is readable, and the network is open.
 - A delegation tool an agent preset registers lives in the child's scope, which `restrict` cannot hide and the depth cap does not count: a cost bound, not a fence.
-- `--audit` projects decisions, not attempts: a refused command the model never escalated is only in the transcript.
 - A module-loaded plugin is arbitrary code; `minidsh config`'s warnings are advisory.
 
 **Context**
@@ -316,9 +320,10 @@ Know these before changing the code near them. One line each; the owning code sa
 - Spill is swept only at load (§9): a long-running host stays unswept until restart; a repeated `callId` overwrites.
 - A lost attachment is turn-fatal (`ATTACHMENT_UNREADABLE`); image validation is header-only; one image producer, no client upload.
 - No session deletion, search, rename or model-written title: each needs a projection past `persistence.list()`'s bounded prefix (a first prompt over 64 KiB lists nameless).
-- **Crash repair is as sharp as the log (§4).** A call dead at its gate before the log's first `tool/dispatch`, or whose `tool/call` is the last line, reads unknown (S16 targets both), as does a crash in `tool-shell`'s in-body consent. A repaired `subagent/end` has no cost.
+- **Crash repair is as sharp as the lifecycle (§4).** Only one claiming `dispatch` and `synced` reads a gate death as not started; a 1.0.0 or unsynced one reads it unknown, and a never-logged call under the process-crash model; a crash in `tool-shell`'s in-body consent reads unknown. A repaired `subagent/end` has no cost; salvage closers are placeholders.
 - Effect records cover only `ctx.fs` and `ctx.shell` (not a command's own writes, spill or attachments), may over-report a shell that died between commands, and may follow an abandoned body's result (§6).
-- The format version is never restamped at attach; an unknown kind with `surfaceOp` throws in the seed; `freezeEnvelope` drops unknown envelope fields; a power cut losing whole lines leaves a valid shorter log.
+- `synced` is as honest as the disk; Windows cannot sync a new log's directory; facts after the last checkpoint can be lost; a power cut after it reads as damage (a NUL run), recoverable by `--salvage`.
+- A pre-S16 log names no deployment-default acceptance, nor whether an error result came from the gate or a body.
 - A fork boundary may separate a compaction bracket from the replace that realized it.
 
 **Surfaces**
@@ -348,7 +353,7 @@ Know these before changing the code near them. One line each; the owning code sa
 key files; .ts omitted
 src/kernel/  tokens · bus · context · errors
 src/core/    scope · json · ids · text; a package per §3 row, plus effects/ (no service) and metering/
-  session/   store · session · surface (the folds) · page · title · repair · invariant
+  session/   store · session · surface (the folds) · page · title · format · repair · invariant
   agent/     index (the registry, Inbox, resolveCallConfig) · repair (the closer list) · invariant
   loop/      driver · factory (the creation transaction) · marker · invariant
   sandbox/   events · index (writableRoots) · paths (canonicalPath) · invariant
@@ -359,9 +364,9 @@ src/capabilities/
   persistence-jsonl/ (the lease) · credentials-local/ · settings-local/ · spill-local/ · composition-record/
   context-runtime/ (persona, the runtime-context section) · workspace-instructions/ · compaction-basic/ · session-title/
   protocol/ (frames: methods, attach, SessionView · host · connection · transport-*)
-src/app/     cli · home · compose · config · settings · headless · serve · web · present (the audit)
+src/app/     cli · home · compose · config · settings · headless · serve · web · present (the audit) · inspect (verify/inspect)
              web/ (plain JS) · terminal/ · *.e2e.test.ts (the eight arcs)
-src/test-support/ scripted-adapter · harness · llm-replay · serve-process · web-process · fixtures/
+src/test-support/ scripted-adapter · harness · llm-replay · serve-process · web-process · fixtures/ (sessions/: real logs)
 scripts/     build · check-deps · check-docs · doc-registers · count-lines
 bin/         minidsh.js
 .github/     workflows/ (check, live) · ISSUE_TEMPLATE/
