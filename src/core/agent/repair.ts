@@ -34,19 +34,25 @@
  * attach by comparing the tail, and what makes a second crash before these
  * reach disk harmless: the next resume recomputes them exactly.
  */
-import { repairInterruptedTail, type EventEnvelope, type TailCloser } from '../session/index.ts'
+import { repairInterruptedTail, type EventEnvelope, type RepairContext, type TailCloser } from '../session/index.ts'
 import { closeUnpairedCompactions } from '../compaction/events.ts'
 import { closeUnpairedSubagents } from './events.ts'
 
 const TAIL_CLOSERS: readonly TailCloser[] = [closeUnpairedSubagents, closeUnpairedCompactions, repairInterruptedTail]
 
-/** Every closer a stored log owes, in order, seqs continuing from its length. A balanced log yields `[]`. */
-export function repairTail(events: readonly EventEnvelope[]): EventEnvelope[] {
+/**
+ * Every closer a stored log owes, in order, seqs continuing from its length. A
+ * balanced log yields `[]`. Under `salvage` (a damaged log's readable prefix)
+ * the same closers are written, but as conservative placeholders: every owed
+ * call reads outcome-unknown, and a `cancelled` or `interrupted` states only
+ * that the record ends there, not that nothing followed.
+ */
+export function repairTail(events: readonly EventEnvelope[], context: RepairContext = {}): EventEnvelope[] {
   const time = events.at(-1)?.time ?? Date.now()
   const closers: EventEnvelope[] = []
   let seq = events.length
   for (const close of TAIL_CLOSERS) {
-    const made = close(events, seq, time)
+    const made = close(events, seq, time, context)
     closers.push(...made)
     seq += made.length
   }

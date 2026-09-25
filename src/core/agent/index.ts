@@ -16,6 +16,7 @@ import {
   matches,
   sliceForkSeed,
   type EventEnvelope,
+  type SalvageRecord,
   type Session,
   type SessionHeader,
 } from '../session/index.ts'
@@ -304,18 +305,18 @@ class AgentRegistry implements Agents {
   }
 
   async fork(owner: Context, source: Session | SessionId, boundary?: number, options: ForkAgentOptions = {}): Promise<AgentHandle> {
-    const src = this.forkSource(source)
+    const src = this.forkSource(source, options.salvage === true)
     const seed = sliceForkSeed(src.events, boundary)
     // A fork of a delegated session must carry that session's fence with it.
-    // A boundary below the opening stamps would produce a session the header
+    // A seed without the opening stamps would produce a session the header
     // still calls a child while its authority re-opened at the deployment
-    // default — possibly WIDER than the ceiling it was delegated under.
-    if (src.header.delegatedBy !== undefined) {
-      const ceiling = delegationCeiling(src.events)
-      const pin = delegationPin(src.events)
-      if ((ceiling !== undefined && delegationCeiling(seed) === undefined) || (pin !== undefined && delegationPin(seed) === undefined)) {
-        throw new Error(`fork of "${src.parentId}": the boundary cuts below the delegation opening, which would drop the authority this session was delegated under`)
-      }
+    // default — possibly WIDER than the ceiling it was delegated under. The
+    // header decides, not the source: a salvaged prefix whose damage fell
+    // before the stamps has none to lose, and "present in source ⇒ present in
+    // seed" passed it vacuously.
+    if (src.header.delegatedBy !== undefined && (delegationCeiling(seed) === undefined || delegationPin(seed) === undefined)) {
+      const why = src.salvage === undefined ? 'the boundary cuts below the delegation opening' : 'the damage removed the delegation opening'
+      throw new Error(`fork of "${src.parentId}": ${why}, which would drop the authority this session was delegated under`)
     }
     return this.create(owner, {
       cwd: src.cwd,
@@ -331,10 +332,11 @@ class AgentRegistry implements Agents {
       ...(src.header.agentPreset === undefined ? {} : { agentPreset: src.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `fork of "${src.parentId}"`),
       ...(options.world === undefined ? {} : { world: options.world }),
+      ...(src.salvage === undefined ? {} : { salvage: src.salvage }),
     })
   }
 
-  private loadStored(id: SessionId): StoredSession {
+  private loadStored(id: SessionId, salvage = false): StoredSession {
     // A call-time optional read: persistence is a capability, not a lifecycle
     // dependency of the registry; without a provider these entry points fail
     // clean while everything else keeps working.
@@ -342,23 +344,45 @@ class AgentRegistry implements Agents {
     if (!persistence) throw new Error('continuing a stored session requires a persistence provider')
     const stored = persistence.load(id)
     if (!stored) throw new Error(`no stored session "${id}"`)
-    if (stored.damaged) throw new Error(`session "${id}": the stored log is damaged; refusing to continue it`)
+    if (stored.damaged && !salvage) {
+      throw new Error(`session "${id}": the stored log is damaged; refusing to continue it (a fork with salvage forks its readable prefix)`)
+    }
     return stored
   }
 
-  private forkSource(source: Session | SessionId): { events: readonly EventEnvelope[]; cwd: string; parentId: SessionId; header: SessionHeader } {
+  /**
+   * A salvaged source is a DAMAGED stored log's readable prefix: repaired
+   * fully conservatively (every owed call unknown, §4), never written or
+   * leased, and its fork records where the prefix stopped so a reader of the
+   * fork alone knows its seed's closers are placeholders.
+   */
+  private forkSource(
+    source: Session | SessionId,
+    salvage: boolean,
+  ): { events: readonly EventEnvelope[]; cwd: string; parentId: SessionId; header: SessionHeader; salvage?: SalvageRecord } {
     if (typeof source !== 'string') {
       return { events: source.events, cwd: source.header.cwd, parentId: source.id, header: source.header }
     }
     const live = this.agents.get(source)
     if (live) return { events: live.session.events, cwd: live.session.header.cwd, parentId: live.session.id, header: live.session.header }
-    const stored = this.loadStored(source)
-    const closers = repairTail(stored.events)
+    const stored = this.loadStored(source, salvage)
+    const salvaging = stored.damaged === true
+    const closers = repairTail(stored.events, { salvage: salvaging })
+    const integrity = stored.integrity
     return {
       events: closers.length === 0 ? stored.events : [...stored.events, ...closers],
       cwd: stored.header.cwd,
       parentId: stored.header.id,
       header: stored.header,
+      ...(salvaging
+        ? {
+            salvage: {
+              bytes: integrity?.bytes ?? 0,
+              readableBytes: integrity?.readableBytes ?? 0,
+              stop: { line: integrity?.stop?.line ?? 0, reason: integrity?.stop?.reason ?? 'damaged' },
+            },
+          }
+        : {}),
     }
   }
 

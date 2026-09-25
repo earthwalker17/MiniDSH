@@ -98,6 +98,8 @@ export interface ContinueOptions extends BootOptions {
   readonly task?: string
   /** Fork boundary (inclusive seq); fork only. */
   readonly boundary?: number
+  /** Fork a damaged stored log from its readable prefix (fork only; `ForkAgentOptions.salvage`). */
+  readonly salvage?: boolean
   /** Overrides; the stored log's folded request/header fills whatever is not given. */
   readonly provider?: string
   readonly model?: string
@@ -301,7 +303,10 @@ export async function resumeTask(options: ContinueOptions, onEvent?: EventListen
 export async function forkTask(options: ContinueOptions, onEvent?: EventListener): Promise<TaskResult> {
   const root = await bootComposition(options, onEvent)
   try {
-    const handle = await root.get(AGENTS).fork(root, asSessionId(options.id), options.boundary, continueArgs(options))
+    const handle = await root.get(AGENTS).fork(root, asSessionId(options.id), options.boundary, {
+      ...continueArgs(options),
+      ...(options.salvage === true ? { salvage: true } : {}),
+    })
     applyAuthority(root, handle, options)
     return await drive(handle, options.task)
   } finally {

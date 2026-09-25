@@ -109,7 +109,10 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
       fail(`tool/dispatch for "${event.data.callId}" has no pending tool/call`)
     }
     if (matches(event, TOOL_RESULT)) {
-      const synthetic = event.data.error?.code === 'TOOL_NOT_STARTED'
+      // Repair answers blocks that never logged a call: as not started, or —
+      // salvaging a damaged prefix, which may have lost the call line itself —
+      // as unknown under its own name.
+      const synthetic = event.data.error?.code === 'TOOL_NOT_STARTED' || event.data.error?.name === 'SalvagedError'
       if (!synthetic && !trace.pending.has(event.data.callId)) fail(`tool/result for "${event.data.callId}" has no pending tool/call`)
       trace.pending.delete(event.data.callId)
     }

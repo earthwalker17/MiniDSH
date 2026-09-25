@@ -68,6 +68,7 @@ const FLAGS = {
   json: '--json',
   headless: '--headless',
   audit: '--audit',
+  salvage: '--salvage',
 } as const
 type FlagName = keyof typeof FLAGS
 const VALUE_FLAGS = new Set<string>((Object.keys(FLAGS) as FlagName[]).filter((name) => FLAGS[name].includes(' ')))
@@ -77,7 +78,7 @@ const COMMANDS: Readonly<Record<string, { readonly positional: string; readonly 
   run: { positional: '"<task>"', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
   chat: { positional: '["<task>"]', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   resume: { positional: '<id> ["<task>"]', flags: ['headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
-  fork: { positional: '<id> ["<task>"]', flags: ['at', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
+  fork: { positional: '<id> ["<task>"]', flags: ['at', 'salvage', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
   serve: { positional: '', flags: ['cwd', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   config: { positional: '', flags: ['sandbox', 'ask', 'accept', 'json'] },
@@ -495,6 +496,8 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   if (typeof plan === 'string') return usage(plan)
   const approve = args.flags.get('approve') === true
   const at = kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}
+  // Salvage is asked for by name: a fork never quietly continues a damaged log.
+  const salvage = kind === 'fork' && args.flags.get('salvage') === true ? { salvage: true } : {}
 
   if (!headless) {
     try {
@@ -506,6 +509,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         approve,
         ...(kind === 'resume' ? { resumeId: id } : { forkId: id }),
         ...at,
+        ...salvage,
         ...(task.length > 0 ? { task } : {}),
         ...modelFlags(args),
       })
@@ -524,6 +528,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
     ...modelFlags(args),
     ...at,
+    ...salvage,
     approve,
   }
   try {

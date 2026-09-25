@@ -79,6 +79,8 @@ export interface TerminalOptions extends BootOptions {
   /** Branch a stored (or live) session into a new one and attach to it. */
   readonly forkId?: string
   readonly boundary?: number
+  /** Fork a damaged stored log from its readable prefix (`ForkAgentOptions.salvage`). */
+  readonly salvage?: boolean
   /** An initial prompt, sent as soon as the surface is attached. */
   readonly task?: string
   readonly provider?: string
@@ -603,7 +605,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       const handle =
         options.resumeId !== undefined
           ? await agents.resume(host.root, asSessionId(options.resumeId), continueOptions)
-          : await agents.fork(host.root, asSessionId(options.forkId!), options.boundary, continueOptions)
+          : await agents.fork(host.root, asSessionId(options.forkId!), options.boundary, { ...continueOptions, ...(options.salvage === true ? { salvage: true } : {}) })
       // An explicitly requested authority is a durable switch here too: a
       // resumed session keeps what it recorded unless someone says otherwise.
       applyAuthority(host.root, handle, options)

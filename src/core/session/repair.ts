@@ -5,7 +5,9 @@ import { createToolResultMessage, restoreMessage } from '../llm/message.ts'
 import { deepFreeze, snapshotJson } from '../json.ts'
 import {
   ASSISTANT_MESSAGE,
+  END_SEED,
   matches,
+  SESSION_LIFECYCLE,
   STEP_START,
   STEP_END,
   TOOL_CALL,
@@ -14,6 +16,7 @@ import {
   TURN_END,
   TURN_START,
   type EventEnvelope,
+  type LifecycleRecord,
 } from './types.ts'
 
 /**
@@ -26,7 +29,17 @@ import {
  * the session's own structure: turns, steps, calls, and the approval pairs a
  * call leaves open.
  */
-export type TailCloser = (events: readonly EventEnvelope[], nextSeq: number, time: number) => EventEnvelope[]
+export type TailCloser = (events: readonly EventEnvelope[], nextSeq: number, time: number, context?: RepairContext) => EventEnvelope[]
+
+/**
+ * What the events are. `salvage`: a DAMAGED log's readable prefix, cut at the
+ * first bad line wherever it fell — not a crash suffix, so nothing about what
+ * is missing past it can be inferred, and every closer is a conservative
+ * placeholder rather than a fact.
+ */
+export interface RepairContext {
+  readonly salvage?: boolean
+}
 
 /**
  * Closing events for an interrupted tail, so a resumed session opens balanced:
@@ -48,20 +61,21 @@ export type TailCloser = (events: readonly EventEnvelope[], nextSeq: number, tim
  *   | evidence for the block                            | code                   |
  *   | no `tool/call`                                    | `TOOL_NOT_STARTED`     |
  *   | a `tool/dispatch`, or a recorded effect           | `TOOL_OUTCOME_UNKNOWN` |
- *   | neither, in a log that records dispatches AND     | `TOOL_NOT_STARTED`     |
- *   |   kept an event written after the `tool/call`     |                        |
+ *   | neither, in a lifecycle whose `session/lifecycle` | `TOOL_NOT_STARTED`     |
+ *   |   claims `dispatch` AND `durability: 'synced'`    |                        |
  *   | anything else                                     | `TOOL_OUTCOME_UNKNOWN` |
  *
- * The third row is what `tool/dispatch` bought: a call that died at its policy
- * gate or waiting on a person's consent provably never reached a body, and
- * before S14 every logged call had to be read as "may have run". `classify`
- * below carries both of its conditions and why each is load-bearing.
+ * and under `salvage` every block is `TOOL_OUTCOME_UNKNOWN` (`classify`).
  *
- * The last row is a default, and it absorbs two different unknowns: a log an
- * earlier version wrote (no dispatches at all, so absence says nothing), and a
- * log whose tail stops AT the call (where absence could be truncation). In
- * both, "did not run" would be a claim the log cannot support — and claiming
- * it about a body that ran is the one error this contract exists to prevent.
+ * The third row is what `tool/dispatch` and a synced checkpoint buy together:
+ * the driver makes the dispatch durable before any body, so after a crash OR a
+ * power cut a missing one means the gate never passed — a call that died at
+ * its policy gate or waiting on a person's consent. Both claims are read from
+ * the record of the open turn's lifecycle, never inferred: a lifecycle written
+ * before S16 (1.0.0, or an unsynced store) gets the last row.
+ *
+ * The last row is a default, and claiming "did not run" about a body that ran
+ * is the one error this contract exists to prevent.
  *
  * An outcome-unknown result also carries what the log can prove about how far
  * the call got: the effects recorded for it in this step (§4). Presence is
@@ -75,6 +89,7 @@ export function repairInterruptedTail(
   events: readonly EventEnvelope[],
   nextSeq: number = events.length,
   time: number = events.at(-1)?.time ?? Date.now(),
+  context: RepairContext = {},
 ): EventEnvelope[] {
   let openTurn: number | undefined
   let openStep: { turn: number; step: number } | undefined
@@ -85,8 +100,13 @@ export function repairInterruptedTail(
   const dispatched = new Set<string>()
   const effects = new Map<string, EffectRecorded[]>()
   const answered = new Set<string>()
-  /** Does this log's WRITER record dispatches at all? Whole-log, never reset. */
-  let recordsDispatch = false
+  /**
+   * The record of the CURRENT lifecycle segment, reset at every
+   * `session/end-seed`. The open turn always lies in the last segment — each
+   * resume closes the tail before its own end-seed, and a fork refuses an
+   * open turn — so at the end of the pass this is the open turn's writer.
+   */
+  let lifecycle: LifecycleRecord | undefined
   const clearStep = (): void => {
     blocks = []
     calls.clear()
@@ -96,7 +116,9 @@ export function repairInterruptedTail(
   }
   for (let i = 0; i < events.length; i++) {
     const event = events[i]!
-    if (matches(event, TURN_START)) {
+    if (matches(event, END_SEED)) lifecycle = undefined
+    else if (matches(event, SESSION_LIFECYCLE)) lifecycle ??= event.data
+    else if (matches(event, TURN_START)) {
       openTurn = event.data.turn
       turnStartIndex = i
     } else if (matches(event, TURN_END)) {
@@ -114,10 +136,8 @@ export function repairInterruptedTail(
         .filter((block): block is Extract<typeof block, { type: 'tool-call' }> => block.type === 'tool-call')
         .map((block) => ({ id: block.id, messageSeq: event.seq }))
     } else if (matches(event, TOOL_CALL)) calls.set(event.data.callId, event.seq)
-    else if (matches(event, TOOL_DISPATCH)) {
-      recordsDispatch = true
-      dispatched.add(event.data.callId)
-    } else if (matches(event, EFFECT_RECORDED)) {
+    else if (matches(event, TOOL_DISPATCH)) dispatched.add(event.data.callId)
+    else if (matches(event, EFFECT_RECORDED)) {
       // Collected in the SAME pass and bounded by the step, which is also what
       // keeps a repeated call id honest: nothing makes one unique across
       // steps, and a whole-log fold would render an earlier turn's writes as
@@ -146,23 +166,17 @@ export function repairInterruptedTail(
   for (const [callId, callSeq] of calls) {
     if (!answered.has(callId) && !owed.some((entry) => entry.callId === callId)) owed.push({ callId, source: callSeq, started: true })
   }
-  /**
-   * The last seq the log actually kept. A crash truncates a SUFFIX — a torn
-   * final line, or whole lines still in the page cache when the power went
-   * (§13) — so nothing written before a surviving event can have been lost.
-   * That is what makes a missing dispatch mean something, and only there.
-   */
-  const lastSeq = events.at(-1)?.seq ?? -1
-
+  const salvage = context.salvage === true
   for (const entry of owed) {
     const recorded = effects.get(entry.callId) ?? []
     const code = classify({
       logged: entry.started,
       reachedBody: dispatched.has(entry.callId) || recorded.length > 0,
-      recordsDispatch,
-      survivedPast: entry.source < lastSeq,
+      claimsDispatch: lifecycle?.dispatch === true,
+      synced: lifecycle?.durability === 'synced',
+      salvage,
     })
-    const text = code === 'TOOL_OUTCOME_UNKNOWN' ? unknownText(recorded) : notStartedText(entry.started)
+    const text = salvage ? salvageText(recorded) : code === 'TOOL_OUTCOME_UNKNOWN' ? unknownText(recorded) : notStartedText(entry.started)
     /**
      * A DERIVED message id, not a minted one. Everything else a closer emits
      * is a pure function of the log, and `createToolResultMessage` would put a
@@ -181,7 +195,7 @@ export function repairInterruptedTail(
         type: TOOL_RESULT.type,
         seq: seq++,
         time,
-        data: snapshotJson({ turn, step, callId: entry.callId, message, error: { name: 'InterruptedError', code } }),
+        data: snapshotJson({ turn, step, callId: entry.callId, message, error: { name: salvage ? 'SalvagedError' : 'InterruptedError', code } }),
         surfaceOp: { op: 'append' },
         sourceEventSeqs: [entry.source],
       }) as EventEnvelope,
@@ -195,36 +209,45 @@ export function repairInterruptedTail(
 }
 
 /**
- * The recovery table, as four rows.
+ * The recovery table, as four rows — and one override.
  *
- * The last one is the one that is easy to get wrong. A missing `tool/dispatch`
- * only means "the gate never passed" if the log could not have LOST it, and
- * the log is not fsynced (§4): a crash truncates a suffix — a torn final line,
- * or whole lines still in the page cache when the power went (§13). So absence
- * is evidence exactly when this log kept something written AFTER the call,
- * because the writer would have written the dispatch before that later event
- * and a suffix truncation cannot take one and leave the other. A call whose
- * `tool/call` is the last surviving line is the genuinely ambiguous case — the
- * gate never passed, OR the dispatch and everything after it is gone — and
- * there the answer is unknown.
+ * The third row is the one that is easy to get wrong. A missing
+ * `tool/dispatch` means "the gate never passed" only if the log could not have
+ * LOST it, and that is a property of the WRITER, which its lifecycle record
+ * states: `dispatch` (this driver writes one before every body) and
+ * `durability: 'synced'` (every checkpoint it passed was on stable storage, so
+ * the dispatch was on disk before any body ran). Absent either claim — a 1.0.0
+ * log, an unsynced store — a power cut could have taken the dispatch line and
+ * left the call, and the answer is unknown.
  *
- * Without that bound the row is a REGRESSION on the pre-S14 rule: a power cut
- * after an effect landed would read as "did not run, safe to call again",
- * which is the one answer this whole contract exists to prevent.
+ * S14 answered that with "the log kept an event written after the call"; the
+ * S16 design critique showed it unsound under power loss, because the gate
+ * itself writes `approval/*` BETWEEN the call and the dispatch, so a surviving
+ * later event does not prove the dispatch could not have been lost.
+ *
+ * The first row keeps process-crash semantics for an unsynced writer (the
+ * driver logs `tool/call` before any gate or body, and a crash loses nothing
+ * that was written); a synced writer made the call durable before its gate.
+ *
+ * `salvage` overrides all of it: a damaged prefix stops at the first bad line
+ * wherever it fell, which may be the very `tool/call` of a block whose body
+ * ran and whose later lines are unreadable — so no absence proves anything.
  */
 function classify(evidence: {
   /** A `tool/call` was logged for this block. */
   readonly logged: boolean
   /** A `tool/dispatch` was logged for it, or an effect was recorded against it. */
   readonly reachedBody: boolean
-  /** This log's writer records dispatches at all — a 1.0.0 log does not. */
-  readonly recordsDispatch: boolean
-  /** The log kept an event written after this call's `tool/call`. */
-  readonly survivedPast: boolean
+  /** The open turn's lifecycle record says its driver writes `tool/dispatch` before every body. */
+  readonly claimsDispatch: boolean
+  /** ... and that its checkpoints were on stable storage. */
+  readonly synced: boolean
+  readonly salvage: boolean
 }): 'TOOL_NOT_STARTED' | 'TOOL_OUTCOME_UNKNOWN' {
+  if (evidence.salvage) return 'TOOL_OUTCOME_UNKNOWN'
   if (!evidence.logged) return 'TOOL_NOT_STARTED'
   if (evidence.reachedBody) return 'TOOL_OUTCOME_UNKNOWN'
-  if (evidence.recordsDispatch && evidence.survivedPast) return 'TOOL_NOT_STARTED'
+  if (evidence.claimsDispatch && evidence.synced) return 'TOOL_NOT_STARTED'
   return 'TOOL_OUTCOME_UNKNOWN'
 }
 
@@ -242,6 +265,16 @@ function unknownText(recorded: readonly EffectRecorded[]): string {
     'Tool result unknown: the session was interrupted while this call was running, so it may or may not have taken effect. ' +
     (evidence === undefined ? 'No effect was recorded for it, which is not proof that none happened. ' : `${evidence} `) +
     'Check the current state before acting on this, and repeat the call only if it is read-only or idempotent — never blindly.'
+  )
+}
+
+/** What the model is told about a call in a salvaged fork: the record stopped here, and the world may not have. */
+function salvageText(recorded: readonly EffectRecorded[]): string {
+  const evidence = describeEffects(recorded)
+  return (
+    'Tool result unknown: this session was forked from a DAMAGED log whose record is unreadable after this point, so this call — and any later work that is not in this history — may have taken effect. ' +
+    (evidence === undefined ? '' : `${evidence} `) +
+    'Check the current state before acting on anything, and repeat a call only if it is read-only or idempotent — never blindly.'
   )
 }
 

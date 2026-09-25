@@ -5,10 +5,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { persistenceJsonlPlugin } from '../../capabilities/persistence-jsonl/index.ts'
 import { AGENTS, SUBAGENT_END, SUBAGENT_START } from '../agent/index.ts'
+import { APPROVAL } from '../approval/index.ts'
+import { SANDBOX } from '../sandbox/index.ts'
 import { COMPACTION_END, COMPACTION_START, foldCompactionFailures } from '../compaction/index.ts'
 import { asSessionId } from '../ids.ts'
 import { createUserMessage } from '../llm/message.ts'
-import { SESSIONS, STEP_START, TOOL_CALL, TOOL_DISPATCH, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
+import { ASSISTANT_MESSAGE, SESSION_LIFECYCLE, SESSIONS, STEP_START, TOOL_CALL, TOOL_DISPATCH, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
 import { assistantText } from '../../test-support/scripted-adapter.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 
@@ -356,7 +358,6 @@ describe('crash repair closes the committed surface, not just the logged calls',
    */
   it('answers every tool-call block of the interrupted step and cancels an undecided approval', async () => {
     const { harness: h } = await persistedHarness()
-    const { ASSISTANT_MESSAGE } = await import('../session/index.ts')
     const { APPROVAL_ASKED } = await import('../approval/events.ts')
     const { createAssistantMessage } = await import('../llm/message.ts')
     const { serializeMessages } = await import('../../capabilities/llm-deepseek/serialize.ts')
@@ -486,6 +487,12 @@ describe('lineage survives the process', () => {
       delegatedByCallId: 'call-7',
       delegationDepth: 2,
       agentPreset: 'reviewer',
+      // Opened as `tool-subagent` opens every child: a fork of a delegated
+      // session must carry these, or it would re-open WIDER than its ceiling.
+      setup: (_ctx, agent) => {
+        h.root.get(SANDBOX).open(agent.session, { mode: 'workspace-write', reason: 'delegation', accepts: 'full' })
+        h.root.get(APPROVAL).open(agent.session, { policy: 'never', reason: 'delegation' })
+      },
     })
     child.agent.followup(createUserMessage('go'))
     await child.agent.whenIdle()
@@ -498,5 +505,75 @@ describe('lineage survives the process', () => {
     expect(forked.agent.session.header).toMatchObject({ parentId: id, delegatedBy: 'session-parent', delegatedByCallId: 'call-7', delegationDepth: 2, agentPreset: 'reviewer' })
     await forked.dispose()
     await resumed.dispose()
+  })
+})
+
+describe('salvage: forking a damaged log from its readable prefix', () => {
+  /** A stored log whose step made two tool calls, the first dispatched, then corrupted right after the first call line. */
+  async function damagedLog(h: CoreHarness, base: string, id: string): Promise<Buffer> {
+    const { createAssistantMessage } = await import('../llm/message.ts')
+    const { asCallId } = await import('../ids.ts')
+    const sessions = h.root.get(SESSIONS)
+    const session = sessions.create({ cwd: process.cwd(), id: asSessionId(id) })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('two things') }, { surfaceOp: { op: 'append' } })
+    const calls = ['c1', 'c2'].map((callId) => ({ type: 'tool-call' as const, id: asCallId(callId), name: 'bash', arguments: '{}' }))
+    session.append(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage(calls, 'scripted', 'scripted-model') }, { surfaceOp: { op: 'append' } })
+    session.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' })
+    session.append(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'c1' })
+    void sessions.detach(session)
+    // Bit rot on the dispatch line: everything from it on is unreadable.
+    const lines = readFileSync(fileFor(base, id), 'utf8').split('\n')
+    // Line 7 (the header, then seqs 0..5) is the dispatch; cut two bytes off it.
+    lines[6] = lines[6]!.slice(0, -2)
+    const bytes = Buffer.from(lines.join('\n'))
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(fileFor(base, id), bytes)
+    return bytes
+  }
+
+  it('refuses a damaged log unless salvage is asked for by name', async () => {
+    const { harness: h, dir: base } = await persistedHarness()
+    await damagedLog(h, base, 'rotten')
+    await expect(h.root.get(AGENTS).fork(h.root, asSessionId('rotten'), undefined, { agentOptions: { provider: 'scripted', model: 'scripted-model' } })).rejects.toThrowError(
+      /damaged; refusing to continue it \(a fork with salvage/,
+    )
+  })
+
+  it('forks the readable prefix with every owed call unknown, records where it stopped, and never touches the source', async () => {
+    const { harness: h, dir: base } = await persistedHarness()
+    const before = await damagedLog(h, base, 'rotten')
+    const fork = await h.root.get(AGENTS).fork(h.root, asSessionId('rotten'), undefined, { agentOptions: { provider: 'scripted', model: 'scripted-model' }, salvage: true })
+    const events = fork.agent.session.events
+    const results = events.filter((event) => event.type === 'tool/result').map((event) => (event.data as { callId: string; error: { name: string; code: string } }))
+    // c1's dispatch was on the damaged line; a salvaged prefix proves nothing about either call.
+    expect(results).toEqual([
+      expect.objectContaining({ callId: 'c1', error: { name: 'SalvagedError', code: 'TOOL_OUTCOME_UNKNOWN' } }),
+      expect.objectContaining({ callId: 'c2', error: { name: 'SalvagedError', code: 'TOOL_OUTCOME_UNKNOWN' } }),
+    ])
+    const record = events.slice(fork.agent.session.liveStart).find((event) => event.type === SESSION_LIFECYCLE.type)!
+    expect(record.data).toMatchObject({ origin: 'seeded', salvage: { stop: { line: 7, reason: 'not JSON' } } })
+    expect((record.data as { salvage: { readableBytes: number; bytes: number } }).salvage.bytes).toBe(before.length)
+    // The damaged source: byte-identical, and never leased.
+    expect(readFileSync(fileFor(base, 'rotten')).equals(before)).toBe(true)
+    const { existsSync } = await import('node:fs')
+    expect(existsSync(`${fileFor(base, 'rotten')}.lock`)).toBe(false)
+    await fork.dispose()
+  })
+
+  it('refuses to salvage a delegated child whose damage took its delegation opening', async () => {
+    const { harness: h, dir: base } = await persistedHarness()
+    const sessions = h.root.get(SESSIONS)
+    const child = sessions.create({ cwd: process.cwd(), id: asSessionId('child'), delegatedBy: asSessionId('parent') })
+    child.append(TURN_START, { turn: 1 })
+    child.append(USER_MESSAGE, { message: createUserMessage('x') }, { surfaceOp: { op: 'append' } })
+    void sessions.detach(child)
+    // A child with no readable opening stamps (lost to damage): re-opening it
+    // at the deployment default would widen it past its ceiling.
+    appendFileSync(fileFor(base, 'child'), 'garbage\n')
+    await expect(h.root.get(AGENTS).fork(h.root, asSessionId('child'), undefined, { agentOptions: { provider: 'scripted', model: 'scripted-model' }, salvage: true })).rejects.toThrowError(
+      /the damage removed the delegation opening/,
+    )
   })
 })

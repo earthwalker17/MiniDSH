@@ -602,17 +602,21 @@ class JsonlArchive implements Persistence {
     //
     // Repair closers are IN the seed (`agents.resume` appends them before the
     // session exists), so `liveStart` counts them and this length check alone
-    // tolerates up to that many foreign events. The tail identity below is what
-    // guards that window, and only because repair is DETERMINISTIC: another
-    // process resuming the same log writes byte-identical closers, and anything
-    // else differs in type or time. A repair that read a clock would open it.
+    // tolerates up to that many foreign events. The identity below guards that
+    // window: every stored event must BE this session's event at its seq, by
+    // full value. Type and time were enough while every resumer wrote the same
+    // closers; since S16 two versions repair the same tail differently (a
+    // synced lifecycle's gate-death reads not-started, 1.0.0 answers unknown
+    // under a random id), so a foreign resumer's torn delta can match in type
+    // and time while its results say something else.
     if (scan.events.length > session.liveStart) {
       throw new Error(`session ${session.id}: the stored log grew past what this session resumed from; refusing to attach`)
     }
-    const lastStored = scan.events.at(-1)
-    const mine = lastStored ? session.events[lastStored.seq] : undefined
-    if (lastStored && (!mine || mine.type !== lastStored.type || mine.time !== lastStored.time)) {
-      throw new Error(`session ${session.id}: the stored log changed since it was loaded; refusing to attach`)
+    for (const stored of scan.events) {
+      const mine = session.events[stored.seq]
+      if (mine === undefined || JSON.stringify(mine) !== JSON.stringify(stored)) {
+        throw new Error(`session ${session.id}: the stored log changed since it was loaded (seq ${stored.seq}); refusing to attach`)
+      }
     }
     if (scan.tail === 'torn-line') {
       // Preserve the crash artifact in a sidecar rather than destroying bytes;

@@ -6,7 +6,7 @@ import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
-import { SESSIONS, SESSION_TITLE, TURN_END, TURN_START, USER_MESSAGE, foldSessionTitle, type Sessions } from '../../core/session/index.ts'
+import { SESSIONS, SESSION_TITLE, TURN_END, TURN_START, USER_MESSAGE, foldSessionTitle, repairInterruptedTail, type Sessions } from '../../core/session/index.ts'
 import { sessionPlugin } from '../../core/session/index.ts'
 import { persistenceJsonlPlugin } from './index.ts'
 
@@ -176,6 +176,22 @@ describe('persistence-jsonl: resume attach', () => {
     await expect(resumed.flush()).rejects.toSatisfy(damagedFlush)
     // A failed publication is permanent: EVERY flush keeps failing, not just the first.
     await expect(resumed.flush()).rejects.toSatisfy(damagedFlush)
+  })
+
+  it('refuses to attach over a foreign closer that matches its own in type and time but not in what it says', async () => {
+    const { sessions, base } = await mount()
+    const crashed = sessions.create({ cwd: '/w', id: asSessionId('race') })
+    crashed.append(TURN_START, { turn: 1 })
+    crashed.append(USER_MESSAGE, { message: createUserMessage('go') }, { surfaceOp: { op: 'append' } })
+    await sessions.detach(crashed)
+    const stored = root!.get(PERSISTENCE).load('race')!
+    const mine = repairInterruptedTail(stored.events)
+    // Another resumer (another version) got the lease first and appended ITS
+    // closer: same type, same time, different words — then died.
+    const foreign = { ...mine[0]!, data: { turn: 1, reason: { kind: 'error', code: 'X', message: 'another writer' } } }
+    appendFileSync(fileFor(base, 'race'), `${JSON.stringify(foreign)}\n`)
+    const resumed = sessions.create({ cwd: '/w', id: stored.header.id, createdAt: stored.header.createdAt, seed: [...stored.events, ...mine], origin: 'resumed' })
+    await expect(resumed.flush()).rejects.toSatisfy((error: unknown) => /changed since it was loaded \(seq 2\)/.test(((error as AggregateError).errors?.[0] as Error)?.message ?? ''))
   })
 
   it('refuses to snapshot over an existing stored log (only resume may touch it)', async () => {

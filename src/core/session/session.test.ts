@@ -10,6 +10,7 @@ import { deriveEventMessage, foldRequestHeader } from './surface.ts'
 import {
   ASSISTANT_MESSAGE,
   REQUEST_HEADER,
+  SESSION_LIFECYCLE,
   STEP_END,
   STEP_START,
   TOOL_CALL,
@@ -298,7 +299,7 @@ describe('Session: the recovery contract', () => {
     expect(text).toMatch(/never blindly/)
   })
 
-  /** A log whose first step completed a dispatched call, so its writer demonstrably records them. */
+  /** A log whose first step completed a dispatched call, then opened a second call — as a writer from before S16 wrote it, with no lifecycle record. */
   const recordsDispatches = (a: Session['append']): void => {
     a(TURN_START, { turn: 1 })
     a(STEP_START, { turn: 1, step: 1 })
@@ -312,13 +313,33 @@ describe('Session: the recovery contract', () => {
     a(TOOL_CALL, { turn: 1, step: 2, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
   }
 
-  it('reads a call that never left its gate as not started, when the log kept something written after it', async () => {
+  /** The same log written by an S16 driver over a syncing store: its first fact says so. */
+  const syncedWriter = (a: Session['append']): void => {
+    a(SESSION_LIFECYCLE, { origin: 'new', dispatch: true, durability: 'synced' })
+    recordsDispatches(a)
+  }
+
+  /**
+   * S14 read this as NOT_STARTED because the ask survived after the call. The
+   * S16 design critique showed that unsound under a power cut: the gate writes
+   * the ask BEFORE the dispatch, so a lost page cache can keep the ask, lose the
+   * dispatch, and leave a body that ran reading "safe to call again". Without a
+   * writer that synced its checkpoints, the answer is unknown.
+   */
+  it("stays unknown for an unsynced writer even when the gate's own events survived the call", async () => {
     const { result } = await crashedAt((append) => {
       const a = append as unknown as Session['append']
       recordsDispatches(a)
-      // The gate ASKED and the host died while a person deliberated. The ask
-      // is the event after the call, and it is what makes the absent dispatch
-      // mean something: the writer got past this call without dispatching it.
+      a(APPROVAL_ASKED, { id: 'approval-11', toolName: 'str_replace_editor', callId: 'c1' })
+    })
+    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
+  })
+
+  it('reads a call that never left its gate as not started, when its writer synced the dispatch before any body', async () => {
+    const { result } = await crashedAt((append) => {
+      const a = append as unknown as Session['append']
+      syncedWriter(a)
+      // The host died while a person deliberated over the ask.
       a(APPROVAL_ASKED, { id: 'approval-11', toolName: 'str_replace_editor', callId: 'c1' })
     })
     expect(codeOf(result)).toBe('TOOL_NOT_STARTED')
@@ -326,16 +347,56 @@ describe('Session: the recovery contract', () => {
     expect(resultText(result)).toMatch(/safe to make the call again/)
   })
 
-  /**
-   * The row that would otherwise be a REGRESSION on the pre-S14 rule. The log
-   * is not fsynced, so a crash can take the dispatch line and leave the call —
-   * and "did not run, safe to call again" about a `git push` that went is the
-   * one answer this whole contract exists to prevent.
-   */
-  it('stays unknown when the `tool/call` is the last surviving line, because truncation explains it too', async () => {
+  it("reads a synced writer's call as not started even when its `tool/call` is the last line — the shape S14 had to call unknown", async () => {
+    const { result } = await crashedAt((append) => syncedWriter(append as unknown as Session['append']))
+    expect(codeOf(result)).toBe('TOOL_NOT_STARTED')
+  })
+
+  it('stays unknown when the `tool/call` is the last surviving line of an unsynced writer, because truncation explains it too', async () => {
     const { result } = await crashedAt((append) => recordsDispatches(append as unknown as Session['append']))
     expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
     expect(resultText(result)).toMatch(/may or may not have taken effect/)
+  })
+
+  it("reads the claims of the open turn's OWN lifecycle, never an earlier one", async () => {
+    // The downgrade hole: an S16 lifecycle, then one written by an older build
+    // (no record, no dispatch facts). The open call is the older writer's.
+    const { sessions } = await harness(false)
+    const first = sessions.create({ cwd: '/w' })
+    syncedWriter(first.append.bind(first) as Session['append'])
+    const closed = [...first.events, ...repairInterruptedTail(first.events)]
+    const later = sessions.create({ cwd: '/w', seed: closed.map((event) => ({ ...event })) })
+    const a = later.append.bind(later) as Session['append']
+    a(TURN_START, { turn: 2 })
+    a(STEP_START, { turn: 2, step: 1 })
+    a(ASSISTANT_MESSAGE, { turn: 2, step: 1, message: createAssistantMessage([call('c9')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+    a(TOOL_CALL, { turn: 2, step: 1, callId: 'c9', name: 'str_replace_editor', arguments: '{}' })
+    a(APPROVAL_ASKED, { id: 'approval-99', toolName: 'str_replace_editor', callId: 'c9' })
+    const result = repairInterruptedTail(later.events).find((event) => event.type === TOOL_RESULT.type)!
+    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
+  })
+
+  it('under salvage answers every owed block unknown, even one whose `tool/call` line is gone', async () => {
+    const { sessions } = await harness(false)
+    const session = sessions.create({ cwd: '/w' })
+    const a = session.append.bind(session) as Session['append']
+    a(SESSION_LIFECYCLE, { origin: 'new', dispatch: true, durability: 'synced' })
+    a(TURN_START, { turn: 1 })
+    a(STEP_START, { turn: 1, step: 1 })
+    // The readable prefix stopped at the assistant message: the damaged line
+    // may have been c1's own `tool/call`, and its body may have run.
+    a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c1'), call('c2')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
+    const closers = repairInterruptedTail(session.events, session.events.length, 1, { salvage: true })
+    const results = closers.filter((event) => event.type === TOOL_RESULT.type)
+    expect(results.map(codeOf)).toEqual(['TOOL_OUTCOME_UNKNOWN', 'TOOL_OUTCOME_UNKNOWN'])
+    expect(results.map((event) => (event.data as { error: { name: string } }).error.name)).toEqual(['SalvagedError', 'SalvagedError'])
+    expect(resultText(results[0]!)).toMatch(/forked from a DAMAGED log/)
+    // And the salvaged seed is one a session will continue: the invariant
+    // accepts a salvage answer for a block that logged no call.
+    const { sessions: checked } = await harness(true)
+    const seeded = checked.create({ cwd: '/w', seed: [...session.events, ...closers].map((event) => ({ ...event })) })
+    seeded.append(TURN_START, { turn: 2 })
+    expect(seeded.events.at(-1)!.type).toBe(TURN_START.type)
   })
 
   it('stays unknown when the body left an effect, whatever else the log lost', async () => {
