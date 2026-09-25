@@ -31,7 +31,7 @@ import {
 } from '../core/session/index.ts'
 import { coreHarness, type CoreHarness } from '../test-support/harness.ts'
 import { main } from './cli.ts'
-import { inspectStored, verdictExitCode, verifyStored } from './inspect.ts'
+import { inspectLines, inspectStored, verdictExitCode, verifyAttachments, verifyLines, verifyStored } from './inspect.ts'
 import { auditLines } from './present.ts'
 
 let dirs: string[] = []
@@ -111,10 +111,15 @@ describe('verify: the verdict', () => {
       ['step/end', undefined],
       ['turn/end', undefined],
     ])
-    // And a live writer holding the lease turns "a crash" into "maybe running".
-    const held = verifyStored(stored(events), { pid: process.pid, host: hostname(), alive: true })
+    // And a live writer holding the lease turns "a crash" into "maybe running":
+    // the closers are the ones a fork taken now appends, and none says "not started".
+    const held = verifyStored(stored(events, { lease: { pid: process.pid, host: hostname(), alive: true } }))
     expect(held.inFlux).toBe(true)
     expect(held.findings.find((finding) => finding.check === 'tail')?.message).toMatch(/live writer holds this log/)
+    expect(held.closers.map((event) => (event.data as { error?: { name: string; code: string } }).error).filter(Boolean)).toEqual([{ name: 'InFluxError', code: 'TOOL_OUTCOME_UNKNOWN' }])
+    expect(verifyLines('s', held)[0]).toMatch(/interrupted — intact, in flux/)
+    // A holder provably dead is a crash after all.
+    expect(verifyStored(stored(events, { lease: { pid: 1, host: hostname(), alive: false } })).inFlux).toBe(false)
   })
 
   it('is torn for an unterminated final line, and damaged — exit 1 — past a readable prefix', () => {
@@ -150,6 +155,32 @@ describe('verify: the verdict', () => {
     expect(inspectStored(stored(events), verification).lifecycles).toEqual([{ startSeq: 0, record: { origin: 'new', dispatch: true, durability: 'synced' } }])
   })
 
+  it('calls a log invalid when a message a projection reads has the wrong shape, where it used to say intact', () => {
+    const events = log((add) => {
+      opening(add)
+      add(TURN_START.type, { turn: 1 })
+      add(STEP_START.type, { turn: 1, step: 1 })
+      add(USER_MESSAGE.type, { message: null }, true)
+    })
+    const verification = verifyStored(stored(events))
+    expect(verification.verdict).toBe('invalid')
+    expect(verification.findings).toContainEqual(expect.objectContaining({ check: 'session', seq: 4, malformed: true, message: 'malformed payload: no message' }))
+  })
+
+  it('runs the report\'s folds too, so a log it calls sound is one inspect can read', () => {
+    // No rule reads a turn's ending reason; the report does.
+    const events = log((add) => {
+      opening(add)
+      add(TURN_START.type, { turn: 1 })
+      add(TURN_END.type, { turn: 1, reason: null })
+    })
+    const verification = verifyStored(stored(events))
+    expect(verification.verdict).toBe('invalid')
+    expect(verification.findings).toContainEqual(expect.objectContaining({ check: 'fold', seq: 3, malformed: true }))
+    // And the report stands, stopped before the payload it cannot read.
+    expect(inspectStored(stored(events), verification).turns).toMatchObject({ total: 1, open: { turn: 1 } })
+  })
+
   it('warns about what only the header can reveal: a child with no delegation opening, an ask nothing will close', () => {
     const child = verifyStored(stored(log((add) => (opening(add), completedTurn(add))), { header: { version: 0, id: asSessionId('c'), createdAt: 1, cwd: '/w', delegatedBy: asSessionId('p') } }))
     expect(child.findings).toEqual([expect.objectContaining({ severity: 'warning', check: 'delegation' })])
@@ -164,6 +195,18 @@ describe('verify: the verdict', () => {
       ),
     )
     expect(stranded.findings).toEqual([expect.objectContaining({ severity: 'warning', check: 'approvals', message: expect.stringMatching(/approval-3 .* no repair closes it/) })])
+  })
+})
+
+describe('verify: attachments', () => {
+  it('reports a message it cannot read instead of throwing', async () => {
+    const events = log((add) => {
+      opening(add)
+      add(USER_MESSAGE.type, { message: { id: 'm', role: 'user', content: null, source: { kind: 'user' } } }, true)
+    })
+    const attachments = { readImage: async () => new Uint8Array() } as unknown as Parameters<typeof verifyAttachments>[1]
+    const findings = await verifyAttachments(events, attachments)
+    expect(findings).toEqual([expect.objectContaining({ check: 'attachments', seq: 2, malformed: true })])
   })
 })
 
@@ -186,6 +229,20 @@ describe('inspect: what the log alone says', () => {
     expect(inspection.turns).toMatchObject({ total: 2, open: { turn: 2 } })
     // Innermost first: the delegation, then the session's own approval and turn.
     expect(verification.closers.map((event) => event.type)).toEqual(['subagent/end', APPROVAL_DECIDED.type, TURN_END.type])
+  })
+
+  it('names each segment by the build that wrote it, and none for one whose record names none', () => {
+    // An S16 log resumed by 1.0.0: its composition record names no build, and
+    // must not inherit the one before it.
+    const events = log((add) => {
+      opening(add)
+      add('composition/applied', { hash: 'aaaa', writer: 'minidsh 1.1.0-dev', rows: [] })
+      add('session/end-seed', {})
+      add('composition/applied', { hash: 'bbbb', rows: [] })
+    })
+    const inspection = inspectStored(stored(events), verifyStored(stored(events)))
+    expect(inspection.lifecycles.map((view) => view.writer)).toEqual(['minidsh 1.1.0-dev', undefined])
+    expect(inspectLines(inspection).find((line) => line.startsWith('      4'))).toBe('      4  no record (a build before S16)')
   })
 
   it('shows, in the audit, what a call DID and what a resume would say about the one in flight', () => {
@@ -264,6 +321,42 @@ describe('sessions verify | inspect: cold reads through the CLI', () => {
     }
   })
 
+  it('reads a log a live writer holds as in flux, leaves its lease alone, and audits no crash that has not happened', async () => {
+    const home = tempDir('minidsh-home-')
+    const previous = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    try {
+      harness = await coreHarness()
+      harness.root.plugin(persistenceJsonlPlugin, { root: join(home, 'sessions') })
+      await harness.root.settle()
+      const sessions = harness.root.get(SESSIONS)
+      // Held by THIS process: the lock names process.pid on this host, which probes alive.
+      const live = sessions.create({ cwd: process.cwd(), id: asSessionId('running') })
+      live.append(SESSION_LIFECYCLE, { origin: 'new', dispatch: true, durability: 'synced' })
+      live.append(TURN_START, { turn: 1 })
+      live.append(STEP_START, { turn: 1, step: 1 })
+      live.append(USER_MESSAGE, { message: createUserMessage('go') }, { surfaceOp: { op: 'append' } })
+      live.append(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c1')], 'scripted', 'scripted-model') }, { surfaceOp: { op: 'append' } })
+      live.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"make"}' })
+      const lock = `${join(home, 'sessions', 'running.jsonl')}.lock`
+      const lockBefore = readFileSync(lock)
+
+      const verified = await capture(['sessions', 'verify', 'running', '--json'])
+      expect(JSON.parse(verified.out)).toMatchObject({ verdict: 'interrupted', inFlux: true })
+      const inspected = await capture(['sessions', 'inspect', 'running'])
+      expect(inspected.out).toMatch(/a fork taken now would close it with/)
+      expect(inspected.out).toMatch(/lease: held by pid \d+ on .* \(alive\)/)
+      const audited = await capture(['sessions', 'show', 'running', '--audit'])
+      expect(audited.out).not.toMatch(/on resume/)
+      // The lease is read, never taken, reclaimed or rewritten.
+      expect(readFileSync(lock).equals(lockBefore)).toBe(true)
+      await sessions.detach(live)
+    } finally {
+      if (previous === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previous
+    }
+  })
+
   it('says a newer format is unsupported, distinct from damage, and refuses a flag a reader does not take', async () => {
     const home = tempDir('minidsh-home-')
     const previous = process.env.MINIDSH_HOME
@@ -279,6 +372,14 @@ describe('sessions verify | inspect: cold reads through the CLI', () => {
       expect({ code: missing.code, err: missing.err.trim() }).toEqual({ code: 1, err: 'no session "nobody"' })
       const wrongFlag = await capture(['sessions', 'verify', 'future', '--audit'])
       expect({ code: wrongFlag.code, err: wrongFlag.err.trim() }).toEqual({ code: 2, err: '--audit is not a flag of "sessions verify"' })
+      const both = await capture(['sessions', 'show', 'future', '--json', '--audit'])
+      expect({ code: both.code, err: both.err.trim() }).toEqual({ code: 2, err: '"sessions show" takes --json or --audit, not both' })
+
+      // A file whose header a power cut zero-filled is damage, not absence.
+      writeFileSync(join(home, 'sessions', 'zeroed.jsonl'), Buffer.alloc(4096))
+      const zeroed = await capture(['sessions', 'verify', 'zeroed', '--json'])
+      expect(zeroed.code).toBe(1)
+      expect(JSON.parse(zeroed.out)).toMatchObject({ verdict: 'damaged', message: expect.stringMatching(/cannot be read at all: NUL bytes where the header line should be/) })
     } finally {
       if (previous === undefined) delete process.env.MINIDSH_HOME
       else process.env.MINIDSH_HOME = previous

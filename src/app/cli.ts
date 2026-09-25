@@ -11,10 +11,10 @@
  */
 import { createRoot, describeConfigError, type Logger } from '../kernel/index.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
-import { foldRequestContext, foldSessionTitle, matches, SessionFormatError, TOOL_RESULT, USER_MESSAGE } from '../core/session/index.ts'
-import { PERSISTENCE, type Persistence, type StoredSession } from '../core/persistence/index.ts'
+import { foldRequestContext, foldSessionTitle, matches, SessionFormatError, TOOL_RESULT, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
+import { heldByWriter, PERSISTENCE, type Persistence, type StoredSession } from '../core/persistence/index.ts'
 import { repairTail } from '../core/agent/index.ts'
-import { persistenceJsonlPlugin, readLease } from '../capabilities/persistence-jsonl/index.ts'
+import { persistenceJsonlPlugin, unreadableHeader } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { statSync } from 'node:fs'
@@ -512,6 +512,13 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   const at = kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}
   // Salvage is asked for by name: a fork never quietly continues a damaged log.
   const salvage = kind === 'fork' && args.flags.get('salvage') === true ? { salvage: true } : {}
+  if (salvage.salvage === true) {
+    // The fork's model is told about lost work only through a call that was
+    // open where reading stopped; damage that fell between turns leaves it no
+    // sign at all. The person asking for the salvage is told here instead.
+    const note = await withPersistence(plan, (persistence) => salvageNote(persistence, id))
+    if (note !== undefined) process.stderr.write(`${note}\n`)
+  }
 
   if (!headless) {
     try {
@@ -778,6 +785,34 @@ async function withPersistence<T>(
   }
 }
 
+/** What a person salvaging `id` must know that its fork's model may never be told: where the readable record stops. */
+function salvageNote(persistence: Persistence, id: string): string | undefined {
+  let stored: StoredSession | undefined
+  try {
+    stored = persistence.load(id)
+  } catch {
+    return undefined
+  }
+  if (stored?.damaged !== true) return undefined
+  const stop = stored.integrity?.stop
+  const where = stop === undefined ? 'part way through' : `at line ${stop.line} (${stop.reason})`
+  return `salvaging ${id}: its log stops being readable ${where}. The fork holds only what came before; any later turns, and what they did, are not in its history, and its model is told so only about a call that was open where reading stopped.`
+}
+
+/**
+ * What a resume would append to a crashed log nobody has resumed, for the
+ * audit. None for a damaged log (a resume is refused), for one a live writer
+ * holds (nothing has crashed), or when repair cannot fold it (`verify` names why).
+ */
+function pendingClosers(stored: StoredSession): EventEnvelope[] {
+  if (stored.damaged === true || heldByWriter(stored)) return []
+  try {
+    return repairTail(stored.events)
+  } catch {
+    return []
+  }
+}
+
 /** A stored log, or the line saying why there is none to read: absent, or of a newer format (which is not damage). */
 function readStored(persistence: Persistence, id: string): StoredSession | string {
   try {
@@ -802,13 +837,16 @@ async function coldReadCommand(args: ParsedArgs, plan: BootPlan, sub: 'inspect' 
   return withPersistence(plan, async (persistence, attachments, storeRoot) => {
     const read = readStored(persistence, id)
     if (typeof read === 'string') {
-      const verdict = read.startsWith('no session') ? 'not-found' : 'unsupported'
-      if (json) process.stdout.write(`${JSON.stringify({ sessionId: id, verdict, message: read })}\n`)
-      else process.stderr.write(`${read}\n`)
+      // A file whose header cannot be read is not a missing session: a power
+      // cut at creation zero-fills exactly that line.
+      const unreadable = read.startsWith('no session') ? unreadableHeader(storeRoot, id) : undefined
+      const verdict = unreadable !== undefined ? 'damaged' : read.startsWith('no session') ? 'not-found' : 'unsupported'
+      const message = unreadable === undefined ? read : `session "${id}": its log exists and cannot be read at all: ${unreadable}`
+      if (json) process.stdout.write(`${JSON.stringify({ sessionId: id, verdict, message })}\n`)
+      else process.stderr.write(`${message}\n`)
       return 1
     }
-    const lease = readLease(storeRoot, id)
-    const checked = verifyStored(read, lease)
+    const checked = verifyStored(read)
     const verification = { ...checked, findings: [...checked.findings, ...(await verifyAttachments(read.events, attachments))] }
     if (sub === 'verify') {
       if (json) {
@@ -820,7 +858,7 @@ async function coldReadCommand(args: ParsedArgs, plan: BootPlan, sub: 'inspect' 
       }
       return verdictExitCode(verification.verdict)
     }
-    const inspection = inspectStored(read, verification, lease)
+    const inspection = inspectStored(read, verification)
     if (json) process.stdout.write(`${JSON.stringify(inspection)}\n`)
     else for (const line of inspectLines(inspection)) process.stdout.write(`${line}\n`)
     return 0
@@ -865,6 +903,8 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
   if (sub === 'show') {
     const id = args.positional[1]
     if (!id) return usage(`usage: ${usageFor('sessions')}`)
+    // Two views of one log, not a combination: one of them would be dropped.
+    if (args.flags.get('json') === true && args.flags.get('audit') === true) return usage('"sessions show" takes --json or --audit, not both')
     return withPersistence(plan, (persistence, attachments) => {
       const read = readStored(persistence, id)
       if (typeof read === 'string') {
@@ -876,7 +916,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         process.stdout.write(`authority and effects of ${stored.header.id} (cwd ${stored.header.cwd})\n`)
         // A crashed log nobody resumed yet: the call in flight is only a line
         // once something repairs it, so the audit shows what a resume would say.
-        for (const line of auditLines(stored.events, stored.damaged ? [] : repairTail(stored.events))) process.stdout.write(`${line}\n`)
+        for (const line of auditLines(stored.events, pendingClosers(stored))) process.stdout.write(`${line}\n`)
       } else if (args.flags.get('json') === true) {
         for (const event of stored.events) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, event })}\n`)
         // Machine readers must see damage too: a trailer object (no `event` field) a frame consumer skips.

@@ -195,6 +195,13 @@ const DENIALS: ReadonlySet<string> = new Set([
   'SANDBOX_NOT_WIDER',
 ])
 
+/** Why an answer is outcome-unknown, by the name repair gave it (`core/session/repair.ts`). */
+const UNKNOWN_BECAUSE: Readonly<Record<string, string>> = {
+  InterruptedError: 'its outcome was lost with the process',
+  SalvagedError: 'its outcome is past the point where the source log was damaged',
+  InFluxError: 'the source was forked while another process was still running it',
+}
+
 /**
  * The audit projection: what this session was permitted to do, when, every
  * time someone was asked — and, since S16, what its calls DID and what they
@@ -232,7 +239,7 @@ export function auditLines(events: readonly EventEnvelope[], pending: readonly E
       return
     }
     if (matches(event, TOOL_RESULT) && event.data.error?.code === 'TOOL_OUTCOME_UNKNOWN') {
-      lines.push(`${at(event.seq)}  unknown     ${calls.get(event.data.callId) ?? event.data.callId} — its outcome was lost with the process`)
+      lines.push(`${at(event.seq)}  unknown     ${calls.get(event.data.callId) ?? event.data.callId} — ${UNKNOWN_BECAUSE[event.data.error.name] ?? UNKNOWN_BECAUSE.InterruptedError}`)
       return
     }
     if (pendingLine && matches(event, TOOL_RESULT)) {
@@ -247,6 +254,8 @@ export function auditLines(events: readonly EventEnvelope[], pending: readonly E
     } else if (matches(event, SANDBOX_ACCEPTANCE)) {
       // An authority DECISION, so `--audit` owes it a line: a projection that
       // showed the mode but not what unfenced the shell would be worse than none.
+      // A `change` here is not always a person's: entering a mode the log has
+      // no line for writes the deployment's weakened default (`stampAcceptance`).
       lines.push(`${at(event.seq)}  accepts     ${event.data.accepts} under ${event.data.forMode} (${event.data.reason})`)
     } else if (matches(event, APPROVAL_GRANT)) {
       // A standing consent is an authority act with no knob behind it, so the
