@@ -87,8 +87,11 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     console.log('[authority arc] host enforcement: ' + init.defaultAuthority.enforcement + (confined ? ' (confined branch)' : ' (unconfined branch)'))
 
     // ---- 1. inside the workspace: ordinary work, no consent needed ---------
+    // The TOOL is named: step 4b reads this write back from the editor's own
+    // effect record, and on a confined host a model free to choose reaches for
+    // the shell, whose writes are not enumerated (S16 WSL run 2).
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', {
-      text: 'Create a file named notes.txt in the working directory containing exactly this single line: authority holds',
+      text: 'Using the file editor tool, create a file named notes.txt in the working directory containing exactly this single line: authority holds',
     })
     await serve.waitForCompletedTurn(sessionId, 1)
     expect(readFileSync(join(workspace, 'notes.txt'), 'utf8').trim()).toBe('authority holds')
@@ -323,8 +326,12 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       // answer — and an absent line would then prove nothing, exactly as step
       // 3b spells out for the shell. The claim is that the POLICY refuses, so
       // something has to reach it.
+      // "View first": the editor refuses an edit of a file it has not read in
+      // this process (`FS_NOT_OBSERVED`) BEFORE the fence is reached, and a
+      // model that wrote notes.txt with the shell never viewed it — the S16
+      // WSL run 1 failed exactly so, the switch untested.
       text:
-        'Using the file editor tool, append a second line reading "after the switch" to notes.txt. ' +
+        'Using the file editor tool, view notes.txt, then append a second line reading "after the switch" to it. ' +
         'Make the attempt even if you expect it to be refused, then report exactly what the tool returned.',
     })
     await serve.waitForCompletedTurn(sessionId, confined ? 5 : 4)
