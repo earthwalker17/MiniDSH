@@ -19,7 +19,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
-import { killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
+import { coldRead, killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
@@ -72,6 +72,19 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     const beforeResume = validPrefix(sessionFile)
     expect(beforeResume.length).toBeGreaterThan(0)
 
+    // ---- between the lifecycles: a COLD read by another process ------------
+    // Nobody holds the log now (its writer is dead, its lock still names it).
+    // A separate `minidsh sessions verify` must read it without taking or
+    // reclaiming that lock, and say what a resume will append.
+    const lockFile = `${sessionFile}.lock`
+    const lockBefore = readFileSync(lockFile, 'utf8')
+    const cold = coldRead(home, ['verify', sessionId, '--json'])
+    expect(cold.code, `cold verify of the killed log: ${cold.out}${cold.err}`).toBe(0)
+    const coldVerdict = cold.json as { verdict: string; closers: EventEnvelope[]; findings: { check: string; message: string }[] }
+    expect(['interrupted', 'torn']).toContain(coldVerdict.verdict)
+    expect(readFileSync(lockFile, 'utf8'), 'a cold read touched the lease').toBe(lockBefore)
+    expect(readFileSync(sessionFile).subarray(0, beforeResume.length).equals(beforeResume)).toBe(true)
+
     // ---- lifecycle 2: resume over the wire, repair, finish ----------------
     const second = new ServeProcess(workspace, home, { approve: true })
     const resumed = await second.request<{ sessionId: string }>('session/prompt', {
@@ -108,6 +121,19 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     expect((interrupted[0]!.data as { turn: number }).turn).toBe(2)
     expect(storedEvents.some((event) => event.type === 'session/end-seed')).toBe(true)
 
+    // What the cold read predicted is, byte for byte, what the second process
+    // appended: repair is deterministic across processes (§4).
+    const firstCloser = coldVerdict.closers[0]!.seq
+    const appended = storedEvents.slice(firstCloser, firstCloser + coldVerdict.closers.length)
+    expect(appended.map((event) => JSON.stringify(event))).toEqual(coldVerdict.closers.map((event) => JSON.stringify(event)))
+    // Two lifecycles, each stating what its writer guaranteed.
+    const lifecycles = storedEvents.filter((event) => event.type === 'session/lifecycle').map((event) => event.data)
+    expect(lifecycles).toEqual([
+      { origin: 'new', dispatch: true, durability: 'synced' },
+      { origin: 'resumed', dispatch: true, durability: 'synced' },
+    ])
+    console.log(`[live arc] cold verify at the kill: ${coldVerdict.verdict}; predicted ${coldVerdict.closers.length} closer(s), and the resume appended exactly those`)
+
     /**
      * THE RECOVERY CONTRACT, against a real kill, in two assertions — one that
      * every run exercises and one that only a kill inside the call window does.
@@ -121,9 +147,9 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
      * The second is the equivalence, over whatever the kill actually caught.
      * `waitFor` sees turn 2's `tool/call` frame and SIGKILLs, but the call can
      * finish inside that window — so the count is printed rather than required,
-     * and this run's value is on the record either way. Turn 1 completed a tool
-     * call, so the log demonstrably records dispatches and any synthetic result
-     * here is decided by the sharp rule, not the 1.0.0 fallback.
+     * and this run's value is on the record either way. The killed lifecycle's
+     * record claims `dispatch` and `synced` (asserted below), so any synthetic
+     * result here is decided by the synced-writer row, not the 1.0.0 fallback.
      */
     const dispatched = new Set(
       storedEvents.filter((event) => event.type === 'tool/dispatch').map((event) => (event.data as { callId: string }).callId),

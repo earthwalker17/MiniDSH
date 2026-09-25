@@ -25,7 +25,7 @@ import type { Logger } from '../kernel/index.ts'
 import { effectiveSandboxMode } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
-import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
+import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { auditLines } from './present.ts'
 import { runTask } from './headless.ts'
 
@@ -133,6 +133,22 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     await serve.waitForCompletedTurn(sessionId, 2)
     const final = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId })
     await serve.shutdown()
+
+    // ---- the child's authority, read cold from its own log -----------------
+    // A separate process, holding only the stored bytes, states the ceiling and
+    // the pin the runtime enforced, and the join back to the delegating call.
+    const childCold = coldRead(home, ['inspect', childId, '--json'])
+    expect(childCold.code, `cold inspect of the child: ${childCold.out}${childCold.err}`).toBe(0)
+    const child = childCold.json as {
+      verdict: string
+      header: { delegatedBy?: string; delegatedByCallId?: string }
+      authority: { delegation?: { ceiling?: string; pin?: string } }
+    }
+    expect(child.verdict).toBe('ok')
+    expect(child.authority.delegation).toMatchObject({ ceiling: stamps[0]!.mode, pin: 'never' })
+    expect(child.header).toMatchObject({ delegatedBy: sessionId, delegatedByCallId: (start!.data as { callId: string }).callId })
+    const parentCold = coldRead(home, ['inspect', sessionId, '--json']).json as { children: { childId: string; callId: string; ended?: string }[] }
+    expect(parentCold.children).toEqual([{ childId, callId: (start!.data as { callId: string }).callId, seq: start!.seq, ended: 'completed' }])
 
     // The WORLD: the parent wrote the file, the decoy is untouched, and the
     // child — which never had the authority to write — wrote nothing.

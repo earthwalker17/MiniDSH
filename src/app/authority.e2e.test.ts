@@ -34,7 +34,7 @@ import { canonicalPath } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { runTask } from './headless.ts'
-import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
+import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -82,6 +82,8 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     // premise is an assumption that decays silently, and "no host can confine"
     // was this arc's premise for eight sessions.
     const confined = init.defaultAuthority.enforcement !== 'none'
+    /** The session that accepted an unconfined shell (unconfined hosts only), read cold at the end. */
+    let acceptingId: string | undefined
     console.log('[authority arc] host enforcement: ' + init.defaultAuthority.enforcement + (confined ? ' (confined branch)' : ' (unconfined branch)'))
 
     // ---- 1. inside the workspace: ordinary work, no consent needed ---------
@@ -262,6 +264,11 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       // A person can see it and take it back, and the log says so.
       const view = await serve.request<{ grants: { id: string }[] }>('session/authority', { sessionId: granting.sessionId })
       expect(view.grants.map((grant) => grant.id)).toEqual([grants[0]!.id])
+      // The same standing consent, folded from the STORED log by another
+      // process while this one still holds it: storage says what the runtime does.
+      const coldGrants = coldRead(home, ['inspect', granting.sessionId, '--json']).json as { authority: { grants: { id: string }[] }; lease?: { alive: unknown } }
+      expect(coldGrants.authority.grants.map((grant) => grant.id)).toEqual(view.grants.map((grant) => grant.id))
+      expect(coldGrants.lease?.alive, 'the live host holds the lease, and the cold read only reports it').toBe(true)
       expect(await serve.request('approval/revoke', { sessionId: granting.sessionId, grantId: grants[0]!.id })).toEqual({ revoked: true })
       expect(serve.events('approval/grant', granting.sessionId).map((event) => dataOf<{ op: string }>(event).op)).toEqual(['grant', 'revoke'])
 
@@ -295,6 +302,7 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       // escalation this host used to charge per command is gone.
       expect(serve.events('approval/asked', accepting.sessionId), 'an accepting session still cost an approval').toHaveLength(0)
       console.log(`[authority arc] accepting session ran ${ran.length} shell command(s) with 0 approvals`)
+      acceptingId = accepting.sessionId
     } else {
       console.log('[authority arc] confined host: the grant and acceptance legs were not exercised (nothing asks, and acceptance is inert)')
     }
@@ -395,8 +403,33 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     await serve.waitForCompletedTurn(fresh.sessionId, 1)
     refuseFresh()
     const freshLog = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId: fresh.sessionId })
+    const liveAuthority = await serve.request<{ sandbox: string; approval: string; accepts: string }>('session/authority', { sessionId })
+    const liveAccepting = acceptingId === undefined ? undefined : await serve.request<{ accepts: string }>('session/authority', { sessionId: acceptingId })
     await serve.shutdown()
     expect(freshLog.events.some((event) => event.type === 'sandbox/mode')).toBe(true)
+
+    // ---- 4d. read cold, by another process, the authority is the runtime's ---
+    const verified = coldRead(home, ['verify', sessionId, '--json'])
+    expect(verified.code, `cold verify: ${verified.out}${verified.err}`).toBe(0)
+    expect((verified.json as { verdict: string }).verdict).toBe('ok')
+    const inspected = coldRead(home, ['inspect', sessionId, '--json']).json as { authority: { mode: string; approval: string } }
+    expect({ sandbox: inspected.authority.mode, approval: inspected.authority.approval }).toEqual({ sandbox: liveAuthority.sandbox, approval: liveAuthority.approval })
+    if (acceptingId !== undefined) {
+      const acceptedCold = coldRead(home, ['inspect', acceptingId, '--json']).json as { authority: { accepts?: string } }
+      expect(acceptedCold.authority.accepts, 'the acceptance the runtime honoured is not what its stored log says').toBe(liveAccepting!.accepts)
+    }
+    // And the audit, now of ATTEMPTS: what each command did, and on a host that
+    // cannot confine, the refusal the model had to escalate past.
+    const audit = coldRead(home, ['show', sessionId, '--audit'])
+    expect(audit.code).toBe(0)
+    const auditEffects = audit.out.split('\n').filter((line) => /^\s*\d+ {2}effect /.test(line))
+    expect(auditEffects.length, `no effect lines in the audit:\n${audit.out}`).toBeGreaterThan(0)
+    // Whether the model tried the plain command first is its choice; that every
+    // refusal it met is on the audit is not. Counted against the live frames.
+    const refused = serve.events('tool/result', sessionId).filter((event) => dataOf<{ error?: { code: string } }>(event).error?.code === 'SANDBOX_UNAVAILABLE')
+    const auditRefusals = audit.out.split('\n').filter((line) => /denied {6}SANDBOX_UNAVAILABLE/.test(line))
+    expect(auditRefusals.length, `refusals on the record ${refused.length}, on the audit ${auditRefusals.length}:\n${audit.out}`).toBe(refused.length)
+    console.log(`[authority arc] cold reads: verify ok; ${auditEffects.length} effect line(s) and ${auditRefusals.length} shell refusal(s) in the audit`)
 
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     // The replay runs in a DIFFERENT root, so a recording whose model chose the

@@ -3,7 +3,7 @@
  * the same thing any out-of-process client is: a pipe, ndjson frames, and no
  * shared objects with the host. Used by the live end-to-end tests.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -192,6 +192,23 @@ export class ServeProcess {
 }
 
 /** The bytes of the valid line prefix (through the last newline). */
+/**
+ * `minidsh sessions <verify|inspect|show> <id> [...]` in a SEPARATE process
+ * over `home`'s store: a reader that is not the runtime that wrote the log,
+ * which is the whole claim of a cold read. `json` parses stdout when it is one
+ * JSON document.
+ */
+export function coldRead(home: string, argv: readonly string[]): { code: number | null; out: string; err: string; json?: unknown } {
+  const result = spawnSync(process.execPath, [SERVE_BIN, 'sessions', ...argv], { env: childEnv(home), encoding: 'utf8', timeout: 60_000 })
+  let json: unknown
+  try {
+    json = JSON.parse(result.stdout)
+  } catch {
+    // Not a JSON document (a human report): the caller reads `out`.
+  }
+  return { code: result.status, out: result.stdout, err: result.stderr, ...(json === undefined ? {} : { json }) }
+}
+
 export function validPrefix(file: string): Buffer {
   const bytes = readFileSync(file)
   const lastNewline = bytes.lastIndexOf(0x0a)
