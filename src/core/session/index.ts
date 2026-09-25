@@ -13,7 +13,7 @@ export {
   type SessionTitleSource,
   type SessionTitleState,
 } from './title.ts'
-export { repairInterruptedTail } from './repair.ts'
+export { CONSERVATIVE_ERROR_NAMES, repairInterruptedTail } from './repair.ts'
 export type { RepairContext, TailCloser } from './repair.ts'
 export {
   DEFAULT_PAGE_MESSAGES,

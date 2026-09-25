@@ -33,13 +33,24 @@ export type TailCloser = (events: readonly EventEnvelope[], nextSeq: number, tim
 
 /**
  * What the events are. `salvage`: a DAMAGED log's readable prefix, cut at the
- * first bad line wherever it fell — not a crash suffix, so nothing about what
- * is missing past it can be inferred, and every closer is a conservative
- * placeholder rather than a fact.
+ * first bad line wherever it fell. `held`: a snapshot of a log a live (or
+ * unprobeable) writer still holds, so its open turn may be running and an
+ * owed call may yet run (`heldByWriter`). Neither is a crash suffix, so no
+ * absence proves anything: every owed call is outcome-unknown, under the
+ * context's own error name, and every other closer is a placeholder that
+ * says only where the record ends.
  */
 export interface RepairContext {
   readonly salvage?: boolean
+  readonly held?: boolean
 }
+
+/**
+ * The error names a closer gives an outcome-unknown answer to a block that may
+ * have logged no `tool/call`: the session invariant admits exactly these
+ * (and `TOOL_NOT_STARTED`) as results without a pending call.
+ */
+export const CONSERVATIVE_ERROR_NAMES: ReadonlySet<string> = new Set(['SalvagedError', 'InFluxError'])
 
 /**
  * Closing events for an interrupted tail, so a resumed session opens balanced:
@@ -167,6 +178,7 @@ export function repairInterruptedTail(
     if (!answered.has(callId) && !owed.some((entry) => entry.callId === callId)) owed.push({ callId, source: callSeq, started: true })
   }
   const salvage = context.salvage === true
+  const held = !salvage && context.held === true
   for (const entry of owed) {
     const recorded = effects.get(entry.callId) ?? []
     const code = classify({
@@ -174,9 +186,9 @@ export function repairInterruptedTail(
       reachedBody: dispatched.has(entry.callId) || recorded.length > 0,
       claimsDispatch: lifecycle?.dispatch === true,
       synced: lifecycle?.durability === 'synced',
-      salvage,
+      conservative: salvage || held,
     })
-    const text = salvage ? salvageText(recorded) : code === 'TOOL_OUTCOME_UNKNOWN' ? unknownText(recorded) : notStartedText(entry.started)
+    const text = salvage ? salvageText(recorded) : held ? heldText(recorded) : code === 'TOOL_OUTCOME_UNKNOWN' ? unknownText(recorded) : notStartedText(entry.started)
     /**
      * A DERIVED message id, not a minted one. Everything else a closer emits
      * is a pure function of the log, and `createToolResultMessage` would put a
@@ -195,7 +207,7 @@ export function repairInterruptedTail(
         type: TOOL_RESULT.type,
         seq: seq++,
         time,
-        data: snapshotJson({ turn, step, callId: entry.callId, message, error: { name: salvage ? 'SalvagedError' : 'InterruptedError', code } }),
+        data: snapshotJson({ turn, step, callId: entry.callId, message, error: { name: salvage ? 'SalvagedError' : held ? 'InFluxError' : 'InterruptedError', code } }),
         surfaceOp: { op: 'append' },
         sourceEventSeqs: [entry.source],
       }) as EventEnvelope,
@@ -229,9 +241,11 @@ export function repairInterruptedTail(
  * driver logs `tool/call` before any gate or body, and a crash loses nothing
  * that was written); a synced writer made the call durable before its gate.
  *
- * `salvage` overrides all of it: a damaged prefix stops at the first bad line
- * wherever it fell, which may be the very `tool/call` of a block whose body
- * ran and whose later lines are unreadable — so no absence proves anything.
+ * A conservative context overrides all of it. A damaged prefix stops at the
+ * first bad line wherever it fell, which may be the very `tool/call` of a
+ * block whose body ran and whose later lines are unreadable; a held log's
+ * writer may be running the call, or about to log it, right now. Either way
+ * no absence proves anything.
  */
 function classify(evidence: {
   /** A `tool/call` was logged for this block. */
@@ -242,9 +256,10 @@ function classify(evidence: {
   readonly claimsDispatch: boolean
   /** ... and that its checkpoints were on stable storage. */
   readonly synced: boolean
-  readonly salvage: boolean
+  /** Salvaged or held: see `RepairContext`. */
+  readonly conservative: boolean
 }): 'TOOL_NOT_STARTED' | 'TOOL_OUTCOME_UNKNOWN' {
-  if (evidence.salvage) return 'TOOL_OUTCOME_UNKNOWN'
+  if (evidence.conservative) return 'TOOL_OUTCOME_UNKNOWN'
   if (!evidence.logged) return 'TOOL_NOT_STARTED'
   if (evidence.reachedBody) return 'TOOL_OUTCOME_UNKNOWN'
   if (evidence.claimsDispatch && evidence.synced) return 'TOOL_NOT_STARTED'
@@ -275,6 +290,16 @@ function salvageText(recorded: readonly EffectRecorded[]): string {
     'Tool result unknown: this session was forked from a DAMAGED log whose record is unreadable after this point, so this call — and any later work that is not in this history — may have taken effect. ' +
     (evidence === undefined ? '' : `${evidence} `) +
     'Check the current state before acting on anything, and repeat a call only if it is read-only or idempotent — never blindly.'
+  )
+}
+
+/** What the model is told about a call in a fork of a log another process still holds: it may be running there now. */
+function heldText(recorded: readonly EffectRecorded[]): string {
+  const evidence = describeEffects(recorded)
+  return (
+    'Tool result unknown: this session was forked while another process was still writing it, so this call may be waiting for approval or running there right now, and may take effect after this point. ' +
+    (evidence === undefined ? '' : `${evidence} `) +
+    'Check the current state before acting on this, and repeat the call only if it is read-only or idempotent — never blindly.'
   )
 }
 

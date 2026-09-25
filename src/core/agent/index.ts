@@ -8,7 +8,7 @@ import type { SessionId } from '../ids.ts'
 import { restoreMessage } from '../llm/message.ts'
 import type { Message } from '../llm/types.ts'
 import { delegationPin } from '../approval/events.ts'
-import { PERSISTENCE, type StoredSession } from '../persistence/index.ts'
+import { heldByWriter, PERSISTENCE, type StoredSession } from '../persistence/index.ts'
 import { delegationCeiling } from '../sandbox/events.ts'
 import {
   eventKind,
@@ -355,6 +355,10 @@ class AgentRegistry implements Agents {
    * fully conservatively (every owed call unknown, §4), never written or
    * leased, and its fork records where the prefix stopped so a reader of the
    * fork alone knows its seed's closers are placeholders.
+   *
+   * A stored source another process still holds is repaired conservatively
+   * too (`heldByWriter`): its open turn is not a crash's, and a call at its
+   * gate there may run after the fork's model was told it never started.
    */
   private forkSource(
     source: Session | SessionId,
@@ -367,7 +371,7 @@ class AgentRegistry implements Agents {
     if (live) return { events: live.session.events, cwd: live.session.header.cwd, parentId: live.session.id, header: live.session.header }
     const stored = this.loadStored(source, salvage)
     const salvaging = stored.damaged === true
-    const closers = repairTail(stored.events, { salvage: salvaging })
+    const closers = repairTail(stored.events, { salvage: salvaging, held: heldByWriter(stored) })
     const integrity = stored.integrity
     return {
       events: closers.length === 0 ? stored.events : [...stored.events, ...closers],

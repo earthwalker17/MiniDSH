@@ -562,6 +562,48 @@ describe('salvage: forking a damaged log from its readable prefix', () => {
     await fork.dispose()
   })
 
+  it('forks a log another process still writes with every owed call unknown, never "not started"', async () => {
+    // The review's probe: a live writer's call c1 waits at its gate. The
+    // stored lifecycle claims dispatch + synced, so a CRASHED log would read
+    // c1 as not started — and here the writer may run it after the fork's
+    // model was told it is safe to make the call again.
+    const { harness: h, dir: base } = await persistedHarness()
+    const { createAssistantMessage } = await import('../llm/message.ts')
+    const { asCallId } = await import('../ids.ts')
+    const { APPROVAL_ASKED } = await import('../approval/index.ts')
+    const sessions = h.root.get(SESSIONS)
+    const live = sessions.create({ cwd: process.cwd(), id: asSessionId('live') })
+    live.append(SESSION_LIFECYCLE, { origin: 'new', dispatch: true, durability: 'synced' })
+    live.append(TURN_START, { turn: 1 })
+    live.append(STEP_START, { turn: 1, step: 1 })
+    live.append(USER_MESSAGE, { message: createUserMessage('push it') }, { surfaceOp: { op: 'append' } })
+    const calls = ['c1', 'c2'].map((callId) => ({ type: 'tool-call' as const, id: asCallId(callId), name: 'bash', arguments: '{}' }))
+    live.append(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage(calls, 'scripted', 'scripted-model') }, { surfaceOp: { op: 'append' } })
+    live.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{}' })
+    live.append(APPROVAL_ASKED, { id: 'approval-6', toolName: 'bash', callId: 'c1' })
+    const { existsSync } = await import('node:fs')
+    expect(existsSync(`${fileFor(base, 'live')}.lock`)).toBe(true)
+
+    const options = { agentOptions: { provider: 'scripted', model: 'scripted-model' } }
+    const held = await h.root.get(AGENTS).fork(h.root, asSessionId('live'), undefined, options)
+    const answers = (events: readonly EventEnvelope[]) =>
+      events.filter((event) => event.type === 'tool/result').map((event) => (event.data as { callId: string; error: { name: string; code: string } }).error)
+    expect(answers(held.agent.session.events)).toEqual([
+      { name: 'InFluxError', code: 'TOOL_OUTCOME_UNKNOWN' },
+      { name: 'InFluxError', code: 'TOOL_OUTCOME_UNKNOWN' },
+    ])
+    await held.dispose()
+
+    // The same bytes once the writer is gone are a crash's remains, and read as one.
+    await sessions.detach(live)
+    const crashed = await h.root.get(AGENTS).fork(h.root, asSessionId('live'), undefined, options)
+    expect(answers(crashed.agent.session.events)).toEqual([
+      { name: 'InterruptedError', code: 'TOOL_NOT_STARTED' },
+      { name: 'InterruptedError', code: 'TOOL_NOT_STARTED' },
+    ])
+    await crashed.dispose()
+  })
+
   it('refuses to salvage a delegated child whose damage took its delegation opening', async () => {
     const { harness: h, dir: base } = await persistedHarness()
     const sessions = h.root.get(SESSIONS)

@@ -25,6 +25,26 @@ export interface StoredSession {
   readonly damaged?: true
   /** How the store read the file, for a reader that must say what it could not read. Absent from a store that cannot tell. */
   readonly integrity?: StoredIntegrity
+  /** Who holds the log's write lease, read and never taken. Absent when nobody does, or from a store without leases. */
+  readonly lease?: StoredLease
+}
+
+export interface StoredLease {
+  readonly pid: number
+  readonly host: string
+  readonly acquiredAt?: number
+  /** Probed on this host (`kill(pid, 0)`); `unknown` for another host, which cannot be probed. */
+  readonly alive: boolean | 'unknown'
+}
+
+/**
+ * The log may still be growing: a holder that is alive, or that cannot be
+ * probed, may be appending. Such a log is a snapshot of a RUNNING session, not
+ * the remains of a crash — an open turn may simply be running and an owed call
+ * may yet run — so nothing read from it may call a call "not started" (§4).
+ */
+export function heldByWriter(stored: StoredSession): boolean {
+  return stored.lease !== undefined && stored.lease.alive !== false
 }
 
 export interface StoredIntegrity {
