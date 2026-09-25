@@ -179,8 +179,13 @@ export type ReplayEffects = 'run' | 'recorded'
 interface RecordedAnswer {
   readonly name: string
   readonly result: ToolResult
-  /** Whether a body answered it: the recording has its `tool/dispatch` (or, in a log from before the fact existed, it succeeded). */
-  readonly bodied: boolean
+  /**
+   * Whether a body answered it. A log that records dispatches says (`yes` or
+   * `no`); a log from before the fact existed says only that a SUCCESS came
+   * from a body (the gate answers with errors alone), so its errors are
+   * `unknown` — `FS_NOT_OBSERVED`, say, is refused inside the body.
+   */
+  readonly bodied: 'yes' | 'no' | 'unknown'
 }
 
 const answerKey = (turn: number, step: number, callId: string): string => `${turn}:${step}:${callId}`
@@ -213,7 +218,8 @@ export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, R
       content,
       ...(event.data.error === undefined ? {} : { error: { message: event.data.error.code, info: event.data.error } }),
     }
-    answers.set(key, { name: names.get(key) ?? '', result, bodied: recordsDispatch ? dispatched.has(key) : event.data.error === undefined })
+    const bodied = recordsDispatch ? (dispatched.has(key) ? 'yes' : 'no') : event.data.error === undefined ? 'yes' : 'unknown'
+    answers.set(key, { name: names.get(key) ?? '', result, bodied })
   }
   return answers
 }
@@ -355,7 +361,7 @@ class ReplayDispatch {
         throw new Error(`llm-replay: replayed ${source.auxConsumed()} of ${source.auxTotal()} recorded out-of-loop calls${which}`)
       }
       if (this.effects === 'recorded') {
-        const owed = [...source.answers].filter(([key, answer]) => answer.bodied && !source.served.has(key)).map(([key]) => key)
+        const owed = [...source.answers].filter(([key, answer]) => answer.bodied === 'yes' && !source.served.has(key)).map(([key]) => key)
         if (owed.length > 0) throw new Error(`llm-replay: ${owed.length} recorded tool answer(s) were never asked for${which}: ${owed.join(', ')}`)
       }
     })
@@ -440,7 +446,7 @@ async function answerFromRecording(shared: ReplayDispatch, execution: ToolExecut
   const answer = script.answers.get(key)
   if (!answer) return refuse(`call ${key} (${execution.name}) reached a body, and the recording answered no such call`)
   if (answer.name !== execution.name) return refuse(`call ${key} is "${execution.name}" here and "${answer.name}" in the recording`)
-  if (!answer.bodied) return refuse(`call ${key} (${execution.name}) reached a body here, and the recording refused it before one`)
+  if (answer.bodied === 'no') return refuse(`call ${key} (${execution.name}) reached a body here, and the recording refused it before one`)
   script.served.add(key)
   return answer.result
 }
