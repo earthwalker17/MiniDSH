@@ -34,7 +34,9 @@ export interface ToolCall {
    * Awaited once the gate has passed and immediately before the tool BODY, so
    * a caller can make "this call reached its body" durable (§4). A throw
    * refuses the call — the body never runs — and its `code` becomes the
-   * result's.
+   * result's. A Tools provider that runs a body WITHOUT first awaiting this,
+   * when supplied, breaks crash recovery: the driver's `session/lifecycle`
+   * claims `dispatch` on the strength of it.
    *
    * The pipeline does not write the fact itself. The caller that owns the
    * log's turn and step writes it, which is why the driver supplies this: a
@@ -232,7 +234,9 @@ class ToolRegistry implements Tools {
 
   /**
    * The body, under its deadline. The clock starts here — after the gate — so
-   * an approval a human is still thinking about never spends it. When it
+   * an approval a human is still thinking about never spends it; the
+   * `onDispatch` checkpoint (a real sync since S16, milliseconds) runs inside
+   * it, because it runs inside the waterfall the deadline races. When it
    * fires, the call ends as TOOL_TIMEOUT and the body's signal is aborted so
    * it can release what it holds; a late result is discarded. The deadline is
    * therefore a backstop, not a way to collect partial work: a tool that has

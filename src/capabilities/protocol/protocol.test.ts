@@ -606,6 +606,12 @@ describe('protocol: the paged attach', () => {
         `turn ${turn} to end`,
       )
     }
+    // `turn/end` is not idle: the turn's closing checkpoint is a real sync
+    // since S16, and the agent reports `running` until it resolves.
+    await started.client.waitFor(
+      () => (started.client.statuses().filter((entry) => entry.sessionId === sessionId).at(-1)?.status === 'idle' ? true : undefined),
+      'the agent to go idle after its last turn',
+    )
     return { ...started, sessionId }
   }
 

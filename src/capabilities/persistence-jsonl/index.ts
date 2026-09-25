@@ -23,9 +23,27 @@
  * log as damaged on the next read). Provably-dead same-host holders are
  * reclaimed; anything else names the holder and asks for manual cleanup.
  */
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, truncateSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import {
+  appendFileSync,
+  close as fsClose,
+  closeSync,
+  fdatasync,
+  fsync,
+  fsyncSync,
+  mkdirSync,
+  open,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+  truncateSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { PERSISTENCE, type Persistence, type StoredIntegrity, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
@@ -322,9 +340,44 @@ function listStoredHeaders(root: string): StoredSessionSummary[] {
 interface OpenFile {
   readonly file: string
   readonly fd: number
+  /** Bumped by every write to the file: each append, and the snapshot or attach that opened it. */
+  gen: number
+  /** The highest `gen` a COMPLETED sync covered — one that started at or after it. */
+  synced: number
+  /** The sync in flight; one file's syncs never overlap. */
+  syncing?: Promise<void> | undefined
+  /** A file this process created, whose directory entry is not yet synced (POSIX only). */
+  dirPending: boolean
+}
+
+/** `fdatasync` as a promise: off the event loop, so a web host's other sessions keep running while one waits on its disk. */
+function syncData(fd: number): Promise<void> {
+  return new Promise((resolve, reject) => fdatasync(fd, (error) => (error ? reject(error) : resolve())))
+}
+
+/**
+ * A directory's entry list to stable storage (POSIX). Windows has no API for
+ * it — a directory cannot be opened for `FlushFileBuffers` from Node — so there
+ * a new log's NAME rests on NTFS's own metadata journal (ARCHITECTURE §13).
+ */
+function syncDirectory(dir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    open(dir, 'r', (openError, fd) => {
+      if (openError) return reject(openError)
+      fsync(fd, (syncError) => fsClose(fd, () => (syncError ? reject(syncError) : resolve())))
+    })
+  })
 }
 
 class JsonlArchive implements Persistence {
+  /**
+   * A resolved flush is on stable storage: `onFlush` syncs the file (and, once,
+   * its directory on POSIX). Measured 2026-09-26, append + `fdatasync` of one
+   * log line: Windows NTFS p50 3.6 ms / p95 4.4 ms, WSL 2 ext4 p50 8-10 ms /
+   * p95 11 ms; a flush with nothing new to sync costs no syscall at all. A tool
+   * call pays two (after `tool/call`, after `tool/dispatch`), a step one more.
+   */
+  readonly durability = 'synced' as const
   private readonly root: string
   /** Sessions with a file: materialized (first surface event) or attached (resume). */
   private readonly open = new WeakMap<Session, OpenFile>()
@@ -369,31 +422,46 @@ class JsonlArchive implements Persistence {
       return
     }
     try {
-      this.attach(session, file)
-      this.track(session, file)
+      const created = this.attach(session, file)
+      this.track(session, file, created)
     } catch (error) {
       this.releaseLease(session)
       this.failures.set(session, error)
     }
   }
 
-  private track(session: Session, file: string): void {
+  /**
+   * `created`: this process just made the file, so on POSIX its DIRECTORY
+   * entry must be synced once too, or a power cut can keep the data and lose
+   * the name. The file's bytes were written before the descriptor opened
+   * (snapshot, attach), so it starts dirty.
+   */
+  private track(session: Session, file: string, created: boolean): void {
     const fd = openSync(file, 'a')
-    this.open.set(session, { file, fd })
+    this.open.set(session, { file, fd, gen: 1, synced: 0, dirPending: created && process.platform !== 'win32' })
     this.tracked.add(session)
   }
 
-  /** A closed descriptor is forgotten with the session: no entry ever names a number the OS may have reused. */
+  /**
+   * A closed descriptor is forgotten with the session: no entry ever names a
+   * number the OS may have reused. The close itself waits for a sync in
+   * flight — an `fdatasync` still queued on the threadpool must never run on a
+   * number the OS has since handed to another session's file and "succeed".
+   */
   private close(session: Session): void {
     const opened = this.open.get(session)
     this.tracked.delete(session)
     if (!opened) return
     this.open.delete(session)
-    try {
-      closeSync(opened.fd)
-    } catch {
-      // Already closed.
+    const shut = (): void => {
+      try {
+        closeSync(opened.fd)
+      } catch {
+        // Already closed.
+      }
     }
+    if (opened.syncing) void opened.syncing.then(shut, shut)
+    else shut()
   }
 
   /**
@@ -496,22 +564,27 @@ class JsonlArchive implements Persistence {
   private snapshot(session: Session, file: string): void {
     // The store's duplicate-id throw guards LIVE ids only; the stored plane
     // guards itself: a non-resumed publication must never overwrite a stored
-    // log (resume attaches; a fork mints a new id).
-    if (existsSync(file)) {
-      throw new Error(`session ${session.id}: a stored log with this id already exists; refusing to overwrite`)
-    }
+    // log (resume attaches; a fork mints a new id). Exclusive create, so the
+    // check and the write are one step.
     const header: HeaderLine = { kind: 'session', ...session.header }
     const lines = [JSON.stringify(header), ...session.events.map((event) => JSON.stringify(event))]
-    writeFileSync(file, `${lines.join('\n')}\n`, 'utf8')
+    try {
+      writeFileSync(file, `${lines.join('\n')}\n`, { encoding: 'utf8', flag: 'wx' })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`session ${session.id}: a stored log with this id already exists; refusing to overwrite`, { cause: error })
+      }
+      throw error
+    }
   }
 
-  /** The resume path: append-only continuation of the existing file. */
-  private attach(session: Session, file: string): void {
+  /** The resume path: append-only continuation of the existing file. Returns whether it had to CREATE the file. */
+  private attach(session: Session, file: string): boolean {
     const scan = scanSessionFile(file)
     if (!scan) {
       // No stored file (or an unreadable header): nothing to attach to.
       this.snapshot(session, file)
-      return
+      return true
     }
     // Continued in place only at this writer's own format: an older log is
     // read and forked, never extended with events of a format it lacks.
@@ -545,15 +618,25 @@ class JsonlArchive implements Persistence {
       // Preserve the crash artifact in a sidecar rather than destroying bytes;
       // a delimiter keeps fragments from successive crashes individually
       // recoverable (a torn fragment never ends in a newline). ONE append, so
-      // a failure between sidecar and truncate cannot leave half a record.
+      // a failure between sidecar and truncate cannot leave half a record —
+      // and SYNCED before the truncate, or a power cut could keep the
+      // truncation (journaled metadata) and lose the fragment it moved.
       const torn = readFileSync(file).subarray(scan.validBytes)
-      appendFileSync(`${file}.torn`, Buffer.concat([Buffer.from(`# torn ${new Date().toISOString()} (${torn.length} bytes)\n`), torn, Buffer.from('\n')]))
+      const sidecar = `${file}.torn`
+      const fd = openSync(sidecar, 'a')
+      try {
+        writeSync(fd, Buffer.concat([Buffer.from(`# torn ${new Date().toISOString()} (${torn.length} bytes)\n`), torn, Buffer.from('\n')]))
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
       truncateSync(file, scan.validBytes)
     }
     const delta = session.events.slice(scan.events.length)
     if (delta.length > 0) {
       appendFileSync(file, delta.map((event) => `${JSON.stringify(event)}\n`).join(''), 'utf8')
     }
+    return false
   }
 
   onEvent(session: Session, event: EventEnvelope): void {
@@ -568,6 +651,7 @@ class JsonlArchive implements Persistence {
         const line = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8')
         const written = writeSync(opened.fd, line)
         if (written !== line.length) throw new Error(`wrote ${written} of ${line.length} bytes for event ${event.seq}`)
+        opened.gen += 1
       } catch (error) {
         if (!this.failures.has(session)) this.failures.set(session, error)
         // Quarantine the file: appending a LATER event after a dropped one would
@@ -585,7 +669,7 @@ class JsonlArchive implements Persistence {
     const file = this.fileFor(session.id)
     try {
       this.snapshot(session, file)
-      this.track(session, file)
+      this.track(session, file, true)
     } catch (error) {
       this.failures.set(session, error)
     }
@@ -601,17 +685,65 @@ class JsonlArchive implements Persistence {
   }
 
   /**
-   * The awaited durability checkpoint: a swallowed write error surfaces here,
-   * and keeps surfacing — a failed lease, attach, materialization or append
-   * leaves the session permanently un-persisted, so EVERY flush must fail,
-   * not just the first.
+   * The awaited durability checkpoint. It resolves only once everything
+   * appended before it is on STABLE storage (`durability: 'synced'`), which is
+   * the claim crash repair leans on to read a missing `tool/dispatch` as "the
+   * body never ran" (§4); and a swallowed write error surfaces here and keeps
+   * surfacing — a failed lease, attach, materialization, append or sync leaves
+   * the session permanently un-persisted, so EVERY flush must fail.
+   *
+   * **Which sync covers which flush.** Two flushes of one session overlap in
+   * practice (a timed-out call's dispatch checkpoint is still awaiting while
+   * the driver moves on), and a flush that merely JOINED the sync in flight
+   * would resolve over a write that landed after that sync began — so the next
+   * call's body could run with its `tool/dispatch` still in the page cache.
+   * Each flush therefore takes the file's write generation as its target and
+   * resolves only after a sync that STARTED at or after it completes; syncs of
+   * one file are serialized. A failed sync is never retried: after an fsync
+   * error the kernel may have dropped the dirty pages and marked them clean,
+   * so a retry could report a success that means nothing.
+   *
+   * What it costs is measured beside `durability` above.
    */
-  onFlush(session: Session): void {
+  async onFlush(session: Session): Promise<void> {
+    this.rethrow(session)
+    const opened = this.open.get(session)
+    if (!opened) return
+    const target = opened.gen
+    while (opened.synced < target) {
+      // Detached since (disposal closes the descriptor): there is no file left
+      // to sync through, and nothing flushes a detached session.
+      if (this.open.get(session) !== opened) return
+      opened.syncing ??= this.sync(session, opened).finally(() => {
+        opened.syncing = undefined
+      })
+      await opened.syncing
+      this.rethrow(session)
+    }
+  }
+
+  private rethrow(session: Session): void {
     const failure = this.failures.get(session)
     if (failure === undefined) return
     throw new Error(`session ${session.id} could not be persisted: ${failure instanceof Error ? failure.message : String(failure)}`, {
       cause: failure,
     })
+  }
+
+  /** One sync of one file, covering every write made before it started. Never rejects: a failure is remembered and the file quarantined. */
+  private async sync(session: Session, opened: OpenFile): Promise<void> {
+    const covers = opened.gen
+    try {
+      await syncData(opened.fd)
+      if (opened.dirPending) {
+        await syncDirectory(dirname(opened.file))
+        opened.dirPending = false
+      }
+      opened.synced = Math.max(opened.synced, covers)
+    } catch (error) {
+      if (!this.failures.has(session)) this.failures.set(session, error)
+      this.close(session)
+    }
   }
 
   load(id: string): StoredSession | undefined {
