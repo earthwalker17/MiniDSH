@@ -229,8 +229,9 @@ export function readLease(root: string, id: string): LeaseStatus | undefined {
 const HEADER_READ_BYTES = 64 * 1024
 /**
  * How far past the header a listing will look for a name. A session opens with
- * its header, the four facts creation stamps, the turn and then the prompt —
- * about eight lines — and the title lands directly after that prompt. The bound
+ * its header, the lifecycle record and the facts creation stamps, the turn and
+ * then the prompt — about ten lines — and the title lands directly after that
+ * prompt. The bound
  * is what keeps a listing from parsing a chunk-heavy log line by line if that
  * shape ever changes.
  */

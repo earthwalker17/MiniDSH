@@ -499,6 +499,23 @@ describe('protocol: the authority control plane', () => {
     expect({ knob: knob.accepts, view: attached.view.authority.accepts }).toEqual({ knob: 'none', view: 'none' })
   })
 
+  it('says a stored session of a newer format cannot be read here, in the wire words for a bad request', async () => {
+    const { client, sessionsRoot } = await startHost(new ScriptedAdapter())
+    writeFileSync(join(sessionsRoot, 'future.jsonl'), `${JSON.stringify({ kind: 'session', version: 9, id: 'future', createdAt: 1, cwd: '/w' })}\n`)
+    const reply = await client.call('session/attach', { sessionId: 'future' })
+    expect(reply.error?.code).toBe(-32602)
+    expect(reply.error?.message).toMatch(/format 9, and this MiniDSH reads format 0/)
+  })
+
+  it('refuses to continue a stored session of a newer format with the same bad-request answer', async () => {
+    const { client, sessionsRoot } = await startHost(new ScriptedAdapter())
+    writeFileSync(join(sessionsRoot, 'future.jsonl'), `${JSON.stringify({ kind: 'session', version: 9, id: 'future', createdAt: 1, cwd: '/w' })}
+`)
+    const reply = await client.call('session/prompt', { sessionId: 'future', text: 'go on' })
+    expect(reply.error?.code).toBe(-32602)
+    expect(reply.error?.message).toMatch(/format 9, and this MiniDSH reads format 0/)
+  })
+
   it('refuses a mode outside the closed vocabulary', async () => {
     const adapter = new ScriptedAdapter().script(assistantText('hi'))
     const { client } = await startHost(adapter)

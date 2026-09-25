@@ -35,7 +35,7 @@ import { asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { meterSession } from '../../core/metering/index.ts'
-import { PERSISTENCE, type StoredSessionSummary } from '../../core/persistence/index.ts'
+import { PERSISTENCE, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
 import { SETTINGS, SettingsError, type Settings } from '../../core/settings/index.ts'
 import type { JsonValue } from '../../core/json.ts'
 import { AUTHORITY_PRESET, PRESETS } from '../../core/presets/index.ts'
@@ -55,6 +55,7 @@ import {
   ASSISTANT_MESSAGE,
   REQUEST_CONTEXT,
   SESSIONS,
+  SessionFormatError,
   foldSessionTitle,
   TRACE_TYPES,
   foldRequestContext,
@@ -856,10 +857,18 @@ export class ProtocolHost {
     if (!inflight) {
       inflight = agents
         .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.agentDefaults(), ...world })
-        .then((handle) => {
-          this.owned.set(handle.agent.id, handle)
-          return handle.agent
-        })
+        .then(
+          (handle) => {
+            this.owned.set(handle.agent.id, handle)
+            return handle.agent
+          },
+          (error: unknown) => {
+            // The same answer `session/attach` gives: the session exists and
+            // this host cannot continue it, which is the caller's to fix.
+            if (error instanceof SessionFormatError) throw new RpcFailure(INVALID_PARAMS, error.message)
+            throw error
+          },
+        )
         .finally(() => this.resuming.delete(requested))
       this.resuming.set(requested, inflight)
     }
@@ -979,7 +988,15 @@ export class ProtocolHost {
       this.cold.set(sessionId, cached)
       return cached
     }
-    const stored = this.ctx.tryGet(PERSISTENCE)?.load(sessionId)
+    let stored: StoredSession | undefined
+    try {
+      stored = this.ctx.tryGet(PERSISTENCE)?.load(sessionId)
+    } catch (error) {
+      // A newer format is not a host fault: the session exists, and this host
+      // cannot read it. Said in the wire's words, like a missing one.
+      if (error instanceof SessionFormatError) throw new RpcFailure(INVALID_PARAMS, error.message)
+      throw error
+    }
     if (!stored) throw new RpcFailure(INVALID_PARAMS, `no session "${sessionId}"`)
     const source: SessionSource = {
       header: stored.header,
