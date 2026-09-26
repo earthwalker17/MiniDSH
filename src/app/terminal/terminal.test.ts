@@ -87,7 +87,7 @@ function scriptedBoot(adapter: ScriptedAdapter, prepare?: (root: Context) => voi
 }
 
 describe('terminal render (pure)', () => {
-  it('streams text deltas raw, closes the line on finish, and marks thinking once', () => {
+  it('streams text deltas as they arrive, closes the line on finish, and marks thinking once', () => {
     const renderer = new TerminalRenderer()
     expect(renderer.onEvent(chunkEvent({ type: 'reasoning-delta', index: 0, text: 'hmm' }, 0))).toBe('… thinking\n')
     expect(renderer.onEvent(chunkEvent({ type: 'reasoning-delta', index: 0, text: 'more' }, 1))).toBe('')
@@ -96,6 +96,20 @@ describe('terminal render (pure)', () => {
     expect(renderer.onEvent(chunkEvent({ type: 'finish', reason: { kind: 'stop' } }, 4))).toBe('\n')
     // The next step starts fresh.
     expect(renderer.onEvent(chunkEvent({ type: 'reasoning-delta', index: 0, text: 'again' }, 5))).toBe('… thinking\n')
+  })
+
+  /**
+   * The streamed answer is the one class of line the S16.5 review found
+   * bypassing `printableText`: history and every non-streamed line went
+   * through it, while a text delta reached the terminal verbatim — so a model
+   * could erase and repaint the line above the next `[y/N]` with its answer.
+   */
+  it('neutralizes control characters in a streamed delta, as it does in history', () => {
+    const renderer = new TerminalRenderer()
+    const hostile = `ok${String.fromCharCode(27)}[2K${String.fromCharCode(13)}REPAINTED`
+    const streamed = renderer.onEvent(chunkEvent({ type: 'text-delta', index: 0, text: hostile }, 0))
+    expect(streamed).toBe('ok [2K REPAINTED')
+    expect(streamed).toHaveLength(hostile.length)
   })
 
   it('renders a stored transcript from durable surface events', () => {
@@ -620,6 +634,8 @@ describe('terminal authority', () => {
     driver.type('do the risky thing')
     await driver.see('approve risky (run under "danger-full-access": the suite needs the network)? [y/N] ')
     driver.type('y')
+    // The durable decision, rendered from its event: who decided, and how.
+    await driver.see('allowed-once (by user)')
     await driver.see('escalation handled')
     driver.type('/exit')
     expect(await exitCode).toBe(0)
