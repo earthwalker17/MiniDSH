@@ -181,6 +181,36 @@ describe('verify: the verdict', () => {
     expect(inspectStored(stored(events), verification).turns).toMatchObject({ total: 1, open: { turn: 1 } })
   })
 
+  it('calls a malformed salvage claim invalid, and the report still renders', () => {
+    // The one structured claim: verify used to call this `ok` while inspect
+    // threw rendering it (the S16.5 review reproduced both).
+    const events = log((add) => {
+      add(SESSION_LIFECYCLE.type, { origin: 'seeded', dispatch: true, durability: 'synced', salvage: 'yes' })
+      add(SANDBOX_MODE.type, { mode: 'workspace-write', enforcement: 'full', reason: 'initial' })
+    })
+    const verification = verifyStored(stored(events))
+    expect(verification.verdict).toBe('invalid')
+    expect(verification.findings).toContainEqual(expect.objectContaining({ check: 'session', seq: 0 }))
+    expect(inspectLines(inspectStored(stored(events), verification)).some((line) => line.includes('seeded'))).toBe(true)
+  })
+
+  it('says a bracket is open, not a turn, when only a compaction the log never closed remains', () => {
+    // An ordinary disposal mid-`/compact` leaves exactly this, with no crash
+    // anywhere: the closer is the bracket's, and the words say so.
+    const events = log((add) => {
+      opening(add)
+      completedTurn(add)
+      add('compaction/start', { trigger: 'explicit', budgetTokens: 1000, projectedTokens: 900, plannedStart: 2, plannedEnd: 5, plannedNodes: 2 })
+    })
+    const verification = verifyStored(stored(events))
+    expect(verification.verdict).toBe('interrupted')
+    expect(verification.closers.map((event) => event.type)).toEqual(['compaction/end'])
+    const tail = verification.findings.find((finding) => finding.check === 'tail')!
+    expect(tail.message).toContain('a bracket is open')
+    expect(tail.message).not.toContain('crash')
+    expect(verifyLines('s', verification)[0]).toContain('a turn or a bracket is open')
+  })
+
   it('warns about what only the header can reveal: a child with no delegation opening, an ask nothing will close', () => {
     const child = verifyStored(stored(log((add) => (opening(add), completedTurn(add))), { header: { version: 0, id: asSessionId('c'), createdAt: 1, cwd: '/w', delegatedBy: asSessionId('p') } }))
     expect(child.findings).toEqual([expect.objectContaining({ severity: 'warning', check: 'delegation' })])

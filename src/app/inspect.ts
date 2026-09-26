@@ -41,7 +41,7 @@ export type Severity = 'error' | 'warning' | 'info'
 
 export interface Finding {
   readonly severity: Severity
-  /** Which judgement found it: `integrity`, `session`, `authority`, `repair`, `delegation`, `approvals`, `attachments`, `tail`. */
+  /** Which judgement found it: `integrity`, `session`, `authority`, `repair`, `delegation`, `approvals`, `attachments`, `fold`, `tail`. */
   readonly check: string
   readonly seq?: number
   readonly message: string
@@ -50,7 +50,7 @@ export interface Finding {
 }
 
 /**
- * `ok`, `interrupted` (an open last turn a resume closes) and `torn` (a crash
+ * `ok`, `interrupted` (an open turn or bracket a resume closes) and `torn` (a crash
  * artifact a resume sidecars) are the shapes a healthy runtime leaves and exit
  * 0; `damaged` (bytes past a readable prefix), `invalid` (a rule broken inside
  * it), `unsupported` (a newer format) and `not-found` exit 1.
@@ -161,12 +161,17 @@ export function verifyStored(stored: StoredSession): Verification {
   }
 
   if (closers.length > 0 && !damaged) {
+    // What the closers say, not a guess: repair closes an unpaired delegation or
+    // compaction bracket whether or not a turn is open, and an ordinary
+    // disposal mid-`/compact` leaves exactly that with no crash anywhere.
+    const openTurn = closers.some((event) => matches(event, TURN_END))
+    const what = openTurn ? 'the last turn is open' : 'a bracket is open (a delegation or a compaction the log never closed)'
     findings.push({
       severity: 'info',
       check: 'tail',
       message: inFlux
-        ? `the last turn is open and a live writer holds this log, so it may simply be running; a fork taken now closes it with ${closers.length} conservative closer(s)`
-        : `the last turn is open (a crash or a kill): a resume appends ${closers.length} closer(s)`,
+        ? `${what} and a live writer holds this log, so it may simply be running; a fork taken now closes it with ${closers.length} conservative closer(s)`
+        : `${what}${openTurn ? ' (a crash or a kill)' : ''}: a resume appends ${closers.length} closer(s)`,
     })
   }
 
@@ -427,7 +432,7 @@ function findingLine(finding: Finding): string {
 
 const VERDICT_WORDS: Readonly<Record<Verdict, string>> = {
   ok: 'intact: every rule holds and every bracket is closed',
-  interrupted: 'intact, interrupted: its last turn is open, and a resume closes it',
+  interrupted: 'intact, interrupted: a turn or a bracket is open, and a resume closes it',
   torn: 'intact, with a torn final line a resume sidecars',
   damaged: 'DAMAGED: readable only up to a point, so a resume is refused',
   invalid: 'INVALID: the log breaks a rule the runtime holds every append to',
@@ -437,7 +442,7 @@ const VERDICT_WORDS: Readonly<Record<Verdict, string>> = {
 
 /** The verdict in words: an open turn or an unterminated line under a live writer is not a crash's. */
 function verdictWords(verdict: Verdict, inFlux: boolean): string {
-  if (inFlux && verdict === 'interrupted') return 'intact, in flux: a live writer holds it, and its last turn may simply be running'
+  if (inFlux && verdict === 'interrupted') return 'intact, in flux: a live writer holds it, and its open turn or bracket may simply be running'
   if (inFlux && verdict === 'torn') return 'intact, in flux: a live writer holds it, and its unterminated last line is likely an append in progress'
   return VERDICT_WORDS[verdict]
 }
@@ -471,7 +476,10 @@ export function inspectLines(inspection: Inspection): string[] {
     const cut = index === inspection.lifecycles.length - 1 && integrity?.tail === 'damaged'
     const missing = cut ? 'no record readable (the damage may have taken it)' : 'no record (a build before S16)'
     const claims = record === undefined ? missing : [record.origin, ...(record.dispatch === true ? ['dispatch'] : []), record.durability ?? 'unsynced'].join(' · ')
-    const salvage = record?.salvage === undefined ? '' : ` · salvaged: its source stopped at line ${record.salvage.stop.line} (${record.salvage.stop.reason})`
+    // Shape-checked here too: the session invariant refuses a malformed claim
+    // at verify, and a report over an `invalid` log must still render.
+    const stop = record?.salvage?.stop
+    const salvage = stop === undefined || typeof stop.line !== 'number' ? '' : ` · salvaged: its source stopped at line ${stop.line} (${stop.reason})`
     lines.push(`  ${String(lifecycle.startSeq).padStart(5)}  ${claims}${lifecycle.writer === undefined ? '' : ` · ${lifecycle.writer}`}${salvage}`)
   })
   const { turns } = inspection

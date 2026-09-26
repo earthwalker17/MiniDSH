@@ -62,10 +62,14 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     // claim — the conservative reading an older reader owes a newer log.
     const data: unknown = event.data
     if (typeof data !== 'object' || data === null) throw new Error('session/lifecycle carries no record')
-    const { origin, dispatch, durability } = data as Record<string, unknown>
+    const { origin, dispatch, durability, salvage } = data as Record<string, unknown>
     if (typeof origin !== 'string') fail('session/lifecycle origin is not a string')
     if (dispatch !== undefined && typeof dispatch !== 'boolean') fail('session/lifecycle dispatch is not a boolean')
     if (durability !== undefined && typeof durability !== 'string') fail('session/lifecycle durability is not a string')
+    // The one structured claim, held to its shape for the same reason: a
+    // reader renders it (`sessions inspect`), and a log `verify` calls sound
+    // must be one the report can read.
+    if (salvage !== undefined && !isSalvageRecord(salvage)) fail('session/lifecycle salvage is not a salvage record ({bytes, readableBytes, stop: {line, reason}})')
     return
   }
 
@@ -211,4 +215,15 @@ export const sessionInvariantPlugin: Plugin = {
   apply(ctx) {
     ctx.get(INVARIANTS).register(ctx, NAME, installSessionInvariant)
   },
+}
+
+/** The salvage claim's shape — types, not vocabularies, like the three claims beside it. */
+function isSalvageRecord(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  const stop = record.stop
+  if (typeof record.bytes !== 'number' || typeof record.readableBytes !== 'number') return false
+  if (typeof stop !== 'object' || stop === null) return false
+  const { line, reason } = stop as Record<string, unknown>
+  return typeof line === 'number' && typeof reason === 'string'
 }
