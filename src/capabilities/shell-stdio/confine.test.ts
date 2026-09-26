@@ -117,12 +117,18 @@ const required = process.env.MINIDSH_EXPECT_CONFINEMENT === '1'
  * What ARCHITECTURE §13 says about hard links, per platform: `true` = the
  * write reaches the outside inode (an escape the document states), `false` =
  * nothing on the host changes, `unmeasured` = print, assert nothing, and pin
- * from the CI log. Linux was measured under bwrap 0.9.0 on WSL 2 (2026-09-24
- * for the pre-existing link, 2026-09-26 for the rest).
+ * from the CI log. Both backends measured the same shape: a link that already
+ * sits in the workspace is written through (the OS confines paths, and the
+ * inode has two), and neither lets a confined command CREATE one across the
+ * boundary — bwrap because the bind is another mount (`EXDEV`), Seatbelt
+ * because the link is a write it denies (`Operation not permitted`) — nor
+ * write an outside path that also has a workspace name. Linux: bwrap 0.9.0 on
+ * WSL 2 and ubuntu-latest, 2026-09-24 and 2026-09-26. macOS: Seatbelt on
+ * macos-latest (26.6.2), 2026-09-26, run 36252910375.
  */
 const HARD_LINK_ESCAPES: Readonly<Record<string, Readonly<Record<'preExisting' | 'created' | 'outsidePath', boolean | 'unmeasured'>>>> = {
   linux: { preExisting: true, created: false, outsidePath: false },
-  darwin: { preExisting: 'unmeasured', created: 'unmeasured', outsidePath: 'unmeasured' },
+  darwin: { preExisting: true, created: false, outsidePath: false },
 }
 
 /**
