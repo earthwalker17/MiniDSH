@@ -17,8 +17,8 @@
  * that exist to prove this and must never pass having proved nothing.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { canonicalPath, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
@@ -112,6 +112,29 @@ function mechanismInstalled(): boolean {
 
 const installed = mechanismInstalled()
 const required = process.env.MINIDSH_EXPECT_CONFINEMENT === '1'
+
+/**
+ * What ARCHITECTURE §13 says about hard links, per platform: `true` = the
+ * write reaches the outside inode (an escape the document states), `false` =
+ * nothing on the host changes, `unmeasured` = print, assert nothing, and pin
+ * from the CI log. Linux was measured under bwrap 0.9.0 on WSL 2 (2026-09-24
+ * for the pre-existing link, 2026-09-26 for the rest).
+ */
+const HARD_LINK_ESCAPES: Readonly<Record<string, Readonly<Record<'preExisting' | 'created' | 'outsidePath', boolean | 'unmeasured'>>>> = {
+  linux: { preExisting: true, created: false, outsidePath: false },
+  darwin: { preExisting: 'unmeasured', created: 'unmeasured', outsidePath: 'unmeasured' },
+}
+
+/**
+ * A measurement must reach the log of a PASSING run, and vitest shows a
+ * passing test's console output only on a TTY. So it goes to the process's
+ * own stderr, unintercepted, and to the GitHub job summary where one exists.
+ */
+function reportMeasurement(text: string): void {
+  process.stderr.write(`${text}\n`)
+  const summary = process.env.GITHUB_STEP_SUMMARY
+  if (summary) appendFileSync(summary, `\`\`\`\n${text}\n\`\`\`\n`)
+}
 
 // A CI leg that exists to prove confinement may not go green having skipped it.
 describe.runIf(required)('a host that is REQUIRED to confine', () => {
@@ -270,6 +293,78 @@ describe.skipIf(!installed)(`OS confinement on ${process.platform}`, () => {
     const after = await shell.exec({ command: 'pwd', policy: session, timeoutMs: 30_000 })
     expect(after.output).toContain('sub')
     expect(after.restarted).toBeUndefined()
+  })
+
+  /**
+   * HARD LINKS, measured rather than assumed. Both backends confine by PATH,
+   * and a hard link gives one inode two paths, so three questions decide what
+   * "no host file outside the ceiling changes" is worth on a backend:
+   *   (1) a link that already sits in the workspace, pointing at an outside inode;
+   *   (2) a link the confined command CREATES from an outside file into the workspace;
+   *   (3) an outside file written by its OUTSIDE path while it also has a
+   *       workspace name — Seatbelt resolves policy through the vnode's cached
+   *       name, so the inverse escape is as plausible as the direct one.
+   *
+   * The outside files live under $HOME, never under os.tmpdir(): bwrap masks
+   * /tmp with a tmpfs, so an outside file there is invisible and a confined
+   * `ln` would fail ENOENT before the link syscall — the wrong measurement.
+   * Under bwrap $HOME is inside the read-only bind and the workspace a
+   * separate bind, so a cross-boundary link(2) is the real EXDEV; on macOS
+   * /Users and /private/var/folders share the Data volume, so `ln` can succeed
+   * and the Seatbelt question is actually asked.
+   *
+   * Every assertion is about the WORLD — the bytes of the outside file — never
+   * an exit code, and every case prints what it measured, so the CI log of a
+   * platform this project has no machine for answers the question. A platform
+   * whose row says `unmeasured` prints and asserts nothing: the documentation
+   * (ARCHITECTURE §13) is pinned from the log, not guessed.
+   */
+  it('writes through, or not, a hard link: measured per backend, asserted on the outside file', async () => {
+    const ws = tempDir('minidsh-confine-ws-')
+    const outside = canonicalPath(mkdtempSync(join(homedir(), '.minidsh-confine-link-')))
+    dirs.push(outside)
+    const confinement = selectConfinement('auto')
+    shell = new ShellProcess('bash', ws, { confinement })
+    const policy = policyFor('workspace-write', ws)
+    const run = (command: string): Promise<{ exitCode?: number; output: string }> => shell!.exec({ command, policy, timeoutMs: 30_000 })
+    const changed = (name: string): boolean => readFileSync(join(outside, name), 'utf8').includes('escaped')
+    const plant = (name: string, link: string): void => {
+      writeFileSync(join(outside, name), 'original\n')
+      try {
+        linkSync(join(outside, name), join(ws, link))
+      } catch (error) {
+        throw new Error(`this host cannot hard-link ${outside} into ${ws} (${(error as NodeJS.ErrnoException).code}); the measurement needs one filesystem`, { cause: error })
+      }
+    }
+
+    // (1) a pre-existing link, made unconfined, written through by the confined shell.
+    plant('t1', 'link1')
+    const one = await run(`echo escaped >> ${JSON.stringify(join(ws, 'link1'))}`)
+    // (2) the confined shell creates the link itself, then writes through it.
+    writeFileSync(join(outside, 't2'), 'original\n')
+    const two = await run(`ln ${JSON.stringify(join(outside, 't2'))} ${JSON.stringify(join(ws, 'link2'))} 2>&1 && echo escaped >> ${JSON.stringify(join(ws, 'link2'))}`)
+    // (3) the outside path of a file that also has a workspace name.
+    plant('t3', 'alias3')
+    const three = await run(`echo escaped >> ${JSON.stringify(join(outside, 't3'))} 2>&1`)
+
+    const measured = { preExisting: changed('t1'), created: changed('t2'), outsidePath: changed('t3') }
+    const detail = (result: { exitCode?: number; output: string }): string =>
+      `exit ${result.exitCode ?? 'none'}${result.output.trim().length > 0 ? `: ${result.output.trim().slice(0, 160)}` : ''}`
+    const version = process.platform === 'darwin' ? spawnSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).stdout.trim() : release()
+    const label = `${process.platform}/${confinement.id} (${version})`
+    const report =
+      `[confine] hard links on ${label}\n` +
+      `  (1) write through a pre-existing link: outside file ${measured.preExisting ? 'CHANGED' : 'unchanged'}; ${detail(one)}\n` +
+      `  (2) link created by the confined command, then written: outside file ${measured.created ? 'CHANGED' : 'unchanged'}; ${detail(two)}\n` +
+      `  (3) outside path of a file that also has a workspace name: outside file ${measured.outsidePath ? 'CHANGED' : 'unchanged'}; ${detail(three)}`
+    reportMeasurement(report)
+
+    const expected = HARD_LINK_ESCAPES[process.platform]
+    for (const key of ['preExisting', 'created', 'outsidePath'] as const) {
+      const claim = expected?.[key]
+      if (claim === undefined || claim === 'unmeasured') continue
+      expect(measured[key], `${key} on ${label}: ARCHITECTURE §13 says ${claim ? 'the write reaches the outside inode' : 'no host file changes'}\n${report}`).toBe(claim)
+    }
   })
 
   it('still refuses when the composition pins a host with no backend', async () => {
