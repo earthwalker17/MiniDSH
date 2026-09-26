@@ -96,7 +96,7 @@ Official references:
 - Subsystem documentation: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
 - Cordis paper: https://github.com/cordiverse/paper
 
-These sources are actively changing, and DSH's notes move between `proposed/`, `implemented/` and `archived/` as they age, so a deep link into `.agents/notes` can go stale within weeks. Claude Code should inspect the current repository and primary docs whenever a design decision depends on them. Links here were last checked on 2026-09-09.
+These sources are actively changing, and DSH's notes move between `proposed/`, `implemented/` and `archived/` as they age, so a deep link into `.agents/notes` can go stale within weeks. Claude Code should inspect the current repository and primary docs whenever a design decision depends on them. Links here were last checked on 2026-09-26.
 
 ---
 
@@ -133,7 +133,7 @@ The official minimal configuration exposes essentially a persistent shell while 
 
 References:
 
-- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/preset/agent-presets/presets/minimal/agent.cordis.yml
+- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml
 - The SDK (newline-delimited JSON-RPC over stdio): https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/README.md
 - Tool-surface simplification note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/archived/simplification/2026-08-10-default-presets-single-editor.md
 
@@ -507,7 +507,7 @@ Especially useful starting points:
 - Agent scope design: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md
 - Web client architecture note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md
 - LLM family: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/README.md
-- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/preset/agent-presets/presets/minimal/agent.cordis.yml
+- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml
 - Attachment subsystem: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/attachment.md
 
 Search the current repository for newer decisions when these files reference superseded or archived notes.

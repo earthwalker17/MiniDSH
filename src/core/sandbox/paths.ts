@@ -13,7 +13,11 @@
  *
  * A HARD link is not a link to follow: it passes containment by name, and a
  * write through one lands on the outside inode (ARCHITECTURE §13). Detecting
- * it needs inode identity per write.
+ * it needs inode identity per write, and an `nlink > 1` refusal would deny
+ * every pnpm-installed file, which the store hard-links. Both confinement
+ * backends share the shape, measured (`shell-stdio/confine.test.ts`,
+ * 2026-09-26/27): they confine by path, write through a pre-existing link,
+ * and refuse to create one across the boundary or to write the outside name.
  */
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve as resolvePath } from 'node:path'
