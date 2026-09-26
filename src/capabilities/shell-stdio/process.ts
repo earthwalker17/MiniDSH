@@ -52,47 +52,45 @@ function wrapper(dialect: ShellDialect, base64: string, marker: string): string 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * Names this deployment never declared as a secret but which look like one.
+ * The environment a child gets: the harness's, minus what MiniDSH itself
+ * owns, plus whatever the caller adds.
  *
- * A deny PATTERN, which this project otherwise distrusts — and the direction is
- * why it is acceptable here: over-matching hides a variable from a command,
- * under-matching leaks a key. Upstream ships the same heuristic
- * (`/KEY|PASSWORD|SECRET|TOKEN/i`) for the same reason, with the same honest
- * hole: a secret named nothing like one passes.
- */
-const SECRET_SHAPED = /KEY|TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL/i
-
-/**
- * The environment a child gets: the harness's, minus what it must not see,
- * plus whatever the caller adds.
+ * Two removals, one rule each. **Secrecy**: the credential references this
+ * deployment DECLARED (`ctx.credentials`, the only thing that can know a row
+ * renamed its own `apiKeyEnv`) — exactly those, and nothing for merely
+ * looking like one. `GOOGLE_APPLICATION_CREDENTIALS`, an undeclared
+ * `OPENAI_API_KEY`, a `PASSWORD` in the user's profile all pass: they are the
+ * user's, not the harness's, and the shell child is the user's shell. (S16.5
+ * deleted the `/KEY|TOKEN|SECRET|PASSWORD/i` heuristic upstream still ships:
+ * a variable withheld for its NAME broke ordinary work — a path-valued
+ * `*_CREDENTIALS` first — while withholding no credential MiniDSH consumes.)
+ * **Identity**: `MINIDSH_*`, so a command cannot read — or nest a harness
+ * against — this process's own home and route. That is the one withheld name
+ * that is not a credential, kept on purpose.
  *
- * Two removals answering two different questions, kept apart because they are
- * not the same rule. **Secrecy**: the references this deployment declared
- * (`ctx.credentials`, which is the only thing that can know a row renamed its
- * own `apiKeyEnv`), plus the pattern above for what it never declared.
- * **Identity freshness**: `MINIDSH_*`, so a command cannot read — or nest a
- * harness against — this process's own home and route.
+ * On win32 names are compared case-insensitively, because the environment
+ * is: `credentials-local` resolves `process.env[ref]`, which finds
+ * `Deepseek_Api_Key` for `DEEPSEEK_API_KEY` there, and a scrub comparing
+ * exact spellings handed that very value to every child.
  *
  * The caller's overlay merges AFTER: today that is the confinement's `envFor`
- * (the `TMPDIR` a profile granted), and a future caller may forward a value on
- * purpose. And the limit is real and stated (§13): this
- * withholds variables, it does not withhold credentials. Reads are never
- * fenced, so `~/.minidsh/credentials.json` is still readable, and
- * `HTTP(S)_PROXY` and `SSH_AUTH_SOCK` are kept deliberately because removing
- * them breaks ordinary work. (`GOOGLE_APPLICATION_CREDENTIALS` matches the
- * pattern and is withheld.) Defence in depth, not a boundary.
+ * (the `TMPDIR` a profile granted). And the limit is real and stated (§13):
+ * this withholds VARIABLES, not credentials. Reads are never fenced, so
+ * `~/.minidsh/credentials.json` is still readable, and the network is open.
+ * Defence in depth, not a boundary.
  */
 export function childEnvironment(declared: readonly string[], overlay: Readonly<Record<string, string>> | undefined): NodeJS.ProcessEnv {
-  const withheld = new Set(declared)
+  const fold = process.platform === 'win32' ? (name: string): string => name.toUpperCase() : (name: string): string => name
+  const withheld = new Set(declared.map(fold))
   const env: NodeJS.ProcessEnv = {}
   for (const [name, value] of Object.entries(process.env)) {
-    if (withheld.has(name) || SECRET_SHAPED.test(name) || name.toUpperCase().startsWith('MINIDSH_')) continue
+    if (withheld.has(fold(name)) || name.toUpperCase().startsWith('MINIDSH_')) continue
     env[name] = value
   }
   return { ...env, ...overlay }
 }
 
-/** Spread into `spawn` options. Always an explicit env now: inheriting wholesale is what this stopped doing. */
+/** Spread into `spawn` options. Always an explicit env: inheriting wholesale is what this stopped doing. */
 function envOption(declared: readonly string[], overlay: Readonly<Record<string, string>> | undefined): { env: NodeJS.ProcessEnv } {
   return { env: childEnvironment(declared, overlay) }
 }
@@ -178,19 +176,19 @@ export class ShellProcess implements ShellSession {
   private readonly shellPath: string | undefined
   private readonly maxCaptureChars: number
   private readonly confinement: Confinement
-  /** Credential names this deployment declared, withheld from every child this process spawns. */
-  private readonly withheld: readonly string[]
+  /** Credential names this deployment declared, asked at EVERY spawn: a row may declare after this shell exists. */
+  private readonly withheld: () => readonly string[]
 
   constructor(
     dialect: ShellDialect,
     cwd: string,
-    options: { shellPath?: string; maxCaptureChars?: number; confinement?: Confinement; withheld?: readonly string[] } = {},
+    options: { shellPath?: string; maxCaptureChars?: number; confinement?: Confinement; withheld?: () => readonly string[] } = {},
   ) {
     this.dialect = dialect
     this.cwd = cwd
     this.shellPath = options.shellPath
     this.maxCaptureChars = options.maxCaptureChars ?? 512_000
-    this.withheld = options.withheld ?? []
+    this.withheld = options.withheld ?? (() => [])
     // A piped child shell confines nothing on its own; a backend that wraps the
     // spawn in an OS sandbox supplies a truthful probe here instead.
     this.confinement = options.confinement ?? NO_CONFINEMENT
@@ -259,7 +257,7 @@ export class ShellProcess implements ShellSession {
     const base = shellCommand(this.dialect, this.shellPath)
     const { cmd, args } = this.confinement.wrap(base.cmd, base.args, policy)
     const wrapped = cmd !== base.cmd
-    const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], ...envOption(this.withheld, this.confinement.envFor(policy)), ...sessionOption(wrapped) })
+    const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], ...envOption(this.withheld(),this.confinement.envFor(policy)), ...sessionOption(wrapped) })
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     // Identity-guarded: output from a killed child never lands in the live buffer.
@@ -419,7 +417,7 @@ export class ShellProcess implements ShellSession {
     const child = spawn(cmd, args, {
       cwd: this.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      ...envOption(this.withheld, this.confinement.envFor(request.policy)),
+      ...envOption(this.withheld(),this.confinement.envFor(request.policy)),
       ...sessionOption(true),
     })
     // Reachable from `dispose`: an escalated command runs under the widest

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +10,8 @@ import { main } from './cli.ts'
 import { runTask } from './headless.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
+/** The host dialect's binary; `shell.test.ts` turns a missing one into a failure under MINIDSH_EXPECT_SHELL, so a skip here hides nothing. */
+const shellAvailable = spawnSync(process.platform === 'win32' ? 'pwsh' : 'bash', ['--version'], { stdio: 'ignore' }).status === 0
 
 let dirs: string[] = []
 afterEach(() => {
@@ -129,6 +132,50 @@ describe('headless runner (real composition, scripted model)', () => {
       await root.dispose()
     }
   })
+
+  /**
+   * The scrub's whole list is what the mounted rows DECLARED, through the
+   * composition that ships: both adapter rows, nothing else. Pinned here and
+   * not in shell.test.ts because the claim spans three capabilities — a row's
+   * `declare`, the credential seam, the shell provider's thunk — and a
+   * one-line revert in any of them leaves every unit test green.
+   */
+  it.skipIf(!shellAvailable)('withholds from a shell child exactly the credential names the mounted rows declared', async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const { bootComposition } = await import('./headless.ts')
+    const { AGENTS } = await import('../core/agent/index.ts')
+    const { CREDENTIALS } = await import('../core/credentials/index.ts')
+    const { SHELL } = await import('../core/shell/index.ts')
+    const vars = { DEEPSEEK_API_KEY: 'deepseek-secret', ANTHROPIC_API_KEY: 'anthropic-secret', GOOGLE_APPLICATION_CREDENTIALS: '/home/me/gcp.json' }
+    const previous = new Map(Object.keys(vars).map((name) => [name, process.env[name]] as const))
+    for (const [name, value] of Object.entries(vars)) process.env[name] = value
+    // No `llm-deepseek` disable patch: the claim is about what the SHIPPED rows declare.
+    const adapter = new ScriptedAdapter()
+    const root = await bootComposition({ sessionsRoot, logger: silent, prepare: (context) => void context.get(LLM).registerAdapter(context, adapter) })
+    try {
+      expect(root.get(CREDENTIALS).declaredRefs().toSorted()).toEqual(['ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY'])
+      const handle = await root.get(AGENTS).create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+      try {
+        const shell = root.get(SHELL).sessionFor(handle.agent)
+        const policy = { mode: 'danger-full-access' as const, workspaceRoot: cwd }
+        const read = async (name: string): Promise<string> =>
+          (await shell.exec({ command: process.platform === 'win32' ? `Write-Output $env:${name}` : `echo $${name}`, policy, timeoutMs: 30_000 })).output
+        expect(await read('DEEPSEEK_API_KEY')).not.toContain('deepseek-secret')
+        expect(await read('ANTHROPIC_API_KEY')).not.toContain('anthropic-secret')
+        // Credential-shaped, and the user's: it reaches the user's shell.
+        expect(await read('GOOGLE_APPLICATION_CREDENTIALS')).toContain('/home/me/gcp.json')
+      } finally {
+        await handle.dispose()
+      }
+    } finally {
+      await root.dispose()
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
+  }, 120_000)
 
   it('refuses a row config outside the plugin contract at boot, naming the row and the key', async () => {
     const cwd = tempDir('minidsh-cwd-')

@@ -124,27 +124,60 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
  * reaped the persistent child and left the escalated one — the command running
  * under the widest authority the session ever granted — alive behind it.
  */
-describe('the environment a child is given', () => {
-  it('withholds what this deployment declared a secret, what LOOKS like one, and its own identity', () => {
-    const before = { ...process.env }
-    process.env.CORP_LLM_CRED = 'renamed-by-config'
-    process.env.SOME_API_KEY = 'looks-like-one'
-    process.env.MINIDSH_HOME = '/somewhere'
-    process.env.ORDINARY_SETTING = 'kept'
-    try {
-      // `CORP_LLM_CRED` is the case a name pattern cannot catch and assembly
-      // cannot know: a row renamed its own `apiKeyEnv`, and only the credential
-      // seam it declared to can say so.
-      const env = childEnvironment(['CORP_LLM_CRED'], undefined)
-      expect(env.CORP_LLM_CRED).toBeUndefined()
-      expect(env.SOME_API_KEY).toBeUndefined()
-      expect(env.MINIDSH_HOME).toBeUndefined()
-      // And an ordinary child still works: PATH and the rest are untouched.
-      expect(env.ORDINARY_SETTING).toBe('kept')
-      expect(env.PATH ?? env.Path).toBeDefined()
-    } finally {
-      process.env = before
+/**
+ * Sets variables on the REAL `process.env` and restores each one afterwards,
+ * never replacing the object: on win32 `process.env` is the case-insensitive
+ * one, and a plain copy assigned back would silently stop being that.
+ */
+async function withEnv<T>(vars: Record<string, string>, body: () => Promise<T> | T): Promise<T> {
+  const previous = new Map(Object.keys(vars).map((name) => [name, process.env[name]] as const))
+  for (const [name, value] of Object.entries(vars)) process.env[name] = value
+  try {
+    return await body()
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
     }
+  }
+}
+
+describe('the environment a child is given', () => {
+  it('withholds what this deployment declared a secret and its own identity, and nothing for merely looking like one', async () => {
+    await withEnv(
+      {
+        CORP_LLM_CRED: 'renamed-by-config',
+        SOME_API_KEY: 'looks-like-one',
+        GOOGLE_APPLICATION_CREDENTIALS: '/home/me/gcp.json',
+        MINIDSH_HOME: '/somewhere',
+        ORDINARY_SETTING: 'kept',
+      },
+      () => {
+        // `CORP_LLM_CRED` is the case assembly cannot know: a row renamed its
+        // own `apiKeyEnv`, and only the credential seam it declared to can say so.
+        const env = childEnvironment(['CORP_LLM_CRED'], undefined)
+        expect(env.CORP_LLM_CRED).toBeUndefined()
+        expect(env.MINIDSH_HOME).toBeUndefined()
+        // Undeclared, so not the harness's: a name is not a reason to withhold,
+        // and the path-valued one is exactly what a name pattern got wrong.
+        expect(env.SOME_API_KEY).toBe('looks-like-one')
+        expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe('/home/me/gcp.json')
+        // And an ordinary child still works: PATH and the rest are untouched.
+        expect(env.ORDINARY_SETTING).toBe('kept')
+        expect(env.PATH ?? env.Path).toBeDefined()
+      },
+    )
+  })
+
+  it.runIf(process.platform === 'win32')('compares names case-insensitively on Windows, where the environment does', async () => {
+    // `credentials-local` resolves `process.env['DEEPSEEK_API_KEY']`, which on
+    // win32 finds THIS spelling — so a scrub comparing exact spellings handed
+    // the very value the harness consumes to every child.
+    await withEnv({ Deepseek_Api_Key: 'mixed-case' }, () => {
+      expect(process.env.DEEPSEEK_API_KEY).toBe('mixed-case')
+      const env = childEnvironment(['DEEPSEEK_API_KEY'], undefined)
+      expect(Object.keys(env).filter((name) => name.toUpperCase() === 'DEEPSEEK_API_KEY')).toEqual([])
+    })
   })
 
   /**
@@ -153,25 +186,27 @@ describe('the environment a child is given', () => {
    * wholesale `process.env` spread, dropping `withheld` where the provider
    * builds the process, or dropping a row's `declare` — each put this
    * deployment's API key back into every command the model runs, and every one
-   * of them left the two pure-function tests above passing.
+   * of them left the pure-function tests above passing.
    */
-  it.skipIf(!available)('gives a REAL child the scrubbed environment, not just the helper', async () => {
-    const before = { ...process.env }
-    process.env.CORP_LLM_CRED = 'renamed-by-config'
-    process.env.SOME_API_KEY = 'looks-like-one'
-    process.env.ORDINARY_SETTING = 'kept'
+  it.skipIf(!available)('gives a REAL child the scrubbed environment, and asks what is declared at every spawn', async () => {
     const root = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
     dir = root
-    try {
-      proc = new ShellProcess(dialect, root, { withheld: ['CORP_LLM_CRED'] })
+    await withEnv({ CORP_LLM_CRED: 'renamed-by-config', SOME_API_KEY: 'looks-like-one', LATER_CRED: 'declared-later', ORDINARY_SETTING: 'kept' }, async () => {
+      const declared = ['CORP_LLM_CRED']
+      proc = new ShellProcess(dialect, root, { withheld: () => declared })
       const read = async (name: string): Promise<string> =>
         (await proc!.exec({ command: readVar(name), policy: unconfined(root), timeoutMs: 30_000 })).output
       expect(await read('CORP_LLM_CRED')).not.toContain('renamed-by-config')
-      expect(await read('SOME_API_KEY')).not.toContain('looks-like-one')
+      expect(await read('SOME_API_KEY')).toContain('looks-like-one')
       expect(await read('ORDINARY_SETTING')).toContain('kept')
-    } finally {
-      process.env = before
-    }
+      expect(await read('LATER_CRED')).toContain('declared-later')
+      // A row that mounts after this shell exists (an agent preset's own
+      // adapter) declares into the same seam, and the NEXT spawn withholds it.
+      declared.push('LATER_CRED')
+      await proc.restart()
+      expect(await read('LATER_CRED')).not.toContain('declared-later')
+      expect(await read('ORDINARY_SETTING')).toContain('kept')
+    })
   }, SHELL_TEST_TIMEOUT_MS)
 
   it('merges the caller overlay AFTER the scrub, so a forwarded value survives', () => {
