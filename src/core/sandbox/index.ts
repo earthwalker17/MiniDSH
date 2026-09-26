@@ -109,9 +109,10 @@ export interface Sandbox {
    */
   resolve(request: SandboxPolicyRequest): SandboxExecutionPolicy
   /**
-   * Records the mode a session opens under, iff nothing is recorded yet —
-   * the deployment default for a fresh session, nothing new for a resumed one
-   * whose log already says. Called at `agent/created`, before publication.
+   * Records the mode a session opens under iff nothing is recorded, re-stamps
+   * it `resume` when this host enforces differently, and stamps a weakened
+   * deployment acceptance for every confinable mode the log does not record
+   * (`stampAcceptance`). Called at `agent/created`, before publication.
    *
    * With an `opening`, the explicit form a creator uses BEFORE publication
    * (in `setup`): the child opens under the mode its parent had at

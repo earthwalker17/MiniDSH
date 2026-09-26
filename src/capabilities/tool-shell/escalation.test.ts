@@ -278,7 +278,8 @@ describe('the shell on a host that DOES confine', () => {
     const schemas = harness!.root.get(TOOLS).schemas()
     const description = schemas.find((schema) => schema.name === toolName)!.description
     expect(description).toContain('inside an OS sandbox')
-    expect(description).not.toContain('cannot be confined on this host is REFUSED')
+    // The unconfined host's guidance, which a confining host must not be handed.
+    expect(description).not.toContain("is this session's recorded choice")
   })
 })
 

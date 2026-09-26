@@ -70,7 +70,7 @@ describe('agents.resume', () => {
     h.adapter.script(assistantText('resumed'))
     const resumed = await h.root.get(AGENTS).resume(h.root, id)
     expect(resumed.agent.session.origin).toBe('resumed')
-    // The folded request/header supplied the model config; nothing was passed here.
+    // The folded base route (`agent/options`) supplied the model config; nothing was passed here.
     expect(resumed.agent.options).toMatchObject({ provider: 'scripted', model: 'scripted-model' })
     resumed.agent.followup(createUserMessage('continue'))
     await resumed.agent.whenIdle()

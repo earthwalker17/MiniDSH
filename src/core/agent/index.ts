@@ -244,7 +244,8 @@ export interface Agents {
    * Continues a stored session under its own id: load → repair the interrupted
    * tail → seed → the ordinary creation transaction with `origin: 'resumed'`
    * (so persistence attaches append-only). Model config comes from the stored
-   * log's folded request/header unless overridden (see `ResumeAgentOptions`).
+   * log's folded `agent/options` base (its `request/header` for a log that
+   * predates the base) unless overridden (see `ResumeAgentOptions`).
    * The store's duplicate-id throw is the liveness guard.
    */
   resume(owner: Context, id: SessionId, options?: ResumeAgentOptions): Promise<AgentHandle>

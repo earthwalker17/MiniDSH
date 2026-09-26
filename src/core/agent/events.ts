@@ -83,8 +83,10 @@ export const SUBAGENT_END = eventKind<{
  * closer uses. The delegation tool owes its end record on every exit path it
  * has — a depth refusal, a cancelled call, a child that lost durability, a
  * throw — so an unpaired start is not an ordinary shape this runtime can
- * reach. Only a host death leaves one, and the turn closer beside this one
- * says `interrupted` about the same death.
+ * reach. A host death leaves one, and the turn closer beside this one says
+ * `interrupted` about the same death. So does a fork of a log another writer
+ * still holds, or of a salvaged prefix: there `interrupted` is a placeholder
+ * like the turn closer's (`session/repair.ts`), not a claim the child stopped.
  *
  * It carries no `usage`: the child's cost is summed in its own log, and a
  * closer that invented a total would be stating a number nobody measured.

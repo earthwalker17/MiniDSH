@@ -26,12 +26,21 @@ async function harness() {
 }
 
 describe('BlockAssembler', () => {
-  it('assembles text and tool-call blocks from deltas and prefers block-end', () => {
+  it('assembles a text block from deltas, and prefers the block-end form when it differs', () => {
     const asm = new BlockAssembler()
     for (const chunk of assistantText('hello world')) asm.push(chunk)
     expect(asm.blocks()).toEqual([{ type: 'text', text: 'hello world' }])
     expect(asm.finish).toEqual({ kind: 'stop' })
     expect(asm.usage?.outputTokens).toBe(5)
+
+    // A block-end that disagrees with the folded deltas wins: it is the
+    // provider's finalized form, and the deltas were only its stream.
+    const finalized = new BlockAssembler()
+    finalized.push({ type: 'block-start', index: 0, blockType: 'text' })
+    finalized.push({ type: 'text-delta', index: 0, text: 'hel' })
+    finalized.push({ type: 'block-end', index: 0, block: { type: 'text', text: 'hello' } })
+    finalized.push({ type: 'finish', reason: { kind: 'stop' } })
+    expect(finalized.blocks()).toEqual([{ type: 'text', text: 'hello' }])
   })
 
   it('concatenates tool-call argument fragments and caches id/name from the first fragment', () => {
@@ -92,8 +101,9 @@ describe('LlmRuntime', () => {
     const catalog = llm.providers()
     expect(catalog).toHaveLength(1)
     expect(catalog[0]!.id).toBe('scripted')
-    expect(catalog[0]!.models.length).toBeGreaterThan(0)
-    expect(catalog[0]!.models[0]).toMatchObject({ id: expect.any(String) as string, name: expect.any(String) as string })
+    // The adapter's own facts plus the window `resolveModel` enriches it with (§5).
+    expect(catalog[0]!.models).toHaveLength(1)
+    expect(catalog[0]!.models[0]).toMatchObject({ id: 'scripted-model', name: 'Scripted Model', contextWindow: 100_000 })
   })
 
   it('unregisters an adapter when its owning context disposes', async () => {

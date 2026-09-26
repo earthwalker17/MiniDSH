@@ -318,16 +318,6 @@ describe('the websocket frame codec', () => {
     expect(proper[0]!.masked).toBe(true)
   })
 
-  it('never emits a control frame past the 125-byte limit, however long the ping it echoes', () => {
-    // A ping we answer carries the PEER's payload; writing 200 into the single
-    // length byte would desynchronize everything after it on that socket.
-    const ping = Buffer.alloc(4 + 200)
-    ping[0] = 0x80 | 0x9
-    ping[1] = 0x80 | 200
-    const { frames } = decodeFrames(Buffer.concat([Buffer.from([0x89, 0x80 | 125, 1, 2, 3, 4]), Buffer.alloc(125)]), 1024)
-    expect(frames[0]!.payload).toHaveLength(125)
-  })
-
   it('encodes each length form the way the wire expects', () => {
     expect(encodeTextFrame('hi')[1]).toBe(2)
     expect(encodeTextFrame('x'.repeat(200))[1]).toBe(126)

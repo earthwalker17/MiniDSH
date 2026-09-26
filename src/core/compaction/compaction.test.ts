@@ -109,11 +109,16 @@ describe('planCompaction', () => {
     session.append(STEP_END, { turn: 1, step: 1 })
     session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
 
-    // A tiny tail budget wants to cut right after the assistant's tool call.
-    const plan = planCompaction(session.events, session.surfaceSeqs(), { budgetTokens: 100, retainRatio: 0.01 })
+    // A tail budget that wants to cut right after the assistant's tool call, so
+    // the naive tail would BEGIN with the tool result. At 0.01 the tail loop
+    // already cut past it and the pairing rule never moved anything (the S16.5
+    // review reproduced it): 0.2 makes the naive cut land on the result, and
+    // the rule then carries the cut forward to the next assistant message.
+    const plan = planCompaction(session.events, session.surfaceSeqs(), { budgetTokens: 100, retainRatio: 0.2 })
     expect(plan).toBeDefined()
+    expect(plan!.shadowedSeqs).toHaveLength(3)
     const retained = session.surfaceSeqs().slice(plan!.shadowedSeqs.length)
-    expect(session.events[retained[0]!]!.type).not.toBe('tool/result')
+    expect(session.events[retained[0]!]!.type).toBe('assistant/message')
   })
 
   it('declines when there is not enough history to be worth summarising', async () => {

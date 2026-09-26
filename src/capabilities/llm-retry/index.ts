@@ -1,7 +1,8 @@
 /**
  * Bounded request retry on `agent/request-error`. Failed attempts stay durable
- * (each opens a fresh step); only the retryable code set is retried, with
- * exponential backoff honoring a provider `retryAfterMs`.
+ * (each attempt's chunks carry their own `attempt` number within the same
+ * step); only the retryable code set is retried, with exponential backoff
+ * honoring a provider `retryAfterMs`.
  */
 import { z } from 'zod'
 import type { Plugin } from '../../kernel/index.ts'

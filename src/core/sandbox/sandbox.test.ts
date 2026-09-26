@@ -15,6 +15,7 @@ import { asSessionId } from '../ids.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, APPROVAL_REQUEST, type ApprovalOutcome } from '../approval/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
 import {
+  canonicalPath,
   acceptanceFor,
   allowsWrite,
   effectiveSandboxMode,
@@ -172,11 +173,12 @@ describe('sandbox mode: durable, folded, recorded when it changes', () => {
     await resumed.dispose()
   })
 
-  it('an agent-less call is fenced to the configured root and records nothing', async () => {
+  it('an agent-less call is fenced to the configured root', async () => {
     harness = await coreHarness()
     const resolved = harness.root.get(SANDBOX).resolve({})
     expect(resolved.mode).toBe('workspace-write')
-    expect(resolved.workspaceRoot.length).toBeGreaterThan(0)
+    // The row's own root (the process cwd when none is configured), canonical.
+    expect(resolved.workspaceRoot).toBe(canonicalPath(process.cwd()))
     expect(allowsWrite(resolved, join(resolved.workspaceRoot, 'x.txt'))).toBe(true)
   })
 })

@@ -138,11 +138,6 @@ async function callTool(test: Harness, agent: Agent, callId: string, name: strin
   return result!
 }
 
-function resultText(event: EventEnvelope): string {
-  if (!matches(event, TOOL_RESULT)) throw new Error('not a tool/result')
-  return messageText({ ...event.data.message, content: event.data.message.content })
-}
-
 /** A tool result's own text, unwrapped from its envelope the way the model receives it. */
 function resultContent(event: EventEnvelope): string {
   if (!matches(event, TOOL_RESULT)) throw new Error('not a tool/result')
@@ -336,7 +331,5 @@ describe('the projection', () => {
     expect(text).toMatch(/^\[history \d+–\d+ · \d+ message\(s\)/)
     expect(text).toContain('user')
     expect(text).toContain('assistant')
-    // The envelope the model sees carries the text, not an empty result.
-    expect(resultText(result).length + text.length).toBeGreaterThan(0)
   })
 })

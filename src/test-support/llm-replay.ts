@@ -210,9 +210,11 @@ const answerKey = (turn: number, step: number, callId: string): string => `${tur
  * recording's turn and step numbering.
  *
  * Whether a missing dispatch means "no body ran" is a property of the WRITER,
- * so it is decided per lifecycle segment (between `session/end-seed`s): a
- * segment whose record claims `dispatch`, or that holds a `tool/dispatch`,
- * records them; a 1.0.0 segment of a log a later build resumed does not.
+ * so it is decided per lifecycle segment (between `session/end-seed`s) from
+ * the segment's own `session/lifecycle` CLAIM, never from the presence of a
+ * `tool/dispatch` in it (§4: readers use its claims, never its presence): a
+ * 1.0.0 segment of a log a later build resumed claims nothing, and so does an
+ * unreleased S14–S15 log, which then reads conservatively rather than as proof.
  */
 export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, RecordedAnswer> {
   const names = new Map<string, string>()
@@ -226,10 +228,7 @@ export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, R
     segmentOf[index] = segment
     if (matches(event, SESSION_LIFECYCLE) && event.data.dispatch === true) recordsDispatch[segment] = true
     else if (matches(event, TOOL_CALL)) names.set(answerKey(event.data.turn, event.data.step, event.data.callId), event.data.name)
-    else if (matches(event, TOOL_DISPATCH)) {
-      recordsDispatch[segment] = true
-      dispatched.add(answerKey(event.data.turn, event.data.step, event.data.callId))
-    }
+    else if (matches(event, TOOL_DISPATCH)) dispatched.add(answerKey(event.data.turn, event.data.step, event.data.callId))
   })
   const answers = new Map<string, RecordedAnswer>()
   for (const [index, event] of events.entries()) {

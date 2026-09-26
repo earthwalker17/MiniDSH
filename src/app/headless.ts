@@ -100,7 +100,7 @@ export interface ContinueOptions extends BootOptions {
   readonly boundary?: number
   /** Fork a damaged stored log from its readable prefix (fork only; `ForkAgentOptions.salvage`). */
   readonly salvage?: boolean
-  /** Overrides; the stored log's folded request/header fills whatever is not given. */
+  /** Overrides; the stored log's folded base route (`agent/options`) fills whatever is not given. */
   readonly provider?: string
   readonly model?: string
   readonly reasoningEffort?: string
@@ -282,8 +282,8 @@ function continueArgs(options: ContinueOptions): {
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
       ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
     },
-    // The defaults tier: the stored log's folded request/header beats these,
-    // so a settings-layer model can never rewrite what a session recorded.
+    // The defaults tier: the stored log's folded base route beats these, so a
+    // settings-layer model can never rewrite what a session recorded.
     defaults: options.agentDefaults ?? defaultAgentOptions(),
     ...(options.world === undefined ? {} : { world: options.world }),
   }

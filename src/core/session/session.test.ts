@@ -353,9 +353,12 @@ describe('Session: the recovery contract', () => {
   })
 
   it('stays unknown when the `tool/call` is the last surviving line of an unsynced writer, because truncation explains it too', async () => {
+    // The same row answers a 1.0.0 log, which recorded no dispatches at all:
+    // absence is evidence only under a lifecycle that claims dispatch and synced.
     const { result } = await crashedAt((append) => recordsDispatches(append as unknown as Session['append']))
     expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
     expect(resultText(result)).toMatch(/may or may not have taken effect/)
+    expect(resultText(result)).toContain('No effect was recorded for it, which is not proof that none happened')
   })
 
   it("reads the claims of the open turn's OWN lifecycle, never an earlier one", async () => {
@@ -409,20 +412,6 @@ describe('Session: the recovery contract', () => {
     })
     expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
     expect(resultText(result)).toContain('wrote /w/landed.txt')
-  })
-
-  it('stays conservative on a log from before the dispatch fact existed', async () => {
-    // The same shape as above with step 1's dispatch removed: absence is no
-    // longer evidence, so the call a 1.0.0 log left open reads as it always did.
-    const { result } = await crashedAt((append) => {
-      const a = append as unknown as Session['append']
-      a(TURN_START, { turn: 1 })
-      a(STEP_START, { turn: 1, step: 1 })
-      a(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([call('c1')], 'p', 'm') }, { surfaceOp: { op: 'append' } })
-      a(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'str_replace_editor', arguments: '{}' })
-    })
-    expect(codeOf(result)).toBe('TOOL_OUTCOME_UNKNOWN')
-    expect(resultText(result)).toContain('No effect was recorded for it, which is not proof that none happened')
   })
 
   it('never attributes an earlier step’s effects to a repeated call id', async () => {

@@ -48,7 +48,12 @@ import type { TokenUsage } from '../../core/llm/index.ts'
 export interface SubagentConfig {
   /** How deep delegation may go; `0` forbids it entirely (default 2). */
   readonly maxDepth?: number | undefined
-  /** The subtractive view every child gets over the tools it inherits (the delegation tool itself is always denied). */
+  /**
+   * The subtractive view every child gets AT DELEGATION over the tools it
+   * inherits (the delegation tool itself is always denied). It lives in
+   * `setup`, which no continuation re-runs: a child resumed or forked alone
+   * keeps its ceiling and pins, not this view or its persona (§13; S21).
+   */
   readonly toolFilter?: ToolRestriction | undefined
   /**
    * Replaces the persona section in the child's world — a scoped section

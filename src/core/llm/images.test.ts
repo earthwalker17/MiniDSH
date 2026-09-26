@@ -116,9 +116,6 @@ describe('Anthropic wire shape', () => {
     })
     expect(second).toEqual({ type: 'text', text: 'and now?' })
   })
-
-  it('keeps the string form when the bytes were not resolved, and sends the descriptor', () => {
-    const result = createToolResultMessage(asCallId('c1'), [IMAGE], false)
-    expect(serializeAnthropic([result])).toEqual([[{ type: 'tool_result', tool_use_id: 'c1', content: imageDescriptor(REF) }]].map((content) => ({ role: 'user', content })))
-  })
+  // The unresolved case — the descriptor as a plain string — is content.test.ts's
+  // byte-identity pin, for both providers.
 })

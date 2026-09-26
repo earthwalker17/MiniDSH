@@ -123,8 +123,9 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
       // parent accepted nothing records no acceptance — the strict default
       // needs no line — and checking the stamp alone left exactly those
       // children able to accept an unconfined shell. The approval pin is the
-      // fact every delegated session has, and the delegation opening itself
-      // is written before it, so it is still allowed through.
+      // fact every delegated session has; the delegation opening is admitted
+      // by the branch above whatever order the two pins are written in, so
+      // only a later, non-delegation acceptance reaches this refusal.
       fail('sandbox/acceptance changes what a delegated session was started accepting')
     }
     trace.acceptanceStamps += 1

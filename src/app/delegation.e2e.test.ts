@@ -8,10 +8,13 @@
  *
  *   delegation   the parent delegates a bounded search; the child completes
  *                it in its own session and its answer reaches the parent
- *   the ceiling  the child opens under `read-only` + `never` with
- *                `reason: 'delegation'`, its shell escalation is refused (on a host that cannot confine; on one that can, the child simply runs under its read-only ceiling and asks for nothing)
- *                without anyone being asked, and a wire attempt to widen the
- *                child is refused too
+ *   the ceiling  the child opens under its parent's mode (`workspace-write`
+ *                in the default composition: the row sets no narrower one) with
+ *                approvals pinned `never`, `reason: 'delegation'`; on a host
+ *                that cannot confine, a shell escalation it asks for is refused
+ *                without anyone being asked (on one that can, it runs confined
+ *                and asks for nothing), and a wire attempt to widen the child
+ *                is refused too
  *   the world    the parent then writes the file the child could not have
  *   replay       the parent's log replays keylessly
  *
@@ -101,9 +104,13 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     expect(auditLines(childEvents)[0]).toContain('(delegation')
     expect(auditLines(parentLog.events).some((line) => line.includes('delegated') && line.includes(childId))).toBe(true)
     // Every approval the child asked for — if it asked at all — was refused
-    // without a client ever being consulted.
+    // without a client ever being consulted. `every` on an empty list is true,
+    // so the count is printed: a child that read its files with the editor
+    // never reached the shell, and this leg then exercised nothing (the
+    // refusal itself is pinned offline in subagent.test.ts).
     const decided = childEvents.filter((event) => event.type === 'approval/decided').map((event) => (event.data as { outcome: string }).outcome)
     expect(decided.every((outcome) => outcome === 'rejected')).toBe(true)
+    console.log(`[delegation arc] the child asked ${decided.length} time(s)${decided.length === 0 ? ': the refusal leg was not exercised this run' : `, all refused`}`)
 
     // ---- a wire attempt to widen the child is refused ----------------------
     // The child is disposed with the call, so a resumed one is the only way to
@@ -151,7 +158,7 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     expect(parentCold.children).toEqual([{ childId, callId: (start!.data as { callId: string }).callId, seq: start!.seq, ended: 'completed' }])
 
     // The WORLD: the parent wrote the file, the decoy is untouched, and the
-    // child — which never had the authority to write — wrote nothing.
+    // child — asked to read, and unable to ask anyone for anything — wrote nothing.
     expect(readFileSync(join(workspace, 'found.txt'), 'utf8')).toContain('PLUM-42')
     expect(readFileSync(decoy).equals(decoyBytes)).toBe(true)
     expect(existsSync(join(workspace, 'one.txt'))).toBe(true)

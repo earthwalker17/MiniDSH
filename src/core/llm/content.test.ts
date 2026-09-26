@@ -50,8 +50,7 @@ describe('blockText', () => {
   })
 
   it('projects an image to its stored descriptor, not to nothing', () => {
-    expect(blockText(IMAGE)).toBe(REF.name === undefined ? '' : imageDescriptor(REF))
-    expect(blockText(IMAGE).length).toBeGreaterThan(0)
+    expect(blockText(IMAGE)).toBe(imageDescriptor(REF))
   })
 
   it('reads the STORED descriptor, so a wording change cannot rewrite an old log', () => {
@@ -151,9 +150,9 @@ describe('the wire is unmoved for a history with no image', () => {
   })
 
   it('an image-bearing tool result carries its descriptor rather than "(no output)"', () => {
-    // Phase 2 replaces the descriptor with real bytes on an image-capable route;
-    // until then — and forever on a text-only route — this is what is sent, and
-    // the one thing it must never be is silence.
+    // On a text-only route, or when the bytes were not resolved, this is what
+    // is sent (images.test.ts covers the resolved-bytes wire), and the one
+    // thing it must never be is silence.
     const result = createToolResultMessage(asCallId('c2'), [IMAGE], false)
     const deepseek = serializeDeepSeek(undefined, [result])
     expect(deepseek[0]?.content).toBe(imageDescriptor(REF))

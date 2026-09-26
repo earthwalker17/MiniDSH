@@ -140,10 +140,19 @@ describe('tool execution pipeline', () => {
   it('applies monotonic guards after pre-execute', async () => {
     const { tools, agent, signal } = await setup()
     tools.register(harness!.root, upper)
-    tools.guard(harness!.root, (execution) => (execution.name === 'upper' ? 'guarded off' : undefined))
+    // The order is the claim, so both stages record when they ran.
+    const order: string[] = []
+    harness!.root.on(TOOLS_PRE_EXECUTE, async () => {
+      order.push('pre-execute')
+      return { kind: 'allow' as const }
+    })
+    tools.guard(harness!.root, () => {
+      order.push('guard')
+      return undefined
+    })
     const result = await tools.execute(call('upper', { text: 'x' }, agent, signal))
-    expect(result.isError).toBe(true)
-    expect(result.error?.info?.code).toBe('DENIED')
+    expect(result.isError).toBe(false)
+    expect(order).toEqual(['pre-execute', 'guard'])
   })
 
   it('consults guards BEFORE asking for consent, so a call a guard refuses never interrupts a person', async () => {

@@ -113,18 +113,6 @@ describe.skipIf(!available)(`persistent ${dialect} shell`, () => {
 })
 
 /**
- * The two things a one-shot grant promises, on the host where they are
- * EASIEST to get wrong: one that confines nothing.
- *
- * Both of these were live defects. The throwaway child was taken only when the
- * granted policy's world differed from the live child's — and on a host with
- * no backend every world is the same one, so the escalated command ran in the
- * session's own shell and its `cd` persisted, while the tool told the model
- * the opposite. And the throwaway was stored nowhere, so disposing the agent
- * reaped the persistent child and left the escalated one — the command running
- * under the widest authority the session ever granted — alive behind it.
- */
-/**
  * Sets variables on the REAL `process.env` and restores each one afterwards,
  * never replacing the object: on win32 `process.env` is the case-insensitive
  * one, and a plain copy assigned back would silently stop being that.
@@ -274,6 +262,18 @@ describe.skipIf(!available)('a host that enforces only partially', () => {
   }, SHELL_TEST_TIMEOUT_MS)
 })
 
+/**
+ * The two things a one-shot grant promises, on the host where they are
+ * EASIEST to get wrong: one that confines nothing.
+ *
+ * Both of these were live defects. The throwaway child was taken only when the
+ * granted policy's world differed from the live child's — and on a host with
+ * no backend every world is the same one, so the escalated command ran in the
+ * session's own shell and its `cd` persisted, while the tool told the model
+ * the opposite. And the throwaway was stored nowhere, so disposing the agent
+ * reaped the persistent child and left the escalated one — the command running
+ * under the widest authority the session ever granted — alive behind it.
+ */
 describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
   it('runs beside the persistent shell and leaves its state alone', async () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-'))

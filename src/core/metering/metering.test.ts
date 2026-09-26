@@ -203,7 +203,8 @@ describe('metering a session', () => {
     expect(before.projectedTokens).toBe(6000)
 
     // Compaction: one short summary replaces both nodes.
-    session.append(
+    const eventsBefore = session.events.length
+    const summary = session.append(
       USER_MESSAGE,
       { message: createUserMessage('summary') },
       { surfaceOp: { op: 'replace', start: first.seq, end: reply.seq }, sourceEventSeqs: [first.seq, reply.seq] },
@@ -215,8 +216,9 @@ describe('metering a session', () => {
     expect(after.projectedTokens).toBeLessThan(before.projectedTokens / 10)
     // The system prompt is still part of every request, so it is still counted.
     expect(after.projectedTokens).toBeGreaterThanOrEqual(estimateTokens(header.system))
-    // The log kept everything; only the surface shrank.
-    expect(session.events.length).toBeGreaterThan(session.surfaceSeqs().length)
+    // The log kept everything (one line more, the summary); only the surface shrank, to it.
+    expect(session.events.length).toBe(eventsBefore + 1)
+    expect(session.surfaceSeqs()).toEqual([summary.seq])
     await root.dispose()
   })
 

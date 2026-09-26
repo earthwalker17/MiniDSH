@@ -104,7 +104,7 @@ describe('authority in a real composition', () => {
     expect(modeStamps(events)).toEqual([{ mode: 'read-only', enforcement: 'none', reason: 'initial' }])
   })
 
-  it('records an explicitly requested mode as the session own durable switch', async () => {
+  it("records an explicitly requested mode as the session's opening stamp", async () => {
     const cwd = tempDir('minidsh-cwd-')
     const { events } = await editorRun(cwd, { command: 'create', path: join(cwd, 'note.txt'), file_text: 'kept' }, { sandbox: 'danger-full-access' })
     expect(modeStamps(events)).toEqual([{ mode: 'danger-full-access', enforcement: 'none', reason: 'initial' }])

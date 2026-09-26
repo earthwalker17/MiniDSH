@@ -713,12 +713,18 @@ describe('protocol: the paged attach', () => {
 
   it('publishes the view again whenever a durable fact moves one of its folds', async () => {
     const { client, sessionId } = await session(2)
-    const views = client.notifications.filter((entry) => entry.method === 'session.view')
-    expect(views.length).toBeGreaterThan(0)
-    const last = views.at(-1)!.params as unknown as { sessionId: string; view: SessionView }
+    const views = (): { sessionId: string; view: SessionView }[] =>
+      client.notifications.filter((entry) => entry.method === 'session.view').map((entry) => entry.params as unknown as { sessionId: string; view: SessionView })
+    expect(views().length).toBeGreaterThan(0)
+    const last = views().at(-1)!
     expect(last.sessionId).toBe(sessionId)
     expect(last.view.context?.projectedTokens).toBeGreaterThan(0)
     expect(last.view.authority.enforcement).toBe('none')
+    // "Whenever": one durable switch, one more view, and it carries the switch.
+    const before = views().length
+    await client.result('session/authority', { sessionId, sandbox: 'read-only' })
+    await client.waitFor(() => (views().length > before ? true : undefined), 'a view after the authority switch')
+    expect(views().at(-1)!.view.authority).toMatchObject({ sandbox: 'read-only' })
   })
 
   it('serves a gap repair as a range bounded at both ends, with the trace tier dropped', async () => {
@@ -1150,12 +1156,16 @@ describe('protocol: more than one client', () => {
     const { sessionId } = await first.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
     await first.waitForIdle(sessionId)
 
-    // The second client hangs up. The agent it was watching is not its to end.
+    // The second client hangs up. The agent it was watching is not its to end:
+    // the SAME instance answers the next prompt — a disposed agent would have
+    // been transparently resumed from the store, which this must tell apart.
+    const before = host.root.get(AGENTS).get(asSessionId(sessionId))
+    expect(before).toBeDefined()
     second.input.end()
-    await first.waitFor(() => (host.root.get(AGENTS).get(asSessionId(sessionId)) ? true : undefined), 'the agent to still be live')
+    await new Promise((resolve) => setTimeout(resolve, 50))
     await first.result('session/prompt', { sessionId, text: 'still here?' })
     await first.waitFor(() => (first.frames('turn/end', sessionId).length >= 2 ? true : undefined), 'the second turn to end')
-    expect(host.root.get(AGENTS).get(asSessionId(sessionId))).toBeDefined()
+    expect(host.root.get(AGENTS).get(asSessionId(sessionId))).toBe(before)
   })
 
   it('settles an approval nobody is left to answer, rather than parking the agent forever', async () => {

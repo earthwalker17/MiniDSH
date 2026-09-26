@@ -5,7 +5,7 @@ import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type
 /**
  * A model as the catalog advertises it: the adapter's own facts plus the
  * context window and modalities. The window travels with the catalog because
- * a surface that must meter context (§ `core/metering`) has no other way to
+ * a surface that must meter context (`core/metering`, §6) has no other way to
  * learn it — and because it is a model fact, not a runtime one.
  */
 export interface ModelCatalogEntry extends ModelInfo {

@@ -58,7 +58,7 @@ export interface WebSocketCarrierOptions {
   readonly hardLimitBytes?: number
   /** Largest inbound message accepted (default 8 MiB). */
   readonly maxMessageBytes?: number
-  /** Heartbeat period; a peer that misses two is gone (default 30s). */
+  /** Heartbeat period; a peer that has not answered the previous ping by the next beat is closed 1013 (default 30s). */
   readonly heartbeatMs?: number
   readonly onConnection: (connection: ClientConnection, socket: WebSocketPeer) => void
   readonly onClose: (connection: ClientConnection) => void
@@ -100,7 +100,9 @@ export function encodeTextFrame(text: string): Buffer {
 
 /** A control frame's payload may not exceed 125 bytes (RFC 6455 §5.5); a longer
  *  one would not fit the single length byte and would desynchronize the stream
- *  for everything after it. A ping we echo is the peer's payload, so clip it. */
+ *  for everything after it. The decoder already refuses an inbound control
+ *  frame past that (CLOSE_PROTOCOL_ERROR), so a ping we echo is never longer;
+ *  the clip is defence in depth for a caller of our own. */
 function encodeControlFrame(opcode: number, payload: Buffer = Buffer.alloc(0)): Buffer {
   const clipped = payload.length > 125 ? payload.subarray(0, 125) : payload
   const head = Buffer.alloc(2)

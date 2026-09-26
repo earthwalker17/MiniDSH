@@ -142,9 +142,12 @@ export interface AgentFactory {
 
 /**
  * Options for continuing a stored session (`agents.resume` / `agents.fork`).
- * Model config precedence: explicit `agentOptions` overrides > the seed's own
- * folded `request/header` (the log is its own config authority) > `defaults`
- * (a surface's default model, used only when the log recorded no request).
+ * Model config precedence: explicit `agentOptions` overrides > the seed's
+ * folded `agent/options` (the BASE route, the log's own config authority) >
+ * its folded `request/header` (only for a log from before the base was
+ * recorded) > `defaults` (a surface's default model, used only when the log
+ * recorded no route at all); `maxSteps` is the one default that survives a
+ * recorded fact.
  */
 export interface ResumeAgentOptions {
   readonly agentOptions?: Partial<AgentOptions>
