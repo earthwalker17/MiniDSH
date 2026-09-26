@@ -38,7 +38,7 @@ function settingsFile(content: unknown): string {
 describe('resolveSettings', () => {
   it('layers env over file over the pure built-ins', () => {
     // Built-ins are env-free: an ambient MINIDSH_MODEL must not leak in here.
-    expect(defaultAgentOptions()).toEqual({ provider: 'deepseek', model: 'deepseek-v4-flash' })
+    expect(defaultAgentOptions()).toEqual({ provider: 'deepseek', model: 'deepseek-flash' })
 
     expect(resolveSettings({ env: {} }).agent).toEqual(defaultAgentOptions())
     const path = settingsFile({ agent: { model: 'from-file', reasoningEffort: 'low', maxSteps: 7 } })

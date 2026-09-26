@@ -71,6 +71,18 @@ describe('DeepSeek translation', () => {
     expect(finish).toEqual({ type: 'finish', reason: { kind: 'error', failure: { message: expect.any(String), code: 'EMPTY_RESPONSE' } } })
   })
 
+  it('maps a content-less stream that never named a finish_reason to EMPTY_RESPONSE too', () => {
+    // The conventional empty first delta, then a usage-only chunk and [DONE]:
+    // the same emptiness as a bare `stop`, which the S16.5 review found
+    // answered `stop` with zero blocks, so the driver appended an empty
+    // message and no retry fired.
+    const translator = new DeepSeekTranslator()
+    translator.push({ choices: [{ delta: { content: '' } }] })
+    translator.push({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 0 } })
+    const finish = translator.finalize().at(-1)
+    expect(finish).toEqual({ type: 'finish', reason: { kind: 'error', failure: { message: expect.any(String), code: 'EMPTY_RESPONSE' } } })
+  })
+
   it('maps length to max-tokens', () => {
     const translator = new DeepSeekTranslator()
     translator.push({ choices: [{ delta: { content: 'partial' } }] })

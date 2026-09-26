@@ -303,7 +303,9 @@ export function defaultDialect(): ShellDialect {
  * not ambiently at every call site.
  */
 export function defaultAgentOptions(): AgentOptions {
-  return { provider: 'deepseek', model: 'deepseek-v4-flash' }
+  // The id DeepSeek lists (2026-09-26); `deepseek-v4-flash`, the 1.0.0 default,
+  // is unlisted, still served as this model, and still accepted (llm-deepseek).
+  return { provider: 'deepseek', model: 'deepseek-flash' }
 }
 
 /** The default MiniDSH composition. DeepSeek is the provider; the model is chosen per run. */

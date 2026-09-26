@@ -120,15 +120,19 @@ export class DeepSeekTranslator {
 
   private finishReason(): FinishReason {
     switch (this.wireFinish) {
+      // A stream that reached [DONE] with nothing in it is EMPTY_RESPONSE
+      // whether or not the wire named a finish_reason: an empty delta must
+      // not open a block (above), and an unnamed finish must not turn the
+      // same emptiness into a `stop` the driver appends as an empty message
+      // and the retry policy never sees.
       case 'stop':
+      case undefined:
         if (this.order.length === 0) return { kind: 'error', failure: { message: 'model returned no content', code: 'EMPTY_RESPONSE' } }
         return { kind: 'stop' }
       case 'tool_calls':
         return { kind: 'tool-calls' }
       case 'length':
         return { kind: 'max-tokens' }
-      case undefined:
-        return { kind: 'stop' }
       default:
         return { kind: 'error', failure: { message: `unexpected finish_reason "${this.wireFinish}"`, code: 'MALFORMED_RESPONSE' } }
     }

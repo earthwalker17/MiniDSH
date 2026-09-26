@@ -21,13 +21,26 @@ const USER_AGENT = 'minidsh (+https://github.com/earthwalker17/MiniDSH)'
  */
 const EFFORTS = ['off', 'low', 'high', 'max'] as const
 
+/**
+ * A snapshot, dated. `GET /models` listed `deepseek-flash` and `deepseek-v4-pro`
+ * on 2026-09-26; the two `v4-flash` ids are unlisted, still answer, and are
+ * SERVED as `deepseek-flash` (the response's `model`), which on 2026-09-27
+ * read a 96×96 image correctly. The log records the REQUESTED id, never the
+ * served one. `deepseek-flash` is catalogued text-only all the same: what this
+ * catalog admits is MiniDSH's contract (§5, refuse at admission), and the
+ * verification arc's premise is a text-only default; S18 measures the vision
+ * contract and moves the flag. `deepseek-v4-pro` accepted an image block and
+ * silently ignored it (200, no image tokens), so admission cannot be left to
+ * the provider.
+ */
 const MODELS: readonly ModelInfo[] = [
+  { id: 'deepseek-flash', name: 'DeepSeek-Flash' },
   { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' },
   { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
   { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp' },
 ]
 
-/** The one model that takes images; every other id — catalogued or not — is text only. */
+/** The one id this catalog admits images on; every other id — catalogued or not — is text only here. */
 const VISION_MODELS: ReadonlySet<string> = new Set(['deepseek-v4-flash-vision-exp'])
 
 export interface DeepSeekAdapterOptions {
