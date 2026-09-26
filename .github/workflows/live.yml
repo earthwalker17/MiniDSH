@@ -73,9 +73,9 @@ jobs:
             && echo "sandbox-exec: functional — the arcs take their confined branch" \
             || echo "sandbox-exec: not functional — the arcs take their unconfined branch"
 
-      # No `require-lockfile`: the first real run of check.yml warned that the
-      # v2 action has no such input, and pnpm installs frozen under CI anyway.
-      - uses: pnpm/setup@v2
+      # No `require-lockfile`: pnpm installs frozen under CI anyway (v3 installs
+      # pnpm 11 and newer only, which is what `packageManager` pins).
+      - uses: pnpm/setup@v3
         with:
           runtime: node@24.19.0
           cache: true
