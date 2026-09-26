@@ -564,6 +564,22 @@ describe('the CLI front door', () => {
     expect(await quiet(() => main(['frobnicate']))).toBe(2)
   })
 
+  it('refuses --json on an interactive resume or fork, instead of printing a terminal where frames were expected', async () => {
+    const errors: string[] = []
+    const err = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      errors.push(String(chunk))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      expect(await main(['resume', 'session-nope', '--json'])).toBe(2)
+      expect(await main(['fork', 'session-nope', '--json'])).toBe(2)
+    } finally {
+      process.stderr.write = err
+    }
+    expect(errors.join('')).toContain('--headless')
+  })
+
   it('refuses an authority flag on a command that only reads stored logs, instead of accepting and ignoring it', async () => {
     expect(await quiet(() => main(['sessions', 'list', '--sandbox', 'read-only']))).toBe(2)
     expect(await quiet(() => main(['sessions', 'list', '--ask', 'never']))).toBe(2)

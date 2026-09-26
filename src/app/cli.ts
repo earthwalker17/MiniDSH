@@ -500,6 +500,12 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   const task = args.positional.slice(1).join(' ').trim()
   const headless = args.flags.get('headless') === true
   if (!id || (headless && task.length === 0)) return usage(`usage: ${usageFor(kind)}`)
+  // Listed for the headless shape only. The interactive branch below runs the
+  // terminal and reads no `--json`, so accepting the flag there printed a
+  // banner where a script expected frames — the exact class `chat --json`
+  // was fixed for (refuseUnknownFlags): a flag a command cannot honour is
+  // refused, never ignored.
+  if (!headless && args.flags.get('json') === true) return usage(`--json streams the wire's frames from a headless ${kind}: add --headless "<task>" (the interactive terminal has no JSON stream)`)
   const atRaw = args.flags.get('at')
   const boundary = typeof atRaw === 'string' ? Number(atRaw) : undefined
   // A typo'd --at must not silently fork at the log head.
@@ -1011,7 +1017,8 @@ export async function main(argv: readonly string[]): Promise<number> {
           'config:    ~/.minidsh/composition.json + settings.json layer over the built-ins;',
           '           --patch <file> (repeatable) layers after them on any command',
           'authority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)',
-          '           --ask ask|never; --approve grants every request in a headless run',
+          '           --ask ask|never; --approve answers every request yes (headless runs; chat, serve and web then never ask)',
+          '           --accept full|none: what a session accepts from a host that cannot confine the shell (default full)',
           '',
         ].join('\n'),
       )
