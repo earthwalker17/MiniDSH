@@ -1,8 +1,9 @@
 /**
  * Two REAL stored logs, replayed and read keylessly inside `pnpm check`:
- * `minidsh-1.0.0.jsonl` written by the published `minidsh@1.0.0` (the only
- * released writer) and `minidsh-s16.jsonl` by this build, each one headless
- * DeepSeek turn in a WSL `/tmp` workspace (`src/test-support/fixtures/sessions`).
+ * `minidsh-1.0.0.jsonl` written by the published `minidsh@1.0.0` (a log with
+ * no approvals, delegation or compaction: one headless shape) and
+ * `minidsh-s16.jsonl` by the `1.1.0-dev` build that became 1.1.0, each one
+ * headless DeepSeek turn in a WSL `/tmp` workspace (`src/test-support/fixtures/sessions`).
  *
  * What this proves, and only this: the current runtime reads, verifies,
  * inspects, repairs and salvages real bytes from both writers, and replays

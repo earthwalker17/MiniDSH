@@ -1,0 +1,178 @@
+# The release: a `v*` tag becomes `minidsh@<version>` on npm and a GitHub
+# release, from CI, with nobody typing a one-time code.
+#
+# Trusted publishing (OIDC): no npm token exists anywhere in this repository
+# or its secrets. npm mints a short-lived credential for THIS workflow file in
+# THIS repository and attaches provenance to the package on its own. That
+# needs the `id-token: write` permission below, an npm CLI of 11.5.1 or newer,
+# and — once, by a person — this file named as the package's trusted publisher
+# on npmjs.com (package settings → Publishing access → GitHub Actions:
+# `earthwalker17` / `MiniDSH` / `release.yml`). A tag pushed before that is
+# configured fails at the publish step with nothing published.
+#
+# The ORDER is what makes a failed run leave a state a person can read:
+# guards → the whole gate → pack → smoke-install the packed bytes → a DRAFT
+# release holding those bytes → publish those same bytes → install from the
+# public registry and verify the attestation → the draft goes public. A
+# failure before the publish leaves a draft and no package; one after it, a
+# published package and a visible draft; never a package no release names or
+# a release no package backs. npm refuses to publish an existing version, so
+# a re-run after a successful publish skips that step and finishes the rest.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # the GitHub release
+  id-token: write # the OIDC exchange npm trusted publishing needs
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the ancestry guard below needs history
+
+      # `check.yml` runs on branches, never on a tag, so this is where a tag
+      # proves it names a commit main already carries — a tag on a stray commit
+      # publishes nothing — and that it agrees with the version the code says.
+      - name: Refuse a tag that is not on main, or that disagrees with package.json
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "tag $TAG does not match package.json version $VERSION"; exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "tag $TAG points at $GITHUB_SHA, which is not on main: nothing is published from a stray commit"; exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # The same functional probe check.yml makes: this leg proves confinement,
+      # and a gate that skipped it would be a green lie about the release.
+      - name: Install bubblewrap and report whether it can actually confine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "apparmor userns knob absent; the probe decides"
+          if bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent -- true; then
+            echo "bwrap: functional"
+          else
+            echo "bwrap: PRESENT BUT NOT FUNCTIONAL — the gate below will fail, and that is the honest outcome"
+          fi
+
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24.19.0
+          cache: true
+
+      # Trusted publishing needs npm 11.5.1 or newer. Which npm pnpm/setup
+      # leaves first on PATH is not something it promises, so the one that will
+      # publish is installed and printed rather than assumed.
+      - name: An npm that can publish through OIDC
+        run: |
+          set -euo pipefail
+          npm install -g npm@^11.5.1
+          npm --version
+          node -e "const [a,b,c]=require('child_process').execSync('npm --version').toString().trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm ' + [a,b,c].join('.') + ' cannot publish through trusted publishing'); process.exit(1) }"
+
+      # The gate, in full, on the commit being released — its own step, not
+      # `prepublishOnly`, whose failure would arrive as npm noise around an
+      # exit code. A leg that exists to prove confinement sets the flags.
+      - run: pnpm check
+        env:
+          MINIDSH_EXPECT_CONFINEMENT: '1'
+          MINIDSH_EXPECT_SHELL: '1'
+
+      # The bytes: packed once, here (`prepack` builds dist/). Everything after
+      # this step — the smoke, the release asset, the publish — uses THIS file.
+      - name: Pack
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          TARBALL="$RUNNER_TEMP/minidsh-$VERSION.tgz"
+          test -f "$TARBALL"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      # The install path, as check.yml proves it, but on the bytes about to ship.
+      - name: Smoke-install the packed bytes into an empty directory
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/packed" && cd "$RUNNER_TEMP/packed"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$TARBALL"
+          test ! -e node_modules/minidsh/src
+          test -f node_modules/minidsh/dist/app/cli.js
+          test -f node_modules/minidsh/dist/app/web/rows.js
+          node node_modules/minidsh/bin/minidsh.js --version | grep -qx "minidsh $VERSION"
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'core-agent-loop'
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list 2>&1 | grep -q 'no stored sessions'
+
+      # A DRAFT first, holding the packed bytes and the CHANGELOG section, so a
+      # failure from here on leaves something a person can see and finish.
+      - name: Draft the GitHub release from the CHANGELOG
+        run: |
+          set -euo pipefail
+          node - "$VERSION" > "$RUNNER_TEMP/notes.md" <<'JS'
+          const fs = require('fs')
+          const version = process.argv[2]
+          const text = fs.readFileSync('CHANGELOG.md', 'utf8')
+          const start = text.indexOf(`## [${version}]`)
+          if (start < 0) { console.error(`CHANGELOG.md has no section for ${version}`); process.exit(1) }
+          const rest = text.slice(text.indexOf('\n', start) + 1)
+          const end = rest.search(/^## \[/m)
+          process.stdout.write((end < 0 ? rest : rest.slice(0, end)).trim() + '\n')
+          JS
+          test -s "$RUNNER_TEMP/notes.md"
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "release v$VERSION already exists; keeping it"
+          else
+            gh release create "v$VERSION" --draft --title "minidsh $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "$TARBALL"
+          fi
+
+      # No token: the OIDC exchange is the credential, and provenance is
+      # attached by npm itself. The TARBALL, not the checkout, so the published
+      # bytes are the ones the smoke ran and the release holds; `--ignore-scripts`
+      # because the gate and the build already ran above, once, on those bytes.
+      - name: Publish to npm through trusted publishing
+        run: |
+          set -euo pipefail
+          if npm view "minidsh@$VERSION" version > /dev/null 2>&1; then
+            echo "minidsh@$VERSION is already on the registry; not publishing again"
+          else
+            npm publish "$TARBALL" --access public --ignore-scripts
+          fi
+
+      # The artifact a stranger gets, from the public registry, with its
+      # attestation verified: the claim the release makes, checked, not assumed.
+      - name: Install from the public registry and verify the attestation
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/public" && cd "$RUNNER_TEMP/public"
+          npm init -y > /dev/null
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if npm install --no-audit --no-fund "minidsh@$VERSION"; then break; fi
+            if [ "$attempt" = 12 ]; then echo "minidsh@$VERSION did not become installable within a minute"; exit 1; fi
+            sleep 5
+          done
+          node node_modules/minidsh/bin/minidsh.js --version | grep -qx "minidsh $VERSION"
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'core-agent-loop'
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list 2>&1 | grep -q 'no stored sessions'
+          npm audit signatures 2>&1 | tee "$RUNNER_TEMP/signatures.txt"
+          grep -q 'verified attestation' "$RUNNER_TEMP/signatures.txt"
+
+      - name: Publish the draft release
+        run: gh release edit "v$VERSION" --draft=false
