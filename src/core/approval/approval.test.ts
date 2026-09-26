@@ -4,7 +4,7 @@ import { AGENTS } from '../agent/index.ts'
 import { intentKey, type EffectIntent } from '../effects/index.ts'
 import { SANDBOX } from '../sandbox/index.ts'
 import { AUTHORITY_PRESET } from '../presets/index.ts'
-import { TOOL_CALL, type EventEnvelope } from '../session/index.ts'
+import { END_SEED, TOOL_CALL, type EventEnvelope } from '../session/index.ts'
 import { matches } from '../session/index.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_REQUEST, liveGrants, openApprovals, type ApprovalAnswer, type ApprovalOutcome } from './index.ts'
 
@@ -319,11 +319,13 @@ describe('standing grants', () => {
   })
 
   /**
-   * Two of the four kinds in `AUTHORITY_KINDS` are bare string literals no
-   * compiler checks — a rename or a typo in either would compile, typecheck and
+   * Four of the five kinds in `AUTHORITY_KINDS` are bare string literals no
+   * compiler checks — a rename or a typo in any would compile, typecheck and
    * pass every other test while grants quietly outlived the authority change
-   * that was supposed to end them. `/accept none` is precisely a change to what
-   * the shell world does, so it is the one a grant must not survive.
+   * that was supposed to end them. `sandbox/mode` is covered by the test above
+   * and the lifecycle's end by the one below; `/accept none` is precisely a
+   * change to what the shell world does, so it is the one a grant must not
+   * survive, and a preset writes through both setters.
    */
   it('ends a grant on the OTHER two authority kinds too, which no type checks', async () => {
     for (const move of ['acceptance', 'preset'] as const) {
@@ -343,11 +345,39 @@ describe('standing grants', () => {
   })
 
   /**
+   * A consent lives within the run it was given in. A fork is a new session
+   * whose seed carries the source's grant, and a resume is a new run of the
+   * same one: before S16.5 the fork honoured it under a new id and the resume
+   * reused an interactive consent unattended, because neither wrote an
+   * authority event at its pickup. `session/end-seed` closes both.
+   */
+  it('ends every grant at the lifecycle boundary a resume or a fork continues from', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+    const approval = harness.root.get(APPROVAL)
+    await approval.request({ agent, toolName: 'bash', subject })
+    const whole = agent.session.facts
+    expect(liveGrants(whole).size).toBe(1)
+    // The pure fold, over exactly the seed a continuation reads.
+    const continued = [...whole, { type: END_SEED.type, seq: whole.length, time: 0, data: {} }] as typeof whole
+    expect(liveGrants(continued).size).toBe(0)
+    // And the real path: a fork of the granting session starts without it.
+    const fork = await harness.root.get(AGENTS).fork(harness.root, agent.session.id)
+    try {
+      expect(fork.agent.session.id).not.toBe(agent.session.id)
+      expect(approval.grants(fork.agent.session)).toHaveLength(0)
+    } finally {
+      await fork.dispose()
+    }
+  })
+
+  /**
    * The grant is written BEFORE the decision that names it, so the decision can
-   * carry its id — and the log is not fsynced, so a crash can keep the first
-   * line and lose the second. Repair then closes that ask `cancelled`: nobody
-   * consented. A grant whose own ask was never allowed must not go on answering
-   * for the rest of the session.
+   * carry its id — and no checkpoint sits between the two lines, so a crash
+   * can keep the first and lose the second. Repair then closes that ask
+   * `cancelled`: nobody consented. A grant whose own ask was never allowed must
+   * not go on answering for the rest of the session.
    */
   it('does not honour a grant whose decision the log never kept', async () => {
     harness = await coreHarness()

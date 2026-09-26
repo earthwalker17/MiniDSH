@@ -108,8 +108,15 @@ export interface ApprovalGrant {
  * comparison in a walk that already happens, and it covers the cases a
  * subject-only guard misses: a resume onto a differently-enforcing host writes
  * `sandbox/mode{resume}`, and a preset writes through both setters.
+ *
+ * **And the lifecycle's end.** A consent lives within the run of the session
+ * it was given in: `session/end-seed` closes the seed a resume or a fork
+ * continues from, so neither picks a standing grant up. Before S16.5 a fork
+ * inherited one under a NEW session id, and a same-host resume reused an
+ * interactive consent unattended (the residual §13 used to list); a person
+ * who continues a session answers again, once.
  */
-const AUTHORITY_KINDS: ReadonlySet<string> = new Set([APPROVAL_POLICY.type, 'sandbox/mode', 'sandbox/acceptance', 'authority/preset'])
+const AUTHORITY_KINDS: ReadonlySet<string> = new Set([APPROVAL_POLICY.type, 'sandbox/mode', 'sandbox/acceptance', 'authority/preset', 'session/end-seed'])
 
 /**
  * Every live grant, keyed by `intentKey`. A grant is live only if it was not
