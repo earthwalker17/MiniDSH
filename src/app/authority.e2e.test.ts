@@ -85,6 +85,13 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     /** The session that accepted an unconfined shell (unconfined hosts only), read cold at the end. */
     let acceptingId: string | undefined
     console.log('[authority arc] host enforcement: ' + init.defaultAuthority.enforcement + (confined ? ' (confined branch)' : ' (unconfined branch)'))
+    // A leg that exists to prove the confined branch may not pass having taken
+    // the other one: `live.yml` sets this, as `check.yml` does for the
+    // confinement tests, so a runner whose backend stopped working fails here
+    // instead of reporting eight green arcs about a host it did not have.
+    if (process.env.MINIDSH_EXPECT_CONFINEMENT === '1') {
+      expect(confined, `MINIDSH_EXPECT_CONFINEMENT=1 but the host reports enforcement "${init.defaultAuthority.enforcement}": the confined branch was not exercised`).toBe(true)
+    }
 
     // ---- 1. inside the workspace: ordinary work, no consent needed ---------
     // The TOOL is named: step 4b reads this write back from the editor's own

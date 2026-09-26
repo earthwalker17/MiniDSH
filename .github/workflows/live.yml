@@ -84,9 +84,16 @@ jobs:
       # `${{ inputs.filter }}` is expanded before bash parses the line, so a
       # dispatch could otherwise append a second command to a step holding both
       # API keys. Unquoted on use so a blank filter expands to nothing.
+      # Both legs exist to run the CONFINED branch of the authority arc, and
+      # the probes above only say which branch to expect. The flag makes the
+      # arc fail, not branch, when the host it was given cannot confine — the
+      # same rule check.yml's confinement tests apply, for the same reason:
+      # a green run that took the unconfined branch on both legs proved
+      # nothing this workflow is for.
       - run: pnpm test:e2e $FILTER
         env:
           FILTER: ${{ inputs.filter }}
+          MINIDSH_EXPECT_CONFINEMENT: '1'
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 

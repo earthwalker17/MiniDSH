@@ -97,6 +97,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
           pnpm pack --pack-destination "$RUNNER_TEMP"
           cd "$RUNNER_TEMP"
           mkdir -p install && cd install
@@ -107,7 +108,9 @@ jobs:
           test -f node_modules/minidsh/dist/app/web/index.html
           # app.js imports it at load: missing, the installed browser client is a blank page.
           test -f node_modules/minidsh/dist/app/web/rows.js
-          node node_modules/minidsh/bin/minidsh.js --version | grep -q '^minidsh '
+          # The checkout's own version, exactly: `^minidsh ` would also accept the
+          # "minidsh unknown" version.ts prints when the emit cannot find package.json.
+          node node_modules/minidsh/bin/minidsh.js --version | grep -qx "minidsh $VERSION"
           # Each command must ASSERT something, not merely exit 0: `config`
           # proves the whole plugin graph assembled, and the listing proves it
           # answered the empty case rather than failing silently into no output.
