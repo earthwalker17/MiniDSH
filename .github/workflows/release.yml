@@ -7,8 +7,10 @@
 # needs the `id-token: write` permission below, an npm CLI of 11.5.1 or newer,
 # and — once, by a person — this file named as the package's trusted publisher
 # on npmjs.com (package settings → Publishing access → GitHub Actions:
-# `earthwalker17` / `MiniDSH` / `release.yml`). A tag pushed before that is
-# configured fails at the publish step with nothing published.
+# `earthwalker17` / `MiniDSH` / `release.yml`, with `npm publish` among its
+# allowed actions — without it the exchange succeeds and the publish answers
+# 403). A tag pushed before that is configured fails at the publish step with
+# nothing published.
 #
 # The ORDER is what makes a failed run leave a state a person can read:
 # guards → the whole gate → pack → smoke-install the packed bytes → a DRAFT
