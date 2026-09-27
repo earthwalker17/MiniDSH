@@ -14,9 +14,10 @@
 # guards → the whole gate → pack → smoke-install the packed bytes → a DRAFT
 # release holding those bytes → publish those same bytes → install from the
 # public registry and verify the attestation → the draft goes public. A
-# failure before the publish leaves a draft and no package; one after it, a
-# published package and a visible draft; never a package no release names or
-# a release no package backs. npm refuses to publish an existing version, so
+# failure before the draft leaves nothing; one between the draft and the
+# publish leaves a draft and no package; one after it, a published package and
+# a visible draft; never a package no release names or a release no package
+# backs. npm refuses to publish an existing version, so
 # a re-run after a successful publish skips that step and finishes the rest.
 name: release
 
@@ -133,7 +134,7 @@ jobs:
           const start = text.indexOf(`## [${version}]`)
           if (start < 0) { console.error(`CHANGELOG.md has no section for ${version}`); process.exit(1) }
           const rest = text.slice(text.indexOf('\n', start) + 1)
-          const end = rest.search(/^## \[/m)
+          const end = rest.search(/^(## \[|\[[^\]]+\]: )/m)
           process.stdout.write((end < 0 ? rest : rest.slice(0, end)).trim() + '\n')
           JS
           test -s "$RUNNER_TEMP/notes.md"
@@ -163,16 +164,22 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/public" && cd "$RUNNER_TEMP/public"
           npm init -y > /dev/null
+          # `--prefer-online`, or attempts 2–12 would re-read the packument npm
+          # cached at attempt 1 (Cache-Control max-age=300) and never see the
+          # version propagate.
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if npm install --no-audit --no-fund "minidsh@$VERSION"; then break; fi
+            if npm install --no-audit --no-fund --prefer-online "minidsh@$VERSION"; then break; fi
             if [ "$attempt" = 12 ]; then echo "minidsh@$VERSION did not become installable within a minute"; exit 1; fi
             sleep 5
           done
           node node_modules/minidsh/bin/minidsh.js --version | grep -qx "minidsh $VERSION"
           MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'core-agent-loop'
           MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list 2>&1 | grep -q 'no stored sessions'
-          npm audit signatures 2>&1 | tee "$RUNNER_TEMP/signatures.txt"
-          grep -q 'verified attestation' "$RUNNER_TEMP/signatures.txt"
+          # The attestation THIS package carries, named: the dependency ships
+          # provenance too, so a grep for "verified attestation" over the whole
+          # tree would pass with minidsh unattested.
+          npm audit signatures --json --include-attestations > "$RUNNER_TEMP/signatures.json"
+          node -e "const r=require(process.argv[1]);const p=(r.verified||[]).find(x=>x.name==='minidsh'&&x.version===process.argv[2]);if(!p||!p.attestations){console.error('minidsh@'+process.argv[2]+' has no verified attestation');process.exit(1)}console.log('minidsh@'+process.argv[2]+': verified attestation')" "$RUNNER_TEMP/signatures.json" "$VERSION"
 
       - name: Publish the draft release
         run: gh release edit "v$VERSION" --draft=false
