@@ -188,13 +188,15 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/public" && cd "$RUNNER_TEMP/public"
           npm init -y > /dev/null
-          # `--prefer-online`, or attempts 2–12 would re-read the packument npm
-          # cached at attempt 1 (Cache-Control max-age=300) and never see the
-          # version propagate.
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          # `--prefer-online`, or later attempts would re-read the packument
+          # npm cached at the first (Cache-Control max-age=300) and never see the
+          # version propagate. Up to ten minutes: the 1.1.0 publish took longer
+          # than the one minute this first allowed, and a re-run then had to
+          # finish the release.
+          for attempt in $(seq 1 60); do
             if "$NPM" install --no-audit --no-fund --prefer-online "minidsh@$VERSION"; then break; fi
-            if [ "$attempt" = 12 ]; then echo "minidsh@$VERSION did not become installable within a minute"; exit 1; fi
-            sleep 5
+            if [ "$attempt" = 60 ]; then echo "minidsh@$VERSION did not become installable within ten minutes"; exit 1; fi
+            sleep 10
           done
           node node_modules/minidsh/bin/minidsh.js --version | grep -qx "minidsh $VERSION"
           MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'core-agent-loop'
