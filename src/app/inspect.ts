@@ -12,6 +12,7 @@
  * Its one consumer is the CLI; a wire method would move it below the surfaces.
  */
 import { foldInbox, repairTail, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
+import { COMPACTION_END } from '../core/compaction/events.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, delegationPin, effectiveApprovalPolicy, liveGrants, undecidedApprovals, type ApprovalGrant, type ApprovalPolicy } from '../core/approval/index.ts'
 import type { Attachments } from '../core/attachments/index.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
@@ -165,7 +166,12 @@ export function verifyStored(stored: StoredSession): Verification {
     // compaction bracket whether or not a turn is open, and an ordinary
     // disposal mid-`/compact` leaves exactly that with no crash anywhere.
     const openTurn = closers.some((event) => matches(event, TURN_END))
-    const what = openTurn ? 'the last turn is open' : 'a bracket is open (a delegation or a compaction the log never closed)'
+    const openBracket = closers.some((event) => matches(event, SUBAGENT_END) || matches(event, COMPACTION_END))
+    const what = openTurn
+      ? openBracket
+        ? 'the last turn and a bracket (a delegation or a compaction) are open'
+        : 'the last turn is open'
+      : 'a bracket is open (a delegation or a compaction the log never closed)'
     findings.push({
       severity: 'info',
       check: 'tail',

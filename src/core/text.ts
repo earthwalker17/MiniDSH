@@ -21,3 +21,19 @@ export function printableText(text: string): string {
   }
   return flat
 }
+
+/**
+ * The same rule for text that keeps its LINES: `\n` and `\t` survive, every
+ * other control character becomes a space. For a streamed answer, whose
+ * paragraphs and code blocks are the model's own structure; `printableText`
+ * would fold them onto one line (the S16.5 review caught exactly that after
+ * the streamed delta was first neutralized). Still length-preserving.
+ */
+export function printableLines(text: string): string {
+  let flat = ''
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!
+    flat += code === 0x0a || code === 0x09 || !(code < 0x20 || (code >= 0x7f && code <= 0x9f)) ? ch : ' '
+  }
+  return flat
+}

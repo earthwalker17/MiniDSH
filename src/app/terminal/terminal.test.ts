@@ -104,12 +104,18 @@ describe('terminal render (pure)', () => {
    * through it, while a text delta reached the terminal verbatim — so a model
    * could erase and repaint the line above the next `[y/N]` with its answer.
    */
-  it('neutralizes control characters in a streamed delta, as it does in history', () => {
+  it('neutralizes control characters in a streamed delta, and keeps its lines', () => {
     const renderer = new TerminalRenderer()
     const hostile = `ok${String.fromCharCode(27)}[2K${String.fromCharCode(13)}REPAINTED`
     const streamed = renderer.onEvent(chunkEvent({ type: 'text-delta', index: 0, text: hostile }, 0))
     expect(streamed).toBe('ok [2K REPAINTED')
     expect(streamed).toHaveLength(hostile.length)
+    // The answer's own structure is not a control sequence: a newline and a
+    // tab survive (the first fix folded every paragraph onto one line).
+    const NL = String.fromCharCode(10)
+    const TAB = String.fromCharCode(9)
+    const shaped = `line one${NL}${TAB}indented${NL}${String.fromCharCode(27)}[1mbold`
+    expect(renderer.onEvent(chunkEvent({ type: 'text-delta', index: 0, text: shaped }, 1))).toBe(`line one${NL}${TAB}indented${NL} [1mbold`)
   })
 
   it('renders a stored transcript from durable surface events', () => {

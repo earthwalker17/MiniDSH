@@ -79,11 +79,12 @@ class ShellStdioProvider implements Shell {
     const process = new ShellProcess(this.dialect, canonicalPath(agent.session.header.cwd), {
       confinement: this.confinement,
       // Asked at every SPAWN, not at mount and not once per shell: every row
-      // that exists has declared by the time a tool runs, but an agent preset
-      // may mount a row with its own `apiKeyEnv` after this agent's shell does,
-      // and a list read once would hand its key to the next command. `tryGet`
-      // because a composition may mount no credential seam at all — one that
-      // has none has no declared name to withhold.
+      // that exists has declared by the time a tool runs, and a row declaring
+      // later is withheld from the next spawn (a persistent child already
+      // alive keeps its environment until it restarts; today no runtime path
+      // mounts a row after an agent's first spawn). `tryGet` because a
+      // composition may mount no credential seam at all — one that has none
+      // has no declared name to withhold.
       withheld: () => this.ctx.tryGet(CREDENTIALS)?.declaredRefs() ?? [],
       ...(this.config.shellPath === undefined ? {} : { shellPath: this.config.shellPath }),
       ...(this.config.maxCaptureChars === undefined ? {} : { maxCaptureChars: this.config.maxCaptureChars }),

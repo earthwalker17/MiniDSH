@@ -7,7 +7,7 @@
  */
 import { formatTokens, type ContextMetrics } from '../../core/metering/index.ts'
 import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
-import { printableText } from '../../core/text.ts'
+import { printableLines } from '../../core/text.ts'
 import { APPROVAL_ASKED } from '../../core/approval/index.ts'
 import type { StreamChunk } from '../../core/llm/index.ts'
 import type { SessionView } from '../../capabilities/protocol/index.ts'
@@ -54,9 +54,10 @@ export class TerminalRenderer {
         this.streamedText = true
         // Neutralized like every other line a person reads here: the streamed
         // answer is model-written text, and an ESC in it repaints the terminal
-        // above the next `[y/N]`. Length-preserving, and no fold reads a chunk,
-        // so the log and the model are untouched (core/text.ts, §8).
-        return printableText(chunk.text)
+        // above the next `[y/N]`. Per LINE, so the answer's own paragraphs and
+        // code blocks survive; length-preserving, and no fold reads a chunk, so
+        // the log and the model are untouched (core/text.ts, §8).
+        return printableLines(chunk.text)
       }
       if (chunk.type === 'reasoning-delta' && !this.thinking) {
         this.thinking = true

@@ -62,7 +62,7 @@ function confinementLine(view: AuthorityView): string {
  * this very ask, that is narrower still.
  */
 function firstAskTip(offered: boolean, authority: AuthorityView | undefined): string {
-  if (offered) return 'tip: y allows this once; a allows this exact call for the rest of the session (/grants lists them, /revoke takes one back)\n'
+  if (offered) return 'tip: y allows this once; a allows this exact call until this session is resumed or forked (/grants lists them, /revoke takes one back)\n'
   if (authority !== undefined && authority.enforcement === 'none' && authority.accepts === 'full') {
     return 'tip: this host cannot sandbox the shell. /accept none runs shell commands anyway and keeps file edits fenced; /preset danger-full-access drops the fence too\n'
   }
