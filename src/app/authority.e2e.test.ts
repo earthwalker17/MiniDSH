@@ -411,12 +411,21 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     // anything this session is testing. `rejected` keeps the fence honest and
     // lets the turn finish either way.
     const refuseFresh = serve.answerApprovals('rejected')
-    const fresh = await serve.request<{ sessionId: string }>('session/prompt', {
-      text: 'Create a file named done.txt (a relative path, not an absolute one) in the working directory containing exactly: ok',
-    })
+    // The TOOL is named, as the web arc names it: on a confined host a model
+    // free to choose reaches for the shell, and a shell command that spells
+    // the workspace's absolute path replays into a root that is not there (S16.5
+    // WSL runs 1 and 2 of 3 failed the replay below exactly so).
+    const FRESH_TASK = 'Using the file editor tool, create a file named done.txt (a relative path, not an absolute one) in the working directory containing exactly: ok'
+    const fresh = await serve.request<{ sessionId: string }>('session/prompt', { text: FRESH_TASK })
     await serve.waitForCompletedTurn(fresh.sessionId, 1)
     refuseFresh()
     const freshLog = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId: fresh.sessionId })
+    // What the recording holds, printed before the replay reads it: which tools
+    // wrote, and whether any call spelled the live workspace by its absolute
+    // path — the one thing a replay in another root cannot reproduce.
+    const freshCalls = freshLog.events.filter((event) => event.type === 'tool/call').map((event) => dataOf<{ name: string; arguments: string }>(event))
+    const spelledLiveRoot = freshCalls.filter((call) => call.arguments.includes(canonicalPath(workspace)) || call.arguments.includes(workspace)).length
+    console.log(`[authority arc] fresh session: ${freshCalls.length} tool call(s) [${freshCalls.map((call) => call.name).join(', ')}], ${spelledLiveRoot} naming the live workspace path`)
     const liveAuthority = await serve.request<{ sandbox: string; approval: string; accepts: string }>('session/authority', { sessionId })
     const liveAccepting = acceptingId === undefined ? undefined : await serve.request<{ accepts: string }>('session/authority', { sessionId: acceptingId })
     await serve.shutdown()
@@ -453,7 +462,7 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     const replayCwd = tempDir('minidsh-auth-replay-ws-')
     const replayed = await runTask(
       {
-        task: 'Create a file named done.txt (a relative path, not an absolute one) in the working directory containing exactly: ok',
+        task: FRESH_TASK,
         cwd: replayCwd,
         model: 'deepseek-v4-flash',
         sessionsRoot: tempDir('minidsh-auth-replay-'),
@@ -467,6 +476,9 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     )
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
-    expect(existsSync(join(replayCwd, 'done.txt')), 'the replayed run drained its script but wrote nothing: the recorded path did not survive the move').toBe(true)
+    expect(
+      existsSync(join(replayCwd, 'done.txt')),
+      `the replayed run drained its script but wrote nothing: the recorded path did not survive the move (the recording's ${freshCalls.length} call(s) [${freshCalls.map((call) => call.name).join(', ')}], ${spelledLiveRoot} naming the live workspace path)`,
+    ).toBe(true)
   })
 })

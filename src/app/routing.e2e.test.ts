@@ -209,8 +209,15 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
       (event) => event.type === 'request/header' && ((event.data as { header: { tools?: { name: string }[] } }).header.tools ?? []).some((tool) => tool.name === 'history_read'),
     )
     const recalls = events.filter((event) => event.type === 'tool/call' && (event.data as { name: string }).name === 'history_read').length
+    // The two failure shapes this arc has produced are named, because they need
+    // different fixes: `marker-drop` (no summary carried the token and recall
+    // was never called) is about compaction; `off-instruction` (the token was
+    // reachable — carried, or recalled — and the answer still lacks it) is about
+    // the model. A passing run says which way it passed.
+    const reachable = carried > 0 || recalls > 0
+    const shape = last.includes('ALPHA-11') ? (recalls > 0 ? 'recalled' : 'carried') : reachable ? 'off-instruction' : 'marker-drop'
     const why =
-      `after ${compactionTrace.length} applied compaction(s) shadowing [${compactionTrace.join(', ')}] node(s); ` +
+      `shape: ${shape}; after ${compactionTrace.length} applied compaction(s) shadowing [${compactionTrace.join(', ')}] node(s); ` +
       `${carried} of ${summaries.length} summary node(s) carried ALPHA-11; history_read ${offered ? 'offered' : 'NOT offered'}, called ${recalls}x`
     // Printed on every run, not only on a failing one. This arc's flake rate is
     // a number the route to V1 reports rather than hides, and a passing run is
