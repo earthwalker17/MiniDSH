@@ -8,6 +8,9 @@
  *
  * Pure functions over events, no state: a surface that streams (the terminal)
  * layers its own live cases on top and falls back here for everything else.
+ * Every line passes `printableText` (`core/text.ts`): a model-written answer
+ * can carry an ESC, so the log's bytes reach a terminal only with control
+ * characters neutralized — the plain-text half of the projection §8 names.
  */
 import { AGENT_OPTIONS, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY } from '../core/approval/index.ts'

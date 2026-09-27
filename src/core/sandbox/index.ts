@@ -10,8 +10,10 @@
  *
  * The workspace boundary needs no event of its own: the immutable
  * `SessionHeader.cwd` recorded at creation IS the root for every call in that
- * session. Only the mode is switchable, and a switch IS its durable event —
- * nothing mutates the mode out of band.
+ * session; the wire may name it only for a NEW session, under `workspaceRoots`
+ * (`session/prompt`), and nothing switches it afterwards. Only the mode is
+ * switchable, and a switch IS its durable event — nothing mutates the mode out
+ * of band.
  */
 import { z } from 'zod'
 import { serviceKey, type Context, type Plugin } from '../../kernel/index.ts'

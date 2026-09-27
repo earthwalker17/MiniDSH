@@ -1,71 +1,61 @@
 # DSH reference: Skills, documents, extensions, MCP
 
-> A map: verify against the current repository before relying on a line ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@ddefc45f` (master, 2026-09-17); checked 2026-09-19.
+> A map: verify against the current repository before relying on a line ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26.
 
 ## What exists (at the pin)
 
 | Component | Path | Status | Purpose |
 |---|---|---|---|
-| `ctx.skills` registry | `packages/skill/skill` | default-mounted | Layered host-plane registry |
-| Filesystem provider | `packages/skill/skill-filesystem` | default-mounted | Ranked roots, per-load re-read, watch |
+| `ctx.skills` registry | `packages/skill/skill` | default-mounted | Host+per-scope layered: nearest layer wins a name, rank only within a layer |
+| Filesystem provider | `packages/skill/skill-filesystem` | default-mounted | Ranked roots, per-load re-read, watch; a preset row in Web (host row off) |
 | `skill` tool | `packages/skill/tool-skill` | default-mounted | Catalog message, body loader, user `/name` |
-| Office skills | `packages/skill/skill-office` | opt-in | docx, pptx, xlsx, a checker; Desktop only |
-| Office-to-PDF | `packages/document/office-to-pdf` | default-mounted | Web-app preview; no model tool, no events |
-| `present` tool | `packages/deliverables/tool-present` | default-mounted | Up to 8 deliverables; one log-only event |
-| Workspace changes | `packages/deliverables/workspace-changes` | default-mounted | Per-turn git snapshots, change summary; host memory |
-| Package runner | `packages/extensions/cordis-host-runner` | default-mounted | `node:vm` registry no shipped model tool reaches |
-| Inspect tools | `packages/extensions/tool-cordis` | opt-in | Two read-only API tools; `cordis` only |
-| Plugin Manager tool | `packages/boot/plugin-manager` | disabled-by-default | Persistent profile-wide bundles; on only in `cordis` |
-| MCP | `packages/mcp` | opt-in | A client row per server, none shipped; resources inert |
-| PTC | `packages/ptc-runtime` | default-mounted | Host runtime in base; `run_code` in the `ptc` preset only |
+| Badge skill | `packages/skill/skill-badge` | disabled-by-default | One bundled skill; a packaged-provider template |
+| Office skills | `packages/skill/skill-office` | carrier opt-in | docx, pptx, xlsx over a bundled LibreOffice Kit CLI; Desktop and the SDK profile |
+| Workspace deps tool | `packages/skill/tool-workspace-dependencies` | carrier opt-in | `load_workspace_dependencies`: absolute paths to a bundled Python, Node, pnpm |
+| Office-to-PDF | `packages/document/office-to-pdf` | Web bundle | Preview conversion; no model tool, no event, no attachment |
+| `present` tool | `packages/deliverables/tool-present` | default-mounted | `maxFiles` 8, prompt asks for at most four; one log-only event |
+| Workspace changes | `packages/deliverables/workspace-changes` | Web bundle | Per-turn git snapshots; summary in host memory |
+| Package runners | `packages/extensions/cordis-host-runner`, `cordis-client-runner` | Web bundle | `node:vm` host half, browser half; no shipped model tool reaches them |
+| Inspect tools | `packages/extensions/tool-cordis` | `cordis` only | Two read-only API tools over `ctx.cordisInspect` |
+| Plugin Manager tool | `packages/boot/plugin-manager` | `cordis` with a profile | Persistent profile-wide bundles; a DSH peer-version gate with exact exemptions |
+| Creator skills | `packages/preset/agent-preset/skills` | `cordis` only | Three skills through `customSkillDirs`; SKILL.md plus `references/` |
+| MCP | `packages/mcp` | opt-in | A client row per server, none shipped; `mcp-resources` in base and `sdk-minimal`, inert until a server is configured |
+| PTC | `packages/ptc-runtime` | default-mounted | Node runtime in base; the `ptc` preset switches `tool-presentation` to `mode: ptc`; Python runtime experimental |
 
 ## Open for the route
 
-- **S16, format evolution.** A durable event name is a format contract: the Code Mode→PTC rename waited for a versioned format edge, not an in-place rename (v2→v3 did it: README naming traps). `.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md`
-- **S16, cold inspect.** Deliverable events point outside the log: `deliverables/presented` names live paths; `workspace/changes {turn}` is logged while its diffs stay in host memory. `docs/subsystems/deliverables.md`
-- **S19, catalog.** Each `agent/pre-step` compares a digest of model-invocable entries with the newest visible `skill-catalog` message; a change appends one user-role `<system-reminder>` holding the whole list, even empty. No skill event type. `packages/skill/tool-skill/README.md`
+- **S19, catalog.** Each `agent/pre-step` compares a digest of model-invocable entries with the newest visible `skill-catalog` message; a change appends one user-role `<system-reminder>` holding the whole list, even empty. No skill event type; tool-set changes are a separate `developer/message` diff. `packages/skill/tool-skill/README.md`, `.agents/notes/implemented/architecture/2026-09-20-dynamic-tool-updates.md`
 - **S19, loader.** `skill({name})` re-reads the file, only then reveals its directory, and enforces `disable-model-invocation`. Loading by ordinary reads, S19's catalog must carry the path, and that flag has no enforcement point. `packages/skill/tool-skill/README.md`
-- **S19, shadowing.** Lower rank wins: project `.dsh/skills` (100), `.agents/skills` (200), then `customSkillDirs` (300), user homes (400/500), bundled (600); with no documented trust gate (`SAFETY.md` never mentions skills), a clone can shadow by name. `packages/skill/skill-filesystem/README.md`
-- **S19, discovery.** A malformed flag drops the skill; neither an incomplete snapshot (consumers keep the last-good view) nor a body is cached. `docs/subsystems/skills.md`
-- **S19, document skills.** Instructions plus `check_office.py`, a stdlib OOXML checker, for docx, pptx, xlsx (no PDF); no package installs; visual QA optional, its absence stated. `packages/skill/skill-office/README.md`
-- **Built (S14, S15).** Skill scripts run through the shell tool (`packages/skill/skill-filesystem/README.md`), so the recorded effect and the consent subject cover them: `docs/ARCHITECTURE.md` §4 and §7 (a script's own writes are not recorded, §13).
+- **S19, shadowing.** Within a layer lower rank wins: project `.dsh/skills` (100), `.agents/skills` (200), `customSkillDirs` (300), user homes (400/500), bundled (600); across layers the agent's preset beats the host; no trust prompt anywhere (the ledger). `packages/skill/skill-filesystem/src/index.ts`
+- **S19, discovery.** A malformed flag drops the skill; neither an incomplete snapshot (consumers keep the last-good view) nor a body is cached. Oracle: `snapshots/session/skill-load`. `docs/subsystems/skills.md`
+- **S19, document skills.** Instructions plus `check_office.py` (stdlib OOXML checker) plus a bundled LibreOffice Kit CLI (render, PDF convert, recalculate); the SDK profile mounts them behind `DSH_PRIMARY_RUNTIME`. Oracles: `snapshots/session/office-skills`, `office-skills-no-renderer`. `packages/skill/skill-office/README.md`, `packages/bundle/sdk-app/cordis.patch.yml`
+- **S19, body size.** Base and `standard` prune a tool result over 8,192 chars to a 4,096 head plus tail once pressure is confirmed, so upstream split its Creator skills into a short SKILL.md and `references/` files: size S19's bodies for the reader's budget. `.agents/notes/implemented/architecture/2026-09-21-creator-skills-progressive-disclosure.md`
+- **S22, carriers.** Desktop and the SDK ship Python, Node and pnpm as a manifest-checked payload, copied under the home on first use or used in place. `packages/skill/tool-workspace-dependencies/README.md`
+- **S22, cold inspect.** Deliverable events point outside the log: `deliverables/presented` names live paths; `workspace/changes {turn}` is logged while its summary dies with the Session. `docs/subsystems/deliverables.md`
 
 ## Sources
 
 | Path | What it establishes | Checked |
 |---|---|---|
-| `docs/subsystems/skills.md` | Registry, layering, caching | 2026-09-19 |
-| `packages/skill/tool-skill/README.md` | Catalog and loader templates | 2026-09-19 |
-| `packages/skill/skill-filesystem/README.md` | Format, rank table, limits | 2026-09-19 |
-| `packages/skill/skill-office/README.md` | Office skill set, checker | 2026-09-19 |
-| `packages/skill/skill-office/assets/office-docx/SKILL.md` | One concrete document skill | 2026-09-19 |
-| `apps/desktop-host/src/office.ts` | Desktop-only mount; bundled Python interpreter (S22) | 2026-09-19 |
-| `packages/preset/agent-presets/presets/standard/agent.cordis.yml` | Skills, `present` on; plugin tool off | 2026-09-19 |
-| `packages/preset/agent-presets/presets/cordis/agent.cordis.yml` | TRUST header, Creator rows | 2026-09-19 |
-| `packages/bundle/base/cordis.patch.yml` | Host rows: skills, PTC, MCP | 2026-09-19 |
-| `packages/bundle/web-app/cordis.patch.yml` | Base skill rows off | 2026-09-19 |
-| `docs/subsystems/deliverables.md` | Two log-only events | 2026-09-19 |
-| `packages/extensions/cordis-host-runner/README.md` | Trust stance, pivot | 2026-09-19 |
-| `packages/boot/plugin-manager/README.md` | Approval rule, build-script caveat | 2026-09-19 |
-| `docs/subsystems/mcp.md` | Opt-in rule, unsupported list | 2026-09-19 |
-| `packages/mcp/mcp-client/README.md` | Tool names, reconnect | 2026-09-19 |
-| `.agents/notes/archived/architecture/2026-08-25-rename-code-mode-to-ptc.md` | Rename direction and scope | 2026-09-19 |
-| `SAFETY.md` | No workspace-skill trust rule | 2026-09-19 |
+| `docs/subsystems/skills.md` | Layered registry, rank table, caching, browser catalog | 2026-09-26 |
+| `packages/skill/tool-skill/README.md` | Catalog and loader templates | 2026-09-26 |
+| `packages/skill/skill-filesystem/README.md`, `src/index.ts` | Format, rank table, limits; `trustedHost` is a read path, not a gate | 2026-09-26 |
+| `packages/skill/skill-office/README.md` | Office skill set, checker, kit CLI | 2026-09-26 |
+| `packages/skill/tool-workspace-dependencies/README.md` | Payload manifest, carriers | 2026-09-26 |
+| `apps/desktop-host/src/office.ts`, `packages/bundle/sdk-app/cordis.patch.yml` | Desktop mount of both Office plugins; SDK rows, env-gated | 2026-09-26 |
+| `packages/bundle/web-app/presets/standard.patch.yml` (also `cordis`, `ptc`) | Preset skill, `present`, plugin-tool rows | 2026-09-26 |
+| `packages/bundle/base/cordis.patch.yml`, `packages/bundle/web-app/cordis.patch.yml` | Host rows: skills, PTC, MCP, pruner; host skill rows off, runners, office-to-pdf, changes | 2026-09-26 |
+| `docs/subsystems/deliverables.md` | Two log-only events | 2026-09-26 |
+| `packages/boot/plugin-manager/README.md` | Approval rule, compatibility, lock | 2026-09-26 |
 
 ## Likely to go stale
 
-- The extensions pivot was a day old; the runners look vestigial; `docs/subsystems/extensions.md` is a stub.
-- `skill-office` is days old: a CLI or Web mount, a PDF skill or renamed Desktop tools are plausible.
-- The rank table and missing trust gate: a trust prompt is an obvious follow-up.
-- Which plane owns the skill rows.
-- Memory-only `workspace/changes` is a documented limitation; MCP's unsupported list tracks the official SDK.
+- Office moved fast since 2026-09-17: the shared runtime (09-17/18), the kit CLI across deployments (09-23), kit 0.1.1 (09-24). A Web or base mount, more formats, or a renamed tool are plausible.
+- Plugin Manager: registries and fallbacks (09-22), peer compatibility with exemptions (09-23), bounded pnpm runs and lock takeover (09-23/24).
+- `docs/subsystems/extensions.md` is now a generated API page; the runners look vestigial beside Plugin Manager.
 
 ## Not read
 
-- Skill source (`packages/skill/skill-filesystem/src/index.ts`, `packages/skill/tool-skill/src/index.ts`): "no trust gate" is docs-only.
-- `snapshots/session/skill-load`: model-only and user-only skills recorded, the best S19 oracle.
-- `office-pptx`, `office-xlsx` SKILL.md bodies, `check_office.py`, the Creator skills (`packages/preset/agent-presets/presets/cordis/skills`), DSH's twelve `.agents/skills`.
-- `apps/desktop-host/src/workspace-dependencies.ts`; the `render_document` backend (no pinned file name matches); PDF handling.
-- `packages/extensions/tool-cordis/README.md`, `docs/tool-catalog.md`.
-- The `headless`, `acp-app`, `sdk-app`, `sdk-minimal` bundles; the `ptc` preset's skill rows.
-- How compaction treats loaded skill bodies.
+- `packages/skill/tool-skill/src/index.ts`; the skill-load and office-skills snapshot contents.
+- `office-pptx`, `office-xlsx` SKILL.md bodies, `check_office.py`, the kit package (external), DSH's fourteen `.agents/skills`.
+- `docs/subsystems/ptc-runtime.md` body; `ptc-runtime-python` beyond its summary; the `headless` and `acp-app` bundles' skill rows.

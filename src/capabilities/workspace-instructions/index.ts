@@ -125,6 +125,10 @@ export function renderInstructions(sources: readonly Source[], maxBytes: number)
 /**
  * Already entered, as a LIVE surface node.
  *
+ * This is the one statement (ARCHITECTURE §6 no longer carries it) that the
+ * instructions re-enter once a compaction shadows them, because the guard
+ * reads the live surface rather than the log.
+ *
  * The liveness is the whole point. Shadowed events stay in the log forever, so
  * a guard that folded the log would keep suppressing instructions a compaction
  * had already removed from the model's view — the house rules would quietly

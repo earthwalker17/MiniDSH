@@ -1,66 +1,62 @@
 # DSH reference: Execution: loop, jobs, subagents, teams
 
-> Where to research DSH's loop, tool pipeline, jobs and delegation, and their dependency order: pinned to `deepseek-ai/deepseek-harness@ddefc45f` (master, 2026-09-17), checked 2026-09-19 ([reading rules](../README.md)).
+> Where to research DSH's loop, tool pipeline, jobs and delegation: pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2), checked 2026-09-26 ([reading rules](../README.md)).
 
 ## What exists (at the pin)
 
 | Component | Path | Status | Purpose |
 |---|---|---|---|
-| Agent loop, tools pipeline | `packages/core/agent-loop`, `packages/core/tools` | default-mounted | Inbox, turn/step machine, tool scheduling, cancel, crash closers |
-| Subprocess, shell | `packages/subprocess`, `packages/shell` | default-mounted | Managed spawn; shell exec and a background `start()` handle |
-| Jobs seam, local provider | `packages/jobs/jobs`, `packages/jobs/jobs-local` | default-mounted | `ctx.jobs`: in-memory, owner-fenced, capped |
-| Job tools | `packages/jobs/tool-jobs` | default-mounted | The controller arming `start()`; `job_output`, `job_list`, `job_kill` |
-| Subagent registry, providers, tools | `packages/subagent` | default-mounted | One-shot and continuable children, `send_message`; codex and claude-code rows disabled |
-| Agent teams | `packages/experimental/agent-team` | experimental | Lead plus teammates over continuable children |
-| Workflow | `packages/workflow` | default-mounted | Model-written script starting subagents; `tool-ralph` disabled |
-| Schedule | `packages/schedule/schedule` | opt-in | Session-local reminders; only an example overlay mounts it |
-| Goal, plan mode, todo | `packages/goal`, `packages/plan/plan-mode`, `packages/todo/tool-todo` | default-mounted | Log-only domains; the loop depends on none |
+| Agent loop, tools pipeline | `packages/core/agent-loop`, `packages/core/tools` | default-mounted | Inbox, turn/step machine, per-call `executionMode`, cancel |
+| Subprocess, shell | `packages/subprocess`, `packages/shell` | default-mounted | Managed spawn; every command a job from its start (registry composed) |
+| Jobs seam, local provider | `packages/jobs/jobs`, `packages/jobs/jobs-local` | default-mounted | `ctx.jobs`: in-memory, owner-fenced, capped; `wait`, `remove`, `awaited` settlements |
+| Job tools | `packages/jobs/tool-jobs` | base; every preset but `minimal` | The controller arming `start()`; `job_output`, `job_list`, `job_kill`; notices |
+| Job controller | `packages/api/job-controller` | web-app | `job.list`, `job.follow`, a human `job.kill` fenced by owner |
+| Subagent registry, providers, tools | `packages/subagent` | default-mounted | One-shot and continuable children, parent catalog, `send_message`, `interrupt_agent`; codex, claude-code off |
+| Agent teams | `packages/experimental/agent-team` | experimental, no bundle row | Lead plus teammates over continuable children; durable `team/*` records |
+| Workflow | `packages/workflow` | default-mounted | Model-written script; `tool-workflow/run-*`, `agent-start\|end` persisted in the parent log; `tool-ralph` off |
+| Schedule | `packages/schedule/schedule` | web-app row, `disabled: true` | Host-wide reminders in a storage domain, delivered as a follow-up in the origin session |
+| Agent presets | `packages/bundle/web-app/presets/*.patch.yml` | web-app | `standard` (default), `minimal`, `ptc`, `cordis` |
+| Goal, plan mode, todo | `packages/goal`, `packages/plan`, `packages/todo` | default-mounted | Log-only domains; the loop depends on none |
 
 ## Open for the route
 
-- **S17, admission.** The collectability gate lives in the registry, not in producers: `start()` refuses unless an attached controller serves the owner, and errors past its per-owner cap. The registry owns identity (`<kind>-N`, predictable: authorize, never hide) and lifecycle; the producer owns resources. `docs/subsystems/jobs.md`
-- **S17, delivery.** Completion reaches the owner only through its inbox: injected when busy, a woken turn when idle, capped by `maxConsecutiveWakes` (3), refilled only by user input; a `reported` bit dedups. `packages/jobs/tool-jobs/README.md`
-- **S17, settlement.** First-wins; completion is announced LAST. `docs/subsystems/jobs.md`
-- **S17, the idle race.** A known defect: a settlement landing in the driver's retirement window is injected and nothing wakes. MiniDSH's claim-commit ordering must close that window for jobs. `packages/jobs/tool-jobs/README.md`
-- **S17, composition.** Base mounts the registries and tool rows on the host plane; the web-app bundle disables the tool rows, so a preset decides whether its agent can collect background work. `packages/bundle/web-app/cordis.patch.yml`
-- **S20, the dev server as a job.** A bash-kind job: shell's `start()` handle has no id or owner; the jobs registry and `tool-jobs` controller supply both (knowledge runs one way). `docs/subsystems/shell.md`
-- **S21, continuable children.** A durable child Session plus at most one process-local Activation, steered by `Agent.steer()` (cold-resuming when absent); settling claims idle and closes admission in one JavaScript turn. `docs/subsystems/subagent.md`
-- **S21, parallel calls.** Only tool bodies overlap: policy stages and `tool/result` commits stay in model order and exclusive calls are barriers, so replay can key on identity, not arrival. `packages/core/agent-loop/README.md`
-- **Built in S14** (resume-time closers owned by the agent layer, never storage): MiniDSH's side is ARCH §12, verdicts in [assumptions.md](../assumptions.md).
+- **S17, admission.** The collectability gate lives in the registry: `start()` refuses unless an attached controller serves the owner, and errors past the per-owner cap (10). The registry owns identity (`<kind>-N`: authorize, never hide) and lifecycle, the producer its resources; `remove` drops a settled job the model never saw. `docs/subsystems/jobs.md`
+- **S17, delivery.** Completion reaches the owner only through its inbox: injected when busy, a woken turn when idle (unbounded by default since 2026-09-22, the old cap of 3 stalled sessions; `quiet` never wakes); `awaited` settlements, model kills and teardown get no notice. `packages/jobs/tool-jobs/README.md`
+- **S17, settlement.** First-wins; `settled` is announced LAST, after the final drain, with `cause` and `awaited`. `docs/subsystems/jobs.md`
+- **S17, the idle race.** STILL OPEN (the ledger); steering has the same hole; the fix "belongs to `agent-loop`". `packages/jobs/tool-jobs/README.md`
+- **S17, composition.** Base mounts the registry and tool rows on the host plane; web-app disables the tool rows and every preset but `minimal` re-mounts `tool-jobs`; headless, sdk-app, acp-app keep base's rows; sdk-minimal has the registry only. `packages/bundle/web-app/cordis.patch.yml`
+- **S20, the dev server as a job.** A foreground command is registered on `ctx.jobs` at its start and the call `wait`s on it: in time its record is removed, past the timeout the same id is returned (`promoteOnTimeout`); `terminal_send` is the third producer. `packages/shell/tool-bash/README.md`
+- **S21, continuable children.** A durable child Session plus at most one resident Activation, steered by `Agent.steer()` (cold-resumed when absent; `ACTIVATION_LIMIT_REACHED` at capacity); `interrupt()` cancels keeping the inbox, claimed work not requeued; settling claims idle and closes admission in one JS turn. `docs/subsystems/subagent.md`
+- **S21, parallel calls.** Reclassified before each start, so a registry change mid-group becomes a barrier; never-started calls after cancellation get synthetic `tool/call` + `ABORTED_BEFORE_DISPATCH` pairs (the 2026-07-10 note is stale here). `packages/core/agent-loop/src/tool-calls.ts`
+- **S21, teams.** Still experimental, "no stability promise", no bundle row; a durable mailbox on the Lead log, every message a Steer into the inbox. `packages/experimental/agent-team/README.md`
 
 ## Sources
 
 | Path | What it establishes | Checked |
 |---|---|---|
-| `docs/subsystems/jobs.md` | Job contract, collectability gate, settlement | 2026-09-19 |
-| `packages/jobs/jobs-local/README.md` | Cap, no queue, process-local | 2026-09-19 |
-| `packages/jobs/jobs-local/src/index.ts` | Imports only: no session package | 2026-09-19 |
-| `packages/jobs/tool-jobs/README.md` | Job tools, delivery, wake budget, defect | 2026-09-19 |
-| `packages/core/agent-loop/README.md` | Pool, cancel, abort pairs, crash closers | 2026-09-19 |
-| `.agents/notes/implemented/feature/2026-07-10-parallel-tool-call-execution.md` | Why a per-call classifier; commit cursor | 2026-09-19 |
-| `docs/subsystems/subagent.md` | One-shot versus continuable; interrupt | 2026-09-19 |
-| `packages/subagent/tool-subagent/README.md` | `backgroundMode`; package default | 2026-09-19 |
-| `packages/preset/agent-presets/presets/standard/agent.cordis.yml` | Spawn and fork continuable | 2026-09-19 |
-| `packages/preset/agent-presets/presets/minimal/agent.cordis.yml` | Persona plus one persistent shell | 2026-09-19 |
-| `packages/bundle/base/cordis.patch.yml` | Host rows; fork one-shot | 2026-09-19 |
-| `packages/bundle/web-app/cordis.patch.yml` | Base tool rows disabled | 2026-09-19 |
-| `packages/experimental/agent-team/README.md` | Team records; experimental | 2026-09-19 |
-| `docs/subsystems/shell.md` | Handle without id or owner | 2026-09-19 |
+| `docs/subsystems/jobs.md` | Contract, ring, cap, `remove`, settlement | 2026-09-26 |
+| `packages/jobs/jobs-local/README.md` | Process-local, no queue, teardown | 2026-09-26 |
+| `packages/jobs/tool-jobs/README.md` | Notice lanes, unbounded wakes, idle race | 2026-09-26 |
+| `packages/core/agent-loop/README.md`, `src/tool-calls.ts` | Pool, inbox emits, abort pairs; reclassify before start | 2026-09-26 |
+| `packages/core/tools/src/index.ts` | `executionMode`, fail-closed | 2026-09-26 |
+| `docs/subsystems/subagent.md` | One-shot vs continuable; interrupt | 2026-09-26 |
+| `packages/subagent/tool-subagent/README.md` | Default `one-shot`; depth 1; says "Task" | 2026-09-26 |
+| `packages/bundle/web-app/presets/{standard,minimal}.patch.yml` | Spawn and fork continuable, `tool-jobs`; persona plus one persistent shell | 2026-09-26 |
+| `packages/bundle/base/cordis.patch.yml`, `packages/bundle/web-app/cordis.patch.yml` | Host rows, fork one-shot, ralph off; tool rows off, schedule off, default preset | 2026-09-26 |
+| `packages/bundle/{headless,sdk-app,acp-app}/cordis.patch.yml` | Keep base's rows | 2026-09-26 |
+| `packages/experimental/agent-team/README.md` | Experimental; durable mailbox | 2026-09-26 |
+| `docs/subsystems/shell.md`, `packages/shell/tool-bash/README.md` | Handle without id; foreground as job | 2026-09-26 |
+| `docs/persistence-catalog.md` | `tool-workflow/*`, `subagent/catalog`, `team/*` persist; no `job/*` | 2026-09-26 |
 
 ## Likely to go stale
 
-- Fork: continuable in the standard preset, one-shot in base, citing `.agents/notes/implemented/architecture/2026-08-10-fork-children-stay-one-shot.md`. In flux.
-- The word "job" and the tool names: `packages/subagent/tool-subagent/README.md` still says "Task".
-- Numeric defaults (10, 10, 3, depth 1), several of them live settings: `docs/config-catalog.md` is the authority.
-- The stranded-notice defect, whose fix "belongs to `agent-loop`".
-- Process-local jobs: the seam is abstract, so a durable backend can arrive.
-- Teams and schedule off by default: promotion is a small composition edit.
+- Jobs moved daily 2026-09-21/22: foreground-as-job with `remove`/`awaited` (bb201493), `job.kill` fence dropped (0659ded5), unbounded wakes (b6775f6d), archive stops owned jobs first (cbae324b).
+- Schedule shipped in web-app on 2026-09-24 (e8967378) and was disabled four hours later (cad6fef2): expect a re-enable.
+- Fork: continuable in the presets, one-shot in base. Numeric defaults (10, 10, depth 1, waits 30/600 s): `docs/config-catalog.md` is the authority.
+- Teams churned 2026-09-19..23; promotion is a composition edit. agent-loop 2026-09-23: dynamic tool updates changed request-series rules.
 
 ## Not read
 
-- Source bodies: `packages/core/agent-loop/src/tool-calls.ts`, `packages/subagent/subagent/src/continuation.ts`, `packages/jobs/tool-jobs/src/index.ts`; `packages/jobs/jobs-local/src/index.ts` beyond its imports.
-- In code, whether any durable PARENT-log record brackets a child: `docs/subsystems/subagent.md` calls the `subagent/start` and `subagent/end` pair observe-only.
-- The README-versus-note conflict on never-started calls after abort.
-- A new Web session's default preset; the `ptc` and `cordis` presets; whether the headless, sdk-app, acp-app and sdk-minimal bundles disable base's tool rows.
-- The PTY job producer; goal round driver; `docs/subsystems/user-questions.md`; `packages/schedule/schedule/README.md`.
-- The continuable activation cap (`snapshots/sdk/subagent-activation-limit`); Windows termination in `packages/subprocess/win32-process`.
+- Source bodies: `packages/subagent/subagent/src/continuation.ts`, `packages/jobs/tool-jobs/src`, `packages/jobs/jobs-local/src`, `packages/api/job-controller/src`.
+- `packages/goal/goal-round-driver` and `docs/subsystems/user-questions.md` beyond their heads.
+- `packages/subprocess/win32-process` beyond its head; the `team/*` event bodies.

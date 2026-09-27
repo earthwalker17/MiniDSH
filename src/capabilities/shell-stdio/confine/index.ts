@@ -31,6 +31,9 @@ export interface Confinement {
    * promises is governed — asserted from how the profile is built and proven
    * by a functional probe, not measured per call. `none` means it cannot
    * confine, and the provider must then refuse rather than run unconfined.
+   * No backend reports `partial` today: `build` claims `full` from the profile
+   * alone. `partial` exists as a value a ROW may accept (`sandbox/acceptance`)
+   * and as DSH's Windows verdict, never as a measurement made here.
    */
   readonly enforcement: SandboxEnforcement
   /** This backend's own words for a refused write; empty when nothing confines. */

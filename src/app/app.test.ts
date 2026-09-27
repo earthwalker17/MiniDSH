@@ -1,3 +1,9 @@
+/**
+ * Cross-capability claims are tested HERE, against the full composition
+ * (`bootComposition`), never a hand-mounted subset: a seam that holds only in
+ * isolation is not a seam. Each package's own test covers its contract; this
+ * file covers what two or more capabilities agree on (ARCHITECTURE §10).
+ */
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

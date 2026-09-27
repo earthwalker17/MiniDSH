@@ -287,6 +287,9 @@ export interface ComposeOptions {
    * Deployment default for what a session accepts from its execution world
    * (default `full`). It is a default, not a ceiling: a session records its
    * own the moment anyone changes one, and that recorded fact is what replays.
+   * S15 shipped this option unwired (`serve/web/chat --accept` reached no row
+   * until S16): a new deployment-default option is tested from the CLI down to
+   * its row, not from the row up.
    */
   readonly accepts?: SandboxEnforcement
   /** Deployment default approval policy (`never` refuses every request unattended). */

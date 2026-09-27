@@ -3,6 +3,10 @@
  * One text message per frame — no newline framing, because the protocol does
  * it — and one connection per socket.
  *
+ * Stated limits, unmeasured (ARCHITECTURE §13): no RPC deadline or client
+ * timeout exists on this carrier, and the soft and hard backpressure limits
+ * below were chosen, not measured.
+ *
  * The codec is written here rather than taken as a dependency: Node ships a
  * WebSocket CLIENT but no server, and the server half a JSON-RPC wire needs is
  * a handshake plus a frame codec. That also means the tests drive a real socket

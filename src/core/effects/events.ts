@@ -16,7 +16,9 @@
  * the effect, so a crash in between leaves the effect done and unrecorded, and
  * an append that fails is swallowed rather than failing a write that already
  * landed. Nothing may read a missing record as "nothing happened": crash
- * repair reads it as "unknown" (§4), which is the only safe direction. Nor is
+ * repair reads it as "unknown" (§4), which is the only safe direction. And a
+ * record is not a fence: the fs fence and the confinement backend never
+ * consult it, so losing one loses evidence, never containment (§7). Nor is
  * it an inventory — a shell command's own file writes are not enumerated here,
  * and the spill and attachment stores write outside `ctx.fs` — so the
  * model-facing rendering says so in as many words.

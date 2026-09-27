@@ -1,8 +1,9 @@
 /**
  * The headless CLI surface. It renders exclusively from `session/event`, drives
  * only `ctx.agents`/`ctx.sessions` via the runner, and exits 0 iff the turn
- * completed. `--json` streams raw session events to stdout; `sessions show`
- * reads the log only.
+ * completed, 2 on a usage failure (a malformed or unlisted flag, a bad settings
+ * file), never starting a paid run on one. `--json` streams raw session events
+ * to stdout; `sessions show` reads the log only.
  *
  * Every command boots through ONE preamble (`prepareBoot`): flags, settings,
  * the disk layers, the preset and agent-preset flags — so `config`, `--preset`
