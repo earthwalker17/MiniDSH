@@ -80,15 +80,20 @@ jobs:
           runtime: node@24.19.0
           cache: true
 
-      # Trusted publishing needs npm 11.5.1 or newer. Which npm pnpm/setup
-      # leaves first on PATH is not something it promises, so the one that will
-      # publish is installed and printed rather than assumed.
+      # Trusted publishing needs npm 11.5.1 or newer. The `npm` PATH resolves
+      # first is the runner image's own (10.x from its Node), and `npm install
+      # -g` upgrades whichever prefix that npm owns — the first release run
+      # printed 10.9.8 right after "added 1 package". So npm 11 goes into a
+      # prefix of our own, and every step that publishes, reads the registry or
+      # verifies the attestation calls it by path.
       - name: An npm that can publish through OIDC
         run: |
           set -euo pipefail
-          npm install -g npm@^11.5.1
-          npm --version
-          node -e "const [a,b,c]=require('child_process').execSync('npm --version').toString().trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm ' + [a,b,c].join('.') + ' cannot publish through trusted publishing'); process.exit(1) }"
+          npm install -g --prefix "$RUNNER_TEMP/npm11" npm@^11.5.1
+          NPM="$RUNNER_TEMP/npm11/bin/npm"
+          echo "node $(node --version) at $(command -v node); npm $("$NPM" --version) at $NPM (PATH's npm: $(npm --version))"
+          "$NPM" --version | node -e "const [a,b,c]=require('fs').readFileSync(0,'utf8').trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm ' + [a,b,c].join('.') + ' cannot publish through trusted publishing'); process.exit(1) }"
+          echo "NPM=$NPM" >> "$GITHUB_ENV"
 
       # The gate, in full, on the commit being released — its own step, not
       # `prepublishOnly`, whose failure would arrive as npm noise around an
@@ -151,10 +156,10 @@ jobs:
       - name: Publish to npm through trusted publishing
         run: |
           set -euo pipefail
-          if npm view "minidsh@$VERSION" version > /dev/null 2>&1; then
+          if "$NPM" view "minidsh@$VERSION" version > /dev/null 2>&1; then
             echo "minidsh@$VERSION is already on the registry; not publishing again"
           else
-            npm publish "$TARBALL" --access public --ignore-scripts
+            "$NPM" publish "$TARBALL" --access public --ignore-scripts
           fi
 
       # The artifact a stranger gets, from the public registry, with its
@@ -168,7 +173,7 @@ jobs:
           # cached at attempt 1 (Cache-Control max-age=300) and never see the
           # version propagate.
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if npm install --no-audit --no-fund --prefer-online "minidsh@$VERSION"; then break; fi
+            if "$NPM" install --no-audit --no-fund --prefer-online "minidsh@$VERSION"; then break; fi
             if [ "$attempt" = 12 ]; then echo "minidsh@$VERSION did not become installable within a minute"; exit 1; fi
             sleep 5
           done
@@ -178,7 +183,7 @@ jobs:
           # The attestation THIS package carries, named: the dependency ships
           # provenance too, so a grep for "verified attestation" over the whole
           # tree would pass with minidsh unattested.
-          npm audit signatures --json --include-attestations > "$RUNNER_TEMP/signatures.json"
+          "$NPM" audit signatures --json --include-attestations > "$RUNNER_TEMP/signatures.json"
           node -e "const r=require(process.argv[1]);const p=(r.verified||[]).find(x=>x.name==='minidsh'&&x.version===process.argv[2]);if(!p||!p.attestations){console.error('minidsh@'+process.argv[2]+' has no verified attestation');process.exit(1)}console.log('minidsh@'+process.argv[2]+': verified attestation')" "$RUNNER_TEMP/signatures.json" "$VERSION"
 
       - name: Publish the draft release
