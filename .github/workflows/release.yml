@@ -149,6 +149,25 @@ jobs:
             gh release create "v$VERSION" --draft --title "minidsh $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "$TARBALL"
           fi
 
+      # What npm's trusted-publishing exchange is shown, printed before the
+      # publish so a mismatch with the trusted publisher configured on
+      # npmjs.com is named here rather than surfacing as ENEEDAUTH (npm's own
+      # exchange fails silently and falls back to token auth). Claims only,
+      # never the token; on a failed exchange the registry's answer is printed
+      # and the job stops with the draft in place and nothing published.
+      - name: The identity npm's exchange is shown
+        run: |
+          set -euo pipefail
+          TOKEN="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).value)")"
+          node -e "const p=JSON.parse(Buffer.from(process.argv[1].split('.')[1],'base64url').toString()); for (const k of ['aud','iss','repository','repository_owner','repository_id','workflow','workflow_ref','job_workflow_ref','environment','ref','ref_type','sha','event_name','actor']) console.log(k.padEnd(18), p[k] ?? '(absent)')" "$TOKEN"
+          STATUS="$(curl -sS -o "$RUNNER_TEMP/exchange.json" -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/minidsh")"
+          echo "exchange: HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            cat "$RUNNER_TEMP/exchange.json"; echo
+            echo "the trusted publisher for minidsh on npmjs.com must name the repository, the workflow file and (only if one is set there) the environment printed above"
+            exit 1
+          fi
+
       # No token: the OIDC exchange is the credential, and provenance is
       # attached by npm itself. The TARBALL, not the checkout, so the published
       # bytes are the ones the smoke ran and the release holds; `--ignore-scripts`
