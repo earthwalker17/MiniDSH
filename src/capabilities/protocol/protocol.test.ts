@@ -15,7 +15,9 @@ import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { startProtocolHost, type ProtocolHostHandle } from '../../app/serve.ts'
-import type { AttachResult, PageResult, SessionView } from './frames.ts'
+import type { Patch } from '../../app/compose.ts'
+import { JOBS, type JobExit, type JobProcess } from '../../core/jobs/index.ts'
+import type { AttachResult, ControlSubscribeResult, ControlSummary, JobCancelResult, PageResult, SessionView } from './frames.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const SCRIPTED = { provider: 'scripted', model: 'scripted-model' }
@@ -128,6 +130,8 @@ async function startHost(
     agentDefaults?: { provider: string; model: string }
     /** The deployment's acceptance, as `serve --accept` sets it. */
     accepts?: 'full' | 'none'
+    /** Row patches beside the one that keeps the real provider out. */
+    patches?: readonly Patch[]
   },
 ): Promise<{ host: ProtocolHostHandle; client: TestClient; clients: TestClient[]; sessionsRoot: string }> {
   const clients = Array.from({ length: 1 + (extra?.extraClients ?? 0) }, () => new TestClient())
@@ -143,7 +147,7 @@ async function startHost(
     ...(extra?.settingsStorePath === undefined ? {} : { settingsStorePath: extra.settingsStorePath }),
     ...(extra?.agentDefaults === undefined ? {} : { agentDefaults: extra.agentDefaults }),
     ...(extra?.accepts === undefined ? {} : { accepts: extra.accepts }),
-    patches: [{ id: 'llm-deepseek', disabled: true }],
+    patches: [{ id: 'llm-deepseek', disabled: true }, ...(extra?.patches ?? [])],
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
       extra?.prepare?.(root)
@@ -158,6 +162,64 @@ async function startHost(
   hosts.push(host)
   return { host, client: clients[0]!, clients, sessionsRoot }
 }
+
+/**
+ * A process that ends when the test says so — or, `dies: false`, never — as
+ * `core/jobs/jobs.test.ts` has it. The registry, the log and the host are
+ * real; no process is spawned in a protocol test.
+ */
+class FakeProcess implements JobProcess {
+  readonly pid = 4242
+  readonly mode = 'workspace-write' as const
+  readonly enforcement = 'full' as const
+  readonly exited: Promise<JobExit>
+  private readonly dies: boolean
+  private finish!: (exit: JobExit) => void
+  constructor(dies = true) {
+    this.dies = dies
+    this.exited = new Promise((resolve) => (this.finish = resolve))
+  }
+  kill(): void {
+    if (this.dies) queueMicrotask(() => this.finish({ signal: 'SIGKILL' }))
+  }
+  exit(exit: JobExit = { exitCode: 0 }): void {
+    this.finish(exit)
+  }
+}
+
+/** A stop waits this long for a killed process, so a test of one that never dies is quick. */
+const QUICK_JOBS: readonly Patch[] = [{ id: 'jobs', config: { stopWaitMs: 100 } }]
+
+/** Starts a fake job on a live session through the real registry, as a producer would. */
+async function startJob(host: ProtocolHostHandle, sessionId: string, options: { label?: string; dies?: boolean } = {}): Promise<{ jobId: string; process: FakeProcess }> {
+  const agent = host.root.get(AGENTS).get(asSessionId(sessionId))
+  if (!agent) throw new Error(`no live agent for ${sessionId}`)
+  let process!: FakeProcess
+  const view = await host.root.get(JOBS).start({
+    agent,
+    kind: 'shell',
+    label: options.label ?? 'npm run dev',
+    launch: async () => (process = new FakeProcess(options.dies ?? true)),
+  })
+  return { jobId: view.jobId, process }
+}
+
+const publishedViews = (client: TestClient, sessionId: string): SessionView[] =>
+  client.notifications
+    .filter((entry) => entry.method === 'session.view' && entry.params.sessionId === sessionId)
+    .map((entry) => (entry.params as unknown as { view: SessionView }).view)
+
+const summariesOf = (client: TestClient, sessionId: string): ControlSummary[] =>
+  client.notifications
+    .filter((entry) => entry.method === 'control.summary' && entry.params.sessionId === sessionId)
+    .map((entry) => entry.params as unknown as ControlSummary)
+
+/** The log as the host serves it: what a resume, a replay and an audit will have. */
+async function logOf(client: TestClient, sessionId: string): Promise<{ type: string; data: Record<string, unknown> }[]> {
+  return (await client.result<{ events: { type: string; data: Record<string, unknown> }[] }>('session/events', { sessionId, omitTrace: true })).events
+}
+
+const pause = (ms = 50): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe('protocol: handshake and streaming', () => {
   it('initialize returns the server info, the provider catalog, and the default agent options', async () => {
@@ -1332,6 +1394,7 @@ describe('protocol: a delegated child is its parent, not a client', () => {
       ['session/compact', { sessionId: childId }],
       ['session/model', { sessionId: childId, model: 'scripted-model' }],
       ['session/authority', { sessionId: childId, sandbox: 'read-only' }],
+      ['job/cancel', { sessionId: childId, jobId: 'job-0000000000000000' }],
     ] as const
     for (const [method, params] of writes) {
       const reply = await client.call(method, params)
@@ -1370,6 +1433,28 @@ describe('protocol: a delegated child is its parent, not a client', () => {
 
     release()
     await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+  })
+
+  it('leaves a child mid-delegation out of the control plane', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { clients } = await startHost(delegating('the child answer', 'done', held), { extraClients: 1 })
+    const [client, control] = clients as [TestClient, TestClient]
+    await control.result('control/subscribe', {})
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    const start = await client.waitFor(() => client.frames('subagent/start', sessionId)[0], 'the delegation to start')
+    const childId = start.event.data.childId as string
+
+    // The child belongs to its parent's tool call: no baseline row, no summary.
+    const baseline = await control.result<ControlSubscribeResult>('control/subscribe', {})
+    expect(baseline.sessions.map((one) => one.sessionId)).toEqual([sessionId])
+    release()
+    await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+    await control.waitFor(() => (summariesOf(control, sessionId).at(-1)?.status === 'idle' ? true : undefined), 'the parent idle')
+    expect(summariesOf(control, sessionId).length).toBeGreaterThan(0)
+    expect(summariesOf(control, childId)).toHaveLength(0)
   })
 
   it('lets a resumed child be driven, and still holds it to its ceiling', async () => {
@@ -1464,5 +1549,291 @@ describe('protocol: who can answer a parked approval', () => {
     const decided = settled.page.events.filter((one) => one.type === 'approval/decided')
     expect(decided).toHaveLength(1)
     expect((decided[0]!.data as { outcome: string }).outcome).toBe('unavailable')
+  })
+
+  /** A question asked while a control subscriber that watches NOTHING is connected, and then left by its only watcher. */
+  async function parkedForSubscriber(): Promise<{ asker: TestClient; control: TestClient; sessionId: string; id: string }> {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const { clients } = await startHost(adapter, { ...withGate, extraClients: 1 })
+    const [asker, control] = clients as [TestClient, TestClient]
+    // Only its summaries tell it about any session.
+    await control.result('session/detach', {})
+    await control.result('control/subscribe', {})
+    const { sessionId } = await asker.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    const asked = await asker.waitFor(() => asker.frames('approval/asked', sessionId)[0], 'the ask')
+    // The only watcher narrows away: nobody is SHOWN the question now.
+    await asker.result('session/detach', { sessionId })
+    await control.waitFor(() => summariesOf(control, sessionId).find((one) => one.pendingApprovals === 1), 'a summary counting the question')
+    return { asker, control, sessionId, id: asked.event.data.id as string }
+  }
+
+  it('keeps a question parked for a control subscriber, refuses its answer until it attaches, and takes it after', async () => {
+    const { asker, control, sessionId, id } = await parkedForSubscriber()
+    // Still parked: the subscriber was told a question waits, and can come to it.
+    await pause()
+    expect((await logOf(asker, sessionId)).filter((event) => event.type === 'approval/decided')).toHaveLength(0)
+
+    // A count is not the question. It answers only what it was shown.
+    const refused = await control.call('approval/answer', { sessionId, id, outcome: 'allowed-once' })
+    expect(refused.error?.code).toBe(-32602)
+    expect(refused.error?.message).toMatch(/does not watch session/)
+
+    const attached = await control.result<AttachResult>('session/attach', { sessionId })
+    expect(attached.view.pendingApprovals.map((one) => one.id)).toEqual([id])
+    const answered = await control.result<{ outcome: string }>('approval/answer', { sessionId, id, outcome: 'allowed-once' })
+    expect(answered.outcome).toBe('accepted')
+    const decided = await control.waitFor(() => control.frames('approval/decided', sessionId)[0], 'the decision')
+    expect(decided.event.data).toMatchObject({ outcome: 'allowed-once', decidedBy: 'user' })
+    await control.waitFor(() => control.frames('turn/end', sessionId)[0], 'the turn to end')
+  })
+
+  it('settles that question unavailable once the subscriber keeping it parked disconnects', async () => {
+    const { asker, control, sessionId } = await parkedForSubscriber()
+    control.input.end()
+    // Polled through the log, because the asker stopped receiving this session.
+    const deadline = Date.now() + 3000
+    let decided: { type: string; data: Record<string, unknown> } | undefined
+    while (decided === undefined) {
+      decided = (await logOf(asker, sessionId)).find((event) => event.type === 'approval/decided')
+      if (decided !== undefined) break
+      if (Date.now() > deadline) throw new Error('the question its last possible answerer left never settled')
+      await pause(20)
+    }
+    expect(decided.data.outcome).toBe('unavailable')
+  })
+})
+
+describe('protocol: background jobs in the view', () => {
+  it('shows a live job running, then ended, and re-publishes the view on each', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('ready'), assistantText('the job is done'))
+    const { host, client } = await startHost(adapter, { patches: QUICK_JOBS })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'start', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    expect((await client.result<AttachResult>('session/attach', { sessionId })).view.jobs).toEqual([])
+    const before = publishedViews(client, sessionId).length
+
+    const { jobId, process } = await startJob(host, sessionId)
+    // The start alone is a fact a page-holding client cannot pair, and nothing
+    // else happened: the host re-sends the view for it.
+    const running = await client.waitFor(() => publishedViews(client, sessionId).slice(before).find((view) => view.jobs.length > 0), 'a view naming the job')
+    expect(running.jobs).toEqual([{ jobId, label: 'npm run dev', state: 'running', pid: 4242 }])
+
+    process.exit({ exitCode: 0 })
+    const ended = await client.waitFor(() => publishedViews(client, sessionId).find((view) => view.jobs[0]?.state === 'ended'), 'a view with the job ended')
+    expect(ended.jobs[0]).toMatchObject({ jobId, state: 'ended', end: { jobId, cause: 'exited', exitCode: 0 } })
+    // Its own end woke the agent, and the woken turn entered the notice: it
+    // was delivered, so nothing is held.
+    await client.waitFor(() => (client.frames('turn/end', sessionId).length >= 2 ? true : undefined), 'the woken turn')
+    await client.waitFor(() => (client.statuses().filter((one) => one.sessionId === sessionId).at(-1)?.status === 'idle' ? true : undefined), 'idle')
+    const after = await client.result<AttachResult>('session/attach', { sessionId })
+    expect(after.view.jobs).toEqual([expect.objectContaining({ jobId, state: 'ended' })])
+    expect(after.view.jobs[0]!.held).toBeUndefined()
+  })
+
+  it('holds a quiet notice from the moment its agent goes idle, though no fact marks that moment', async () => {
+    const adapter = new ScriptedAdapter().script(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => reject(new LlmError('ABORTED', 'aborted')))
+        }),
+    )
+    const { host, clients } = await startHost(adapter, { extraClients: 1, patches: QUICK_JOBS })
+    const [client, control] = clients as [TestClient, TestClient]
+    await control.result('session/detach', {})
+    await control.result('control/subscribe', {})
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hang', agentOptions: SCRIPTED })
+    await client.waitFor(() => client.statuses().find((entry) => entry.sessionId === sessionId && entry.status === 'running'), 'running')
+    const { jobId } = await startJob(host, sessionId)
+
+    // Stopped mid-turn: the turn's next step would enter the notice, so it is
+    // not held while the turn runs.
+    await client.result('job/cancel', { sessionId, jobId })
+    expect(publishedViews(client, sessionId).at(-1)!.jobs).toEqual([expect.objectContaining({ jobId, state: 'ended' })])
+    expect(publishedViews(client, sessionId).at(-1)!.jobs[0]!.held).toBeUndefined()
+
+    // The turn is cancelled with the queue spared, so no step ever enters it.
+    // Going idle is no fact, yet it is the moment the notice becomes held.
+    await client.result('session/cancel', { sessionId, keepQueued: true })
+    await client.waitForIdle(sessionId)
+    await client.waitFor(() => (publishedViews(client, sessionId).at(-1)?.jobs[0]?.held === true ? true : undefined), 'a view holding the notice')
+    await control.waitFor(() => summariesOf(control, sessionId).find((one) => one.status === 'idle' && one.heldNotices === 1), 'a summary holding it')
+  })
+
+  it('reads a stored log cold: an unpaired start is unclosed, never running, and a quiet notice is held', async () => {
+    const first = await startHost(new ScriptedAdapter().script(assistantText('ready')), { patches: QUICK_JOBS })
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'start', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(sessionId)
+    // One that will not die when its session ends, and one a person stopped.
+    const stuck = await startJob(first.host, sessionId, { label: 'a server that ignores signals', dies: false })
+    const stopped = await startJob(first.host, sessionId, { label: 'npm test' })
+    await first.client.result('job/cancel', { sessionId, jobId: stopped.jobId })
+    const live = await first.client.result<AttachResult>('session/attach', { sessionId })
+    expect(live.view.jobs.map((job) => [job.jobId, job.state, job.held])).toEqual([
+      [stuck.jobId, 'running', undefined],
+      [stopped.jobId, 'ended', true],
+    ])
+    // The disposal stops what it can; a process that would not die records
+    // nothing, which is what the next resume will call `lost`.
+    await first.host.dispose()
+
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot: first.sessionsRoot })
+    const cold = await second.client.result<AttachResult>('session/attach', { sessionId })
+    expect(cold.view.jobs).toEqual([
+      { jobId: stuck.jobId, label: 'a server that ignores signals', state: 'unclosed', pid: 4242 },
+      { jobId: stopped.jobId, label: 'npm test', state: 'ended', pid: 4242, end: expect.objectContaining({ cause: 'cancelled', by: 'user' }), held: true },
+    ])
+    // Looking resumed nothing: the bracket is still open in the file.
+    expect(second.host.root.get(AGENTS).list()).toHaveLength(0)
+    const ends = (await logOf(second.client, sessionId)).filter((event) => event.type === 'job/end')
+    expect(ends.map((event) => event.data.jobId)).toEqual([stopped.jobId])
+  })
+})
+
+describe('protocol: job/cancel', () => {
+  it('stops a job as a person: recorded by the user, its notice queued quiet, the agent not woken', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('ready'), assistantText('noted'))
+    const { host, clients } = await startHost(adapter, { extraClients: 1, patches: QUICK_JOBS })
+    const [client, control] = clients as [TestClient, TestClient]
+    await control.result('session/detach', {})
+    await control.result('control/subscribe', {})
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'start', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const { jobId } = await startJob(host, sessionId)
+    await control.waitFor(() => summariesOf(control, sessionId).find((one) => one.runningJobs === 1), 'a summary counting the job')
+    const summariesBefore = summariesOf(control, sessionId).length
+    const turnsBefore = client.frames('turn/start', sessionId).length
+
+    const result = await client.result<JobCancelResult>('job/cancel', { sessionId, jobId })
+    expect(result).toMatchObject({ jobId, state: 'ended', end: { jobId, cause: 'cancelled', by: 'user' } })
+
+    // The log: one end, a person's, and its notice inserted QUIET.
+    const log = await logOf(client, sessionId)
+    expect(log.filter((event) => event.type === 'job/end').map((event) => event.data)).toEqual([expect.objectContaining({ jobId, cause: 'cancelled', by: 'user' })])
+    const notice = log
+      .filter((event) => event.type === 'inbox/spliced')
+      .map((event) => event.data as { op: string; waking?: boolean; message?: { id: string } })
+      .find((splice) => splice.op === 'insert' && splice.message?.id === `msg-job-${jobId}`)
+    expect(notice?.waking).toBe(false)
+    // Not woken: no paid turn for a stop somebody asked for.
+    await pause()
+    expect(client.frames('turn/start', sessionId)).toHaveLength(turnsBefore)
+    expect(host.root.get(AGENTS).get(asSessionId(sessionId))!.status).toBe('idle')
+    expect(publishedViews(client, sessionId).at(-1)!.jobs).toEqual([expect.objectContaining({ jobId, state: 'ended', held: true })])
+    // The end and its notice land in one step, and a subscriber is told the
+    // state after both, once — never a frame with the notice not yet queued.
+    expect(summariesOf(control, sessionId).slice(summariesBefore)).toEqual([{ sessionId, status: 'idle', runningJobs: 0, heldNotices: 1, pendingApprovals: 0 }])
+
+    // The next message delivers it, and then nothing is held.
+    await client.result('session/prompt', { sessionId, text: 'anything new?' })
+    await client.waitFor(() => (client.frames('turn/end', sessionId).length >= 2 ? true : undefined), 'the next turn')
+    const entered = client.frames('user/message', sessionId).map((frame) => (frame.event.data.message as { id: string }).id)
+    expect(entered).toContain(`msg-job-${jobId}`)
+    await client.waitFor(() => (publishedViews(client, sessionId).at(-1)?.jobs[0]?.held === undefined ? true : undefined), 'the hold to clear')
+    await control.waitFor(() => (summariesOf(control, sessionId).at(-1)?.heldNotices === 0 ? true : undefined), 'a summary with nothing held')
+  })
+
+  it('refuses a job this session never ran, and a session that is only stored', async () => {
+    const first = await startHost(new ScriptedAdapter().script(assistantText('ready')), { patches: QUICK_JOBS })
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'start', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(sessionId)
+    const unknown = await first.client.call('job/cancel', { sessionId, jobId: 'job-0000000000000000' })
+    expect(unknown.error?.code).toBe(-32602)
+    expect(unknown.error?.message).toMatch(/no background job/)
+    const missing = await first.client.call('job/cancel', { sessionId })
+    expect(missing.error?.code).toBe(-32602)
+    await first.host.dispose()
+
+    // A control-plane method acts only on a live session: a stored one is not
+    // resumed to stop something in it.
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot: first.sessionsRoot })
+    const stored = await second.client.call('job/cancel', { sessionId, jobId: 'job-0000000000000000' })
+    expect(stored.error?.code).toBe(-32602)
+    expect(stored.error?.message).toContain('no live session')
+    expect(second.host.root.get(AGENTS).list()).toHaveLength(0)
+  })
+
+  it('still mounts the protocol where the jobs row is disabled, and says so', async () => {
+    const { client } = await startHost(new ScriptedAdapter().script(assistantText('ready')), {
+      patches: [
+        { id: 'jobs', disabled: true },
+        { id: 'tool-jobs', disabled: true },
+      ],
+    })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'start', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const reply = await client.call('job/cancel', { sessionId, jobId: 'job-0000000000000000' })
+    expect(reply.error?.code).toBe(-32603)
+    expect(reply.error?.message).toContain('no jobs capability')
+    expect((await client.result<AttachResult>('session/attach', { sessionId })).view.jobs).toEqual([])
+  })
+})
+
+describe('protocol: the control plane', () => {
+  it('answers a baseline of every live session, its jobs counted', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('one'), assistantText('two'))
+    const { host, clients } = await startHost(adapter, { extraClients: 1, patches: QUICK_JOBS })
+    const [client, control] = clients as [TestClient, TestClient]
+    const { sessionId: quiet } = await client.result<{ sessionId: string }>('session/prompt', { text: 'first', agentOptions: SCRIPTED })
+    await client.waitForIdle(quiet)
+    const { sessionId: busy } = await client.result<{ sessionId: string }>('session/prompt', { text: 'second', agentOptions: SCRIPTED })
+    await client.waitForIdle(busy)
+    await startJob(host, busy)
+
+    const baseline = await control.result<ControlSubscribeResult>('control/subscribe', {})
+    expect(baseline.sessions).toHaveLength(2)
+    const byId = new Map(baseline.sessions.map((one) => [one.sessionId, one]))
+    expect(byId.get(quiet)).toEqual({ sessionId: quiet, status: 'idle', runningJobs: 0, heldNotices: 0, pendingApprovals: 0 })
+    expect(byId.get(busy)).toEqual({ sessionId: busy, status: 'idle', runningJobs: 1, heldNotices: 0, pendingApprovals: 0 })
+  })
+
+  it('announces a session that goes live beside the wire, before it ever runs', async () => {
+    const { host, client } = await startHost(new ScriptedAdapter().script(assistantText('one')))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'first', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const { header } = await client.result<AttachResult>('session/attach', { sessionId })
+    await client.result('control/subscribe', {})
+
+    // As the terminal's fork and resume do: an agent no wire method created,
+    // which no prompt will start.
+    const created = await host.root.get(AGENTS).create(host.root, { cwd: header.cwd, agentOptions: SCRIPTED })
+    await client.waitFor(() => summariesOf(client, created.agent.id)[0], 'the new session summary')
+    expect(summariesOf(client, created.agent.id)).toEqual([{ sessionId: created.agent.id, status: 'idle', runningJobs: 0, heldNotices: 0, pendingApprovals: 0 }])
+    await created.dispose()
+    await client.waitFor(() => summariesOf(client, created.agent.id).find((one) => one.status === 'closed'), 'its closed summary')
+  })
+
+  it('tells a subscriber narrowed to one session what another is doing, without its events', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('one'), assistantText('two'), assistantText('the job failed'))
+    const { host, clients } = await startHost(adapter, { extraClients: 1, patches: QUICK_JOBS })
+    const [client, control] = clients as [TestClient, TestClient]
+    const { sessionId: watched } = await client.result<{ sessionId: string }>('session/prompt', { text: 'first', agentOptions: SCRIPTED })
+    await client.waitForIdle(watched)
+    await control.result('session/attach', { sessionId: watched })
+    await control.result('control/subscribe', {})
+
+    const { sessionId: other } = await client.result<{ sessionId: string }>('session/prompt', { text: 'second', agentOptions: SCRIPTED })
+    await client.waitForIdle(other)
+    const { process } = await startJob(host, other)
+    // Its status and its job reach this client as summaries, past its watch set.
+    await control.waitFor(() => summariesOf(control, other).find((one) => one.status === 'running'), 'the other session running')
+    await control.waitFor(() => summariesOf(control, other).find((one) => one.runningJobs === 1), 'the other session job')
+    process.exit({ exitCode: 1 })
+    await control.waitFor(() => (summariesOf(control, other).at(-1)?.runningJobs === 0 ? true : undefined), 'the job to end')
+    // And nothing else of that session: the narrowing still holds for everything but summaries.
+    expect(control.frames(undefined, other)).toHaveLength(0)
+    expect(publishedViews(control, other)).toHaveLength(0)
+    expect(control.statuses().filter((one) => one.sessionId === other)).toHaveLength(0)
+  })
+
+  it('says closed, once, when a session agent is disposed', async () => {
+    const { client } = await startHost(new ScriptedAdapter().script(assistantText('done')))
+    await client.result('control/subscribe', {})
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    await client.result('shutdown')
+    expect(summariesOf(client, sessionId).filter((one) => one.status === 'closed')).toEqual([
+      { sessionId, status: 'closed', runningJobs: 0, heldNotices: 0, pendingApprovals: 0 },
+    ])
+    expect(summariesOf(client, sessionId).at(-1)!.status).toBe('closed')
   })
 })

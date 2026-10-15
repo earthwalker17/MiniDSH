@@ -700,12 +700,15 @@ function killTree(child: ChildProcess): Promise<void> {
  * Kills a child and waits for it, AND the killer, to finish — on Windows the
  * tree's descendants hold the workspace directory until they are gone, which
  * is the lock this wait exists to release. Bounded: a process that will not
- * die is reported by whoever needed it dead, not waited on forever.
+ * die is reported by whoever needed it dead, not waited on forever. The bound
+ * is longer on Windows because the tree kill there is a PROCESS (`taskkill`),
+ * ~0.3 s on an idle host and seconds on a loaded one (measured 2026-10-15):
+ * returning before it finished handed the caller a directory still locked.
  */
 function killAndWait(child: ChildProcess | undefined): Promise<void> {
   if (!child || child.exitCode !== null || child.killed) return Promise.resolve()
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
   let timer: ReturnType<typeof setTimeout> | undefined
-  const bound = new Promise<void>((resolve) => (timer = setTimeout(resolve, 2000)))
+  const bound = new Promise<void>((resolve) => (timer = setTimeout(resolve, process.platform === 'win32' ? 10_000 : 2_000)))
   return Promise.race([Promise.all([exited, killTree(child)]).then(() => undefined), bound]).finally(() => clearTimeout(timer))
 }

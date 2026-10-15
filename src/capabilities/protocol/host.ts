@@ -2,8 +2,10 @@
  * The protocol host: JSON-RPC method handlers, the live control plane a wire
  * needs beyond durable events — the status and session projections, approval
  * prompts as answerable frames keyed by the durable `approval/asked` id (a
- * host-side pending table, first answer wins across clients), cancel/steer —
- * and the ownership of agents created over the wire. Approval frames have no
+ * host-side pending table, first answer wins across clients), cancel/steer, a
+ * person's stop of a background job, and a per-session summary for a client
+ * that watches none of them — and the ownership of agents created over the
+ * wire. Approval frames have no
  * notification of their own: the durable `approval/asked`/`approval/decided`
  * events streaming over `session.event` ARE the frames.
  *
@@ -15,7 +17,7 @@
 import { statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import type { Context } from '../../kernel/index.ts'
-import { AGENTS, AGENT_OPTIONS, foldAgentOptions, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, AGENT_OPTIONS, foldAgentOptions, INBOX_SPLICED, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
 import {
   APPROVAL,
   APPROVAL_ASKED,
@@ -29,9 +31,11 @@ import {
   openApprovals,
   type ApprovalAnswer,
   type ApprovalPrompt,
+  type OpenApproval,
 } from '../../core/approval/index.ts'
 import { COMPACTION } from '../../core/compaction/index.ts'
 import { asSessionId } from '../../core/ids.ts'
+import { foldJobs, JOB_END, JOB_START, JobError, JOBS, type JobRecord, type JobView } from '../../core/jobs/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { meterSession } from '../../core/metering/index.ts'
@@ -76,8 +80,12 @@ import {
   type AttachResult,
   type AuthorityView,
   type CompactResult,
+  type ControlSubscribeResult,
+  type ControlSummary,
   type EventsResult,
   type InitializeResult,
+  type JobCancelResult,
+  type JobSummary,
   type PageResult,
   type PromptResult,
   type RpcNotification,
@@ -106,6 +114,13 @@ const ACCEPTANCES: ReadonlySet<string> = new Set(['full', 'none'])
  * The durable kinds that move a `SessionView`. Named from the kind tokens, so a
  * renamed event is a compile error rather than a view that quietly stops
  * updating. A surface `replace` is handled separately — it is an op, not a kind.
+ *
+ * `view.jobs` reads three. A job's bracket moves its `state`; the inbox moves
+ * its notice — an insert queues it, a claim or a clear takes it — which is
+ * what `held` says. A job stopped while its agent is idle appends an end and a
+ * quiet notice and nothing else, so without these a view would show it
+ * running until some unrelated fact landed. `held` also moves with the
+ * agent's status, which is no fact at all: `onAgentStatus` covers that.
  */
 const VIEW_CHANGING: ReadonlySet<string> = new Set([
   ASSISTANT_MESSAGE.type,
@@ -118,7 +133,17 @@ const VIEW_CHANGING: ReadonlySet<string> = new Set([
   AUTHORITY_PRESET.type,
   AGENT_OPTIONS.type,
   REQUEST_CONTEXT.type,
+  JOB_START.type,
+  JOB_END.type,
+  INBOX_SPLICED.type,
 ])
+
+/**
+ * The durable kinds that move a `ControlSummary`: a job's bracket, a notice's
+ * delivery, a question asked or decided. A status change and a disposal are
+ * not facts; `onAgentStatus` and `onAgentDisposed` owe those summaries.
+ */
+const SUMMARY_CHANGING: ReadonlySet<string> = new Set([JOB_START.type, JOB_END.type, INBOX_SPLICED.type, APPROVAL_ASKED.type, APPROVAL_DECIDED.type])
 
 /** One session as a reader sees it — live or stored, addressed the same way. */
 interface SessionSource {
@@ -212,6 +237,47 @@ function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: st
 }
 
 /**
+ * Asked and not yet decided — and only a LIVE agent can have a question
+ * outstanding. A stored log read cold never resumes (that is the point of a
+ * cold read), so `repairInterruptedTail` has not run over it — and a process
+ * killed between `approval/asked` and `approval/decided` leaves exactly the
+ * shape repair exists to close. Folding it here offered a crash artifact to a
+ * browser as a live Allow/Deny on an authority surface, for a question nothing
+ * was waiting on. The view and the control summary both count through here.
+ */
+function pendingApprovalsOf(facts: readonly EventEnvelope[], agent: Agent | undefined): OpenApproval[] {
+  return agent === undefined ? [] : openApprovals(facts)
+}
+
+/** A notice in the inbox that will not wake the agent when it lands. */
+function quietlyQueued(record: JobRecord): boolean {
+  return record.notice?.state === 'queued' && !record.notice.waking
+}
+
+/**
+ * The jobs a log names, as a reader is shown them. `agent` is the LIVE agent
+ * running the session, if any. Only a live registry supervises a job, so an
+ * unpaired start read without one is `unclosed`, never `running` — the rule
+ * `pendingApprovalsOf` follows, for the same reason: a stored log's open
+ * bracket is a crash artifact the next resume closes `lost`. A quiet notice
+ * is `held` only while nothing will claim it — the agent idle or gone — since
+ * a running turn's next step enters whatever the step queue holds.
+ */
+function summarizeJobs(facts: readonly EventEnvelope[], agent: Agent | undefined): JobSummary[] {
+  const idle = agent === undefined || agent.status === 'idle'
+  return foldJobs(facts).map(
+    (record): JobSummary => ({
+      jobId: record.start.jobId,
+      label: record.start.label,
+      state: record.end !== undefined ? 'ended' : agent === undefined ? 'unclosed' : 'running',
+      ...(record.start.pid === undefined ? {} : { pid: record.start.pid }),
+      ...(record.end === undefined ? {} : { end: record.end }),
+      ...(idle && quietlyQueued(record) ? { held: true as const } : {}),
+    }),
+  )
+}
+
+/**
  * A parked approval. It does NOT hold the connections that could answer it:
  * that set is recomputed from the live connections whenever a watch set moves,
  * because a client can arrive after the question was asked (the attach frame
@@ -238,6 +304,13 @@ export class ProtocolHost {
   private readonly inflight = new Set<Promise<Agent>>()
   /** Parsed stored sessions, most recently used last (insertion order IS the LRU). */
   private readonly cold = new Map<string, SessionSource>()
+  /**
+   * Sessions owed a `control.summary` at the end of this tick, and whether
+   * the owing was a disposal. Coalesced because a summary is whole-state: a
+   * job's end and its notice land in one synchronous step, and a subscriber
+   * wants the state after both, not a frame per fact.
+   */
+  private readonly summariesOwed = new Map<string, { readonly session: Session; closed: boolean }>()
   private closed = false
   private shuttingDown = false
 
@@ -260,7 +333,8 @@ export class ProtocolHost {
    * One client is gone. Its agents are NOT: a disconnect is not a shutdown, so
    * a browser refresh reattaches to work still running. What does end is any
    * approval nobody left can answer — leaving it parked would block the agent
-   * on a question no one can see.
+   * on a question no one can see. A control subscriber leaving counts: it was
+   * keeping questions parked that no watcher could see.
    */
   disconnect(connection: ClientConnection): void {
     connection.close()
@@ -270,15 +344,17 @@ export class ProtocolHost {
   }
 
   /**
-   * Settle every parked question no connected client can still see.
+   * Settle every parked question no connected client could still come to
+   * answer (`couldAnswer`).
    *
-   * Called after ANY change to a watch set — a disconnect, a detach, and an
-   * ATTACH, because a client's first attach narrows it away from every other
-   * session at once. Recomputing beats the snapshot it replaces in both
-   * directions: a client that arrived after the ask is counted (it renders the
-   * question from the attach frame's `pendingApprovals` and can answer it), and
-   * a client that narrowed away is not (it would otherwise hold a question it
-   * can no longer see, and the agent would wait on it forever).
+   * Called after ANY change to a watch set or to who subscribes — a
+   * disconnect, a detach, and an ATTACH, because a client's first attach
+   * narrows it away from every other session at once. Recomputing beats the
+   * snapshot it replaces in both directions: a client that arrived after the
+   * ask is counted (it renders the question from the attach frame's
+   * `pendingApprovals` and can answer it), and a client that narrowed away is
+   * not (it would otherwise hold a question it can no longer see, and the
+   * agent would wait on it forever).
    */
   private settleUnwatchedApprovals(): void {
     for (const [key, pending] of this.pendingApprovals) {
@@ -286,10 +362,40 @@ export class ProtocolHost {
       // that ASKED one, and a child mid-delegation is pinned `never`, so its
       // requests are refused inside the approval service before any answerer is
       // consulted. Nothing delegated can be in this table.
-      if (this.anyReceiver(pending.sessionId, false)) continue
+      if (this.anyCouldAnswer(pending.sessionId, false)) continue
       this.pendingApprovals.delete(key)
       pending.settle('unavailable')
     }
+  }
+
+  /**
+   * The AUTHORIZATION rule for `approval/answer`: a connection answers only a
+   * question it was SHOWN — it receives that session's frames, so the
+   * `approval/asked` event reached it, or its attach frame's
+   * `pendingApprovals` carried it. `false` for the reason
+   * `settleUnwatchedApprovals` gives: nothing delegated is ever parked.
+   */
+  private mayAnswer(connection: ClientConnection, sessionId: string): boolean {
+    return this.receives(connection, sessionId, false)
+  }
+
+  /**
+   * The LIVENESS rule for a parked question: a connection that could still
+   * come to answer it. One that `mayAnswer` now, or a control subscriber —
+   * its summaries count the session's `pendingApprovals`, so it can attach, be
+   * shown the question, and answer then. Built ON `mayAnswer` and wider by
+   * exactly that, so the two cannot drift: a subscriber keeps a question
+   * parked and never answers one it was not shown. A child mid-delegation is
+   * in no summary, so for one only `receives` counts.
+   */
+  private couldAnswer(connection: ClientConnection, sessionId: string, underParent: boolean): boolean {
+    if (underParent) return this.receives(connection, sessionId, true)
+    return this.mayAnswer(connection, sessionId) || connection.controlSubscribed
+  }
+
+  private anyCouldAnswer(sessionId: string, underParent: boolean): boolean {
+    for (const connection of this.connections) if (this.couldAnswer(connection, sessionId, underParent)) return true
+    return false
   }
 
   // ---- outbound: the notifications ----------------------------------------
@@ -349,6 +455,7 @@ export class ProtocolHost {
     // them whenever a durable fact moved one. A replace is included because it
     // makes the meter re-estimate the whole surface.
     if (VIEW_CHANGING.has(event.type) || event.surfaceOp?.op === 'replace') this.publishView(session)
+    if (SUMMARY_CHANGING.has(event.type)) this.oweSummary(session, false)
   }
 
   /** The view as it now stands, for every reader of this session. */
@@ -371,23 +478,99 @@ export class ProtocolHost {
 
   onAgentStatus(agent: Agent, status: 'idle' | 'running'): void {
     if (this.closed) return
-    this.broadcast(agent.id, this.parentRunning(agent.id, agent.session.header) !== undefined, { jsonrpc: '2.0', method: 'session.status', params: { sessionId: agent.id, status } })
+    const underParent = this.parentRunning(agent.id, agent.session.header) !== undefined
+    this.broadcast(agent.id, underParent, { jsonrpc: '2.0', method: 'session.status', params: { sessionId: agent.id, status } })
+    // `held` is the one view field a status change moves with no fact behind
+    // it: a quiet notice queued while a turn ran is held from the moment the
+    // agent goes idle. Re-sent only then, so status stays the cheap signal.
+    if (this.anyReceiver(agent.id, underParent) && foldJobs(agent.session.facts).some(quietlyQueued)) this.publishView(agent.session)
+    this.oweSummary(agent.session, false)
+  }
+
+  /** A session went live: a control subscriber learns of it without waiting for it to run. */
+  onAgentCreated(agent: Agent): void {
+    this.oweSummary(agent.session, false)
+  }
+
+  /** A session's agent is gone: its last summary says `closed`. */
+  onAgentDisposed(agent: Agent): void {
+    this.oweSummary(agent.session, true)
   }
 
   /**
    * The `approval/request` answerer. The durable `approval/asked` event already
    * reached every watching client as a frame, so parking the promise is all
-   * this does — and it parks only if someone is actually watching that session.
-   * With nobody to ask, it delegates down the waterfall rather than hanging the
+   * this does — and it parks only if some client could come to answer it
+   * (`couldAnswer`): a watcher, or a control subscriber its summary told. With
+   * nobody to ask, it delegates down the waterfall rather than hanging the
    * agent on a question no one will ever see.
    */
   answerApproval(prompt: ApprovalPrompt, next: () => Promise<ApprovalAnswer>): Promise<ApprovalAnswer> {
     if (this.closed) return next()
     const underParent = this.parentRunning(prompt.agent.id, prompt.agent.session.header) !== undefined
-    if (!this.anyReceiver(prompt.agent.id, underParent)) return next()
+    if (!this.anyCouldAnswer(prompt.agent.id, underParent)) return next()
     return new Promise<ApprovalAnswer>((resolve) => {
       this.pendingApprovals.set(`${prompt.agent.id}:${prompt.id}`, { sessionId: prompt.agent.id, settle: resolve })
     })
+  }
+
+  // ---- the control plane: summaries beside the watch sets -------------------
+
+  private anyControlSubscriber(): boolean {
+    for (const connection of this.connections) if (connection.controlSubscribed) return true
+    return false
+  }
+
+  /** Owes one session's summary at the end of this tick; a disposal makes it the `closed` one. */
+  private oweSummary(session: Session, closed: boolean): void {
+    if (this.closed || !this.anyControlSubscriber()) return
+    const owed = this.summariesOwed.get(session.id)
+    if (owed) {
+      owed.closed ||= closed
+      return
+    }
+    if (this.summariesOwed.size === 0) queueMicrotask(() => this.flushSummaries())
+    this.summariesOwed.set(session.id, { session, closed })
+  }
+
+  /**
+   * Every owed summary, to EVERY control subscriber whatever it watches: the
+   * point of the plane is that a client narrowed to one session still learns
+   * another wants a person. Computed when sent, so it is the state after the
+   * whole tick, and a child mid-delegation is skipped as the baseline skips it.
+   */
+  private flushSummaries(): void {
+    const owed = [...this.summariesOwed.values()]
+    this.summariesOwed.clear()
+    if (this.closed) return
+    const agents = this.ctx.get(AGENTS)
+    for (const { session, closed } of owed) {
+      if (this.parentRunning(session.id, session.header) !== undefined) continue
+      // A live owing whose agent is not (or no longer) registered has nothing
+      // live to summarize; a disposal owes its own `closed` summary.
+      const agent = closed ? undefined : agents.get(session.id)
+      if (!closed && agent === undefined) continue
+      const summary = this.summaryOf(session.id, agent === undefined ? session.facts : agent.session.facts, agent)
+      const frame: RpcNotification = { jsonrpc: '2.0', method: 'control.summary', params: summary }
+      for (const connection of this.connections) if (connection.controlSubscribed) connection.send(frame)
+    }
+  }
+
+  /**
+   * One session's summary, by the rules its view follows: jobs through
+   * `summarizeJobs`, questions through `pendingApprovalsOf`. No `agent` means
+   * its agent is gone, which is `closed`, and then the counts are what the
+   * log holds — notices a disposal queued quiet included.
+   */
+  private summaryOf(sessionId: string, facts: readonly EventEnvelope[], agent: Agent | undefined): ControlSummary {
+    const jobs = summarizeJobs(facts, agent)
+    return {
+      sessionId,
+      status: agent?.status ?? 'closed',
+      runningJobs: jobs.filter((job) => job.state === 'running').length,
+      heldNotices: jobs.filter((job) => job.held === true).length,
+      pendingApprovals: pendingApprovalsOf(facts, agent).length,
+    }
   }
 
   // ---- inbound ------------------------------------------------------------
@@ -434,6 +617,10 @@ export class ProtocolHost {
         return this.approvalAnswer(connection, record)
       case 'approval/revoke':
         return this.approvalRevoke(record)
+      case 'job/cancel':
+        return this.jobCancel(record)
+      case 'control/subscribe':
+        return this.controlSubscribe(connection)
       case 'session/authority':
         return this.authority(record)
       case 'session/model':
@@ -1037,18 +1224,12 @@ export class ProtocolHost {
     const window = route?.contextWindow ?? this.catalogWindow(options)
     return {
       status: source.agent?.status ?? 'idle',
-      // Only a LIVE agent can have a question outstanding. A stored log read
-      // cold never resumes (that is the point of a cold read), so
-      // `repairInterruptedTail` has not run over it — and a process killed
-      // between `approval/asked` and `approval/decided` leaves exactly the
-      // shape repair exists to close. Folding it here offered a crash artifact
-      // to a browser as a live Allow/Deny on an authority surface, for a
-      // question nothing was waiting on.
-      pendingApprovals: source.agent === undefined ? [] : openApprovals(facts),
+      pendingApprovals: pendingApprovalsOf(facts, source.agent),
       authority,
       ...(options === undefined ? {} : { options }),
       ...(route === undefined ? {} : { route }),
       ...(window === undefined || window <= 0 ? {} : { context: meterSession(facts, window) }),
+      jobs: summarizeJobs(facts, source.agent),
     }
   }
 
@@ -1112,6 +1293,11 @@ export class ProtocolHost {
    * It is not identity — there are no accounts here (§13) — but it is the
    * difference between "a client that was shown this" and "any open socket",
    * and it is what `decidedBy: 'user'` is allowed to mean.
+   *
+   * A control subscriber that watches elsewhere keeps the question parked
+   * (`couldAnswer`) but is refused here (`mayAnswer`): its summary showed a
+   * count, never the question. It attaches, is shown it in
+   * `view.pendingApprovals`, and answers then.
    */
   private approvalAnswer(connection: ClientConnection, params: Record<string, unknown>): ApprovalAnswerResult {
     const sessionId = requireString(params, 'sessionId', 'approval/answer')
@@ -1132,11 +1318,7 @@ export class ProtocolHost {
     // First answer wins, whichever client sent it; every other client learns
     // the outcome from the durable `approval/decided` event, not from here.
     if (!pending) return { outcome: 'not-pending' }
-    // `false`, for the reason `settleUnwatchedApprovals` passes `false`: a
-    // delegated child is pinned `never`, so its requests are refused inside the
-    // approval service before any answerer is consulted, and nothing delegated
-    // can be in this table.
-    if (!this.receives(connection, sessionId, false)) {
+    if (!this.mayAnswer(connection, sessionId)) {
       throw new RpcFailure(INVALID_PARAMS, `approval/answer: this connection does not watch session "${sessionId}"`)
     }
     // The offer is re-run against the same fold that produced it, so a client
@@ -1167,6 +1349,50 @@ export class ProtocolHost {
     return { revoked: this.ctx.get(APPROVAL).revoke(agent.session, grantId) }
   }
 
+  /**
+   * A PERSON stops one background job of a live session. The registry records
+   * it `by: 'user'` and delivers its notice quiet: only a job's own end may
+   * wake an agent, so a stop somebody asked for never starts a paid turn.
+   * Reached through `tryGet`, never injected, like compaction: a composition
+   * without the jobs row still mounts the protocol and answers this honestly.
+   */
+  private async jobCancel(params: Record<string, unknown>): Promise<JobCancelResult> {
+    const sessionId = requireString(params, 'sessionId', 'job/cancel')
+    const jobId = requireString(params, 'jobId', 'job/cancel')
+    const agent = this.ctx.get(AGENTS).get(asSessionId(sessionId))
+    if (!agent) throw new RpcFailure(INVALID_PARAMS, `no live session "${sessionId}"`)
+    this.assertDrivable(agent, 'job/cancel')
+    const jobs = this.ctx.tryGet(JOBS)
+    if (!jobs) throw new RpcFailure(INTERNAL_ERROR, 'this host has no jobs capability mounted')
+    let view: JobView
+    try {
+      view = await jobs.cancel(agent, jobId, 'user')
+    } catch (error) {
+      // An id this lifecycle never ran is the caller's to fix; a job of an
+      // earlier lifecycle was closed `lost` by the resume that began this one.
+      if (error instanceof JobError && error.code === 'JOB_UNKNOWN') throw new RpcFailure(INVALID_PARAMS, `job/cancel: ${error.message}`)
+      throw error
+    }
+    return { jobId: view.jobId, state: view.state, ...(view.end === undefined ? {} : { end: view.end }) }
+  }
+
+  /**
+   * Makes this connection a control subscriber and answers the baseline: one
+   * summary per live session the host would show. A child mid-delegation is
+   * left out — it belongs to its parent's tool call, as `parentRunning` says —
+   * and so are its later summaries. Subscribing is a candidacy change
+   * that only ADDS answerers, so nothing parked needs settling here.
+   */
+  private controlSubscribe(connection: ClientConnection): ControlSubscribeResult {
+    connection.subscribeControl()
+    const sessions: ControlSummary[] = []
+    for (const agent of this.ctx.get(AGENTS).list()) {
+      if (this.parentRunning(agent.id, agent.session.header) !== undefined) continue
+      sessions.push(this.summaryOf(agent.id, agent.session.facts, agent))
+    }
+    return { sessions }
+  }
+
   /** Dispose-to-idle: owned turns close as `cancelled` and flush; durable queues survive for the next resume. */
   private async shutdown(): Promise<Record<string, never>> {
     this.shuttingDown = true
@@ -1187,6 +1413,7 @@ export class ProtocolHost {
     this.closed = true
     for (const pending of this.pendingApprovals.values()) pending.settle('unavailable')
     this.pendingApprovals.clear()
+    this.summariesOwed.clear()
     for (const connection of this.connections) connection.close()
     this.connections.clear()
     this.config.onClose?.()

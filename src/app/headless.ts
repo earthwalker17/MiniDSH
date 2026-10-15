@@ -1,14 +1,16 @@
 /**
  * The headless runner: a direct core entry point. Compose → settle (fail loud
  * on pending/failed plugins) → create/resume/fork an agent → followup(task) →
- * wait idle → flush → read the final assistant text and turn outcome from the
- * log. It only touches `ctx.agents`/`ctx.sessions` and renders through
- * `onEvent`.
+ * wait idle → stop its background jobs → flush → read the final assistant text
+ * and turn outcome from the log. It only touches `ctx.agents`/`ctx.sessions`
+ * (and `ctx.jobs`, optional, to stop what a task left running) and renders
+ * through `onEvent`.
  */
 import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS, mergeAgentOptions, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
 import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
+import { JOBS } from '../core/jobs/index.ts'
 import { effectiveSandboxMode, SANDBOX, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
 import { PRESETS } from '../core/presets/index.ts'
@@ -118,6 +120,8 @@ export interface TaskResult {
   readonly sessionId: SessionId
   readonly text: string
   readonly reason: string
+  /** Background jobs still running when the task went idle, stopped by the headless rule (`drive`). */
+  readonly stoppedJobs: number
 }
 
 /** Streams `{sessionId, event}` — the same frame the wire carries (ARCHITECTURE §8). */
@@ -221,12 +225,29 @@ function applyPreset(root: Context, handle: AgentHandle, name: string | undefine
   presets.apply(handle.agent.session, name)
 }
 
-/** Feed the task (if any), wait for quiescence, flush, fold the outcome; always disposes the handle. */
-async function drive(handle: AgentHandle, task: string | undefined): Promise<TaskResult> {
+/**
+ * Feed the task (if any), wait for quiescence, stop what is still running,
+ * flush, fold the outcome; always disposes the handle.
+ *
+ * **The headless rule.** A one-shot run ends when its task goes idle, and
+ * nothing will be there to read a background job's end: every job still
+ * running is stopped, recorded `cancelled` by `disposal` and delivered quiet.
+ * `stopAll` is called in the SAME continuation as `whenIdle`, before any other
+ * await — a job's own end landing in between would wake a paid turn nobody
+ * asked for. The exit code still reads the last `turn/end` alone.
+ */
+async function drive(root: Context, handle: AgentHandle, task: string | undefined): Promise<TaskResult> {
   try {
     await handle.agent.whenIdle()
     if (task !== undefined && task.length > 0) {
       handle.agent.followup(createUserMessage(task))
+      await handle.agent.whenIdle()
+    }
+    const jobs = root.tryGet(JOBS)
+    const stoppedJobs = jobs?.list(handle.agent).filter((job) => job.state === 'running').length ?? 0
+    const stopping = jobs?.stopAll(handle.agent)
+    if (stopping !== undefined) {
+      await stopping
       await handle.agent.whenIdle()
     }
     await handle.agent.session.flush()
@@ -237,6 +258,7 @@ async function drive(handle: AgentHandle, task: string | undefined): Promise<Tas
       sessionId: asSessionId(handle.agent.id),
       text: foldLastAssistantText(events),
       reason,
+      stoppedJobs,
     }
   } finally {
     await handle.dispose()
@@ -264,7 +286,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     })
     applyAuthority(root, handle, options)
-    return await drive(handle, options.task)
+    return await drive(root, handle, options.task)
   } finally {
     await root.dispose()
   }
@@ -294,7 +316,7 @@ export async function resumeTask(options: ContinueOptions, onEvent?: EventListen
   try {
     const handle = await root.get(AGENTS).resume(root, asSessionId(options.id), continueArgs(options))
     applyAuthority(root, handle, options)
-    return await drive(handle, options.task)
+    return await drive(root, handle, options.task)
   } finally {
     await root.dispose()
   }
@@ -308,7 +330,7 @@ export async function forkTask(options: ContinueOptions, onEvent?: EventListener
       ...(options.salvage === true ? { salvage: true } : {}),
     })
     applyAuthority(root, handle, options)
-    return await drive(handle, options.task)
+    return await drive(root, handle, options.task)
   } finally {
     await root.dispose()
   }

@@ -2,8 +2,10 @@
  * The browser surface. It renders durable events and drives the same control
  * plane the terminal does — and holds no semantics of its own:
  *
- * - Context pressure, the open approvals, the authority and the route all
- *   arrive in `SessionView`, because a client holding one PAGE cannot fold them.
+ * - Context pressure, the open approvals, the authority, the route and the
+ *   background jobs all arrive in `SessionView`, because a client holding one
+ *   PAGE cannot fold them; what every OTHER session wants from a person
+ *   arrives as `control.summary`.
  * - The transcript is the log in seq order, not model history. Nothing here
  *   folds the surface; a compaction shows as the record it is, and the messages
  *   it shadowed are still there when you page back.
@@ -12,7 +14,7 @@
  * - No test imports this file: the DOM rendering is untested. The window rules
  *   (`wire.js`) and the row projection (`rows.js`) are what the unit tests cover.
  */
-import { describeRow, tokens } from './rows.js'
+import { describeRow, jobEnded, tokens } from './rows.js'
 import { SessionWindow, Wire } from './wire.js'
 
 const $ = (id) => document.getElementById(id)
@@ -39,6 +41,16 @@ const state = {
   streamRows: [],
   pendingApproval: undefined,
   workspaceId: undefined,
+  /**
+   * The latest `control.summary` per session: whole-state and superseding, so
+   * the newest one is all there is to know. What the session list's badges
+   * read — never a fold of this client's own.
+   */
+  summaries: new Map(),
+  /** The badge holder of each listed session, so a summary updates it in place. */
+  badges: new Map(),
+  /** Jobs whose stop this client asked for and has no answer to yet. */
+  stopping: new Set(),
   /**
    * The live status, kept beside the view: `session.status` flips at turn end,
    * but the last `session.view` was published mid-turn and still says
@@ -186,6 +198,7 @@ function renderView() {
   $('sandbox').value = view?.authority.sandbox ?? ''
   $('approval').value = view?.authority.approval ?? ''
   $('accepts').value = view?.authority.accepts ?? ''
+  renderJobs(view?.jobs ?? [])
 
   const open = view?.pendingApprovals?.[0]
   state.pendingApproval = open
@@ -207,6 +220,54 @@ function renderView() {
       const omitted = call.omittedChars ? `\n…${call.omittedChars} more characters — read the whole call with \`minidsh sessions show --json\`` : ''
       $('approval-call').textContent = `${call.name} ${call.arguments}${omitted}`
     }
+  }
+}
+
+/** How many ended jobs the strip keeps beside the live ones; the transcript has every end. */
+const ENDED_JOBS_SHOWN = 3
+
+/**
+ * The open session's background jobs, as the host folded them (`view.jobs`):
+ * a compact strip under the header. A running job gets a stop button, which is
+ * a PERSON's stop over the wire; the end it causes arrives as a durable event
+ * and a view push like any other, so the button only asks.
+ */
+function renderJobs(jobs) {
+  const strip = $('jobs')
+  const live = jobs.filter((job) => job.state !== 'ended' || job.held)
+  const ended = jobs.filter((job) => job.state === 'ended' && !job.held).slice(-ENDED_JOBS_SHOWN)
+  const shown = jobs.filter((job) => live.includes(job) || ended.includes(job))
+  strip.replaceChildren()
+  strip.hidden = shown.length === 0
+  for (const job of shown) {
+    const item = el('span', `job ${job.state}`)
+    item.title = `${job.label}\n${job.jobId}${job.pid === undefined ? '' : `\npid ${job.pid}`}`
+    item.append(el('span', 'label', job.label), el('span', 'state', job.end ? jobEnded(job.end) : job.state === 'running' ? 'running' : 'no end recorded'))
+    if (job.held) item.append(el('span', 'held', 'notice held: your next message delivers it'))
+    if (job.state === 'running') {
+      const stop = el('button', 'stop', 'stop')
+      stop.title = 'stop this job (the agent is told at its next message)'
+      // Every view push rebuilds the strip, so a stop in flight is remembered
+      // here rather than on a button the next push replaces.
+      stop.disabled = state.stopping.has(job.jobId)
+      stop.addEventListener('click', () => {
+        if (!state.window) return
+        state.stopping.add(job.jobId)
+        stop.disabled = true
+        void state.wire
+          .request('job/cancel', { sessionId: state.window.sessionId, jobId: job.jobId })
+          .then((result) => {
+            if (result.state !== 'ended') notice(`job ${job.jobId}: a stop was requested, but it has not ended yet`)
+          })
+          .catch(fail)
+          .finally(() => {
+            state.stopping.delete(job.jobId)
+            renderView()
+          })
+      })
+      item.append(stop)
+    }
+    strip.append(item)
   }
 }
 
@@ -311,6 +372,7 @@ async function refreshSessions() {
   const { sessions } = await state.wire.request('sessions/list', state.workspaceId ? { workspaceId: state.workspaceId } : undefined)
   const list = $('sessions')
   list.replaceChildren()
+  state.badges.clear()
   for (const session of sessions) {
     const item = el('button', `session${session.id === state.window?.sessionId ? ' current' : ''}`)
     const short = session.id.replace(/^session-/, '').slice(0, 8)
@@ -321,10 +383,36 @@ async function refreshSessions() {
     item.title = session.title ? `${session.title}\n${session.id}\n${session.cwd}` : `${session.id}\n${session.cwd}`
     if (session.live) item.append(el('span', 'live', 'live'))
     if (session.delegatedBy) item.append(el('span', 'tag', 'child'))
+    const badges = el('span', 'badges')
+    item.append(badges)
+    state.badges.set(session.id, badges)
+    renderBadges(session.id)
     item.addEventListener('click', () => void openSession(session.id).catch(fail))
     list.append(item)
     if (session.id === state.window?.sessionId) nameSession(session.title)
   }
+}
+
+/**
+ * What a session wants from a person, read off its latest `control.summary`:
+ * running jobs, notices held for the next message, questions waiting for an
+ * answer. A session this client is not watching still says so here — that is
+ * what the control subscription is for.
+ */
+function renderBadges(sessionId) {
+  const holder = state.badges.get(sessionId)
+  if (!holder) return
+  const summary = state.summaries.get(sessionId)
+  holder.replaceChildren()
+  if (!summary) return
+  const badge = (count, cls, one, many) => {
+    if (count > 0) holder.append(el('span', `badge ${cls}`, count === 1 ? one : `${count} ${many}`))
+  }
+  badge(summary.pendingApprovals, 'ask', '1 question', 'questions')
+  badge(summary.heldNotices, 'held', '1 held notice', 'held notices')
+  badge(summary.runningJobs, 'jobs', '1 job running', 'jobs running')
+  // A closed session is no longer live, whatever the listing said when it was drawn.
+  if (summary.status === 'closed') holder.parentElement?.querySelector('.live')?.remove()
 }
 
 /** The open session's name, in the header and in the tab — one window per session, so the tab can say which. */
@@ -413,10 +501,19 @@ async function start() {
       $('offline').hidden = true
       try {
         state.init = await state.wire.request('initialize')
-        // This surface renders one session at a time, so it watches one at a
-        // time. Left un-narrowed it would be counted as an answerer for every
-        // approval on the host and park questions it never shows.
+        // The browser narrows its EVENT stream to the open session, but stays a
+        // control subscriber for all of them: one session's transcript is what
+        // it renders, and every session's running jobs, held notices and open
+        // questions are what its list shows. `control.summary` ignores the
+        // narrowing, so a question parked on a session this client is not
+        // watching is one its list still points a person to.
         await state.wire.request('session/detach')
+        // A fresh connection's baseline REPLACES what an old one pushed — but a
+        // push that lands before the answer is no older than the baseline, so
+        // it is kept.
+        state.summaries = new Map()
+        const { sessions: summaries } = await state.wire.request('control/subscribe', {})
+        for (const summary of summaries) if (!state.summaries.has(summary.sessionId)) state.summaries.set(summary.sessionId, summary)
         const picker = $('workspace')
         picker.replaceChildren(el('option', undefined, 'every workspace'))
         picker.firstChild.value = ''
@@ -436,6 +533,13 @@ async function start() {
     },
     onClose: () => void ($('offline').hidden = false),
     onNotification: (method, params) => {
+      // Before the filter below, which keeps only the open session's frames: a
+      // summary is about ANY session, and that is the point of it.
+      if (method === 'control.summary') {
+        state.summaries.set(params.sessionId, params)
+        renderBadges(params.sessionId)
+        return
+      }
       if (params?.sessionId && params.sessionId !== state.window?.sessionId) return
       if (method === 'session.event') {
         if (params.event.type === 'assistant/chunk') {

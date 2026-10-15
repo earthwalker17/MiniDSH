@@ -3,18 +3,20 @@
  *
  * A stored log read by something other than the runtime that wrote it (§4):
  * no lease is taken, nothing is repaired or written, and every judgement is
- * one its OWNER already makes — `checkSessionLog` and `checkAuthorityLog` are
- * the live invariants' own steps, `repairTail` is the resume's own closer
- * list, the folds are the ones the runtime reads. This file only composes
+ * one its OWNER already makes — `checkSessionLog`, `checkAuthorityLog` and
+ * `checkJobsLog` are the live invariants' own steps, `repairTail` is the
+ * resume's own closer list, the folds are the ones the runtime reads. This file only composes
  * them into a verdict and a report; it states no rule of its own beyond the
  * two header-versus-log checks that only a reader holding the header can make.
  *
  * Its one consumer is the CLI; a wire method would move it below the surfaces.
  */
-import { foldInbox, repairTail, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
+import { foldInbox, INBOX_SPLICED, repairTail, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
 import { COMPACTION_END } from '../core/compaction/events.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, delegationPin, effectiveApprovalPolicy, liveGrants, undecidedApprovals, type ApprovalGrant, type ApprovalPolicy } from '../core/approval/index.ts'
 import type { Attachments } from '../core/attachments/index.ts'
+import { foldJobs, JOB_END, noticeJobId, type JobEnd } from '../core/jobs/events.ts'
+import { checkJobsLog } from '../core/jobs/invariant.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
@@ -35,14 +37,16 @@ import {
   type SalvageRecord,
   type SessionHeader,
 } from '../core/session/index.ts'
+import { printableText } from '../core/text.ts'
 import { COMPOSITION_APPLIED } from '../capabilities/composition-record/index.ts'
+import { jobStatus } from '../capabilities/tool-jobs/index.ts'
 import { describeEvent, preview } from './present.ts'
 
 export type Severity = 'error' | 'warning' | 'info'
 
 export interface Finding {
   readonly severity: Severity
-  /** Which judgement found it: `integrity`, `session`, `authority`, `repair`, `delegation`, `approvals`, `attachments`, `fold`, `tail`. */
+  /** Which judgement found it: `integrity`, `session`, `authority`, `jobs`, `repair`, `delegation`, `approvals`, `attachments`, `fold`, `tail`. */
   readonly check: string
   readonly seq?: number
   readonly message: string
@@ -126,6 +130,7 @@ export function verifyStored(stored: StoredSession): Verification {
   for (const [check, run] of [
     ['session', checkSessionLog],
     ['authority', checkAuthorityLog],
+    ['jobs', checkJobsLog],
   ] as const) {
     const violation = run(continued)
     if (violation === undefined) continue
@@ -167,17 +172,33 @@ export function verifyStored(stored: StoredSession): Verification {
     // disposal mid-`/compact` leaves exactly that with no crash anywhere.
     const openTurn = closers.some((event) => matches(event, TURN_END))
     const openBracket = closers.some((event) => matches(event, SUBAGENT_END) || matches(event, COMPACTION_END))
+    // A job's closers are two different debts (`closeUnpairedJobs`): a start
+    // the log never ended closes `lost`, its notice after it; an end whose
+    // notice never landed is only owed the notice. Neither is a crash's alone —
+    // a host that died idle with a job running leaves the first and no open turn.
+    const lost = new Set(closers.flatMap((event) => (matches(event, JOB_END) ? [event.data.jobId] : [])))
+    const notices = closers.flatMap((event) => (matches(event, INBOX_SPLICED) && event.data.op === 'insert' ? [noticeJobId(event.data.message)] : [])).filter((id) => id !== undefined)
+    const owed = notices.filter((id) => !lost.has(id)).length
     const what = openTurn
       ? openBracket
         ? 'the last turn and a bracket (a delegation or a compaction) are open'
         : 'the last turn is open'
-      : 'a bracket is open (a delegation or a compaction the log never closed)'
+      : openBracket
+        ? 'a bracket is open (a delegation or a compaction the log never closed)'
+        : lost.size > 0
+          ? `${lost.size} background job(s) have no recorded end`
+          : `${owed} background job end(s) were never delivered to the model`
+    const resume = [
+      ...(openTurn || openBracket ? [`appends ${closers.length - lost.size - notices.length} closer(s)`] : []),
+      ...(lost.size > 0 ? [`closes ${lost.size} job(s) lost`] : []),
+      ...(owed > 0 ? [`delivers ${owed} held notice(s)`] : []),
+    ]
     findings.push({
       severity: 'info',
       check: 'tail',
       message: inFlux
         ? `${what} and a live writer holds this log, so it may simply be running; a fork taken now closes it with ${closers.length} conservative closer(s)`
-        : `${what}${openTurn ? ' (a crash or a kill)' : ''}: a resume appends ${closers.length} closer(s)`,
+        : `${what}${openTurn ? ' (a crash or a kill)' : ''}: a resume ${resume.join(', ')}`,
     })
   }
 
@@ -267,10 +288,30 @@ export interface Inspection {
   readonly undecidedApprovals: readonly { readonly id: string; readonly toolName: string; readonly seq: number; readonly closedOnResume: boolean }[]
   readonly inbox: { readonly nextTurn: readonly string[]; readonly nextStep: readonly string[] }
   readonly children: readonly { readonly childId: string; readonly callId: string; readonly seq: number; readonly ended?: string }[]
+  /**
+   * Every background job the log names, in start order (`foldJobs`). A cold
+   * read supervises nothing, so a job with no recorded end is `unclosed`,
+   * never `running` — whatever its process is doing, nothing here knows.
+   */
+  readonly jobs: readonly InspectedJob[]
   readonly cost: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly childInput: number; readonly childOutput: number }
 }
 
-type Report = Pick<Inspection, 'lifecycles' | 'turns' | 'authority' | 'undecidedApprovals' | 'inbox' | 'children' | 'cost'> & { readonly facts: number }
+export interface InspectedJob {
+  readonly jobId: string
+  readonly label: string
+  /** The seq of its `job/start`. */
+  readonly seq: number
+  readonly state: 'ended' | 'unclosed'
+  /** The recorded end, verbatim. */
+  readonly end?: JobEnd
+  /** Its notice is queued and will not wake the agent: the next message delivers it. */
+  readonly held?: true
+  /** No end recorded, and the closers end it `lost`. */
+  readonly closedOnResume?: true
+}
+
+type Report = Pick<Inspection, 'lifecycles' | 'turns' | 'authority' | 'undecidedApprovals' | 'inbox' | 'children' | 'jobs' | 'cost'> & { readonly facts: number }
 
 /**
  * What the report reads off the log: each section its owner's fold, each
@@ -387,6 +428,22 @@ function readFolds(events: readonly EventEnvelope[], closers: readonly EventEnve
     },
     { nextTurn: [], nextStep: [] },
   )
+  const jobs = attempt(
+    'jobs',
+    (): InspectedJob[] => {
+      const closedOnResume = new Set(closers.flatMap((event) => (matches(event, JOB_END) ? [event.data.jobId] : [])))
+      return foldJobs(facts).map((record) => ({
+        jobId: record.start.jobId,
+        label: record.start.label,
+        seq: record.startSeq,
+        state: record.end === undefined ? 'unclosed' : 'ended',
+        ...(record.end === undefined ? {} : { end: record.end }),
+        ...(record.notice?.state === 'queued' && !record.notice.waking ? { held: true as const } : {}),
+        ...(record.end === undefined && closedOnResume.has(record.start.jobId) ? { closedOnResume: true as const } : {}),
+      }))
+    },
+    [],
+  )
   const metrics = attempt('cost', () => meterSession(facts, 0), undefined)
   return {
     report: {
@@ -397,6 +454,7 @@ function readFolds(events: readonly EventEnvelope[], closers: readonly EventEnve
       undecidedApprovals: asked,
       inbox,
       children: [...children.values()],
+      jobs,
       cost: { input: metrics?.sessionInput ?? 0, output: metrics?.sessionOutput ?? 0, cacheRead: metrics?.sessionCacheRead ?? 0, childInput, childOutput },
     },
     failures,
@@ -509,6 +567,12 @@ export function inspectLines(inspection: Inspection): string[] {
     lines.push(`queued inbox: ${nextTurn.length} next-turn, ${nextStep.length} next-step${nextTurn[0] === undefined ? '' : ` · first: "${nextTurn[0]}"`}`)
   }
   for (const child of inspection.children) lines.push(`child: ${child.childId} (call ${child.callId}, at ${child.seq}) ${child.ended ?? 'never ended'}`)
+  for (const job of inspection.jobs) {
+    // The tool's own status words; the label and the failure detail are the
+    // model's and a producer's text, so the line is neutralized whole.
+    const after = job.closedOnResume === true ? ' — closed `lost` on resume' : job.held === true ? ' · its notice is held for the next message' : ''
+    lines.push(printableText(`job: ${job.jobId} \`${preview(job.label, 80)}\` (at ${job.seq}) ${jobStatus({ state: job.state, ...(job.end === undefined ? {} : { end: job.end }) })}${after}`))
+  }
   const { cost } = inspection
   const childCost = cost.childInput + cost.childOutput > 0 ? ` · children ${formatTokens(cost.childInput)} in / ${formatTokens(cost.childOutput)} out` : ''
   lines.push(`cost: ${formatTokens(cost.input)} in · ${formatTokens(cost.cacheRead)} cached · ${formatTokens(cost.output)} out${childCost}`)

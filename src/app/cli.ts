@@ -451,6 +451,9 @@ function eventPrinter(json: boolean): EventListener {
 function finishTask(result: TaskResult, json: boolean): number {
   if (!json) process.stdout.write(`${result.text}\n`)
   if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
+  // Said, never folded into the exit code: the task's turn decides that, and a
+  // job stopped at the end of a one-shot run is the rule working, not a failure.
+  if (result.stoppedJobs > 0) process.stderr.write(`minidsh: ${result.stoppedJobs} background job(s) were still running when the run ended, and were stopped\n`)
   process.stderr.write(`session: ${result.sessionId}\n`)
   return result.exitCode
 }

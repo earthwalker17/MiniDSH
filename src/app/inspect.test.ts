@@ -8,7 +8,8 @@ import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
-import { AGENTS, SUBAGENT_START } from '../core/agent/index.ts'
+import { AGENTS, INBOX_SPLICED, SUBAGENT_START } from '../core/agent/index.ts'
+import { JOB_END, JOB_START, jobNotice } from '../core/jobs/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../core/approval/index.ts'
 import { EFFECT_RECORDED } from '../core/effects/index.ts'
 import { asCallId, asSessionId } from '../core/ids.ts'
@@ -17,6 +18,7 @@ import type { StoredSession } from '../core/persistence/index.ts'
 import { SANDBOX_ACCEPTANCE, SANDBOX_MODE } from '../core/sandbox/index.ts'
 import {
   ASSISTANT_MESSAGE,
+  matches,
   SESSION_LIFECYCLE,
   SESSIONS,
   STEP_END,
@@ -228,6 +230,97 @@ describe('verify: the verdict', () => {
   })
 })
 
+/** The C0 and C1 control characters a line carries: what `printableText` exists to remove. */
+const controls = (line: string): string[] => [...line].filter((ch) => ch.codePointAt(0)! < 0x20 || (ch.codePointAt(0)! >= 0x7f && ch.codePointAt(0)! <= 0x9f))
+
+describe('verify: background jobs', () => {
+  const JOB = 'job-00000000000000aa'
+  const jobStart = { jobId: JOB, callId: 'c0', kind: 'shell', label: 'sleep 60', pid: 4242, mode: 'workspace-write', enforcement: 'full' } as const
+  /** The run that started the job, ended: the job outlives the call and the turn. */
+  const started = (add: <D>(type: string, data: D, surface?: boolean) => void): void => {
+    opening(add)
+    completedTurn(add)
+    add(JOB_START.type, jobStart)
+  }
+
+  it('closes a job the log never ended `lost`, delivers its notice quiet, and says so instead of naming a bracket', () => {
+    const events = log(started)
+    const verification = verifyStored(stored(events))
+    expect(verification.verdict).toBe('interrupted')
+    expect(verification.closers.map((event) => event.type)).toEqual([JOB_END.type, INBOX_SPLICED.type])
+    expect(verification.closers[0]!.data).toEqual({ jobId: JOB, cause: 'lost' })
+    expect(verification.closers[1]!.data).toMatchObject({ op: 'insert', queue: 'next-step', waking: false, message: { id: `msg-job-${JOB}` } })
+    const tail = verification.findings.find((finding) => finding.check === 'tail')!.message
+    expect(tail).toBe('1 background job(s) have no recorded end: a resume closes 1 job(s) lost')
+    expect(tail).not.toContain('a bracket is open')
+
+    // The report: a cold read supervises nothing, so the job is `unclosed`, never `running`.
+    const inspection = inspectStored(stored(events), verification)
+    expect(inspection.jobs).toEqual([{ jobId: JOB, label: 'sleep 60', seq: events.length - 1, state: 'unclosed', closedOnResume: true }])
+    expect(inspectLines(inspection)).toContain(`job: ${JOB} \`sleep 60\` (at ${events.length - 1}) no end recorded — closed \`lost\` on resume`)
+    expect(JSON.parse(JSON.stringify(inspection)).jobs).toEqual(inspection.jobs)
+  })
+
+  it('says a resume only delivers a notice when the end is recorded and its notice never landed', () => {
+    const events = log((add) => {
+      started(add)
+      add(JOB_END.type, { jobId: JOB, cause: 'exited', exitCode: 0, durationMs: 1200 })
+    })
+    const verification = verifyStored(stored(events))
+    expect(verification.verdict).toBe('interrupted')
+    expect(verification.closers.map((event) => event.type)).toEqual([INBOX_SPLICED.type])
+    expect(verification.findings.find((finding) => finding.check === 'tail')!.message).toBe(
+      '1 background job end(s) were never delivered to the model: a resume delivers 1 held notice(s)',
+    )
+    // Beside an open turn the turn's closers are still counted apart from the job's.
+    const crashed = log((add) => {
+      started(add)
+      add(TURN_START.type, { turn: 2 })
+      add(STEP_START.type, { turn: 2, step: 1 })
+    })
+    const both = verifyStored(stored(crashed))
+    expect(both.findings.find((finding) => finding.check === 'tail')!.message).toBe('the last turn is open (a crash or a kill): a resume appends 2 closer(s), closes 1 job(s) lost')
+  })
+
+  it('reports a held notice in the jobs section, and an end with nothing owed as plainly ended', () => {
+    const end = { jobId: JOB, cause: 'cancelled', by: 'user', durationMs: 3000 } as const
+    const events = log((add) => {
+      started(add)
+      add(JOB_END.type, end)
+      add(INBOX_SPLICED.type, { op: 'insert', queue: 'next-step', message: jobNotice(jobStart, end), waking: false })
+    })
+    const verification = verifyStored(stored(events))
+    expect({ verdict: verification.verdict, closers: verification.closers }).toEqual({ verdict: 'ok', closers: [] })
+    const inspection = inspectStored(stored(events), verification)
+    expect(inspection.jobs).toEqual([{ jobId: JOB, label: 'sleep 60', seq: events.length - 3, state: 'ended', end, held: true }])
+    expect(inspectLines(inspection).find((line) => line.startsWith('job: '))).toBe(
+      `job: ${JOB} \`sleep 60\` (at ${events.length - 3}) stopped by the user after 3.0s · its notice is held for the next message`,
+    )
+  })
+
+  it('holds a stored log to the jobs rule: a second end for one job is invalid, at the seq that broke it', () => {
+    const events = log((add) => {
+      started(add)
+      add(JOB_END.type, { jobId: JOB, cause: 'exited', exitCode: 0, reportedBy: 'c1' })
+      add(JOB_END.type, { jobId: JOB, cause: 'cancelled', by: 'user', reportedBy: 'c1' })
+    })
+    const verification = verifyStored(stored(events))
+    expect(verification.verdict).toBe('invalid')
+    expect(verification.findings).toContainEqual(expect.objectContaining({ severity: 'error', check: 'jobs', seq: events.length - 1, message: expect.stringMatching(/second end/) }))
+  })
+
+  it('neutralizes a hostile label in the report', () => {
+    const ESC = String.fromCharCode(27)
+    const events = log((add) => {
+      opening(add)
+      add(JOB_START.type, { ...jobStart, label: `sleep 1${ESC}[2K${ESC}[1A` })
+    })
+    const line = inspectLines(inspectStored(stored(events), verifyStored(stored(events)))).find((entry) => entry.startsWith('job: '))!
+    expect(controls(line)).toEqual([])
+    expect(line).toContain('sleep 1 [2K [1A')
+  })
+})
+
 describe('verify: attachments', () => {
   it('reports a message it cannot read instead of throwing', async () => {
     const events = log((add) => {
@@ -345,6 +438,57 @@ describe('sessions verify | inspect: cold reads through the CLI', () => {
       const appended = resumed.agent.session.events.slice(before.bytes.toString('utf8').trim().split('\n').length - 1, resumed.agent.session.liveStart)
       expect(appended.map((event) => JSON.stringify(event))).toEqual(verdict.closers.map((event) => JSON.stringify(event)))
       await resumed.dispose()
+    } finally {
+      if (previous === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previous
+    }
+  })
+
+  it('predicts exactly what a resume appends for a job its dead writer left running, and the resume holds its notice', async () => {
+    const home = tempDir('minidsh-home-')
+    const previous = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    try {
+      harness = await coreHarness()
+      harness.root.plugin(persistenceJsonlPlugin, { root: join(home, 'sessions') })
+      await harness.root.settle()
+      const sessions = harness.root.get(SESSIONS)
+      const died = sessions.create({ cwd: process.cwd(), id: asSessionId('died-idle') })
+      died.append(SESSION_LIFECYCLE, { origin: 'new', dispatch: true, durability: 'synced' })
+      died.append(TURN_START, { turn: 1 })
+      died.append(STEP_START, { turn: 1, step: 1 })
+      died.append(USER_MESSAGE, { message: createUserMessage('start the server') }, { surfaceOp: { op: 'append' } })
+      died.append(ASSISTANT_MESSAGE, { turn: 1, step: 1, message: createAssistantMessage([{ type: 'text', text: 'started' }], 'scripted', 'scripted-model') }, { surfaceOp: { op: 'append' } })
+      died.append(STEP_END, { turn: 1, step: 1 })
+      died.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+      // The host died IDLE with the job running: no turn is open, only the job.
+      died.append(JOB_START, { jobId: 'job-00000000000000bb', callId: 'c1', kind: 'shell', label: 'pnpm dev', pid: 999_999, mode: 'workspace-write', enforcement: 'none' })
+      await sessions.detach(died)
+      const file = join(home, 'sessions', 'died-idle.jsonl')
+      const storedLength = readFileSync(file, 'utf8').trim().split('\n').length - 1
+
+      const verified = await capture(['sessions', 'verify', 'died-idle', '--json'])
+      expect(verified.code).toBe(0)
+      const verdict = JSON.parse(verified.out) as { verdict: string; closers: EventEnvelope[]; findings: { check: string; message: string }[] }
+      expect(verdict.verdict).toBe('interrupted')
+      expect(verdict.findings.find((finding) => finding.check === 'tail')?.message).toContain('a resume closes 1 job(s) lost')
+      const inspected = await capture(['sessions', 'inspect', 'died-idle'])
+      expect(inspected.out).toContain('job: job-00000000000000bb `pnpm dev`')
+      expect(inspected.out).toContain('no end recorded — closed `lost` on resume')
+
+      const resumed = await harness.root.get(AGENTS).resume(harness.root, asSessionId('died-idle'), { agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+      const appended = resumed.agent.session.events.slice(storedLength, resumed.agent.session.liveStart)
+      expect(appended.map((event) => JSON.stringify(event))).toEqual(verdict.closers.map((event) => JSON.stringify(event)))
+      // Quiet: the notice is queued for the next prompt, and no turn ran for it.
+      await resumed.agent.whenIdle()
+      expect(resumed.agent.session.events.filter((event) => event.seq >= resumed.agent.session.liveStart && matches(event, TURN_START))).toHaveLength(0)
+      await resumed.dispose()
+      // And the resumed log, read cold again, owes nothing more and still holds the notice.
+      const after = await capture(['sessions', 'inspect', 'died-idle', '--json'])
+      expect((JSON.parse(after.out) as { verdict: string; jobs: unknown[] })).toMatchObject({
+        verdict: 'ok',
+        jobs: [{ jobId: 'job-00000000000000bb', state: 'ended', end: { cause: 'lost' }, held: true }],
+      })
     } finally {
       if (previous === undefined) delete process.env.MINIDSH_HOME
       else process.env.MINIDSH_HOME = previous

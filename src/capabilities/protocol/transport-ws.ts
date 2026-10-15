@@ -18,8 +18,11 @@
  * an unbounded buffer or a drop policy. So the trace tier — recorded for
  * streaming fidelity, never folded by anything — is dropped when a peer falls
  * behind, and the client reconstructs the same text from `assistant/message`.
- * Facts and surface events are never dropped: past a hard ceiling the socket is
- * closed instead, and the client reattaches and gets a fresh page.
+ * Everything else is never dropped — facts, surface events, statuses, views
+ * and `control.summary`, which is small, bound in rate by state changes and
+ * superseding, so dropping one would buy nothing and could hide the one that
+ * says a session wants a person: past a hard ceiling the socket is closed
+ * instead, and the client reattaches and gets a fresh page.
  */
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, Server } from 'node:http'

@@ -12,6 +12,7 @@
 import type { AgentOptions } from '../../core/agent/index.ts'
 import type { ApprovalGrant, ApprovalOfferId, ApprovalPolicy, OpenApproval } from '../../core/approval/index.ts'
 import type { CompactionDeclineReason } from '../../core/compaction/index.ts'
+import type { JobEnd } from '../../core/jobs/index.ts'
 import type { ProviderInfo } from '../../core/llm/index.ts'
 import type { ContextMetrics } from '../../core/metering/index.ts'
 import type { SandboxEnforcement, SandboxMode } from '../../core/sandbox/index.ts'
@@ -220,6 +221,26 @@ export interface SessionView {
   readonly options?: AgentOptions
   /** The EFFECTIVE route of the last request, and the window its adapter advertises. */
   readonly route?: RequestContextRecord
+  /** Every background job the log names, in start order; `[]` when none. A page cannot pair a start with an end it does not hold. */
+  readonly jobs: readonly JobSummary[]
+}
+
+/** One background job as a reader is shown it: a projection of its bracket and its notice, never registry state. */
+export interface JobSummary {
+  readonly jobId: string
+  readonly label: string
+  /**
+   * `running`: a live registry supervises it now. `ended`: its end is
+   * recorded. `unclosed`: no end is recorded and nothing here supervises it —
+   * a cold read of a log whose writer is gone, which the next resume closes
+   * `lost`. A cold read never says `running`.
+   */
+  readonly state: 'running' | 'ended' | 'unclosed'
+  readonly pid?: number
+  /** The recorded end, verbatim. */
+  readonly end?: JobEnd
+  /** Its notice is queued and will not wake the agent: the next message delivers it. */
+  readonly held?: true
 }
 
 /** A message-aligned slice of the log. `from`/`to` are inclusive seq bounds; `to` is -1 for an empty page. */
@@ -346,6 +367,37 @@ export interface ApprovalAnswerResult {
   readonly outcome: 'accepted' | 'not-pending'
 }
 
+/** A PERSON's stop of one background job of a live session. */
+export interface JobCancelParams {
+  readonly sessionId: string
+  readonly jobId: string
+}
+
+/**
+ * The job after the stop, waited on (bounded): `running` means its process
+ * had not ended when the wait gave up, and its end will still be recorded
+ * when it does. Either way the agent is not woken — a stop a person asked for
+ * is delivered quiet.
+ */
+export interface JobCancelResult {
+  readonly jobId: string
+  readonly state: 'running' | 'ended'
+  readonly end?: JobEnd
+}
+
+/**
+ * Become a control subscriber: this connection receives `control.summary` for
+ * every live session, whatever its watch set — and, being shown each one's
+ * `pendingApprovals`, it counts as a client that could still come to answer
+ * a parked question.
+ */
+export type ControlSubscribeParams = Record<string, never>
+
+/** The baseline: one summary per live session the host would show (a child mid-delegation is its parent's). */
+export interface ControlSubscribeResult {
+  readonly sessions: readonly ControlSummary[]
+}
+
 // ---- notifications (host → client) ----------------------------------------
 
 /** `session.event` params: the durable event, verbatim. */
@@ -366,3 +418,21 @@ export interface SessionViewParams {
   readonly sessionId: string
   readonly view: SessionView
 }
+
+/**
+ * `control.summary` params: what a control plane needs to know a session wants
+ * a person, without watching its events. Whole-state and superseding — the
+ * latest one for a session is all there is to know — and coalesced per
+ * session per tick. `closed` is sent once, when the session's agent is
+ * disposed; its counts are what the log then holds.
+ */
+export interface ControlSummary {
+  readonly sessionId: string
+  readonly status: 'idle' | 'running' | 'closed'
+  readonly runningJobs: number
+  /** Notices queued that will not wake the agent: the next message delivers them. */
+  readonly heldNotices: number
+  readonly pendingApprovals: number
+}
+
+export type ControlSummaryParams = ControlSummary

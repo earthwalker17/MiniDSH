@@ -18,6 +18,8 @@ import { runTask } from './headless.ts'
 const silent: Logger = { warn: () => {}, error: () => {} }
 /** The host dialect's binary; `shell.test.ts` turns a missing one into a failure under MINIDSH_EXPECT_SHELL, so a skip here hides nothing. */
 const shellAvailable = spawnSync(process.platform === 'win32' ? 'pwsh' : 'bash', ['--version'], { stdio: 'ignore' }).status === 0
+/** A job that outlives any test that does not stop it. */
+const LONG_JOB = process.platform === 'win32' ? 'Start-Sleep -Seconds 60' : 'sleep 60'
 
 let dirs: string[] = []
 afterEach(() => {
@@ -182,6 +184,45 @@ describe('headless runner (real composition, scripted model)', () => {
       }
     }
   }, 120_000)
+
+  /**
+   * The headless rule, across the loop, the job tools, the registry, the shell
+   * and persistence: a job the task left running is stopped when the task
+   * goes idle, recorded as a disposal and delivered quiet — so nothing wakes a
+   * turn nobody will read, and the exit code is still the task's.
+   */
+  it.skipIf(!shellAvailable)('stops a job still running when the task goes idle: ended by disposal, quiet, the exit code the task\'s', { timeout: 120_000 }, async () => {
+    const cwd = tempDir('minidsh-cwd-')
+    const sessionsRoot = tempDir('minidsh-sessions-')
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'job_start', { command: LONG_JOB }), assistantText('the server is starting'))
+    const began = Date.now()
+    // `confinement: none` + `accepts: none`: the host shape every CI leg can run without a backend.
+    const result = await runTask({ task: 'start the server', cwd, model: 'scripted-model', sessionsRoot, confinement: 'none', accepts: 'none', logger: silent, ...scripted(adapter) })
+    expect(result).toMatchObject({ exitCode: 0, reason: 'completed', text: 'the server is starting', stoppedJobs: 1 })
+    expect(Date.now() - began, 'the run waited for the job instead of stopping it').toBeLessThan(45_000)
+
+    const events = readFileSync(join(sessionsRoot, `${encodeURIComponent(result.sessionId)}.jsonl`), 'utf8')
+      .trim()
+      .split('\n')
+      .slice(1)
+      .map((line) => JSON.parse(line) as { type: string; seq: number; data: Record<string, unknown> })
+    const starts = events.filter((event) => event.type === 'job/start')
+    const ends = events.filter((event) => event.type === 'job/end')
+    expect(starts).toHaveLength(1)
+    expect(starts[0]!.data).toMatchObject({ callId: 'c1', kind: 'shell', mode: 'workspace-write', enforcement: 'none' })
+    expect(ends.map((event) => event.data)).toEqual([expect.objectContaining({ jobId: starts[0]!.data.jobId, cause: 'cancelled', by: 'disposal' })])
+    // Delivered, and quiet: the notice is queued and never woke a turn — one
+    // turn in the log, and no model call past the two the task scripted.
+    const notices = events.filter((event) => event.type === 'inbox/spliced' && (event.data as { message?: { id?: string } }).message?.id === `msg-job-${String(starts[0]!.data.jobId)}`)
+    expect(notices.map((event) => event.data.waking)).toEqual([false])
+    expect(events.filter((event) => event.type === 'turn/start')).toHaveLength(1)
+    expect(adapter.calls).toHaveLength(2)
+  })
+
+  it('stops nothing and says nothing when a task leaves no job running', async () => {
+    const result = await runTask({ task: 'hi', cwd: tempDir('minidsh-cwd-'), model: 'scripted-model', sessionsRoot: tempDir('minidsh-sessions-'), logger: silent, ...scripted(new ScriptedAdapter().script(assistantText('ok'))) })
+    expect(result).toMatchObject({ exitCode: 0, stoppedJobs: 0 })
+  })
 
   it('refuses a row config outside the plugin contract at boot, naming the row and the key', async () => {
     const cwd = tempDir('minidsh-cwd-')
@@ -349,6 +390,53 @@ describe('cli surface', () => {
     // The descriptor on the result row, and the path to the bytes beneath it.
     expect(out).toContain('32×32')
     expect(out, `no host path in:\n${out}`).toContain(join('attachments', 'v1', 'objects', digest.slice(0, 2), digest))
+  })
+
+  /**
+   * The one line a person running `minidsh run` gets about the headless rule,
+   * through the real front door: the model is a disk plugin, the way a
+   * deployment adds one, because `main` takes no adapter.
+   */
+  it.skipIf(!shellAvailable)('says once on stderr that a run stopped the jobs it left running, and still exits 0', { timeout: 120_000 }, async () => {
+    const home = tempDir('minidsh-home-')
+    const cwd = tempDir('minidsh-cwd-')
+    const { pathToFileURL } = await import('node:url')
+    const source = (path: string): string => pathToFileURL(join(import.meta.dirname, '..', path)).href
+    writeFileSync(
+      join(home, 'scripted-model.ts'),
+      `import { LLM } from '${source('core/llm/index.ts')}'
+import { ScriptedAdapter, assistantText, assistantToolCall } from '${source('test-support/scripted-adapter.ts')}'
+const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'job_start', { command: ${JSON.stringify(LONG_JOB)} }), assistantText('started'))
+export default { name: 'scripted-model', inject: [LLM], apply(ctx) { ctx.get(LLM).registerAdapter(ctx, adapter) } }
+`,
+    )
+    writeFileSync(
+      join(home, 'composition.json'),
+      JSON.stringify({ patches: [{ id: 'llm-deepseek', disabled: true }, { id: 'shell', config: { dialect: process.platform === 'win32' ? 'pwsh' : 'bash', confinement: 'none' } }, { insert: [{ id: 'scripted-model', plugin: './scripted-model.ts' }] }] }),
+    )
+    const previousHome = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    const out: string[] = []
+    const err: string[] = []
+    const writeOut = process.stdout.write.bind(process.stdout)
+    const writeErr = process.stderr.write.bind(process.stderr)
+    process.stdout.write = ((text: string) => (out.push(text), true)) as typeof process.stdout.write
+    process.stderr.write = ((text: string) => (err.push(text), true)) as typeof process.stderr.write
+    let code: number
+    try {
+      code = await main(['run', 'start the server', '--provider', 'scripted', '--model', 'scripted-model', '--accept', 'none', '--cwd', cwd])
+    } finally {
+      process.stdout.write = writeOut
+      process.stderr.write = writeErr
+      if (previousHome === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previousHome
+    }
+    const stderr = err.join('')
+    expect(code, stderr).toBe(0)
+    expect(out.join('')).toContain('started')
+    expect(stderr.split('\n').filter((line) => line.includes('background job'))).toEqual([
+      'minidsh: 1 background job(s) were still running when the run ended, and were stopped',
+    ])
   })
 
   it('prints the effective composition with provenance, without a network call', async () => {

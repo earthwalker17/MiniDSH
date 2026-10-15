@@ -23,19 +23,24 @@ import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import { matches, type SessionEventFrame } from '../../core/session/index.ts'
+import { printableText } from '../../core/text.ts'
 import type {
   ApprovalAnswerResult,
   AttachResult,
   AuthorityView,
   CompactResult,
   InitializeResult,
+  JobCancelResult,
+  JobSummary,
   ModelResult,
   PageResult,
   PromptResult,
   SessionView,
   SessionsListResult,
 } from '../../capabilities/protocol/index.ts'
+import { jobStatus } from '../../capabilities/tool-jobs/index.ts'
 import { applyAuthority, type BootOptions } from '../headless.ts'
+import { preview } from '../present.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
 import { renderHistory, TerminalRenderer } from './render.ts'
@@ -130,6 +135,14 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
    * nothing extra — a missing affordance, never a missing question.
    */
   let lastPending: readonly OpenApproval[] = []
+  /**
+   * The background jobs from the last published view, kept as `lastPending`
+   * is: a fold the host owns (a page cannot pair a start with its end), read
+   * by `/jobs` and by the held-notice hint.
+   */
+  let lastJobs: readonly JobSummary[] = []
+  /** Held notices already pointed out, so a view push repeats no hint. */
+  const hintedHeld = new Set<string>()
   let exiting = false
   let lastInterrupt = 0
   /** Until the attach page is rendered, live frames wait in the backlog. */
@@ -155,6 +168,25 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   }
   const printError = (error: unknown): void => {
     out.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
+  }
+
+  /**
+   * One line when an IDLE session holds a job's notice: a stop a person or the
+   * runtime caused never wakes the agent, so without it the end would sit
+   * unread until the next prompt for no reason anyone can see. Said once per
+   * notice; true when it wrote, so a caller with no prompt coming re-prompts.
+   */
+  const hintHeld = (): boolean => {
+    if (status !== 'idle' || !attached || pendingApproval !== undefined) return false
+    const fresh = lastJobs.filter((job) => job.held === true && !hintedHeld.has(job.jobId))
+    if (fresh.length === 0) return false
+    for (const job of fresh) hintedHeld.add(job.jobId)
+    if (promptStanding) {
+      out.write('\n')
+      promptStanding = false
+    }
+    out.write(fresh.length === 1 ? 'a job notice is held; your next message delivers it\n' : `${fresh.length} job notices are held; your next message delivers them\n`)
+    return true
   }
 
   /** Said once: the session-scoped answer to being asked per call, at the moment it is first needed. */
@@ -242,15 +274,22 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
         const projected = params as { sessionId: string; status: 'idle' | 'running' }
         if (sessionId !== undefined && projected.sessionId !== sessionId) return
         status = projected.status
-        if (status === 'idle' && attached) prompt()
+        if (status === 'idle' && attached) {
+          hintHeld()
+          prompt()
+        }
       } else if (method === 'session.view') {
         const projected = params as { sessionId: string; view: SessionView }
         if (sessionId !== undefined && projected.sessionId !== sessionId) return
         lastAuthority = projected.view.authority
         lastPending = projected.view.pendingApprovals
+        lastJobs = projected.view.jobs
         if (!attached) return
         const line = renderer.onView(projected.view)
         if (line) out.write(line)
+        // A notice held while the agent idles arrives as a view, with no
+        // status change behind it to bring the prompt back.
+        if (hintHeld()) prompt()
       }
     },
     onEnd: () => void exit(1),
@@ -336,6 +375,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     }
     if (command === '/sessions') {
       await listSessions()
+      return
+    }
+    if (command === '/jobs') {
+      await manageJobs(line)
       return
     }
     // Before the catch-all, not after it: `/cancel` sat below the unknown-command
@@ -514,6 +557,46 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   }
 
   /**
+   * `/jobs` lists the background jobs the last view named; `/jobs cancel <id>`
+   * is a PERSON's stop, over the wire. The stop's end is recorded and its
+   * notice delivered quiet, so the agent is not woken by it: the hint says so
+   * once the session is idle.
+   */
+  async function manageJobs(line: string): Promise<void> {
+    const [, sub, value] = line.split(/\s+/, 3)
+    if (sessionId === undefined) {
+      out.write('no session yet - send a prompt first\n')
+      prompt()
+      return
+    }
+    if (sub === 'cancel') {
+      if (!value) out.write('usage: /jobs cancel <job-id>   (/jobs lists them)\n')
+      else {
+        try {
+          const result = await client.request<JobCancelResult>('job/cancel', { sessionId, jobId: value })
+          const said =
+            result.state === 'ended'
+              ? jobStatus({ state: 'ended', ...(result.end === undefined ? {} : { end: result.end }) })
+              : 'a stop was requested, but it has not ended yet'
+          out.write(`${printableText(`job ${result.jobId}: ${said}`)}\n`)
+        } catch (error) {
+          printError(error)
+        }
+      }
+    } else if (sub !== undefined) {
+      out.write('usage: /jobs  |  /jobs cancel <job-id>\n')
+    } else {
+      if (lastJobs.length === 0) out.write('no background jobs in this session\n')
+      // The label is the model's command and a failure's detail a producer's
+      // words: one line each, neutralized.
+      for (const job of lastJobs) {
+        out.write(`${printableText(`${jobStatus(job).padEnd(10)}  ${preview(job.label, 80)}  ${job.jobId}${job.held === true ? '  (notice held)' : ''}`)}\n`)
+      }
+    }
+    if (status === 'idle') prompt()
+  }
+
+  /**
    * Authority changes go over the wire like everything else: the terminal is a
    * protocol client, and the switch it asks for becomes a durable event the
    * renderer then reports back to it.
@@ -593,7 +676,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const model = overrides.model ?? init.defaultAgentOptions.model
     const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
     const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
-    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /exit quits, Ctrl+C cancels)\n`)
+    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /jobs lists background jobs, /exit quits, Ctrl+C cancels)\n`)
 
     if (attaching) {
       const agents = host.root.get(AGENTS)
@@ -627,6 +710,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       // page: a page that does not run to the head would otherwise open a gap.
       liveFromSeq = attachment.cursor + 1
       history = { cursor: attachment.cursor, oldest: attachment.page.from, hasMore: attachment.page.hasMore }
+      lastJobs = attachment.view.jobs
       const line = renderer.onView(attachment.view)
       if (line) out.write(line)
       // A prompt asked and never decided still needs an answer; the host folds
@@ -637,7 +721,11 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     }
 
     if (options.task !== undefined && options.task.length > 0) enqueueLine(options.task)
-    else if (status === 'idle') prompt()
+    else if (status === 'idle') {
+      // A resumed session whose job the closer ended `lost` holds its notice.
+      hintHeld()
+      prompt()
+    }
   } catch (error) {
     printError(error)
     await exit(1)

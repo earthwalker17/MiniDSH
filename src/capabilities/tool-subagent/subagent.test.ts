@@ -4,6 +4,7 @@
  * the tool registry, persistence), and a claim about their interplay is only
  * true where they all act — the S5.5 lesson, applied.
  */
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,7 +17,7 @@ import { createUserMessage } from '../../core/llm/message.ts'
 import type { ContentBlock, Message } from '../../core/llm/index.ts'
 import { SANDBOX } from '../../core/sandbox/index.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
-import { matches, TOOL_RESULT, type EventEnvelope, type Session } from '../../core/session/index.ts'
+import { matches, SESSION_EVENT, TOOL_RESULT, type EventEnvelope, type Session } from '../../core/session/index.ts'
 import { defineTool, TOOLS } from '../../core/tools/index.ts'
 import { z } from 'zod'
 import { bootComposition } from '../../app/headless.ts'
@@ -652,6 +653,60 @@ describe('what the review found', () => {
     const result = await w.root.get(TOOLS).execute(toolCall('call-x', 'subagent', JSON.stringify({ description: 'a task', prompt: 'work' }), handle.agent, controller.signal))
     expect(result.isError).toBe(true)
     expect(childRan).toBe(false)
+    await handle.dispose()
+  })
+})
+
+/** The host dialect's binary; `shell.test.ts` turns a missing one into a failure under MINIDSH_EXPECT_SHELL, so a skip here hides nothing. */
+const shellAvailable = spawnSync(process.platform === 'win32' ? 'pwsh' : 'bash', ['--version'], { stdio: 'ignore' }).status === 0
+
+describe('a delegated child and its background jobs', () => {
+  /**
+   * The headless rule, applied to a child: its answer is taken at its idle,
+   * so a job it left running has nobody to read its end. It ends with the
+   * child — recorded in the CHILD's log, `cancelled` by `disposal`, quiet —
+   * and before the parent records the delegation's end, not after it.
+   */
+  it.skipIf(!shellAvailable)('stops a job the child left running when the child goes idle, in the child’s own log, before the parent records the end', { timeout: 120_000 }, async () => {
+    const w = await world()
+    const LONG = process.platform === 'win32' ? 'Start-Sleep -Seconds 60' : 'sleep 60'
+    w.adapter.script(
+      assistantToolCall('call-1', 'subagent', { description: 'start a server', prompt: 'Start the dev server in the background.' }),
+      assistantToolCall('child-1', 'job_start', { command: LONG }),
+      assistantText('the server is starting'),
+      assistantText('the subagent started it'),
+    )
+    // Every event of every session, in the order they were appended.
+    const order: { sessionId: string; type: string }[] = []
+    w.root.on(SESSION_EVENT, (session, event) => void order.push({ sessionId: session.id, type: event.type }))
+    const handle = await w.create()
+    // A host with no confinement backend runs a shell only once the session accepts that; the child inherits it.
+    w.root.get(SANDBOX).setAcceptance(handle.agent.session, 'none', 'workspace-write')
+    const began = Date.now()
+    handle.agent.followup(createUserMessage('delegate the server'))
+    await handle.agent.whenIdle()
+    expect(Date.now() - began, 'the delegation waited for the job instead of stopping it').toBeLessThan(45_000)
+
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    const child = storedEvents(w.sessionsRoot, start.childId)
+    const jobStart = child.find((event) => event.type === 'job/start')
+    expect(jobStart?.data).toMatchObject({ callId: 'child-1', mode: 'workspace-write', enforcement: 'none' })
+    const jobId = (jobStart!.data as { jobId: string }).jobId
+    expect(child.filter((event) => event.type === 'job/end').map((event) => event.data)).toEqual([expect.objectContaining({ jobId, cause: 'cancelled', by: 'disposal' })])
+    // Quiet: the notice is queued, and the child ran one turn, not a second for it.
+    const notice = child.find((event) => event.type === 'inbox/spliced' && (event.data as { message?: { id?: string } }).message?.id === `msg-job-${jobId}`)
+    expect((notice?.data as { waking?: boolean } | undefined)?.waking).toBe(false)
+    expect(child.filter((event) => event.type === 'turn/start')).toHaveLength(1)
+    expect(w.adapter.calls).toHaveLength(4)
+    // The job is the CHILD's: the parent's log names none.
+    expect(handle.agent.session.events.filter((event) => event.type.startsWith('job/'))).toHaveLength(0)
+    // Ended with the child, before the parent recorded the delegation's end —
+    // a disposal after `subagent/end` would record it too, but too late.
+    const ended = order.findIndex((entry) => entry.sessionId === start.childId && entry.type === 'job/end')
+    const delegationEnded = order.findIndex((entry) => entry.sessionId === handle.agent.id && entry.type === SUBAGENT_END.type)
+    expect(ended).toBeGreaterThanOrEqual(0)
+    expect(ended).toBeLessThan(delegationEnded)
+    expect((eventsOf(handle.agent.session, SUBAGENT_END.type)[0]!.data as { reason: { kind: string } }).reason.kind).toBe('completed')
     await handle.dispose()
   })
 })

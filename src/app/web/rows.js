@@ -44,6 +44,8 @@
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_START>} CompactionStartData */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_END>} CompactionEndData */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_APPLIED>} CompactionAppliedData */
+/** @typedef {DataOf<typeof import('../../core/jobs/events.ts').JOB_START>} JobStartData */
+/** @typedef {DataOf<typeof import('../../core/jobs/events.ts').JOB_END>} JobEndData */
 
 /**
  * What `app.js` renders: `cls` is the row's class list; a row with `who` is a
@@ -86,6 +88,29 @@ export const tokens = (count) => (count < 1000 ? String(count) : `${(count / 100
 
 /** @param {string} text @returns {Row} */
 const note = (text) => ({ cls: 'row note', text })
+
+/** @param {number | undefined} ms */
+const after = (ms) => (ms === undefined ? '' : ` after ${(ms / 1000).toFixed(1)}s`)
+
+/**
+ * How a job ended, in the words `jobStatus` (`capabilities/tool-jobs`) uses —
+ * spelled here because nothing is imported at runtime, and held to the same
+ * visibility, not the same bytes, by the parity gate. Not a `switch`: the
+ * gate reads every `case` in this file as an event kind.
+ * @param {JobEndData} end
+ */
+export function jobEnded(end) {
+  if (end.cause === 'exited') {
+    const how = end.exitCode !== undefined ? `exited with code ${end.exitCode}` : end.signal !== undefined ? `terminated by signal ${end.signal}` : 'exited'
+    return `${how}${after(end.durationMs)}`
+  }
+  if (end.cause === 'failed') return `failed${end.detail === undefined ? '' : `: ${end.detail}`}`
+  if (end.cause === 'cancelled') {
+    const by = end.by === 'model' ? '' : end.by === 'user' ? ' by the user' : end.by === 'authority' ? ' (the sandbox policy changed)' : ' (its session ended)'
+    return `stopped${by}${after(end.durationMs)}`
+  }
+  return 'lost: no longer supervised by this session (its process may still be running)'
+}
 
 /**
  * One row per event, or nothing when the event has no shape a person reads.
@@ -198,6 +223,16 @@ export function describeRow(event) {
     case 'subagent/end': {
       const data = /** @type {SubagentEndData} */ (event.data)
       return note(`[subagent ${data.childId} ${data.reason.kind}]`)
+    }
+    case 'job/start': {
+      // The authority it runs under belongs on the row, as it does on a shell
+      // effect's: a job is an effect that outlives the call that started it.
+      const data = /** @type {JobStartData} */ (event.data)
+      return note(`job ${data.jobId} started: ${preview(data.label, 160)} [${data.mode}/${data.enforcement}${data.pid === undefined ? '' : `, pid ${data.pid}`}]`)
+    }
+    case 'job/end': {
+      const data = /** @type {JobEndData} */ (event.data)
+      return note(`job ${data.jobId} ${jobEnded(data)}`)
     }
     case 'turn/end': {
       // A failed turn says WHY here too. The code alone left a keyless first

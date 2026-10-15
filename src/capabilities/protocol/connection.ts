@@ -1,7 +1,8 @@
 /**
  * One connected client. Everything that is per-socket lives here — the frame
- * sink, which sessions this client receives events for, and whether its carrier
- * lets it shut the host down. Everything else (agents, the resume table, the
+ * sink, which sessions this client receives events for, whether it subscribed
+ * to the control plane, and whether its carrier lets it shut the host down.
+ * Everything else (agents, the resume table, the
  * pending approvals, the cold-read cache) belongs to the host and outlives any
  * connection: a browser refreshing its tab must not dispose a running agent.
  */
@@ -12,7 +13,8 @@ export interface ConnectionOptions {
    * Where frames go. A carrier owns framing and flow control; this is the sink.
    * `droppable` marks a frame the client can lose without losing meaning — the
    * trace tier, which is streaming fidelity and nothing a fold reads. A carrier
-   * under pressure may skip those; it may never skip a fact or a surface event.
+   * under pressure may skip those; it may never skip a fact, a surface event,
+   * a view or a control summary.
    */
   readonly send: (frame: RpcResponse | RpcNotification, droppable: boolean) => void
   /**
@@ -33,6 +35,13 @@ export class ClientConnection {
    * session is telling you which one it wants.
    */
   private watching: Set<string> | undefined
+  /**
+   * A control subscriber receives every live session's summary BESIDE its
+   * watch set, never through it: a narrowed client still learns that another
+   * session wants a person. Never unset — a client that no longer wants them
+   * closes the connection.
+   */
+  private control = false
   private closed = false
 
   constructor(options: ConnectionOptions) {
@@ -80,6 +89,14 @@ export class ClientConnection {
    */
   detachAll(): void {
     this.watching = new Set()
+  }
+
+  get controlSubscribed(): boolean {
+    return this.control
+  }
+
+  subscribeControl(): void {
+    this.control = true
   }
 
   send(frame: RpcResponse | RpcNotification, droppable = false): void {

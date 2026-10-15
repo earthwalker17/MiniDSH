@@ -10,13 +10,13 @@
  * for IS its durable event, so no authority state lives on the wire);
  * `persistence` is deliberately NOT injected (a declared-but-absent
  * key would pend the plugin forever in persistence-less compositions) — cold
- * reads use a call-time optional lookup.
+ * reads use a call-time optional lookup, and so does `job/cancel` for `jobs`.
  */
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, Server as HttpServer } from 'node:http'
 import { basename } from 'node:path'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { AGENTS, AGENT_STATUS, type AgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, AGENT_CREATED, AGENT_DISPOSED, AGENT_STATUS, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { canonicalPath, SANDBOX } from '../../core/sandbox/index.ts'
@@ -138,6 +138,8 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
     })
     ctx.on(SESSION_EVENT, (session, event) => host.onSessionEvent(session, event))
     ctx.on(AGENT_STATUS, (agent, status) => host.onAgentStatus(agent, status))
+    ctx.on(AGENT_CREATED, (agent) => host.onAgentCreated(agent))
+    ctx.on(AGENT_DISPOSED, (agent) => host.onAgentDisposed(agent))
     ctx.on(APPROVAL_REQUEST, (prompt, next) => host.answerApproval(prompt, next))
     ctx.on(SETTINGS_CHANGED, (ns, revision) => host.onSettingsChanged(ns, revision))
     ctx.effect(() => {

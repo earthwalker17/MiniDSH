@@ -5,14 +5,15 @@
  * process runs at all.
  */
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
 import { toolJobsPlugin } from '../capabilities/tool-jobs/index.ts'
 import { AGENTS, type Agent } from '../core/agent/index.ts'
-import { JOB_START, noticeJobId } from '../core/jobs/index.ts'
+import { asMessageId } from '../core/ids.ts'
+import { JOB_END, JOB_START, noticeJobId } from '../core/jobs/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { matches, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 import { coreHarness, type CoreHarness } from './harness.ts'
@@ -22,7 +23,12 @@ import { assistantText, assistantToolCall } from './scripted-adapter.ts'
 const dialect: ShellDialect = process.platform === 'win32' ? 'pwsh' : 'bash'
 const available = spawnSync(dialect, ['--version'], { stdio: 'ignore' }).status === 0
 const QUICK = dialect === 'pwsh' ? 'Start-Sleep -Milliseconds 300; Write-Output a' : 'sleep 0.3; echo a'
-const SLOW = dialect === 'pwsh' ? 'Start-Sleep -Milliseconds 3000; Write-Output b' : 'sleep 3; echo b'
+// Ends only after the file the recording's last turn-1 step writes, plus a
+// margin for that turn to close: so its notice wakes turn 2 on any host load.
+const SLOW =
+  dialect === 'pwsh'
+    ? 'while (-not (Test-Path go)) { Start-Sleep -Milliseconds 100 }; Start-Sleep -Milliseconds 1500; Write-Output b'
+    : 'while [ ! -f go ]; do sleep 0.1; done; sleep 1.5; echo b'
 
 const harnesses: CoreHarness[] = []
 const dirs: string[] = []
@@ -61,13 +67,22 @@ describe.runIf(available)('replaying a log with background jobs', () => {
     recording.h.adapter.script(
       assistantToolCall('c1', 'job_start', { command: QUICK }),
       assistantToolCall('c2', 'job_start', { command: SLOW }),
-      // A slow model call: the quick job ends while this turn is busy, so its
-      // notice is taken at the NEXT step of the same turn.
+      // A model call that returns only once the quick job HAS ended: its notice
+      // lands while this turn is busy, so it is taken at the NEXT step of the
+      // same turn. Waiting on the log, not a clock — a loaded host starts a
+      // shell in seconds.
       async () => {
-        await new Promise((resolve) => setTimeout(resolve, 1_500))
+        const deadline = Date.now() + 60_000
+        while (!recording.agent.session.events.some((event) => matches(event, JOB_END))) {
+          if (Date.now() > deadline) throw new Error('the quick job never ended')
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
         return assistantText('waiting')
       },
-      assistantText('saw a'),
+      () => {
+        writeFileSync(join(recording.agent.session.header.cwd, 'go'), '')
+        return assistantText('saw a')
+      },
       // The slow job ends with the agent idle: its notice wakes turn 2.
       assistantText('saw b'),
     )
@@ -85,8 +100,8 @@ describe.runIf(available)('replaying a log with background jobs', () => {
     replay.agent.followup(createUserMessage('start two jobs'))
     await turnsEnded(replay.agent, 2)
     handle.assertConsumed()
-    expect(entered(replay.agent.session.events).map((id) => noticeJobId({ id }) ?? 'prompt')).toEqual(
-      entered(recorded).map((id) => noticeJobId({ id }) ?? 'prompt'),
+    expect(entered(replay.agent.session.events).map((id) => noticeJobId({ id: asMessageId(id) }) ?? 'prompt')).toEqual(
+      entered(recorded).map((id) => noticeJobId({ id: asMessageId(id) }) ?? 'prompt'),
     )
     expect(replay.agent.session.events.some((event) => matches(event, JOB_START)), 'nothing ran').toBe(false)
   })

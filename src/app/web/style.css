@@ -337,6 +337,80 @@ footer {
   opacity: 0.7;
 }
 
+/* What a session wants from a person, from its `control.summary`. */
+.session .badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.session .badge {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+
+.session .badge.ask {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.session .badge.held {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.session .badge.jobs {
+  color: var(--good);
+}
+
+/* The open session's background jobs: one compact line under the header's controls. */
+header .jobs {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.job {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.job .label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job .state {
+  color: var(--dim);
+}
+
+.job.running .state {
+  color: var(--good);
+}
+
+.job.unclosed .state,
+.job .held {
+  color: var(--warn);
+}
+
+.job .stop {
+  padding: 0 6px;
+  font-size: 11px;
+}
+
 /* The open session's name, beside the id it is easier to read than. */
 header .name {
   font-weight: 600;

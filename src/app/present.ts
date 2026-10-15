@@ -19,11 +19,13 @@ import { describeEffect, describeIntent, EFFECT_RECORDED } from '../core/effects
 import { blockText } from '../core/llm/content.ts'
 import { messageText, restoreMessage } from '../core/llm/message.ts'
 import type { ContentBlock } from '../core/llm/index.ts'
+import { JOB_END, JOB_START } from '../core/jobs/events.ts'
 import { formatTokens } from '../core/metering/index.ts'
 import { AUTHORITY_PRESET } from '../core/presets/index.ts'
 import { SANDBOX_ACCEPTANCE, SANDBOX_MODE } from '../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, matches, REQUEST_CONTEXT, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 import { printableText } from '../core/text.ts'
+import { jobStatus } from '../capabilities/tool-jobs/index.ts'
 
 /** Every image descriptor a result carries, at any depth. */
 function imagesIn(blocks: readonly ContentBlock[]): string[] {
@@ -132,6 +134,18 @@ export function describeEvent(event: EventEnvelope): string | undefined {
     const cost = usage === undefined ? '' : ` · ${formatTokens(usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0))} in · ${formatTokens(usage.outputTokens)} out`
     return `[subagent ${childId} ${reason.kind}${cost}]`
   }
+  if (matches(event, JOB_START)) {
+    // The label is the command the MODEL wrote, clamped by the registry — but a
+    // stored log is not the registry's to vouch for, and no rule reads the rest
+    // of this payload, so the whole line is neutralized, not only the label.
+    const { jobId, label, mode, enforcement, pid } = event.data
+    return printableText(`job ${jobId} started: ${preview(label, 120)} [${mode}/${enforcement}${pid === undefined ? '' : `, pid ${pid}`}]`)
+  }
+  if (matches(event, JOB_END)) {
+    // The tool's own status words, so `job_output`, a surface and a cold read
+    // say the same thing about one end.
+    return printableText(`job ${event.data.jobId} ${jobStatus({ state: 'ended', end: event.data })}`)
+  }
   if (matches(event, COMPACTION_START)) {
     const { trigger, budgetTokens, plannedNodes } = event.data
     return `[compacting ${plannedNodes} messages · ${trigger} · budget ${formatTokens(budgetTokens)}]`
@@ -210,9 +224,10 @@ const UNKNOWN_BECAUSE: Readonly<Record<string, string>> = {
 /**
  * The audit projection: what this session was permitted to do, when, every
  * time someone was asked — and, since S16, what its calls DID and what they
- * were refused. An escalation names only its tool, so the command it covered
- * is joined in from the `tool/call` its `callId` points at — the same join a
- * reader would otherwise do by hand.
+ * were refused, and since S17 every background job: the stamp it ran under
+ * and how it ended. An escalation names only its tool, so the command it
+ * covered is joined in from the `tool/call` its `callId` points at — the same
+ * join a reader would otherwise do by hand.
  *
  * `pending` are the closers a resume WOULD append to a crashed log nobody has
  * resumed yet (`repairTail`): shown marked, because the call in flight when
@@ -300,6 +315,17 @@ export function auditLines(events: readonly EventEnvelope[], pending: readonly E
     } else if (matches(event, SUBAGENT_START)) {
       // A delegation is an authority act: the child's whole scope is decided here.
       lines.push(`${at(event.seq)}  delegated   ${event.data.childId} under ${event.data.sandbox}, approvals ${event.data.approval} (depth ${event.data.depth})`)
+    } else if (matches(event, JOB_START)) {
+      // A job is an effect that outlives its call, run under the authority its
+      // start resolved — never an escalation — so the stamp it got is the line.
+      const { jobId, label, mode, enforcement, pid, callId } = event.data
+      const from = callId === undefined ? '' : ` (call ${callId})`
+      const pidPart = pid === undefined ? '' : `, pid ${pid}`
+      lines.push(`${at(event.seq)}  job started ${printableText(`${jobId} under ${mode}/${enforcement}${pidPart}: ${preview(label, 100)}${from}`)}`)
+    } else if (matches(event, JOB_END)) {
+      // How it ended, and who stopped it: an end by the authority or a disposal
+      // is the runtime acting on it, and `lost` is crash repair's word.
+      lines.push(`${at(event.seq)}  job ended   ${printableText(`${event.data.jobId} ${jobStatus({ state: 'ended', end: event.data })}`)}`)
     } else if (matches(event, TOOL_RESULT)) {
       const error = event.data.error
       if (error && DENIALS.has(error.code)) lines.push(`${at(event.seq)}  denied      ${error.code} (${calls.get(event.data.callId) ?? ''})`)

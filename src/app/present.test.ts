@@ -8,6 +8,7 @@ import { createRoot, type Logger } from '../kernel/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY } from '../core/approval/index.ts'
 import { COMPACTION_APPLIED } from '../core/compaction/index.ts'
 import { invariantsPlugin } from '../core/invariants/index.ts'
+import { JOB_END, JOB_START } from '../core/jobs/index.ts'
 import { createToolResultMessage, createUserMessage } from '../core/llm/message.ts'
 import { asCallId } from '../core/ids.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
@@ -128,6 +129,60 @@ describe('what S8 added to the projection', () => {
     expect(describeEvent(declined)).toBe('[compaction declined: summary-not-smaller]')
     // The applied path already has `compaction/applied`, which says what it cost.
     expect(describeEvent({ type: 'compaction/end', seq: 6, time: 0, data: { startSeq: 4, outcome: { kind: 'applied' } } })).toBeUndefined()
+  })
+})
+
+describe('present: background jobs', () => {
+  const start = (label: string, extra: Record<string, unknown> = {}) => ({
+    type: JOB_START.type,
+    seq: 0,
+    time: 0,
+    data: { jobId: 'job-00000000000000aa', callId: 'c3', kind: 'shell', label, pid: 4242, mode: 'workspace-write', enforcement: 'none', ...extra },
+  })
+  const end = (data: Record<string, unknown>, seq = 1) => ({ type: JOB_END.type, seq, time: 0, data: { jobId: 'job-00000000000000aa', ...data } })
+
+  it('gives a start and an end one short, greppable line each, in the tool\'s own status words', () => {
+    expect(describeEvent(start('pnpm dev'))).toBe('job job-00000000000000aa started: pnpm dev [workspace-write/none, pid 4242]')
+    expect(describeEvent(start('pnpm dev', { pid: undefined, mode: 'read-only', enforcement: 'full' }))).toBe('job job-00000000000000aa started: pnpm dev [read-only/full]')
+    expect(describeEvent(end({ cause: 'exited', exitCode: 1, durationMs: 2500 }))).toBe('job job-00000000000000aa exited with code 1 after 2.5s')
+    expect(describeEvent(end({ cause: 'failed', detail: 'runner died' }))).toBe('job job-00000000000000aa failed: runner died')
+    expect(describeEvent(end({ cause: 'cancelled', by: 'disposal' }))).toBe('job job-00000000000000aa stopped (its session ended)')
+    expect(describeEvent(end({ cause: 'cancelled', by: 'user' }))).toBe('job job-00000000000000aa stopped by the user')
+    expect(describeEvent(end({ cause: 'lost' }))).toMatch(/^job job-00000000000000aa lost: .*may still be running/)
+    // History shows what watching showed: the transcript falls through to the same line.
+    expect(transcriptLines([start('pnpm dev'), end({ cause: 'exited', exitCode: 0 })])).toEqual([
+      'job job-00000000000000aa started: pnpm dev [workspace-write/none, pid 4242]',
+      'job job-00000000000000aa exited with code 0',
+    ])
+  })
+
+  it('neutralizes a hostile label, a hostile id and a hostile failure, which a stored log may carry', () => {
+    // The registry clamps what it writes; a log on disk is not the registry's
+    // word, and an ESC in a label would repaint the line above a `[y/N]`.
+    const ESC = String.fromCharCode(27)
+    const BEL = String.fromCharCode(7)
+    const lines = [
+      describeEvent(start(`npm start${ESC}[2K${ESC}[1Aapprove? y`)),
+      describeEvent(start('ok', { jobId: `job-${ESC}]0;owned${BEL}` })),
+      describeEvent(end({ cause: 'failed', detail: `x${ESC}[31mred` })),
+      ...auditLines([start(`npm start${ESC}[2K`) as never, end({ cause: 'failed', detail: `x${ESC}[31m` }) as never]),
+    ]
+    for (const line of lines) {
+      expect(line).toBeDefined()
+      // The C0 and C1 controls, which `printableText` exists to remove.
+      expect([...line!].filter((ch) => ch.codePointAt(0)! < 0x20 || (ch.codePointAt(0)! >= 0x7f && ch.codePointAt(0)! <= 0x9f))).toEqual([])
+    }
+    expect(lines[0]).toContain('npm start [2K [1Aapprove? y')
+  })
+
+  it('lists each job in the audit with the authority it ran under, and how it ended', () => {
+    const audit = auditLines([start('pnpm dev') as never, end({ cause: 'cancelled', by: 'authority' }) as never])
+    expect(audit).toEqual([
+      '   0  job started job-00000000000000aa under workspace-write/none, pid 4242: pnpm dev (call c3)',
+      '   1  job ended   job-00000000000000aa stopped (the sandbox policy changed)',
+    ])
+    // A crashed log nobody resumed: the closer a resume would write is marked as such.
+    expect(auditLines([start('pnpm dev') as never], [end({ cause: 'lost' }, 1) as never]).at(-1)).toMatch(/job ended {3}job-00000000000000aa lost: .* \(on resume\)$/)
   })
 })
 

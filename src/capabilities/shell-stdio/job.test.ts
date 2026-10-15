@@ -63,7 +63,7 @@ const alive = (pid: number): boolean => {
   }
 }
 
-async function until(condition: () => boolean, ms = 15_000): Promise<void> {
+async function until(condition: () => boolean, ms = 60_000): Promise<void> {
   const deadline = Date.now() + ms
   while (!condition()) {
     if (Date.now() > deadline) throw new Error('timed out waiting for the world to change')
@@ -144,12 +144,17 @@ describe.runIf(available)('a job process', () => {
     }
   })
 
-  it('a timed-out one-shot escalation now reaps its tree on every platform', { timeout: TIMEOUT_MS }, async () => {
+  it('a cancelled one-shot escalation now reaps its tree on every platform', { timeout: TIMEOUT_MS }, async () => {
     const { shell, policy, root } = setup()
-    const run = shell.exec({ command: grandchild(root), policy, oneShot: true, timeoutMs: 4_000 })
+    // Cancelled once the grandchild is up, not on a deadline: a loaded host
+    // can spend a short deadline starting pwsh, before there is a tree at all.
+    const cancel = new AbortController()
+    const run = shell.exec({ command: grandchild(root), policy, oneShot: true, timeoutMs: TIMEOUT_MS, signal: cancel.signal })
     await until(() => existsSync(join(root, 'gc.pid')))
     const pid = Number(readFileSync(join(root, 'gc.pid'), 'utf8'))
-    expect((await run).timedOut).toBe(true)
+    expect(alive(pid)).toBe(true)
+    cancel.abort()
+    await run
     await until(() => !alive(pid))
   })
 })

@@ -29,6 +29,7 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
+import { JOBS } from '../../core/jobs/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
 import {
@@ -348,6 +349,17 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     }
     child.followup(createUserMessage(args.prompt))
     await child.whenIdle()
+    // The headless rule, for a child: its answer is taken at this idle, so a
+    // background job it left running has nobody left to read its end. Stopped
+    // in THIS continuation, before any other await — a job's own end landing
+    // in between would wake a paid child turn whose result nobody reads — and
+    // recorded in the child's own log, `cancelled` by `disposal`, quiet. Read
+    // through `tryGet`: a composition without jobs has nothing to stop.
+    const stopping = deps.ctx.tryGet(JOBS)?.stopAll(child)
+    if (stopping !== undefined) {
+      await stopping
+      await child.whenIdle()
+    }
     // The end record is owed on EVERY exit path of this function, exactly as
     // the driver owes `step/end`: a child whose persistence is quarantined makes
     // this flush throw, and an unpaired `subagent/start` would leave the

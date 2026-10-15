@@ -23,6 +23,7 @@ import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../../core
 import { asAttachmentId } from '../../core/attachments/index.ts'
 import { EFFECT_RECORDED } from '../../core/effects/index.ts'
 import { asCallId } from '../../core/ids.ts'
+import { JOB_END, JOB_START } from '../../core/jobs/index.ts'
 import { createAssistantMessage, createPluginMessage, createToolResultMessage, createUserMessage } from '../../core/llm/message.ts'
 import { AUTHORITY_PRESET } from '../../core/presets/index.ts'
 import { SANDBOX_ACCEPTANCE, SANDBOX_MODE } from '../../core/sandbox/index.ts'
@@ -120,6 +121,16 @@ const SAMPLES: readonly Sample[] = [
     auxCallSeq: 11,
     startSeq: 9,
   }),
+  sample('JOB_START', 'started', JOB_START, { jobId: 'job-0123456789abcdef', callId: 'c4', kind: 'shell', label: 'pnpm dev', pid: 4242, mode: 'workspace-write', enforcement: 'none' }),
+  sample('JOB_START', 'no pid', JOB_START, { jobId: 'job-0123456789abcdee', kind: 'shell', label: 'pnpm test --watch', mode: 'read-only', enforcement: 'full' }),
+  sample('JOB_END', 'exited', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'exited', exitCode: 0, durationMs: 12_300, outputBytes: 80 }),
+  sample('JOB_END', 'signalled', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'exited', signal: 'SIGTERM' }),
+  sample('JOB_END', 'failed', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'failed', detail: 'bwrap: setting up uid map: Permission denied' }),
+  sample('JOB_END', 'cancelled by the model', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'cancelled', by: 'model', reportedBy: 'c5', durationMs: 900 }),
+  sample('JOB_END', 'cancelled by a person', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'cancelled', by: 'user' }),
+  sample('JOB_END', 'cancelled by the authority', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'cancelled', by: 'authority' }),
+  sample('JOB_END', 'cancelled by a disposal', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'cancelled', by: 'disposal', durationMs: 61_000 }),
+  sample('JOB_END', 'lost', JOB_END, { jobId: 'job-0123456789abcdef', cause: 'lost' }),
   // Kinds neither projection renders. Listed so that giving one of them a line
   // in EITHER projection fails here until the other is decided too.
   sample('TURN_START', 'structure', TURN_START, { turn: 1 }),
@@ -193,5 +204,18 @@ describe('the browser row projection against the plain-text one', () => {
     expect(describeRow(find('USER_MESSAGE', 'plugin context'))?.text).toBe('context (plugin: instructions)')
     expect(describeRow(find('ASSISTANT_MESSAGE', 'text'))).toEqual({ cls: 'row assistant', who: 'deepseek-v4-flash', text: 'done' })
     expect(describeRow(find('TOOL_RESULT', 'image'))?.text).toBe('✓ [image: 2x2 png]')
+  })
+
+  it('says how a job started and ended in the words every plain-text surface uses', () => {
+    // `rows.js` spells the status itself (nothing is imported at runtime), so
+    // the words are held here, kind by kind, to the tool's own `jobStatus`.
+    const jobs = SAMPLES.filter((entry) => entry.constant === 'JOB_START' || entry.constant === 'JOB_END')
+    expect(jobs.length).toBe(10)
+    for (const entry of jobs) expect(describeRow(entry.event)?.text, entry.label).toBe(transcriptLines([entry.event])[0])
+    const find = (label: string): string => describeRow(SAMPLES.find((entry) => entry.label === label)!.event)!.text
+    expect(find('started')).toBe('job job-0123456789abcdef started: pnpm dev [workspace-write/none, pid 4242]')
+    expect(find('cancelled by a disposal')).toBe('job job-0123456789abcdef stopped (its session ended) after 61.0s')
+    expect(find('cancelled by the authority')).toContain('the sandbox policy changed')
+    expect(find('lost')).toContain('may still be running')
   })
 })
