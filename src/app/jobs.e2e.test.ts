@@ -96,8 +96,18 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
       'to write result.txt in the workspace containing exactly the line the job printed, and nothing else.'
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: prompt })
     await serve.waitForCompletedTurn(sessionId, 1)
-    await serve.waitFor(() => serve.events('job/end', sessionId)[0], 'the job to end', 120_000)
-    await serve.waitForCompletedTurn(sessionId, 2)
+    // What turn 1 actually did, named when a wait below fails: the premise is
+    // the model's to keep, and a timeout alone says nothing about which half broke.
+    const shape = (): string =>
+      `tool calls ${JSON.stringify(serve.events('tool/call', sessionId).map((event) => [data<{ name: string }>(event).name, data<{ arguments: string }>(event).arguments.slice(0, 120)]))}; ` +
+      `job facts ${JSON.stringify(serve.frames.filter((frame) => frame.sessionId === sessionId && frame.event.type.startsWith('job/')).map((frame) => frame.event.data))}`
+    expect(serve.events('job/start', sessionId), `turn 1 started no job: ${shape()}`).toHaveLength(1)
+    try {
+      await serve.waitFor(() => serve.events('job/end', sessionId)[0], 'the job to end', 120_000)
+      await serve.waitForCompletedTurn(sessionId, 2)
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)} — ${shape()}`)
+    }
     const log = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId })
     await serve.shutdown()
 
