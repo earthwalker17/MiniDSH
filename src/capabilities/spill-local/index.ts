@@ -14,13 +14,13 @@
  * and ancestor-permission checks upstream's does: `~/.minidsh/spill` is not a
  * world-writable temp tree, so there is no planted-path surface to defend.
  */
-import { mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { lstat, readdir, rmdir, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { SESSION_ID_PATTERN } from '../../core/ids.ts'
-import { SPILL, type Spill, type SpillRef, type SpillRequest } from '../../core/spill/index.ts'
+import { SPILL, type Spill, type SpillRef, type SpillRequest, type SpillStream } from '../../core/spill/index.ts'
 
 export interface SpillLocalConfig {
   /** Store root; per-session subdirectories are created beneath it. */
@@ -175,12 +175,55 @@ class LocalSpill implements Spill {
   }
 
   save(request: SpillRequest): SpillRef {
+    const path = this.pathFor(request)
+    writeFileSync(path, request.text, 'utf8')
+    return { path, bytes: statSync(path).size }
+  }
+
+  /**
+   * Synchronous end to end, like `save`: the file exists before this returns,
+   * and every write lands before the next chunk is accepted, so a reader told
+   * the path finds what the producer has written so far. A write that fails
+   * (a full disk) closes the stream for good rather than leaving a file with a
+   * hole in the middle of it.
+   */
+  open(request: Omit<SpillRequest, 'text'>): SpillStream {
+    const path = this.pathFor(request)
+    let fd: number | undefined = openSync(path, 'w', 0o600)
+    let failed = false
+    const shut = (): void => {
+      if (fd === undefined) return
+      const closing = fd
+      fd = undefined
+      try {
+        closeSync(closing)
+      } catch {
+        /* already gone */
+      }
+    }
+    return {
+      path,
+      get failed() {
+        return failed
+      },
+      write(text) {
+        if (fd === undefined || text.length === 0) return
+        try {
+          writeSync(fd, text, null, 'utf8')
+        } catch {
+          failed = true
+          shut()
+        }
+      },
+      close: shut,
+    }
+  }
+
+  private pathFor(request: Omit<SpillRequest, 'text'>): string {
     const dir = join(this.root, safeName(request.sessionId))
     // 0700 on POSIX; Windows inherits the home's ACL, which is the user's own.
     mkdirSync(dir, { recursive: true, mode: 0o700 })
-    const path = join(dir, `${safeName(request.callId)}-${safeName(request.label)}.txt`)
-    writeFileSync(path, request.text, 'utf8')
-    return { path, bytes: statSync(path).size }
+    return join(dir, `${safeName(request.callId)}-${safeName(request.label)}.txt`)
   }
 
 }

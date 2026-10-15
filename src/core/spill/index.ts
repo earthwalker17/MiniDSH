@@ -34,8 +34,26 @@ export interface SpillRequest {
   readonly text: string
 }
 
+/** A file a producer appends to while its output is still arriving. */
+export interface SpillStream {
+  /** Absolute path the model is told to read. */
+  readonly path: string
+  /** Appends; never throws. A store that cannot write stops and says so in `failed`. */
+  write(text: string): void
+  readonly failed: boolean
+  close(): void
+}
+
 export interface Spill {
   save(request: SpillRequest): SpillRef
+  /**
+   * The same home for output that is still being produced — a background
+   * job's (`core/jobs`). Named exactly as `save` names a file, so the sweep
+   * recognises it, and kept fresh by its writes, so the sweep never takes a
+   * file that is still growing. Optional: a store that cannot stream leaves a
+   * job with its in-memory tail, which the reader is told.
+   */
+  open?(request: Omit<SpillRequest, 'text'>): SpillStream
 }
 
 export const SPILL = serviceKey<Spill>('spill')

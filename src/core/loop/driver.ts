@@ -163,7 +163,16 @@ export class ReactLoopAgent implements Agent {
   }
 
   send(message: Message, target: InboxTarget, wakeup: boolean): void {
-    if (this.disposed) return
+    if (this.disposed) {
+      // Disposal has begun, so nothing runs here again — but input that arrives
+      // now (a job stopped by this very disposal, a prompt racing a shutdown) is
+      // RECORDED for the session's next lifecycle rather than dropped: the
+      // inbox re-delivers, never loses (§4). Quiet, so a resume does not start
+      // a paid turn for it; it enters with the next prompt. Only a session the
+      // store has closed takes nothing more.
+      if (!this.session.isClosed) this.inbox.append(message, target, false)
+      return
+    }
     this.inbox.append(message, target, wakeup)
     if (wakeup && !this.running) this.start()
   }

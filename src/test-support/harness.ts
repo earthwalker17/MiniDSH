@@ -9,6 +9,8 @@ import { approvalPlugin } from '../core/approval/index.ts'
 import { invariantsPlugin } from '../core/invariants/index.ts'
 import { LLM, llmPlugin } from '../core/llm/index.ts'
 import { PROMPT, promptPlugin } from '../core/prompt/index.ts'
+import { jobsPlugin, type JobsConfig } from '../core/jobs/index.ts'
+import { jobsInvariantPlugin } from '../core/jobs/invariant.ts'
 import { sandboxPlugin, type SandboxConfig } from '../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
@@ -29,7 +31,9 @@ export interface CoreHarness {
   dispose(): Promise<void>
 }
 
-export async function coreHarness(options: { persona?: string; logger?: Logger; tools?: ToolsConfig; sandbox?: SandboxConfig } = {}): Promise<CoreHarness> {
+export async function coreHarness(
+  options: { persona?: string; logger?: Logger; tools?: ToolsConfig; sandbox?: SandboxConfig; jobs?: JobsConfig } = {},
+): Promise<CoreHarness> {
   const root = createRoot({ logger: options.logger ?? silentLogger })
   root.plugin(invariantsPlugin, {})
   root.plugin(sessionPlugin)
@@ -42,6 +46,8 @@ export async function coreHarness(options: { persona?: string; logger?: Logger; 
   root.plugin(authorityInvariantPlugin)
   root.plugin(agentPlugin)
   root.plugin(agentInvariantPlugin)
+  root.plugin(jobsPlugin, options.jobs ?? {})
+  root.plugin(jobsInvariantPlugin)
   const loop = root.plugin(loopPlugin)
   root.plugin(loopInvariantPlugin)
   await root.settle()

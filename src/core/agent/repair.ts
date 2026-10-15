@@ -17,16 +17,18 @@
  * to interpret. The composition lives in `core/agent` because that is repair's
  * only caller — `resume`, and a `fork` of a cold source.
  *
- * **A STATIC list.** Three closers, readable off this file without running
- * anything. A registry would be the shape to reach for at a third user, and
- * there is no third user.
+ * **A STATIC list.** Four closers, readable off this file without running
+ * anything; each is a core vocabulary's own. A registry is still not the
+ * shape: a fifth bracket is a fifth line here, beside its owner's closer.
  *
  * **Order.** Innermost first: a delegation ends inside the tool call that
- * started it, a compaction bracket ends where the attempt did, and the turn —
- * the outermost bracket — closes last. The two bracket closers run whether or
- * not a turn is open, which is what finally reaches a `/compact` bracket
- * opened on an idle agent; the session's own closers still stop at the open
- * turn, because a call with no turn around it is not a shape this log has.
+ * started it, a compaction bracket ends where the attempt did, then the turn —
+ * and a JOB, which outlives the call and the turn that started it, closes
+ * last (`core/jobs/events.ts`). The bracket closers run whether or not a turn
+ * is open, which is what reaches a `/compact` bracket opened on an idle agent
+ * and a job running while it idled; the session's own closers still stop at
+ * the open turn, because a call with no turn around it is not a shape this
+ * log has.
  *
  * **Purity.** Every closer takes the ORIGINAL events, the seq its records
  * start at and the one timestamp they all share (the last real event's), so
@@ -36,9 +38,10 @@
  */
 import { repairInterruptedTail, type EventEnvelope, type RepairContext, type TailCloser } from '../session/index.ts'
 import { closeUnpairedCompactions } from '../compaction/events.ts'
+import { closeUnpairedJobs } from '../jobs/events.ts'
 import { closeUnpairedSubagents } from './events.ts'
 
-const TAIL_CLOSERS: readonly TailCloser[] = [closeUnpairedSubagents, closeUnpairedCompactions, repairInterruptedTail]
+const TAIL_CLOSERS: readonly TailCloser[] = [closeUnpairedSubagents, closeUnpairedCompactions, repairInterruptedTail, closeUnpairedJobs]
 
 /**
  * Every closer a stored log owes, in order, seqs continuing from its length. A

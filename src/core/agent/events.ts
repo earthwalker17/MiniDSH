@@ -8,6 +8,7 @@
  * vocabularies back. `check-deps` pins the result: core is acyclic at file level.
  */
 import { emitEvent, serialEvent, waterfallEvent } from '../../kernel/index.ts'
+import { restoreMessage } from '../llm/message.ts'
 import type { Message, TokenUsage } from '../llm/types.ts'
 import type { SandboxMode } from '../sandbox/events.ts'
 import { eventKind, matches, type EventEnvelope, type TurnEndReason } from '../session/types.ts'
@@ -44,6 +45,49 @@ export const AGENT_PRE_STEP = waterfallEvent<[context: PreStepContext], Promise<
 export const AGENT_REQUEST = waterfallEvent<[context: RequestContext], Promise<RequestContext['config']>>('agent/request')
 export const AGENT_REQUEST_ERROR = waterfallEvent<[context: RequestErrorContext], Promise<RequestErrorAction>>('agent/request-error')
 export const AGENT_TURN_STOPPING = serialEvent<[context: TurnStoppingContext]>('agent/turn-stopping')
+
+// ---- the durable inbox -------------------------------------------------------
+
+/**
+ * The durable inbox record: op-shaped mutations, not positional splices —
+ * `claim` drains counts from the FRONT, which keeps the fold correct even for
+ * the one real reorder (an insert landing during the pre-step await is logged
+ * before the deferred claim record but appends to the back either way).
+ */
+export type InboxSplice =
+  | { readonly op: 'insert'; readonly queue: InboxTarget; readonly message: Message; readonly waking?: boolean }
+  | { readonly op: 'claim'; readonly steps: number; readonly turns: number }
+  | { readonly op: 'clear' }
+
+/** Log-only; a resumed session folds these to reconstruct its pending input. */
+export const INBOX_SPLICED = eventKind<InboxSplice>('inbox/spliced')
+
+export interface InboxState {
+  readonly turnQueue: Message[]
+  readonly stepQueue: { message: Message; waking: boolean }[]
+}
+
+/** Reconstructs the pending inbox from a session log's `inbox/spliced` records. */
+export function foldInbox(events: readonly EventEnvelope[]): InboxState {
+  const turnQueue: Message[] = []
+  const stepQueue: { message: Message; waking: boolean }[] = []
+  for (const event of events) {
+    if (!matches(event, INBOX_SPLICED)) continue
+    const splice = event.data
+    if (splice.op === 'insert') {
+      const message = restoreMessage(splice.message as Parameters<typeof restoreMessage>[0])
+      if (splice.queue === 'next-turn') turnQueue.push(message)
+      else stepQueue.push({ message, waking: splice.waking === true })
+    } else if (splice.op === 'claim') {
+      stepQueue.splice(0, splice.steps)
+      turnQueue.splice(0, splice.turns)
+    } else {
+      turnQueue.length = 0
+      stepQueue.length = 0
+    }
+  }
+  return { turnQueue, stepQueue }
+}
 
 // ---- delegation -------------------------------------------------------------
 

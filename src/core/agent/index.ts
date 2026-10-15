@@ -5,22 +5,20 @@
  */
 import { serviceKey, type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
 import type { SessionId } from '../ids.ts'
-import { restoreMessage } from '../llm/message.ts'
 import type { Message } from '../llm/types.ts'
 import { delegationPin } from '../approval/events.ts'
 import { heldByWriter, PERSISTENCE, type StoredSession } from '../persistence/index.ts'
 import { delegationCeiling } from '../sandbox/events.ts'
 import {
-  eventKind,
   foldRequestHeader,
-  matches,
   sliceForkSeed,
   type EventEnvelope,
   type SalvageRecord,
   type Session,
   type SessionHeader,
 } from '../session/index.ts'
-import { AGENT_CREATED, AGENT_DISPOSED, AGENT_REQUEST, foldAgentOptions } from './events.ts'
+import { AGENT_CREATED, AGENT_DISPOSED, AGENT_REQUEST, foldAgentOptions, type InboxSplice, type InboxState } from './events.ts'
+import { closeUnpairedJobs } from '../jobs/events.ts'
 import { repairTail } from './repair.ts'
 import type {
   Agent,
@@ -121,50 +119,9 @@ export async function resolveCallConfig(
 
 // ---- inbox ----------------------------------------------------------------
 
-type InboxDispatch = (event: 'inserted' | 'discarded' | 'claimed', message: Message, target?: InboxTarget) => void
-
-/**
- * The durable inbox record: op-shaped mutations, not positional splices —
- * `claim` drains counts from the FRONT, which keeps the fold correct even for
- * the one real reorder (an insert landing during the pre-step await is logged
- * before the deferred claim record but appends to the back either way).
- */
-export type InboxSplice =
-  | { readonly op: 'insert'; readonly queue: InboxTarget; readonly message: Message; readonly waking?: boolean }
-  | { readonly op: 'claim'; readonly steps: number; readonly turns: number }
-  | { readonly op: 'clear' }
-
-/** Log-only; a resumed session folds these to reconstruct its pending input. */
-export const INBOX_SPLICED = eventKind<InboxSplice>('inbox/spliced')
-
 type InboxRecord = (splice: InboxSplice) => void
 
-export interface InboxState {
-  readonly turnQueue: Message[]
-  readonly stepQueue: { message: Message; waking: boolean }[]
-}
-
-/** Reconstructs the pending inbox from a session log's `inbox/spliced` records. */
-export function foldInbox(events: readonly EventEnvelope[]): InboxState {
-  const turnQueue: Message[] = []
-  const stepQueue: { message: Message; waking: boolean }[] = []
-  for (const event of events) {
-    if (!matches(event, INBOX_SPLICED)) continue
-    const splice = event.data
-    if (splice.op === 'insert') {
-      const message = restoreMessage(splice.message as Parameters<typeof restoreMessage>[0])
-      if (splice.queue === 'next-turn') turnQueue.push(message)
-      else stepQueue.push({ message, waking: splice.waking === true })
-    } else if (splice.op === 'claim') {
-      stepQueue.splice(0, splice.steps)
-      turnQueue.splice(0, splice.turns)
-    } else {
-      turnQueue.length = 0
-      stepQueue.length = 0
-    }
-  }
-  return { turnQueue, stepQueue }
-}
+type InboxDispatch = (event: 'inserted' | 'discarded' | 'claimed', message: Message, target?: InboxTarget) => void
 
 /**
  * Two-list message queue. `next-turn` holds prompts (one claimed per turn);
@@ -307,7 +264,14 @@ class AgentRegistry implements Agents {
 
   async fork(owner: Context, source: Session | SessionId, boundary?: number, options: ForkAgentOptions = {}): Promise<AgentHandle> {
     const src = this.forkSource(source, options.salvage === true)
-    const seed = sliceForkSeed(src.events, boundary)
+    const sliced = sliceForkSeed(src.events, boundary)
+    // A fork never supervises its source's jobs: the registry that runs them
+    // is the source's, and a cold source's repair closed only what was open at
+    // the END of its log, not at this boundary. So the sliced seed is closed
+    // here, for every source — a job running at the cut is `lost` to the fork,
+    // and the fork's model is told (`core/jobs/events.ts`).
+    const jobClosers = closeUnpairedJobs(sliced, sliced.length, sliced.at(-1)?.time ?? Date.now())
+    const seed = jobClosers.length === 0 ? sliced : [...sliced, ...jobClosers]
     // A fork of a delegated session must carry that session's fence with it.
     // A seed without the opening stamps would produce a session the header
     // still calls a child while its authority re-opened at the deployment

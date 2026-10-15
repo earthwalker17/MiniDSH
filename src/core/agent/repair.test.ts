@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { COMPACTION_END, COMPACTION_START, foldCompactionFailures } from '../compaction/index.ts'
 import { STEP_START, TOOL_CALL, TURN_START, type EventEnvelope } from '../session/index.ts'
+import { JOB_START } from '../jobs/events.ts'
 import { SUBAGENT_END, SUBAGENT_START } from './events.ts'
 import { repairTail } from './repair.ts'
 
@@ -39,6 +40,16 @@ describe('repairTail: the composed crash repair', () => {
     // The delegation closes BEFORE the tool result that answers its call, as it
     // would have live, and the turn — the outermost bracket — closes last.
     expect(closers.map((event) => event.type)).toEqual(['subagent/end', 'tool/result', 'step/end', 'turn/end'])
+  })
+
+  it('closes a job LAST, after the turn: it outlives the call and the turn that started it', () => {
+    const events = log(
+      ev(TURN_START, { turn: 1 }),
+      ev(STEP_START, { turn: 1, step: 1 }),
+      ev(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'job_start', arguments: '{}' }),
+      ev(JOB_START, { jobId: 'job-1', callId: 'c1', kind: 'shell', label: 'serve', mode: 'workspace-write', enforcement: 'full' }),
+    )
+    expect(repairTail(events).map((event) => event.type)).toEqual(['tool/result', 'step/end', 'turn/end', 'job/end', 'inbox/spliced'])
   })
 
   it('closes a compaction bracket opened with no turn open, which nothing could reach before', () => {

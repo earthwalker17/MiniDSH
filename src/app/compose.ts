@@ -12,6 +12,8 @@ import { llmPlugin } from '../core/llm/index.ts'
 import { loopInvariantPlugin, loopPlugin } from '../core/loop/index.ts'
 import { promptPlugin } from '../core/prompt/index.ts'
 import { sandboxPlugin, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
+import { jobsPlugin } from '../core/jobs/index.ts'
+import { jobsInvariantPlugin } from '../core/jobs/invariant.ts'
 import { authorityInvariantPlugin } from '../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { sessionTitlePlugin } from '../capabilities/session-title/index.ts'
@@ -72,6 +74,8 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       approvalHeadlessPlugin,
       sandboxPlugin,
       authorityInvariantPlugin,
+      jobsPlugin,
+      jobsInvariantPlugin,
       authorityPresetsPlugin,
       compactionBasicPlugin,
       fsLocalPlugin,
@@ -359,6 +363,10 @@ export function compose(options: ComposeOptions): Row[] {
     }),
   )
   if (options.spillRoot !== undefined) rows.push(defineRow('spill', spillLocalPlugin, { root: options.spillRoot }))
+  // The registry and its driver (`core/jobs`): beside the execution world it
+  // supervises, and with no model-facing surface of its own.
+  rows.push(defineRow('jobs', jobsPlugin, {}))
+  if (withInvariants) rows.push(defineRow('jobs-invariant', jobsInvariantPlugin))
   // A service row with no model-facing surface: the binary plane exists wherever
   // MiniDSH runs, while the tools that PRODUCE images stay composition, so the
   // shipped tool set does not grow.
