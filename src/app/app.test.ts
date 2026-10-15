@@ -223,7 +223,7 @@ describe('headless runner (real composition, scripted model)', () => {
    * the store creates nothing until something is saved — the same discipline
    * as a session that opened and was abandoned leaving no file behind.
    */
-  it('ships the attachment service and no new model-facing tool', async () => {
+  it('ships the attachment service, the job tools, and no other model-facing tool', async () => {
     const sessionsRoot = tempDir('minidsh-sessions-')
     const attachmentsRoot = tempDir('minidsh-attachments-')
     const { bootComposition } = await import('./headless.ts')
@@ -239,8 +239,9 @@ describe('headless runner (real composition, scripted model)', () => {
       // name it, and hidden from every agent until that agent's first applied
       // compaction — so what an agent is OFFERED is the shorter list, asserted
       // in the recall capability's own tests.
+      // S17 added the three job tools (`tool-jobs`); nothing else is offered.
       expect(root.get(TOOLS).schemas().map((schema) => schema.name).toSorted()).toEqual(
-        [defaultDialect(), 'str_replace_editor', 'subagent', 'history_read'].toSorted(),
+        [defaultDialect(), 'str_replace_editor', 'subagent', 'history_read', 'job_start', 'job_output', 'job_cancel'].toSorted(),
       )
       expect(readdirSync(attachmentsRoot)).toEqual([])
     } finally {

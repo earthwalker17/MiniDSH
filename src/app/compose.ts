@@ -38,6 +38,7 @@ import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
 import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructions/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { toolShellPlugin } from '../capabilities/tool-shell/index.ts'
+import { toolJobsPlugin } from '../capabilities/tool-jobs/index.ts'
 import { toolSubagentPlugin } from '../capabilities/tool-subagent/index.ts'
 import { toolHistoryPlugin } from '../capabilities/tool-history/index.ts'
 
@@ -85,6 +86,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       attachmentsLocalPlugin,
       toolEditorPlugin,
       toolShellPlugin,
+      toolJobsPlugin,
       toolSubagentPlugin,
       toolHistoryPlugin,
       toolViewImagePlugin,
@@ -373,6 +375,7 @@ export function compose(options: ComposeOptions): Row[] {
   if (options.attachmentsRoot !== undefined) rows.push(defineRow('attachments', attachmentsLocalPlugin, { root: options.attachmentsRoot }))
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))
+  rows.push(defineRow('tool-jobs', toolJobsPlugin, {}))
   rows.push(defineRow('tool-subagent', toolSubagentPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))
   // `maxBytes` is the deployment's prompt-budget choice, made here rather than

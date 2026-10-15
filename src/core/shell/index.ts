@@ -128,8 +128,50 @@ export interface ShellRunResult {
   readonly sandbox: { readonly mode: SandboxMode; readonly enforcement: SandboxEnforcement }
 }
 
+/**
+ * A command started to run BESIDE the session rather than inside a call: a
+ * background job's process (`core/jobs`). The same authority contract as
+ * `exec` — the caller's resolved policy, refused (`SANDBOX_UNAVAILABLE`) when
+ * the world cannot deliver what the caller accepts — and never an escalation:
+ * there is no `oneShot` here, because a job outlives the one call a grant
+ * covers.
+ */
+export interface ShellJobRequest {
+  readonly command: string
+  readonly policy: SandboxExecutionPolicy
+  readonly accepts?: SandboxEnforcement
+  /** Every chunk of stdout and stderr, in arrival order, as it arrives. */
+  readonly output: (chunk: string) => void
+}
+
+export interface ShellJobExit {
+  readonly exitCode?: number
+  readonly signal?: string
+  /** It never ran as asked: a confinement runner that died at start. */
+  readonly failure?: string
+  /** This shell's own disposal killed it. */
+  readonly disposed?: true
+}
+
+/** A started process: its own process group on POSIX, reaped when the shell is disposed. */
+export interface ShellJob {
+  readonly pid?: number
+  /** What actually governs it — a reported fact, fixed at spawn. */
+  readonly sandbox: { readonly mode: SandboxMode; readonly enforcement: SandboxEnforcement }
+  /** Settles once the process is gone and its output drained; never rejects. */
+  readonly exited: Promise<ShellJobExit>
+  /** Kills it and what it started, where the platform can say so. Idempotent. */
+  kill(): void
+}
+
 export interface ShellSession {
   exec(request: ShellExecRequest): Promise<ShellRunResult>
+  /**
+   * Starts a command and returns once it has SPAWNED — a missing binary or a
+   * wrapper that cannot start is refused here, exactly as `exec` refuses it.
+   * Optional: a world that cannot hold a process beside its shell has no jobs.
+   */
+  start?(request: ShellJobRequest): Promise<ShellJob>
   restart(): Promise<void>
   dispose(): Promise<void>
 }

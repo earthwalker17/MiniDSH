@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { join } from 'node:path'
 import {
   DEFAULT_ACCEPTANCE,
   meetsAcceptance,
@@ -8,7 +9,15 @@ import {
   type SandboxExecutionPolicy,
   type SandboxMode,
 } from '../../core/sandbox/index.ts'
-import { ShellError, type ShellExecRequest, type ShellRunResult, type ShellSession } from '../../core/shell/index.ts'
+import {
+  ShellError,
+  type ShellExecRequest,
+  type ShellJob,
+  type ShellJobExit,
+  type ShellJobRequest,
+  type ShellRunResult,
+  type ShellSession,
+} from '../../core/shell/index.ts'
 import { confinementRemedy, NO_CONFINEMENT, type Confinement } from './confine/index.ts'
 
 export type ShellDialect = 'bash' | 'pwsh'
@@ -139,10 +148,13 @@ export class ShellProcess implements ShellSession {
   private childWorld: string | undefined
   /** A world that has already answered a command here, so a restart into it is not a broken host. */
   private provenWorld: string | undefined
-  /** An in-flight one-shot child, which disposal must reap: it runs under the WIDEST authority a session ever granted. */
-  private oneShotChild: ChildProcess | undefined
+  /** In-flight one-shot children, which disposal must reap: each runs under the WIDEST authority a session ever granted. */
+  private readonly oneShotChildren = new Set<ChildProcess>()
+  /** Running job processes, and how to tell each that THIS shell's disposal is what killed it. */
+  private readonly jobChildren = new Map<ChildProcess, () => void>()
   /**
-   * Every POSIX process group a one-shot escalation opened in this session.
+   * Every POSIX process group a one-shot escalation or a job opened in this
+   * session.
    *
    * Reaping the CHILD is not enough, and the probe is the reason: a command
    * that backgrounds and disowns something leaves the leader exiting at once
@@ -160,7 +172,7 @@ export class ShellProcess implements ShellSession {
    * unreachable edge the write lease documents for pid reuse, and it is named
    * rather than papered over.
    */
-  private readonly oneShotGroups = new Set<number>()
+  private readonly reapGroups = new Set<number>()
   /** True from a spawn until its first command answered: a child that dies before that never worked at all. */
   private fresh = false
   /** True when the live child was spawned through the confinement wrapper. */
@@ -424,8 +436,8 @@ export class ShellProcess implements ShellSession {
     // authority the session ever granted, so it is the LAST thing that may
     // outlive the agent scope that was supposed to end it.
     const startedAt = Date.now()
-    this.oneShotChild = child
-    if (child.pid !== undefined && process.platform !== 'win32') this.oneShotGroups.add(child.pid)
+    this.oneShotChildren.add(child)
+    if (child.pid !== undefined && process.platform !== 'win32') this.reapGroups.add(child.pid)
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     let output = ''
@@ -443,9 +455,9 @@ export class ShellProcess implements ShellSession {
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
-      killTree(child)
+      void killTree(child)
     }, timeoutMs)
-    const onAbort = (): void => killTree(child)
+    const onAbort = (): void => void killTree(child)
     request.signal?.addEventListener('abort', onAbort, { once: true })
     try {
       const { code, failed } = await ended
@@ -460,7 +472,109 @@ export class ShellProcess implements ShellSession {
     } finally {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', onAbort)
-      if (this.oneShotChild === child) this.oneShotChild = undefined
+      this.oneShotChildren.delete(child)
+    }
+  }
+
+  /**
+   * A job's process: `runOneShot`'s spawn, without its deadline and without
+   * waiting for the exit. The order is the contract (ARCHITECTURE §7):
+   * `confine()` refuses what this world cannot deliver for what the caller
+   * accepts, a disposed shell starts nothing, and the spawned child enters the
+   * reap set in the same tick, so no await sits between the policy the caller
+   * resolved and a child disposal can find. It returns once the child has
+   * SPAWNED: a missing binary or wrapper is a refusal, as it is for `exec`.
+   *
+   * It never goes through the per-owner queue — a job would hold the
+   * persistent shell for its whole life — and never touches the persistent
+   * child or its state: a job runs in a fresh shell at the session root.
+   */
+  async start(request: ShellJobRequest): Promise<ShellJob> {
+    const enforcement = this.confine(request.policy, request.accepts ?? DEFAULT_ACCEPTANCE)
+    if (this.disposed) throw Object.assign(new Error("this session's shell has been disposed; nothing was started"), { code: 'ABORTED_BEFORE_DISPATCH' })
+    const base = oneShotCommand(this.dialect, this.shellPath, request.command)
+    const { cmd, args } = this.confinement.wrap(base.cmd, base.args, request.policy)
+    const wrapped = cmd !== base.cmd
+    const child = spawn(cmd, args, {
+      cwd: this.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...envOption(this.withheld(), this.confinement.envFor(request.policy)),
+      // Its own process group on POSIX, wrapped or not, so a kill reaches what
+      // it started — the one-shot's reason, and a server's children are the
+      // commonest thing a job leaves behind.
+      ...sessionOption(true),
+    })
+    let disposedHere = false
+    this.jobChildren.set(child, () => (disposedHere = true))
+    if (child.pid !== undefined && process.platform !== 'win32') this.reapGroups.add(child.pid)
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    // The first lines, kept only to tell a runner that never started from a
+    // command that failed; the output itself goes straight to the caller.
+    let opening = ''
+    const forward = (chunk: string): void => {
+      if (opening.length < 2_000) opening += chunk.slice(0, 2_000 - opening.length)
+      request.output(chunk)
+    }
+    child.stdout.on('data', forward)
+    child.stderr.on('data', forward)
+    const forget = (): void => {
+      this.jobChildren.delete(child)
+      if (child.pid !== undefined) this.reapGroups.delete(child.pid)
+    }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', () => resolve())
+        child.once('error', (error: NodeJS.ErrnoException) => reject(this.startupFailure(cmd, wrapped, `could not be started (${error.code ?? error.message})`)))
+      })
+    } catch (error) {
+      forget()
+      throw error
+    }
+    child.on('error', () => {})
+    let closed = false
+    child.once('close', () => (closed = true))
+    const exited = new Promise<ShellJobExit>((resolve) => {
+      child.once('exit', (code, signal) => {
+        const settle = (): void => {
+          // The job is over, so what it started is too: a descendant still in
+          // its group would otherwise outlive the end the log records.
+          if (child.pid !== undefined && process.platform !== 'win32') {
+            try {
+              process.kill(-child.pid, 'SIGKILL')
+            } catch {
+              // Already gone, which is the ordinary case.
+            }
+          }
+          forget()
+          const failed = wrapped && code !== 0 && this.isRunnerFailure(opening.trim())
+          resolve({
+            ...(code === null ? {} : { exitCode: code }),
+            ...(signal === null ? {} : { signal }),
+            ...(failed ? { failure: `the confinement runner "${this.confinement.id}" failed: ${opening.trim().slice(0, 200)}` } : {}),
+            ...(disposedHere ? { disposed: true as const } : {}),
+          })
+        }
+        // 'exit' can precede the last 'data'; 'close' waits for the pipes, and
+        // never comes while a backgrounded descendant still holds one. So the
+        // pipes get a short grace, then the job ends with what it wrote.
+        if (closed) return settle()
+        const grace = setTimeout(() => {
+          child.stdout.destroy()
+          child.stderr.destroy()
+          settle()
+        }, 1_500)
+        child.once('close', () => {
+          clearTimeout(grace)
+          settle()
+        })
+      })
+    })
+    return {
+      ...(child.pid === undefined ? {} : { pid: child.pid }),
+      sandbox: { mode: request.policy.mode, enforcement },
+      exited,
+      kill: () => void killTree(child),
     }
   }
 
@@ -525,21 +639,25 @@ export class ShellProcess implements ShellSession {
   async dispose(): Promise<void> {
     this.disposed = true
     const child = this.child
-    const oneShot = this.oneShotChild
+    const oneShots = [...this.oneShotChildren]
+    const jobs = [...this.jobChildren]
     this.child = undefined
     this.childWorld = undefined
-    this.oneShotChild = undefined
-    await Promise.all([killAndWait(child), killAndWait(oneShot)])
-    // …and everything an escalation left behind, including what outlived the
-    // child that started it. Nothing granted for one call may outlive the scope.
-    for (const group of this.oneShotGroups.values()) {
+    this.oneShotChildren.clear()
+    // A job killed HERE says so in its exit, so its owner records the stop as
+    // the disposal it was, whichever of the two disposers unwound first.
+    for (const [, markDisposed] of jobs) markDisposed()
+    await Promise.all([killAndWait(child), ...oneShots.map(killAndWait), ...jobs.map(([job]) => killAndWait(job))])
+    // …and everything an escalation or a job left behind, including what
+    // outlived the child that started it. Nothing may outlive the scope.
+    for (const group of this.reapGroups.values()) {
       try {
         process.kill(-group, 'SIGKILL')
       } catch {
         // Already gone, which is the ordinary case.
       }
     }
-    this.oneShotGroups.clear()
+    this.reapGroups.clear()
   }
 }
 
@@ -548,33 +666,46 @@ export class ShellProcess implements ShellSession {
  *
  * A child spawned `detached` on POSIX leads its own process group, so a
  * negative pid signals the group — the difference between reaping a shell and
- * reaping a shell that backgrounded something. Falls back to the child alone
- * when there is no group (never detached), when it is already gone, or on
- * Windows, which has neither.
+ * reaping a shell that backgrounded something. On Windows there are no
+ * groups, so `taskkill /T` walks the tree by parent link — which works only
+ * while the root is ALIVE, so it runs first and the single-child kill is the
+ * fallback, never alongside it. It is run by absolute path: a `taskkill` on
+ * PATH is whatever the PATH says. Resolves when the killer itself is done.
  */
-function killTree(child: ChildProcess): void {
-  if (child.exitCode !== null || child.pid === undefined) return
+function killTree(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.pid === undefined) return Promise.resolve()
   if (process.platform !== 'win32') {
     try {
       process.kill(-child.pid, 'SIGKILL')
-      return
+      return Promise.resolve()
     } catch {
-      // Fall through to the single-child kill.
+      // No group (never detached): the single-child kill below.
     }
+    child.kill('SIGKILL')
+    return Promise.resolve()
   }
-  child.kill('SIGKILL')
-}
-
-/** Kills a child and waits for it to actually exit (so its cwd lock is released on Windows). */
-function killAndWait(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.exitCode !== null || child.killed) return Promise.resolve()
+  const taskkill = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe')
   return new Promise((resolve) => {
-    const done = (): void => {
-      clearTimeout(timer)
+    const fallback = (): void => {
+      if (child.exitCode === null) child.kill('SIGKILL')
       resolve()
     }
-    const timer = setTimeout(done, 2000)
-    child.once('exit', done)
-    killTree(child)
+    const killer = spawn(taskkill, ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    killer.once('error', fallback)
+    killer.once('exit', (code) => (code === 0 ? resolve() : fallback()))
   })
+}
+
+/**
+ * Kills a child and waits for it, AND the killer, to finish — on Windows the
+ * tree's descendants hold the workspace directory until they are gone, which
+ * is the lock this wait exists to release. Bounded: a process that will not
+ * die is reported by whoever needed it dead, not waited on forever.
+ */
+function killAndWait(child: ChildProcess | undefined): Promise<void> {
+  if (!child || child.exitCode !== null || child.killed) return Promise.resolve()
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const bound = new Promise<void>((resolve) => (timer = setTimeout(resolve, 2000)))
+  return Promise.race([Promise.all([exited, killTree(child)]).then(() => undefined), bound]).finally(() => clearTimeout(timer))
 }

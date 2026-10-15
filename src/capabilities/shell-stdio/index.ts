@@ -133,6 +133,10 @@ function recording(process: ShellProcess, agent: Agent, ctx: Context): ShellSess
       }
       return result
     },
+    // A job's record is its own bracket (`job/start`, `job/end`), written by
+    // the registry from what this reports — so it passes through unrecorded,
+    // and explicitly: a decorator that omitted it would quietly have no jobs.
+    start: (request) => process.start(request),
     restart: () => process.restart(),
     dispose: () => process.dispose(),
   }
