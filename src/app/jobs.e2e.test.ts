@@ -106,7 +106,7 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
       await serve.waitFor(() => serve.events('job/end', sessionId)[0], 'the job to end', 120_000)
       await serve.waitForCompletedTurn(sessionId, 2)
     } catch (error) {
-      throw new Error(`${error instanceof Error ? error.message : String(error)} — ${shape()}`)
+      throw new Error(`${error instanceof Error ? error.message : String(error)} — ${shape()}`, { cause: error })
     }
     const log = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId })
     await serve.shutdown()
