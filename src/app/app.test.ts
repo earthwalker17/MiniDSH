@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
-import { AGENTS } from '../core/agent/index.ts'
+import { AGENTS as AGENT_REGISTRY } from '../core/agent/index.ts'
 import { LLM } from '../core/llm/index.ts'
 import { SESSION_FLUSH } from '../core/session/index.ts'
 import { ScriptedAdapter, assistantText, assistantToolCall } from '../test-support/scripted-adapter.ts'
@@ -244,7 +244,7 @@ describe('headless runner (real composition, scripted model)', () => {
       prepare: (root) => {
         root.get(LLM).registerAdapter(root, adapter)
         root.on(SESSION_FLUSH, async (session) => {
-          if (held || root.get(AGENTS).get(session.id)?.status !== 'idle') return
+          if (held || root.get(AGENT_REGISTRY).get(session.id)?.status !== 'idle') return
           held = true
           await new Promise((resolve) => setTimeout(resolve, 5_000))
         })
