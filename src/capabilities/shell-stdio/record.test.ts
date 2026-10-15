@@ -89,7 +89,10 @@ describe.runIf(available)('the shell effect record', () => {
     const { agent, shell, policy } = await setup()
     const slow = dialect === 'pwsh' ? 'Start-Sleep -Milliseconds 700' : 'sleep 0.7'
     const first = shell.exec({ command: slow, policy, callId: asCallId('slow') })
-    const second = shell.exec({ command: 'echo second', policy, callId: asCallId('fast') })
+    // The cmdlet, not `echo`: pwsh 7.6 resolves that ALIAS in about 1.6 s on a
+    // host whose PATH also holds an `echo.exe` (measured 2026-10-15), so the
+    // probe measured alias resolution instead of the queue it is about.
+    const second = shell.exec({ command: dialect === 'pwsh' ? 'Write-Output second' : 'echo second', policy, callId: asCallId('fast') })
     await Promise.all([first, second])
 
     const fast = effects(agent).find((record) => record.callId === 'fast')!
