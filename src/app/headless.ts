@@ -244,12 +244,15 @@ async function drive(root: Context, handle: AgentHandle, task: string | undefine
       await handle.agent.whenIdle()
     }
     const jobs = root.tryGet(JOBS)
-    const stoppedJobs = jobs?.list(handle.agent).filter((job) => job.state === 'running').length ?? 0
+    const running = new Set(jobs?.list(handle.agent).filter((job) => job.state === 'running').map((job) => job.jobId) ?? [])
     const stopping = jobs?.stopAll(handle.agent)
     if (stopping !== undefined) {
       await stopping
       await handle.agent.whenIdle()
     }
+    // What the stop ENDED, read from the recorded ends: a job whose own exit
+    // was still draining its pipes when the task went idle ended by itself.
+    const stoppedJobs = (jobs?.list(handle.agent) ?? []).filter((job) => running.has(job.jobId) && job.end?.cause === 'cancelled' && job.end.by === 'disposal').length
     await handle.agent.session.flush()
     const events = handle.agent.session.facts
     const reason = foldLastTurnEnd(events)?.kind ?? 'unknown'

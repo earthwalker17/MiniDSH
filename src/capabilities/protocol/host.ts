@@ -563,6 +563,10 @@ export class ProtocolHost {
    * log holds — notices a disposal queued quiet included.
    */
   private summaryOf(sessionId: string, facts: readonly EventEnvelope[], agent: Agent | undefined): ControlSummary {
+    // Closed is closed: nothing here runs, asks or holds anything for it now,
+    // and a creation rolled back at the lease leaves only a seed's closers
+    // that were never written — counts read from them would be fiction.
+    if (agent === undefined) return { sessionId, status: 'closed', runningJobs: 0, heldNotices: 0, pendingApprovals: 0 }
     const jobs = summarizeJobs(facts, agent)
     return {
       sessionId,

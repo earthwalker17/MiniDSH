@@ -368,6 +368,17 @@ function renderAll(change) {
   renderView()
 }
 
+/** One list refresh for a burst of summaries about sessions the list does not show yet. */
+let refreshPending = false
+function refreshSoon() {
+  if (refreshPending) return
+  refreshPending = true
+  setTimeout(() => {
+    refreshPending = false
+    void refreshSessions().catch(() => undefined)
+  }, 250)
+}
+
 async function refreshSessions() {
   const { sessions } = await state.wire.request('sessions/list', state.workspaceId ? { workspaceId: state.workspaceId } : undefined)
   const list = $('sessions')
@@ -537,7 +548,10 @@ async function start() {
       // summary is about ANY session, and that is the point of it.
       if (method === 'control.summary') {
         state.summaries.set(params.sessionId, params)
-        renderBadges(params.sessionId)
+        // A live session the list was drawn without (another client made it)
+        // gets a row: a question parked only for this tab must be findable.
+        if (!state.badges.has(params.sessionId) && params.status !== 'closed') refreshSoon()
+        else renderBadges(params.sessionId)
         return
       }
       if (params?.sessionId && params.sessionId !== state.window?.sessionId) return

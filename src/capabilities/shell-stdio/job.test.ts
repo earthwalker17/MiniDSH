@@ -86,6 +86,14 @@ describe.runIf(available)('a job process', () => {
     expect(chunks.join('')).toContain('second')
   })
 
+  it("keeps the shell's own non-ASCII text intact: pwsh is told to write UTF-8, as the persistent child is", { timeout: TIMEOUT_MS }, async () => {
+    const { shell, policy } = setup()
+    const chunks: string[] = []
+    const command = dialect === 'pwsh' ? 'Write-Output ([string][char]0x00e9 + [char]0x4e2d)' : "printf 'é中\\n'"
+    await (await shell.start({ command, policy, output: (chunk) => chunks.push(chunk) })).exited
+    expect(chunks.join('').trim()).toBe('é中')
+  })
+
   it('kills its whole tree when asked, and the descendant is gone', { timeout: TIMEOUT_MS }, async () => {
     const { shell, policy, root } = setup()
     const job = await shell.start({ command: grandchild(root), policy, output: () => {} })

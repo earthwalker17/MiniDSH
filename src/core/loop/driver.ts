@@ -27,6 +27,7 @@ import {
   type PreStepDecision,
 } from '../agent/index.ts'
 import { asCallId, type SessionId } from '../ids.ts'
+import { isJobNotice } from '../jobs/events.ts'
 import type { JsonValue } from '../json.ts'
 import { BlockAssembler, LLM, type ContentBlock, type Llm, type LlmRequest, type Message, type ModelModality } from '../llm/index.ts'
 import { createAssistantMessage, createToolResultMessage } from '../llm/message.ts'
@@ -164,13 +165,14 @@ export class ReactLoopAgent implements Agent {
 
   send(message: Message, target: InboxTarget, wakeup: boolean): void {
     if (this.disposed) {
-      // Disposal has begun, so nothing runs here again — but input that arrives
-      // now (a job stopped by this very disposal, a prompt racing a shutdown) is
-      // RECORDED for the session's next lifecycle rather than dropped: the
-      // inbox re-delivers, never loses (§4). Quiet, so a resume does not start
-      // a paid turn for it; it enters with the next prompt. Only a session the
+      // Disposal has begun, so nothing runs here again. Step input that arrives
+      // now — a runtime notice, the end of a job this very disposal stopped — is
+      // RECORDED for the session's next lifecycle, quiet, rather than dropped:
+      // the inbox re-delivers, never loses (§4), and it enters with the next
+      // prompt. A PROMPT racing the shutdown is not: a restored next-turn entry
+      // wakes a resume, and nobody saw that prompt accepted. Only a session the
       // store has closed takes nothing more.
-      if (!this.session.isClosed) this.inbox.append(message, target, false)
+      if (target === 'next-step' && !this.session.isClosed) this.inbox.append(message, target, false)
       return
     }
     this.inbox.append(message, target, wakeup)
@@ -282,10 +284,12 @@ export class ReactLoopAgent implements Agent {
           )
         } catch (error) {
           commitClaim()
+          this.requeueNotices(claimed)
           throw error
         }
         if (signal.aborted) {
           commitClaim()
+          this.requeueNotices(claimed)
           throw new Error('turn aborted')
         }
         if (decision.kind === 'reject') {
@@ -522,6 +526,16 @@ export class ReactLoopAgent implements Agent {
     }
     if (lost) throw lost
     return concluded
+  }
+
+  /**
+   * A claim the turn died holding — a cancel or a throw inside the pre-step
+   * await, before anything was entered — loses what was queued, as a cancel
+   * means to. A job's end notice is not the cancel's to lose (`Inbox.clear`
+   * keeps one for the same reason): it goes back, quiet, behind the claim.
+   */
+  private requeueNotices(claimed: readonly Message[]): void {
+    for (const message of claimed) if (isJobNotice(message)) this.inbox.append(message, 'next-step', false)
   }
 
   /** The durability checkpoint: a provider that remembered losing a write says so here, and the turn stops before its next action. */

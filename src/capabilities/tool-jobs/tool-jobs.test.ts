@@ -5,7 +5,7 @@
  * against the workspace and the session log.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -52,18 +52,19 @@ function temp(prefix: string): string {
   return dir
 }
 
-async function setup(accepts: 'full' | 'none' = 'none'): Promise<{ h: CoreHarness; agent: Agent; workspace: string }> {
+async function setup(accepts: 'full' | 'none' = 'none'): Promise<{ h: CoreHarness; agent: Agent; workspace: string; spill: string }> {
   // A host with no confinement backend, accepting that — the Windows shape,
   // and the only one every CI leg can run without a backend.
   const h = await coreHarness({ sandbox: { accepts }, jobs: { stopWaitMs: 2_000 } })
   harness = h
   h.root.plugin(shellStdioPlugin, { dialect, confinement: 'none' })
-  h.root.plugin(spillLocalPlugin, { root: temp('minidsh-jobs-spill-') })
+  const spill = temp('minidsh-jobs-spill-')
+  h.root.plugin(spillLocalPlugin, { root: spill })
   h.root.plugin(toolJobsPlugin, {})
   await h.root.settle()
   const workspace = temp('minidsh-jobs-ws-')
   const handle = await h.create({ cwd: workspace })
-  return { h, agent: handle.agent, workspace }
+  return { h, agent: handle.agent, workspace, spill }
 }
 
 /** Idle, once the log shows what the case is waiting for — idleness alone returns before a job ends. */
@@ -149,7 +150,7 @@ describe.runIf(available)('the job tools', () => {
   })
 
   it('refuses a job this host cannot run under what the session accepts, and never offers an escalation', { timeout: TIMEOUT_MS }, async () => {
-    const { h, agent } = await setup('full')
+    const { h, agent, spill } = await setup('full')
     h.adapter.script(assistantToolCall('c1', 'job_start', { command: SLOW }), assistantText('refused'))
     agent.followup(createUserMessage('try'))
     await settled(agent, turns(1))
@@ -157,6 +158,7 @@ describe.runIf(available)('the job tools', () => {
     expect(result).toContain('SANDBOX_UNAVAILABLE')
     expect(result).toContain('cannot be escalated')
     expect(agent.session.events.filter((event) => matches(event, JOB_START))).toHaveLength(0)
+    expect(readdirSync(spill), 'a refusal leaves no output file behind').toEqual([])
   })
 
   it("answers for a job of an earlier run from the log, which outlives the registry", { timeout: TIMEOUT_MS }, async () => {

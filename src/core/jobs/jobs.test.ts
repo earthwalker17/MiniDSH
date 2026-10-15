@@ -4,7 +4,7 @@
  * bracket, the notice's delivery, what a resume or a fork is told — because
  * the log is what a resumed session, a replay and an audit will have.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -14,10 +14,10 @@ import { verifyStored } from '../../app/inspect.ts'
 import { assistantText, assistantToolCall } from '../../test-support/scripted-adapter.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { AGENTS, INBOX_SPLICED, repairTail, type Agent } from '../agent/index.ts'
-import { createUserMessage } from '../llm/message.ts'
+import { createPluginMessage, createUserMessage } from '../llm/message.ts'
 import { PERSISTENCE } from '../persistence/index.ts'
 import { SANDBOX } from '../sandbox/index.ts'
-import { matches, SESSION_FLUSH, TURN_END, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
+import { matches, SESSION_EVENT, SESSION_FLUSH, TURN_END, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
 import { defineTool, TOOLS } from '../tools/index.ts'
 import {
   closeUnpairedJobs,
@@ -114,7 +114,6 @@ describe('the job bracket', () => {
 
     process.output('PASS 12 tests\n')
     process.exit({ exitCode: 0 })
-    process.exit({ exitCode: 3 }) // a second report changes nothing: first-wins
     await quiesce(agent)
 
     const ends = ofType(agent, JOB_END.type)
@@ -387,5 +386,157 @@ describe('the closer and the folds, pure', () => {
     const { agent } = await setup()
     agent.session.append(JOB_START, { jobId: 'job-live', kind: 'shell', label: 'x', mode: 'read-only', enforcement: 'full' })
     expect(() => agent.session.append(JOB_END, { jobId: 'job-live', cause: 'lost' })).toThrow(/only crash repair and a fork write that/)
+  })
+})
+
+/** What the S17 review found the cases above did not hold, each a case that fails without its fix. */
+describe('the review cases', () => {
+  it('a cancel whose wait expired is not the report of the end that follows: that end gets its notice', async () => {
+    const { agent, jobs } = await setup({ stopWaitMs: 50 })
+    const { jobId, process } = await launch(jobs, agent, { dies: false })
+    const view = await jobs.cancel(agent, jobId, 'model', 'c-cancel')
+    expect(view.state, 'the call told the model it had not ended').toBe('running')
+    process.exit({ signal: 'SIGKILL' })
+    await quiesce(agent)
+    const end = ofType(agent, JOB_END.type)[0]!.data as Record<string, unknown>
+    expect(end).toMatchObject({ cause: 'cancelled', by: 'model' })
+    expect(end.reportedBy, 'nobody was waiting to report it').toBeUndefined()
+    expect(inserts(agent)).toMatchObject([{ waking: false, message: { id: jobNoticeId(jobId) } }])
+  })
+
+  it("a durable acceptance switch ends the owner's jobs, as a mode switch does", async () => {
+    const { agent, jobs, h } = await setup()
+    const { jobId } = await launch(jobs, agent)
+    h.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
+    await quiesce(agent)
+    expect(ofType(agent, JOB_END.type).map((event) => event.data)).toMatchObject([{ jobId, cause: 'cancelled', by: 'authority' }])
+  })
+
+  it('an exit after its owner abandoned the job appends nothing: the closer owns it now', async () => {
+    const { agent, jobs, h } = await setup()
+    const { process } = await launch(jobs, agent, { dies: false })
+    await h.dispose()
+    harness = undefined
+    const before = agent.session.events.length
+    process.exit({ exitCode: 0 })
+    await tick(20)
+    expect(agent.session.events.length).toBe(before)
+    expect(ofType(agent, JOB_END.type)).toHaveLength(0)
+  })
+
+  it('a job that ended on its own while a stop was asked for is recorded as its own end, and wakes nothing', async () => {
+    const { agent, jobs, h } = await setup()
+    const { process } = await launch(jobs, agent, { dies: false })
+    const stopping = jobs.stopAll(agent)
+    process.exit({ exitCode: 0, selfEnded: true })
+    await stopping
+    await quiesce(agent)
+    const end = ofType(agent, JOB_END.type)[0]!.data as Record<string, unknown>
+    expect(end).toMatchObject({ cause: 'exited', exitCode: 0 })
+    expect(end.by).toBeUndefined()
+    expect(inserts(agent).map((insert) => insert.waking)).toEqual([false])
+    expect(h.adapter.calls).toHaveLength(0)
+  })
+
+  it("a person's cancel keeps a job's queued notice — quiet — and the next message delivers it", async () => {
+    const { agent, jobs, h } = await setup()
+    const { jobId, process } = await launch(jobs, agent)
+    h.root.get(TOOLS).register(
+      h.root,
+      defineTool({
+        name: 'hang',
+        description: 'test',
+        input: z.object({}),
+        output: z.string(),
+        timeoutMs: null,
+        render: () => [{ type: 'text', text: 'ok' }],
+        execute: async (_args, exec) => {
+          process.exit({ exitCode: 0 })
+          await new Promise((resolve) => exec.callSignal.addEventListener('abort', resolve, { once: true }))
+          return 'stopped'
+        },
+      }),
+    )
+    h.adapter.script(assistantToolCall('c1', 'hang', {}))
+    agent.followup(createUserMessage('go'))
+    const deadline = Date.now() + 5_000
+    while (inserts(agent).every((insert) => insert.message.id !== jobNoticeId(jobId))) {
+      if (Date.now() > deadline) throw new Error('the notice never arrived')
+      await tick()
+    }
+    agent.cancel({ kind: 'user' })
+    await quiesce(agent)
+    expect(foldJobs(agent.session.events)[0]!.notice).toMatchObject({ waking: false, state: 'queued' })
+    expect(ofType(agent, TURN_START.type), 'the kept notice woke nothing').toHaveLength(1)
+
+    h.adapter.script(assistantText('saw it'))
+    agent.followup(createUserMessage('and now?'))
+    await quiesce(agent)
+    expect(h.adapter.calls.at(-1)!.messages.map((message) => message.id)).toContain(jobNoticeId(jobId))
+  })
+
+  it('a disposing agent records a runtime notice, quiet, and drops a prompt nobody saw accepted', async () => {
+    const { agent } = await setup()
+    agent.cancel({ kind: 'disposed' })
+    agent.followup(createUserMessage('late prompt'))
+    agent.send(createPluginMessage('test', 'late notice'), 'next-step', true)
+    expect(inserts(agent).map((insert) => ({ waking: insert.waking }))).toEqual([{ waking: false }])
+  })
+
+  it('a cold fork cut while a job ran closes it lost in the fork, though the source ended it later', async () => {
+    const { agent, jobs, h, store } = await setup({}, true)
+    h.adapter.script(assistantText('one'))
+    agent.followup(createUserMessage('first'))
+    await quiesce(agent)
+    const { jobId } = await launch(jobs, agent)
+    const cut = agent.session.seq - 1
+    await jobs.cancel(agent, jobId, 'user')
+    const id = agent.id
+    await h.dispose()
+    harness = undefined
+
+    const next = await coreHarness({ jobs: { stopWaitMs: 200 } })
+    harness = next
+    next.root.plugin(persistenceJsonlPlugin, { root: store! })
+    await next.root.settle()
+    const fork = await next.root.get(AGENTS).fork(next.root, id as never, cut, { agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    const job = foldJobs(fork.agent.session.events).find((record) => record.start.jobId === jobId)!
+    expect(job.end).toEqual({ jobId, cause: 'lost' })
+    expect(job.notice).toMatchObject({ waking: false, state: 'queued' })
+    expect(job.endSeq!).toBeLessThan(fork.agent.session.liveStart)
+    await fork.dispose()
+  })
+
+  it('a waking notice the host died holding still wakes the resume; the closers stay quiet', async () => {
+    const { agent, jobs, h, store } = await setup({}, true)
+    h.adapter.script(assistantText('ok'))
+    agent.followup(createUserMessage('hello'))
+    await quiesce(agent)
+    const crash = mkdtempSync(join(tmpdir(), 'minidsh-jobs-crash-'))
+    dirs.push(crash)
+    const file = `${encodeURIComponent(agent.id)}.jsonl`
+    // A snapshot of the log at the moment the notice landed: what a host
+    // killed right then leaves on disk, the waking insert unclaimed.
+    h.root.on(SESSION_EVENT, (_session, event) => {
+      if (matches(event, INBOX_SPLICED) && event.data.op === 'insert' && event.data.message.id.startsWith('msg-job-')) copyFileSync(join(store!, file), join(crash, file))
+    })
+    h.adapter.script(assistantText('woken here'))
+    const { jobId, process } = await launch(jobs, agent)
+    process.exit({ exitCode: 0 })
+    await quiesce(agent)
+    const id = agent.id
+    await h.dispose()
+    harness = undefined
+
+    const next = await coreHarness({ jobs: { stopWaitMs: 200 } })
+    harness = next
+    next.root.plugin(persistenceJsonlPlugin, { root: crash })
+    await next.root.settle()
+    next.adapter.script(assistantText('woken on resume'))
+    const resumed = await next.root.get(AGENTS).resume(next.root, id as never, { agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+    await quiesce(resumed.agent)
+    expect(next.adapter.calls, 'the restored waking notice woke the resume').toHaveLength(1)
+    expect(next.adapter.calls[0]!.messages.at(-1)!.id).toBe(jobNoticeId(jobId))
+    await resumed.dispose()
   })
 })

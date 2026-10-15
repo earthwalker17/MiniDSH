@@ -151,6 +151,8 @@ export interface ShellJobExit {
   readonly failure?: string
   /** This shell's own disposal killed it. */
   readonly disposed?: true
+  /** It ended before anyone asked it to stop (`core/jobs` records it as its own end). */
+  readonly selfEnded?: true
 }
 
 /** A started process: its own process group on POSIX, reaped when the shell is disposed. */

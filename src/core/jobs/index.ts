@@ -55,6 +55,13 @@ export interface JobExit {
   readonly failure?: string
   /** The producer killed it at its OWN disposal, whoever unwound first. */
   readonly disposed?: true
+  /**
+   * It ended before anyone asked it to stop. Its own end, then, even when a
+   * stop was requested in the moment between its exit and this report (the
+   * producer drains its pipes first): a job that finished is not recorded as
+   * stopped.
+   */
+  readonly selfEnded?: true
 }
 
 export interface JobSpec {
@@ -90,6 +97,8 @@ export interface JobView {
   readonly state: 'running' | 'ended'
   readonly pid?: number
   readonly output?: string
+  /** The output file stops short of what the job wrote: the size cap, or a store that could not write. */
+  readonly outputPartial?: true
   readonly end?: JobEnd
 }
 
@@ -157,8 +166,8 @@ interface Entry {
   process?: JobProcess
   start?: JobStart
   startedAt: number
-  /** The first stop asked for wins: it decides the recorded cause, whatever ended the process. */
-  cancel?: { readonly by: JobCanceller; readonly callId?: string }
+  /** The first stop asked for wins: it decides the recorded cause, unless the process had already ended on its own. */
+  cancel?: { readonly by: JobCanceller }
   end?: JobEnd
   /** True once the end is decided, recorded or abandoned: no later exit appends. */
   done: boolean
@@ -168,9 +177,21 @@ interface Entry {
   tail: string
   total: number
   cursor: number
-  waiters: { readonly callId?: string; readonly resolve: (read: JobRead) => void }[]
+  /**
+   * Calls waiting on this job's end: a `job_output` wait, or a cancel. The
+   * first that names a call REPORTS the end (`job/end.reportedBy`), so no
+   * notice is sent — and a waiter leaves synchronously when its own bound
+   * expires, so an end that lands after that is nobody's report and gets one.
+   */
+  waiters: Waiter[]
   readonly settled: Promise<void>
   markSettled: () => void
+}
+
+interface Waiter {
+  readonly callId?: string
+  /** Called inside `settle`, after the end is recorded: what the waiter returns is built here. */
+  readonly settle: () => void
 }
 
 interface Owner {
@@ -187,6 +208,7 @@ function view(entry: Entry): JobView {
     state: entry.end === undefined ? 'running' : 'ended',
     ...(entry.process?.pid === undefined ? {} : { pid: entry.process.pid }),
     ...(entry.stream === undefined ? {} : { output: entry.stream.path }),
+    ...(entry.capped || entry.stream?.failed === true ? { outputPartial: true as const } : {}),
     ...(entry.end === undefined ? {} : { end: entry.end }),
   }
 }
@@ -195,7 +217,15 @@ function newJobId(): string {
   return `job-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+/** Waits for `promise` at most `ms`, and never leaves its timer behind: a pending one holds a CLI's process open. */
+async function within(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([promise, new Promise<void>((resolve) => (timer = setTimeout(resolve, ms)))])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 class JobsService implements Jobs {
   private readonly agents: Agents
@@ -250,8 +280,6 @@ class JobsService implements Jobs {
       markSettled,
     }
     owner.entries.set(entry.jobId, entry)
-    const stream = this.openOutput(agent, entry.jobId)
-    if (stream !== undefined) entry.stream = stream
     let process: JobProcess
     try {
       process = await spec.launch((chunk) => this.onOutput(entry, chunk))
@@ -264,10 +292,17 @@ class JobsService implements Jobs {
       // Doomed while it started: stop it and refuse, recording nothing — the
       // job never existed in this session's record.
       process.kill()
-      await Promise.race([process.exited, sleep(this.stopWaitMs)])
+      await within(process.exited, this.stopWaitMs)
       this.forget(entry)
       const why = entry.cancel?.by === 'authority' ? "this session's sandbox mode or acceptance changed while it was starting" : 'this session is ending'
       throw new JobError('JOB_REFUSED', `the background job was stopped before it began: ${why}`)
+    }
+    // The file opens only for a job that exists, so a refusal leaves none;
+    // what the process wrote before this moment is in the tail.
+    const stream = this.openOutput(agent, entry.jobId)
+    if (stream !== undefined) {
+      entry.stream = stream
+      if (entry.tail.length > 0) stream.write(entry.tail)
     }
     const start: JobStart = {
       jobId: entry.jobId,
@@ -305,14 +340,14 @@ class JobsService implements Jobs {
     const waitMs = options.waitMs ?? 0
     if (entry.end !== undefined || waitMs <= 0 || options.signal?.aborted) return this.consume(entry)
     return new Promise<JobRead>((resolve) => {
-      const waiter = {
+      const waiter: Waiter = {
         ...(options.callId === undefined ? {} : { callId: options.callId }),
         // Settle hands the waiter a read built in the same synchronous step
         // that recorded the end as this call's to report: no I/O sits between.
-        resolve: (read: JobRead) => {
+        settle: () => {
           clearTimeout(timer)
           options.signal?.removeEventListener('abort', leave)
-          resolve(read)
+          resolve(this.consume(entry))
         },
       }
       const leave = (): void => {
@@ -321,7 +356,7 @@ class JobsService implements Jobs {
         const index = entry.waiters.indexOf(waiter)
         if (index < 0) return
         entry.waiters.splice(index, 1)
-        waiter.resolve(this.consume(entry))
+        waiter.settle()
       }
       const timer = setTimeout(leave, waitMs)
       options.signal?.addEventListener('abort', leave, { once: true })
@@ -331,11 +366,20 @@ class JobsService implements Jobs {
 
   async cancel(agent: Agent, jobId: string, by: 'model' | 'user', callId?: string): Promise<JobView> {
     const entry = this.entryOf(agent, jobId)
-    if (entry.end === undefined) {
-      entry.cancel ??= { by, ...(callId === undefined ? {} : { callId }) }
-      entry.process?.kill()
-      await Promise.race([entry.settled, sleep(this.stopWaitMs)])
-    }
+    if (entry.end !== undefined) return view(entry)
+    entry.cancel ??= { by }
+    // The cancelling call reports the end only if it is still WAITING when the
+    // end lands: past its bound it has told the model "not ended yet", so the
+    // end that follows is nobody's report and gets its notice.
+    let waiter: Waiter | undefined
+    const ended = new Promise<void>((resolve) => {
+      waiter = { ...(callId === undefined ? {} : { callId }), settle: resolve }
+      entry.waiters.push(waiter)
+    })
+    entry.process?.kill()
+    await within(ended, this.stopWaitMs)
+    const index = entry.waiters.indexOf(waiter!)
+    if (index >= 0) entry.waiters.splice(index, 1)
     return view(entry)
   }
 
@@ -382,7 +426,12 @@ class JobsService implements Jobs {
   private async disposeOwner(owner: Owner): Promise<void> {
     owner.ending = true
     await this.stopEvery(owner, 'disposal')
-    for (const entry of owner.entries.values()) entry.done = true
+    // What would not die in time is abandoned: nothing more is appended or
+    // written for it, and the closer of the next lifecycle calls it `lost`.
+    for (const entry of owner.entries.values()) {
+      entry.done = true
+      if (entry.end === undefined) entry.stream?.close()
+    }
     if (this.owners.get(owner.agent.id) === owner) this.owners.delete(owner.agent.id)
     try {
       await owner.agent.session.flush()
@@ -399,7 +448,7 @@ class JobsService implements Jobs {
       entry.process?.kill()
       pending.push(entry.settled)
     }
-    if (pending.length > 0) await Promise.race([Promise.all(pending), sleep(this.stopWaitMs)])
+    if (pending.length > 0) await within(Promise.all(pending), this.stopWaitMs)
   }
 
   /**
@@ -411,14 +460,14 @@ class JobsService implements Jobs {
   private settle(entry: Entry, exit: JobExit): void {
     if (entry.done || entry.start === undefined) return
     entry.done = true
-    const waiter = entry.waiters[0]
+    const reporter = entry.waiters.find((waiter) => waiter.callId !== undefined)
     const durationMs = Date.now() - entry.startedAt
     const exited = {
       ...(exit.exitCode === undefined ? {} : { exitCode: exit.exitCode }),
       ...(exit.signal === undefined ? {} : { signal: exit.signal }),
     }
-    const cancel = entry.cancel ?? (exit.disposed ? { by: 'disposal' as const } : undefined)
-    const reportedBy = cancel?.by === 'model' ? cancel.callId : waiter?.callId
+    const cancel = exit.selfEnded ? undefined : (entry.cancel ?? (exit.disposed ? { by: 'disposal' as const } : undefined))
+    const reportedBy = reporter?.callId
     const end: JobEnd = {
       jobId: entry.jobId,
       ...(cancel !== undefined
@@ -443,7 +492,7 @@ class JobsService implements Jobs {
       this.logger.warn(`jobs: could not record the end of ${entry.jobId}: ${error instanceof Error ? error.message : String(error)}`)
     }
     if (recorded && reportedBy === undefined) this.deliver(entry, end)
-    for (const waiting of entry.waiters.splice(0)) waiting.resolve(this.consume(entry))
+    for (const waiting of entry.waiters.splice(0)) waiting.settle()
     entry.markSettled()
     if (recorded) void session.flush().catch(() => undefined)
   }
@@ -452,7 +501,9 @@ class JobsService implements Jobs {
   private deliver(entry: Entry, end: JobEnd): void {
     const agent = entry.owner.agent
     const own = end.cause === 'exited' || end.cause === 'failed'
-    const waking = own && !entry.owner.ending && foldJobWakes(agent.session.facts) < this.maxWakes
+    // A stop was asked for: the end is recorded as what it was, but it does not
+    // wake — the latch `stopAll` sets exists so that nothing does.
+    const waking = own && entry.cancel === undefined && !entry.owner.ending && foldJobWakes(agent.session.facts) < this.maxWakes
     try {
       agent.send(jobNotice(entry.start, end), 'next-step', waking)
     } catch (error) {
@@ -461,7 +512,7 @@ class JobsService implements Jobs {
   }
 
   private onOutput(entry: Entry, chunk: string): void {
-    if (chunk.length === 0) return
+    if (entry.done || chunk.length === 0) return
     entry.total += chunk.length
     entry.tail = (entry.tail + chunk).slice(-TAIL_CHARS)
     const size = Buffer.byteLength(chunk, 'utf8')

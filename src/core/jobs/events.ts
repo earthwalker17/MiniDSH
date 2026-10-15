@@ -210,7 +210,9 @@ export function foldJobs(events: readonly EventEnvelope[]): JobRecord[] {
       if (splice.op === 'insert') {
         const jobId = noticeJobId(splice.message)
         const record = jobId === undefined ? undefined : records.get(jobId)
-        if (record && record.notice === undefined) record.notice = { seq: event.seq, waking: splice.waking === true, state: 'queued' }
+        // The LATEST insert is the notice's state: a person's cancel or a killed
+        // claim puts a job's notice back, quiet (`Inbox.clear`, the driver).
+        if (record && record.notice?.state !== 'queued') record.notice = { seq: event.seq, waking: splice.waking === true, state: 'queued' }
         ;(splice.queue === 'next-turn' ? turnQueue : stepQueue).push(record ? jobId : undefined)
       } else if (splice.op === 'claim') {
         for (const jobId of stepQueue.splice(0, splice.steps)) leave(jobId, 'claimed')

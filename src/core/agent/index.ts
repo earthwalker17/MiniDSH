@@ -18,7 +18,7 @@ import {
   type SessionHeader,
 } from '../session/index.ts'
 import { AGENT_CREATED, AGENT_DISPOSED, AGENT_REQUEST, foldAgentOptions, type InboxSplice, type InboxState } from './events.ts'
-import { closeUnpairedJobs } from '../jobs/events.ts'
+import { closeUnpairedJobs, isJobNotice } from '../jobs/events.ts'
 import { repairTail } from './repair.ts'
 import type {
   Agent,
@@ -178,11 +178,25 @@ export class Inbox {
    * nothing either way.
    */
   clear(durable: boolean): void {
-    const discarded = [...this.stepQueue.map((entry) => entry.message), ...this.turnQueue]
+    const queued = [...this.stepQueue.map((entry) => entry.message), ...this.turnQueue]
     this.stepQueue.length = 0
     this.turnQueue.length = 0
-    if (durable && discarded.length > 0) this.record({ op: 'clear' })
-    for (const message of discarded) this.dispatch('discarded', message)
+    if (!durable) {
+      for (const message of queued) this.dispatch('discarded', message)
+      return
+    }
+    // A durable clear discards what was queued — except a background job's
+    // end notice, the one message with an exactly-once delivery contract
+    // (`core/jobs/events.ts`): a fact, not a request a person withdrew. It
+    // stays, re-recorded QUIET after the clear, so the cancel that kept it does
+    // not wake a turn for it. Dropping it lost a job's end for good (S17 review).
+    const kept = queued.filter(isJobNotice)
+    if (queued.length > 0) this.record({ op: 'clear' })
+    for (const message of kept) {
+      this.stepQueue.push({ message, waking: false })
+      this.record({ op: 'insert', queue: 'next-step', message, waking: false })
+    }
+    for (const message of queued) if (!kept.includes(message)) this.dispatch('discarded', message)
   }
 
   /** Restores a folded durable state (resume): no dispatch, no re-record. */

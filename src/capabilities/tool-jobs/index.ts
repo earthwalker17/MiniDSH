@@ -173,7 +173,11 @@ function buildJobTools(ctx: Context, maxWaitMs: number) {
 }
 
 function excerpt(text: string, omitted: number, view: JobView): string {
-  const lost = omitted > 0 ? `[${omitted.toLocaleString('en-US')} earlier characters are no longer held in memory${view.output === undefined ? '' : `; the whole output is in ${view.output}`}]\n` : ''
-  const bounded = view.output === undefined ? excerptWithoutSpill(text, EXCERPT) : excerptWithSpill(text, { path: view.output, bytes: 0 }, EXCERPT)
+  // A file that stopped short (the size cap, a store that could not write) is
+  // never called the whole output.
+  const partial = view.outputPartial === true
+  const where = view.output === undefined ? '' : partial ? `; ${view.output} holds only part of it` : `; the whole output is in ${view.output}`
+  const lost = omitted > 0 ? `[${omitted.toLocaleString('en-US')} earlier characters are no longer held in memory${where}]\n` : ''
+  const bounded = view.output === undefined || partial ? excerptWithoutSpill(text, EXCERPT) : excerptWithSpill(text, { path: view.output, bytes: 0 }, EXCERPT)
   return lost + bounded
 }

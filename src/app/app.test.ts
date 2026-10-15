@@ -10,7 +10,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
+import { AGENTS } from '../core/agent/index.ts'
 import { LLM } from '../core/llm/index.ts'
+import { SESSION_FLUSH } from '../core/session/index.ts'
 import { ScriptedAdapter, assistantText, assistantToolCall } from '../test-support/scripted-adapter.ts'
 import { main } from './cli.ts'
 import { runTask } from './headless.ts'
@@ -216,6 +218,40 @@ describe('headless runner (real composition, scripted model)', () => {
     const notices = events.filter((event) => event.type === 'inbox/spliced' && (event.data as { message?: { id?: string } }).message?.id === `msg-job-${String(starts[0]!.data.jobId)}`)
     expect(notices.map((event) => event.data.waking)).toEqual([false])
     expect(events.filter((event) => event.type === 'turn/start')).toHaveLength(1)
+    expect(adapter.calls).toHaveLength(2)
+  })
+
+  /**
+   * Why the stop sits in the SAME continuation as the idle. The run's first
+   * flush after its task went idle is held here, and a short job ends inside
+   * it: without the stop, that job's own end would wake a second turn — one
+   * nobody scripted, which errors, so the run would end 'error'. With it, the
+   * job was already stopped, quiet, when the hold began.
+   */
+  it.skipIf(!shellAvailable)('stops the jobs before anything else can happen after the idle: an end landing right after wakes nothing', { timeout: 120_000 }, async () => {
+    const quick = process.platform === 'win32' ? 'Start-Sleep -Milliseconds 1500' : 'sleep 1.5'
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'job_start', { command: quick }), assistantText('started'))
+    let held = false
+    const result = await runTask({
+      task: 'start it',
+      cwd: tempDir('minidsh-cwd-'),
+      model: 'scripted-model',
+      sessionsRoot: tempDir('minidsh-sessions-'),
+      confinement: 'none',
+      accepts: 'none',
+      logger: silent,
+      ...scripted(adapter),
+      prepare: (root) => {
+        root.get(LLM).registerAdapter(root, adapter)
+        root.on(SESSION_FLUSH, async (session) => {
+          if (held || root.get(AGENTS).get(session.id)?.status !== 'idle') return
+          held = true
+          await new Promise((resolve) => setTimeout(resolve, 5_000))
+        })
+      },
+    })
+    expect(held).toBe(true)
+    expect(result).toMatchObject({ exitCode: 0, reason: 'completed', stoppedJobs: 1 })
     expect(adapter.calls).toHaveLength(2)
   })
 

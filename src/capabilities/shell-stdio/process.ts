@@ -30,9 +30,19 @@ function shellCommand(dialect: ShellDialect, shellPath: string | undefined): { c
   return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc'] }
 }
 
-/** The same shell, asked to run exactly one command and exit: the one-shot grant's shape. */
+/**
+ * The same shell, asked to run exactly one command and exit: the one-shot
+ * grant's shape, and a job's. pwsh gets the persistent child's encoding
+ * line first: without it PowerShell writes its own text in the OEM code page,
+ * which a host on CP936 delivered to the model as replacement characters
+ * (measured 2026-10-15). Guarded, because a console setting can throw where
+ * there is no console; the command's own exit code is unchanged.
+ */
 function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, command: string): { cmd: string; args: string[] } {
-  if (dialect === 'pwsh') return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command] }
+  if (dialect === 'pwsh') {
+    const utf8 = 'try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $OutputEncoding = [Text.Encoding]::UTF8; '
+    return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8 + command] }
+  }
   return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc', '-c', command] }
 }
 
@@ -503,8 +513,13 @@ export class ShellProcess implements ShellSession {
       // it started — the one-shot's reason, and a server's children are the
       // commonest thing a job leaves behind.
       ...sessionOption(true),
+      // No console of the harness's on Windows (CREATE_NO_WINDOW, every stdio
+      // piped or ignored): a Ctrl+C a person aims at the terminal is delivered
+      // to every process on its console, and would otherwise end the job too.
+      windowsHide: true,
     })
     let disposedHere = false
+    let stopRequested = false
     this.jobChildren.set(child, () => (disposedHere = true))
     if (child.pid !== undefined && process.platform !== 'win32') this.reapGroups.add(child.pid)
     child.stdout.setEncoding('utf8')
@@ -536,6 +551,9 @@ export class ShellProcess implements ShellSession {
     child.once('close', () => (closed = true))
     const exited = new Promise<ShellJobExit>((resolve) => {
       child.once('exit', (code, signal) => {
+        // Decided at the exit, before the pipes' grace: a stop asked for in
+        // that grace did not end a process that had already ended.
+        const selfEnded = !stopRequested && !disposedHere
         const settle = (): void => {
           // The job is over, so what it started is too: a descendant still in
           // its group would otherwise outlive the end the log records.
@@ -553,6 +571,7 @@ export class ShellProcess implements ShellSession {
             ...(signal === null ? {} : { signal }),
             ...(failed ? { failure: `the confinement runner "${this.confinement.id}" failed: ${opening.trim().slice(0, 200)}` } : {}),
             ...(disposedHere ? { disposed: true as const } : {}),
+            ...(selfEnded ? { selfEnded: true as const } : {}),
           })
         }
         // 'exit' can precede the last 'data'; 'close' waits for the pipes, and
@@ -574,7 +593,10 @@ export class ShellProcess implements ShellSession {
       ...(child.pid === undefined ? {} : { pid: child.pid }),
       sandbox: { mode: request.policy.mode, enforcement },
       exited,
-      kill: () => void killTree(child),
+      kill: () => {
+        stopRequested = true
+        void killTree(child)
+      },
     }
   }
 

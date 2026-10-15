@@ -55,6 +55,15 @@ function stored(home: string, sessionId: string): EventEnvelope[] {
     .map((line) => JSON.parse(line) as EventEnvelope)
 }
 
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Kills a process tree by pid where it can: what the arc does with an orphan after reporting on it. */
 function killTree(pid: number): void {
   if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
@@ -135,7 +144,13 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
     const workspace = tempDir('minidsh-jobs-lost-ws-')
     const home = tempDir('minidsh-jobs-lost-home-')
     const marker = `SHORT-${Math.random().toString(36).slice(2, 10)}`
-    writeFileSync(join(workspace, 'long.cjs'), "setInterval(() => require('fs').appendFileSync('heartbeat.txt', Date.now() + '\\n'), 500)\n", 'utf8')
+    // The worker records its OWN pid: on Windows its shell root can die with the
+    // host while it lives on, and a dead root's descendants are unreachable.
+    writeFileSync(
+      join(workspace, 'long.cjs'),
+      "const fs = require('fs'); fs.writeFileSync('long.pid', String(process.pid)); setInterval(() => fs.appendFileSync('heartbeat.txt', Date.now() + '\\n'), 500)\n",
+      'utf8',
+    )
     writeFileSync(join(workspace, 'short.cjs'), `setTimeout(() => console.log(${JSON.stringify(marker)}), 2000)\n`, 'utf8')
 
     const first = new ServeProcess(workspace, home, SERVE)
@@ -152,8 +167,11 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
     const sizeAtKill = statSync(join(workspace, 'heartbeat.txt')).size
     await new Promise((resolve) => setTimeout(resolve, 2_000))
     const survived = statSync(join(workspace, 'heartbeat.txt')).size > sizeAtKill
-    console.log(`[jobs arc B] ${process.platform}: the job ${survived ? 'SURVIVED' : 'died with'} its host (pid ${pid ?? '?'})`)
+    const worker = Number(readFileSync(join(workspace, 'long.pid'), 'utf8'))
+    const root = pid !== undefined && alive(pid) ? 'alive' : 'gone'
+    console.log(`[jobs arc B] ${process.platform}: the job's worker ${survived ? 'SURVIVED' : 'died with'} its host; its root (pid ${pid ?? '?'}) is ${root}`)
     if (pid !== undefined) killTree(pid)
+    killTree(worker)
 
     // ---- a cold read predicts the closers -----------------------------------
     const sessionFile = join(home, 'sessions', `${encodeURIComponent(sessionId)}.jsonl`)
