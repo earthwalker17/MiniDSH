@@ -26,7 +26,13 @@
  * (turn, step, callId), never calling `next()` — so nothing touches the disk,
  * no `tool/dispatch` is written (S14 put that fact inside the terminal
  * continuation exactly so a middleware answering here cannot claim a body ran)
- * and a recording replays on any machine, whatever its paths. What it
+ * and a recording replays on any machine, whatever its paths. A background job's
+ * completion is answered the same way: no process runs, so the recorded
+ * notice is re-delivered where the recording CLAIMED it — after the previous
+ * turn ended, for a notice that woke a turn; at the end of the previous step's
+ * model call, for one a busy turn took at its next step — with the recorded
+ * waking flag. Arrival is ordered by the log, never by a clock (and `run`
+ * refuses a log with jobs, whose real timing IS the clock's). What it
  * provably does NOT reproduce: every fact a body or provider writes (effects,
  * approvals asked inside a body, subagent brackets, spill, attachments), a
  * tool's `concludesTurn` or deferred context (unlogged; no shipped tool sets
@@ -35,7 +41,10 @@
  * ever runs when the delegating call's result is served.
  */
 import type { Context, Disposer } from '../kernel/index.ts'
-import { AGENT_OPTIONS } from '../core/agent/index.ts'
+import { AGENT_OPTIONS, AGENTS, INBOX_SPLICED } from '../core/agent/index.ts'
+import { JOB_START, noticeJobId } from '../core/jobs/events.ts'
+import { restoreMessage } from '../core/llm/message.ts'
+import type { Message } from '../core/llm/types.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
 import { foldAuxCalls, LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/aux-call.ts'
 import {
@@ -46,11 +55,14 @@ import {
   matches,
   REQUEST_CONTEXT,
   REQUEST_HEADER,
+  SESSION_EVENT,
   SESSION_LIFECYCLE,
+  STEP_START,
   TOOL_CALL,
   TOOL_DISPATCH,
   TOOL_RESULT,
   TURN_END,
+  USER_MESSAGE,
   type EventEnvelope,
 } from '../core/session/index.ts'
 import { TOOLS_EXECUTE, type ToolExecution, type ToolResult } from '../core/tools/index.ts'
@@ -76,6 +88,11 @@ export type ReplayAttempts = 'every' | 'acted-on'
  * in order. Logs written before `attempt` existed count as a single attempt.
  */
 export function deriveReplayScript(events: readonly EventEnvelope[], attempts: ReplayAttempts = 'every'): StreamChunk[][] {
+  return keyedReplayScript(events, attempts).script
+}
+
+/** The same script, each group with the (turn, step) it was recorded at — what a notice is anchored to. */
+function keyedReplayScript(events: readonly EventEnvelope[], attempts: ReplayAttempts): { script: StreamChunk[][]; keys: string[] } {
   const groups = new Map<string, { attempt: number; chunks: StreamChunk[] }[]>()
   const order: string[] = []
   for (const event of events) {
@@ -99,6 +116,7 @@ export function deriveReplayScript(events: readonly EventEnvelope[], attempts: R
     // A lower attempt after a higher one cannot happen; ignore it rather than reorder.
   }
   const script: StreamChunk[][] = []
+  const keys: string[] = []
   for (const key of order) {
     const list = groups.get(key)!
     const chosen = attempts === 'every' ? list : list.slice(-1)
@@ -108,10 +126,42 @@ export function deriveReplayScript(events: readonly EventEnvelope[], attempts: R
       // mid-stream and the agent never acted on it. In a resumed log the
       // artifact sits MID-log (completed turns follow it), so every finish-less
       // group is dropped — replaying one would silently desynchronize the script.
-      if (entry.chunks.some((chunk) => chunk.type === 'finish')) script.push(entry.chunks)
+      if (entry.chunks.some((chunk) => chunk.type === 'finish')) {
+        script.push(entry.chunks)
+        keys.push(key)
+      }
     }
   }
-  return script
+  return { script, keys }
+}
+
+/** A job's completion notice as the recording delivered it: the message, its waking flag, and the step that took it. */
+export interface RecordedNotice {
+  readonly message: Message
+  readonly waking: boolean
+  readonly turn: number
+  readonly step: number
+}
+
+/**
+ * Every job notice a recording's model was shown, anchored to the step whose
+ * claim entered it. The anchor is the CLAIM, not the insert: the insert follows
+ * its `job/end`, which an effect-free replay never writes, while the claim is
+ * a step the replay reproduces.
+ */
+export function recordedNotices(events: readonly EventEnvelope[]): RecordedNotice[] {
+  const waking = new Map<string, boolean>()
+  const notices: RecordedNotice[] = []
+  let at = { turn: 0, step: 0 }
+  for (const event of events) {
+    if (matches(event, STEP_START)) at = { turn: event.data.turn, step: event.data.step }
+    else if (matches(event, INBOX_SPLICED) && event.data.op === 'insert' && noticeJobId(event.data.message) !== undefined) {
+      waking.set(event.data.message.id, event.data.waking === true)
+    } else if (matches(event, USER_MESSAGE) && noticeJobId(event.data.message) !== undefined) {
+      notices.push({ message: event.data.message, waking: waking.get(event.data.message.id) ?? false, ...at })
+    }
+  }
+  return notices
 }
 
 /**
@@ -266,16 +316,42 @@ interface AuxGroup {
 /** One recorded log's script: log order is the cursor, whatever route a call took. */
 class ReplayScript {
   private readonly script: StreamChunk[][]
+  private readonly keys: string[]
   private readonly auxScript: AuxGroup[]
   private cursor = 0
   private auxCursor = 0
   /** The recording's tool answers, and which of them the effect-free middleware has served. */
   readonly answers: Map<string, RecordedAnswer>
   readonly served = new Set<string>()
-  constructor(script: StreamChunk[][], auxScript: AuxGroup[], answers: Map<string, RecordedAnswer>) {
-    this.script = script
+  /** The recording's job notices still owed to the replayed session. */
+  readonly notices: RecordedNotice[]
+  /** Hands a notice to the replayed session bound to this script. */
+  deliver: (sessionId: string, notice: RecordedNotice) => void = () => {}
+  constructor(keyed: { script: StreamChunk[][]; keys: string[] }, auxScript: AuxGroup[], answers: Map<string, RecordedAnswer>, notices: RecordedNotice[] = []) {
+    this.script = keyed.script
+    this.keys = keyed.keys
     this.auxScript = auxScript
     this.answers = answers
+    this.notices = notices
+  }
+
+  /** The notices a step after the first took: owed once the previous step's model call is served, before that step's claim. */
+  private dueAfterStep(index: number): RecordedNotice[] {
+    const key = this.keys[index]!
+    if (this.keys[index + 1] === key) return [] // a retried attempt follows: not this step's last call
+    const [turn, step] = key.split(':').map(Number) as [number, number]
+    return this.take((notice) => notice.turn === turn && notice.step === step + 1)
+  }
+
+  /** The notices that woke a turn: owed once the previous turn has ended. */
+  dueAfterTurn(turn: number): RecordedNotice[] {
+    return this.take((notice) => notice.step === 1 && notice.turn === turn + 1)
+  }
+
+  private take(due: (notice: RecordedNotice) => boolean): RecordedNotice[] {
+    const taken = this.notices.filter(due)
+    for (const notice of taken) this.notices.splice(this.notices.indexOf(notice), 1)
+    return taken
   }
 
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
@@ -295,8 +371,13 @@ class ReplayScript {
     }
     const group = this.script[this.cursor]
     if (!group) throw new Error(`llm-replay: no recorded step ${this.cursor} to replay`)
+    const index = this.cursor
     this.cursor += 1
     for (const chunk of group) yield chunk
+    // Synchronously, here: a step that owes a request claims its next step's
+    // input with no await after its last tool result, so a notice delivered
+    // any later than the end of this call would miss the claim the recording made.
+    for (const notice of this.dueAfterStep(index)) this.deliver(request.sessionId ?? '', notice)
   }
 
   consumed(): number {
@@ -383,6 +464,9 @@ class ReplayDispatch {
       }
       if (source.auxConsumed() !== source.auxTotal()) {
         throw new Error(`llm-replay: replayed ${source.auxConsumed()} of ${source.auxTotal()} recorded out-of-loop calls${which}`)
+      }
+      if (this.effects === 'recorded' && source.notices.length > 0) {
+        throw new Error(`llm-replay: ${source.notices.length} recorded job notice(s) were never re-delivered${which}: ${source.notices.map((notice) => `${notice.message.id} at ${notice.turn}:${notice.step}`).join(', ')}`)
       }
       if (this.effects === 'recorded') {
         const owed = [...source.answers].filter(([key, answer]) => answer.bodied === 'yes' && !source.served.has(key)).map(([key]) => key)
@@ -518,16 +602,31 @@ export function installLlmReplay(
     }
   }
   const logs = [options.events, ...(options.children ?? [])]
+  if (effects === 'run' && logs.some((events) => events.some((event) => matches(event, JOB_START)))) {
+    throw new Error("llm-replay: this log ran background jobs, whose completions arrived when the clock said; replay it with effects: 'recorded', which re-delivers them where the recording took them")
+  }
   const sources = logs.map(
     (events) =>
       new ReplayScript(
-        deriveReplayScript(events, options.attempts),
+        keyedReplayScript(events, options.attempts ?? 'every'),
         foldAuxCalls(events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) })),
         recordedAnswers(events),
+        effects === 'recorded' ? recordedNotices(events) : [],
       ),
   )
   const shared = new ReplayDispatch(sources)
   shared.effects = effects
+  // A re-delivered notice goes through the replayed agent's own inbox, with
+  // the recorded waking flag: the one queue, exactly as a registry delivers.
+  const deliver = (sessionId: string, notice: RecordedNotice): void => {
+    const agent = owner.get(AGENTS).get(sessionId as never)
+    if (!agent) {
+      shared.mismatch ??= `job notice ${notice.message.id} is owed to session "${sessionId}", which is not live`
+      return
+    }
+    agent.send(restoreMessage(notice.message), 'next-step', notice.waking)
+  }
+  for (const source of sources) source.deliver = deliver
   // Every log's routes, windows and modalities: a child may take a route its
   // parent never did — which is exactly what a vision verifier does.
   const windows = new Map<string, number>()
@@ -540,7 +639,21 @@ export function installLlmReplay(
   const providers = named.length > 0 ? named : ['deepseek']
   const llm = owner.get(LLM)
   const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, modalities, options.contextWindow ?? 1_000_000)))
-  if (effects === 'recorded') disposers.push(owner.on(TOOLS_EXECUTE, (execution, next) => answerFromRecording(shared, execution, next)))
+  if (effects === 'recorded') {
+    disposers.push(owner.on(TOOLS_EXECUTE, (execution, next) => answerFromRecording(shared, execution, next)))
+    // A notice that woke a turn is owed once the turn before it ends — on a
+    // microtask (a session/event listener may not append synchronously, §4),
+    // which still lands while the driver awaits that turn's flush, so it is the
+    // driver's own re-check of the inbox that opens the next turn, as live.
+    disposers.push(
+      owner.on(SESSION_EVENT, (session, event) => {
+        if (!matches(event, TURN_END)) return
+        const script = shared.bound(session.id)
+        if (!script) return
+        for (const notice of script.dueAfterTurn(event.data.turn)) queueMicrotask(() => deliver(session.id, notice))
+      }),
+    )
+  }
   return {
     dispose: async () => {
       for (const dispose of disposers) await dispose()
