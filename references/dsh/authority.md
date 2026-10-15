@@ -28,7 +28,7 @@
 
 ## Open for the route
 
-- **S17, a job that asks.** Unattended is composition: `headless` inherits base's approval service but mounts no answerer (an ask settles `unavailable`); `sdk-minimal` drops the seam and pins `danger-full-access`. `packages/bundle/sdk-minimal/cordis.patch.yml`
+- **S17, a job that asks.** Unattended is composition: `headless` inherits base's approval service but mounts no answerer (an ask settles `unavailable`); `sdk-minimal` drops the seam and pins `danger-full-access`. A background command asks only to escalate, BEFORE its background branch, so an approved one-shot grant lasts the job's life, and its mode is fixed at spawn (rechecked 2026-10-15 at `57190202`). `packages/shell/tool-bash/src/index.ts`
 - **S18, web search.** No backend confines the network (bwrap unshares pid only, Seatbelt allows default), so gating `web_fetch` is a `tools/pre-execute` listener, the shape hooks and auto-review already use. `packages/sandbox/sandbox-local/src/profiles.ts`
 - **S19, skills.** A skill's script is a shell command: the hook runner is the precedent for "borrow `ctx.shell`, inherit its policy and the scrub". `packages/hooks/hook-protocol/src/runner.ts`
 - **S20, the browser process.** Ten spawners outside `ctx.subprocess` import `scrubbedParentEnv()`; the Stagehand Chrome launch is the browser precedent. `packages/experimental/browser-use-stagehand-native/src/launch.ts`
@@ -45,7 +45,7 @@
 | `packages/sandbox/sandbox/src/roots.ts` | `writableRoots()`: Seatbelt and the fs fence | 2026-09-26 |
 | `packages/sandbox/sandbox/src/escalation.ts` | the ladder, `displayReason`, no command parser | 2026-09-26 |
 | `packages/sandbox/sandbox-windows-acl/README.md` | the rung, its boundaries, standing edits | 2026-09-26 |
-| `packages/interaction/user-approval/src/{types,invariant}.ts`, `docs/persistence-schema.json` | the audit payloads; no clamp, no decider | 2026-09-26 |
+| `packages/interaction/user-approval/src/types.ts`, `docs/persistence-schema.json` | the audit payloads; no clamp, no decider; `invariant.ts` deleted 2026-09-30 | 2026-10-15 |
 | `packages/core/tools/src/{index,presentation}.ts` | the gates, `ask`, `ToolCallView` | 2026-09-26 |
 | `.agents/notes/implemented/feature/2026-07-06-approval-seam.md` | `allow_always` deferred, the scope question | 2026-09-26 |
 | `packages/subagent/subagent/src/child-agent.ts` | the seeded pins, depth | 2026-09-26 |

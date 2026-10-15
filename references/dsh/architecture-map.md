@@ -1,10 +1,10 @@
 # DSH reference: Architecture and subsystem map
 
-> The entry map to DSH ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26.
+> The entry map to DSH ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26; the S17 rows and the counts rechecked at `57190202` on 2026-10-15.
 
 ## What exists (at the pin)
 
-A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 54 groups, 312 packages (`docs/module-graph.md`, generated), four apps, six bundles. The HOST plane (bundles) owns registries, authority, persistence and the model route; the AGENT plane is a per-session preset, since 2026-09-21 an ordinary `@deepseek-ai/dsh-agent-preset` row a profile patch can override; only the preset IDENTITY persists (header `agentPreset`, log-only `agent-preset/selected`, `docs/persistence-catalog.md`). Status `default` = a live row in the base bundle unless the purpose names another.
+A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 52 groups, 336 packages on 2026-10-14 (`docs/module-graph.md`, generated), four apps, six bundles. The HOST plane (bundles) owns registries, authority, persistence and the model route; the AGENT plane is a per-session preset, since 2026-09-21 an ordinary `@deepseek-ai/dsh-agent-preset` row a profile patch can override; only the preset IDENTITY persists (header `agentPreset`, log-only `agent-preset/selected`, `docs/persistence-catalog.md`). Status `default` = a live row in the base bundle unless the purpose names another.
 
 | Component | Path | Status | Purpose |
 |---|---|---|---|
@@ -27,7 +27,7 @@ A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 54 grou
 | MCP | `packages/mcp` | opt-in | `mcp-resources` live; no `mcp-client` row |
 | Terminal (PTY) | `packages/terminal` | opt-in | PTY, not a TUI; the `minimal` preset and sdk-minimal only |
 | Extensions | `packages/extensions` | opt-in | `tool-cordis` in the `cordis` preset; inspect providers in web-app |
-| Unmounted groups | `packages/hooks`, `packages/lsp`, `packages/ssh`, `packages/webhook`, `packages/browser-use`, `packages/computer-use` | opt-in | No row in any bundle |
+| Unmounted groups | `packages/lsp`, `packages/ssh`, `packages/browser-use`, `packages/computer-use`; hooks and webhook under `packages/experimental` since 2026-10-06 | opt-in | No row in any bundle |
 | Optional bundles | `packages/experimental/agent-team-profile`, `voice-input-bundle`, `auto-review` | experimental | Offered by the Web plugin page |
 | Other carriers | `packages/sdk`, `packages/acp`, `packages/bundle/headless`, `sdk-app`, `acp-app` | opt-in | Overlays on base: persona restated, `session-title-llm` and HMR off |
 | Desktop | `apps/desktop`, `apps/desktop-host` | opt-in | Electron shell; a private Host runs the CLI-rejected `desktop` profile |
@@ -36,7 +36,7 @@ A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 54 grou
 ## Open for the route
 
 - **S17, job ownership.** A preset's service sits in an `isolate` realm; a service a row outside the realm READS stays on the host, keyed by owner (a realm-scoped jobs registry answered "background jobs unavailable"). `packages/bundle/web-app/cordis.patch.yml`
-- **S17, a held process.** fs and subprocess providers share one execution world: one swap moves Bash, PTY and LSP together. `docs/architecture.md`
+- **S17, a held process.** fs and subprocess providers share one execution world: one swap moves Bash, PTY and LSP together; the subprocess seam owns the process range (`packages/subprocess/subprocess/src/index.ts`). `docs/architecture.md`
 - **S18, the default route.** `agent-default-model` is a host row apart from the adapters; a saved selection overrides it at creation. `packages/bundle/base/cordis.patch.yml`
 - **S19, the skill registry.** Host plus per-scope layers: a preset's `skill-filesystem` fills its own layer; base's host row is disabled in web-app. `packages/bundle/web-app/cordis.patch.yml`
 - **S20, browser providers.** Playwright MCP, DevTools MCP and Cua stay explicit compositions, never optional bundles. `.agents/notes/implemented/architecture/2026-09-21-experimental-capabilities-as-optional-bundles.md`
@@ -57,7 +57,7 @@ A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 54 grou
 
 - Presets: directories became declarations on 09-21; `tool-plugin-manager` sits disabled in every preset; the Coding Tools preference (renamed 09-24) gates selection.
 - web-app rows churn daily: `schedule` and `time-context` inserted then disabled on 09-24.
-- The count: 312 on 09-24, account and provider packages added 09-22/23; the graph regenerates weekly.
+- The count: 312 on 09-24, 336 on 10-14 after prototypes moved to `packages/experimental`; the graph regenerates weekly.
 
 ## Not read
 

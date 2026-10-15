@@ -1,6 +1,6 @@
 # DSH reference: Surfaces: host, clients, protocol, Desktop
 
-> Where to research DSH's host, clients, carriers and Desktop ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26.
+> Where to research DSH's host, clients, carriers and Desktop ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26; the S17 rows rechecked at `57190202` on 2026-10-15.
 
 ## What exists (at the pin)
 
@@ -13,7 +13,7 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 | Connection | `packages/client/connection` | default | Browser wire: trust fence, launch-token cookie, generations; every request is admitted as the one operator Peer |
 | API Gateway, Remotes | `packages/api/gateway`, `packages/api/remotes` | default | Typert `@Remote` unary over POST, streams over the `/api/remote.mux` WebSocket with a per-stream uplink cap; `$events` forwarding |
 | Session Controller | `packages/api/session-controller` | default | List, fork, prompt, cancel, page, follow, control; Client mirrors; archive gate |
-| Job, workspace, terminal controllers | `packages/api/job-controller`, `workspace-controller`, `workspace-files`, `terminal-controller` | default | `job.follow`; workspace baseline plus increments; bounded file reads; PTY panel |
+| Job, workspace, terminal controllers | `packages/api/job-controller`, `workspace-controller`, `workspace-files`, `terminal-controller` | default | `job.list`, `job.follow`, `job.kill` (web-app only); workspace baseline plus increments; bounded file reads; PTY panel |
 | Client Modules, Slots | `packages/client/modules`, `packages/client/ui-slots` | default | Boot graph, typed slots; components never receive `ctx` |
 | Commands, approvals | `packages/interaction/commands`, `packages/interaction/user-approval`, `packages/client/ui-approval` | default | Slash commands, approval dispatch and audit; the panel: allow-once or reject, localized `displayReason` |
 | Jobs, subagent, permission UI | `packages/client/ui-jobs`, `ui-subagent`, `ui-permission-presets` | default | Job roster; child catalog and continuation; `/permission` picker over log-only `permission/preset` |
@@ -23,9 +23,9 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 
 ## Open for the route
 
-- **S17, the control-plane tier.** The control stream is transient: each generation opens with a baseline from `ctx.sessions.list()`, then projection frames; baselines "cannot reconstruct jobs after a Host restart". `packages/api/session-controller/src/control.ts`
-- **S17, subscription order.** The Host attaches every `$events` listener and sends one `ready` frame before the Client reads any baseline; notifications never replay. `packages/client/connection/README.md`
-- **S17, jobs on the wire.** The roster rides the control stream; one job's record is its own Remote stream. `packages/bundle/web-app/cordis.patch.yml`
+- **S17, the control-plane tier.** The control stream is transient and carries projections only: each generation opens with a baseline from `ctx.sessions.list()`, then sequenced frames, in an unbounded per-stream queue (no drop, no coalescing). `packages/api/session-controller/src/control.ts`
+- **S17, subscription order.** The Host attaches every `$events` listener and sends one `ready` frame first; one-way notifications never replay, but a still-pending approval waterfall IS replayed after a reconnect; non-page clients default to `interactions:'none'` since 2026-10-14. `packages/api/remotes/README.md`
+- **S17, jobs on the wire.** The roster is NOT on the control stream (a bundle comment says it is): `job.list` streams whole-set rows coalesced over 100 ms, `job.follow` one job's ring then its status, and both are empty after a Host restart. `packages/api/job-controller/README.md`
 - **S21, following a child.** A child is followed through a direct-parent subagent address on the same journal stream, validated against the header's `parentSession` and the `subagent` projection identity. `packages/api/session-controller/src/history.ts`
 - **S22, fork on the wire.** An explicit `atSeq` copies the exact inclusive prefix, even inside an open turn; omitted, the latest completed turn and its tail; the chat action offers completed turns. `packages/api/session-controller/README.md`
 - **S22, prompt retries.** Idempotent on a client-minted `requestId`, echoed as the user source's `rpcId`. `packages/api/session-controller/README.md`

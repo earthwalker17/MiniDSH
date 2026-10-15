@@ -153,7 +153,7 @@ ARCHITECTURE §11 is a table from *new thing* to *home*: a model provider is an 
 
 ## What MiniDSH learned from DeepSeek Harness
 
-MiniDSH reproduced DSH's principles, not its implementation. [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) is a large, fast-moving system — 312 packages in 54 groups as of 2026-09-24 by its own [module graph](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md) — with an unusually good written architecture; [`references/`](references/README.md) is this project's pinned map of it. The links below were checked on 2026-09-26.
+MiniDSH reproduced DSH's principles, not its implementation. [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) is a large, fast-moving system — 336 packages in 52 groups as of 2026-10-14 by its own [module graph](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md) — with an unusually good written architecture; [`references/`](references/README.md) is this project's pinned map of it. The links below were checked on 2026-09-26.
 
 ### Ideas taken
 

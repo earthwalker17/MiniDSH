@@ -2,7 +2,7 @@
 
 A curated local map of DeepSeek Harness (DSH) for MiniDSH sessions. MiniDSH studies DSH as an architecture textbook and a behavioural oracle, never as a fork (see [PROJECT.md](../docs/PROJECT.md)). This folder says **where an upstream subsystem lives, what MiniDSH leans on about it, and where to research next**. It is a navigation layer, never a mirror: upstream mechanisms are fetched on demand from the paths here, every claim carries a repository path, and the repository itself stays the authority.
 
-**Current pin:** `deepseek-ai/deepseek-harness@477b4f42` (`master`, 2026-09-24, release `dsh-v0.1.7-rc.2`), every file and every ledger row, re-researched in S16.5 (2026-09-26/27). An ordinary session moves the pin only for the area it researched, so each file's header says which commit it describes; the next `.5` moves the rest.
+**Pins:** `deepseek-ai/deepseek-harness@477b4f42` (`master`, 2026-09-24, `dsh-v0.1.7-rc.2`), re-researched in S16.5 (2026-09-26/27), except what S17 (2026-10-15) moved to `57190202` (2026-10-14, `dsh-v0.2.1-alpha.3`): `dsh/execution-jobs-agents.md`, the S17 rows of four other files, and the ledger's execution section and † rows. An ordinary session moves the pin only for the area it researched, so each file's header says which commit it describes; the next `.5` moves the rest.
 
 ## The files
 
