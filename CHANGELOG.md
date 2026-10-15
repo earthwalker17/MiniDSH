@@ -2,6 +2,19 @@
 
 All notable changes to MiniDSH are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The session-by-session engineering record, with what each session measured, lives in [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
+## [Unreleased]
+
+### Added
+
+- **Background jobs.** `job_start` runs a long command beside the session — a dev server, a slow test run — and returns at once; `job_output` reads what it wrote since the last read (optionally waiting for it to end) and `job_cancel` stops it and what it started. A job's start and its one end are durable facts in the log; when a job ends on its own its notice arrives in the session and wakes an idle agent, at most eight times in a row before a person says something, and a stop someone asked for never wakes it. A job runs under the session's own authority, never an escalation, a durable switch of the sandbox mode or acceptance ends it, and it ends with its session. If the MiniDSH process dies, the next resume (and `sessions verify` before it) closes each running job as lost and tells the model so.
+- **Jobs on every surface.** The session view lists jobs; `job/cancel` stops one over the protocol; the terminal has `/jobs` and `/jobs cancel <id>`; the browser shows a jobs strip with a stop button and per-session badges. A new `control/subscribe` sends every client a per-session summary (status, running jobs, held notices, pending approvals) whatever session it is watching, and a question stays answerable while such a client is connected.
+
+### Changed
+
+- **A one-shot run stops what it started.** `minidsh run` (and a delegated child) stops a job still running when its task ends, records it, and says so on stderr; the exit code is unchanged.
+- **On Windows a process is killed with its tree** (`taskkill /T`): a timed-out or cancelled command's children no longer outlive it.
+- **PowerShell one-shot commands write UTF-8**, as the persistent shell always did: on a host whose console code page is not UTF-8 their non-ASCII output arrived garbled.
+
 ## [1.1.0] — 2026-09-27
 
 The record and authority planes, built across three sessions, reviewed as one system and released: durable execution you can read cold, consent that says what will run, and a shell that runs on every platform under an honest boundary.

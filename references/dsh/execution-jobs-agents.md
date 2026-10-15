@@ -12,17 +12,15 @@
 | Job tools | `packages/jobs/tool-jobs` | base; every preset but `minimal` | Arms `start()`; `job_output`, `job_list`, `job_kill`; completion notices |
 | Job controller | `packages/api/job-controller` | web-app | `job.list` (whole-set rows), `job.follow`, a human `job.kill` fenced by the registry owner alone |
 | Subagent activations | `packages/subagent` | default-mounted | Every child returns an id at once and reports through the parent's inbox; no child is a job |
-| Agent teams | `packages/experimental/agent-team` | experimental, no bundle row | Lead plus teammates; a message goes straight into the target inbox |
+| Agent teams | `packages/experimental/agent-team` | experimental, no bundle row | Lead plus teammates |
 | Workflow | `packages/workflow` | default-mounted | Model-written script; root runs bracketed in the parent log; a background run is a `workflow` job |
 | Schedule | `packages/schedule/schedule` | web-app | Host-wide reminders, delivered as a follow-up in the origin session |
-| Agent presets | `packages/bundle/web-app/presets/*.patch.yml` | web-app | `standard` (default), `minimal`, `ptc`, `cordis` |
-| Goal, plan mode, todo | `packages/goal`, `packages/plan`, `packages/todo` | default-mounted | Log-only domains; the loop depends on none |
 
 ## Open for the route
 
 - **S17, the bracket (MiniDSH diverges).** The registry appends `job/registered` and `job/settled` synchronously at its commit, so a terminal fact precedes the notice it causes; ids are `<kind>-<16 hex>` because history outlives the registry. A missing settlement "remains incomplete" and nothing closes it: an ordered shutdown was added and reverted (`3d89cded`), so even a graceful exit can lose it. `docs/subsystems/jobs.md`
 - **S17, admission.** A live owner Agent, a controller serving it, then a per-owner cap of 10 (running plus stopping); nothing queues or preempts, and a refusal leaves no id. `packages/jobs/jobs-local/src/index.ts`
-- **S17, delivery.** A notice is a user message (`{kind:'tool-jobs', form:'notice'}`): `followup` for an idle owner, else `inject`; none for an awaited end, a model kill or teardown, while a person's kill notifies. Waking is unbounded by default: a cap of 3 stalled sessions INVISIBLY (#641, "an observable cost beats an unobservable stall"). The idle race is still open in `agent.ts`. `packages/jobs/tool-jobs/README.md`
+- **S17, delivery.** A notice is a user message (`{kind:'tool-jobs', form:'notice'}`): `followup` for an idle owner, else `inject`; none for an awaited end, a model kill or teardown, while a person's kill notifies. Waking is unbounded by default (#641: a cap of 3 stalled sessions invisibly); the idle race is still open in `agent.ts`. `packages/jobs/tool-jobs/README.md`
 - **S17, headless.** `dsh run` waits for children, never jobs; teardown kills them without a notice. `packages/bundle/headless/README.md`
 - **S20, the dev server as a job.** A foreground command is registered at its start and waited on: in time its record is removed, past the timeout the same id is returned (`promoteOnTimeout`). `terminal_send` moved to `packages/experimental`. `packages/shell/tool-bash/README.md`
 - **S21, continuable children.** Every local child is a durable Session plus one resident activation, settled into the parent's inbox (steer when busy, followup when idle), outside any wake budget; `interrupt()` keeps the inbox, claimed work is not requeued. `.agents/notes/implemented/simplification/2026-09-17-unified-subagent-activations.md`

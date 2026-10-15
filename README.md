@@ -18,7 +18,7 @@ It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (
 Three things:
 
 1. **Useful software.** A coding agent that edits files and runs commands under an authority you set — which files it may write, and which actions need your approval — and can audit afterwards; that survives its process being killed and can be resumed or forked from its log; that manages its own context; that can hand a bounded task to a child or a visual check to a model that can see. Two providers ship (DeepSeek and Anthropic), and a session can switch models mid-conversation.
-2. **A reference architecture.** About twenty-four thousand lines of TypeScript in one package with one runtime dependency: four layers with a dependency rule enforced by a script in `pnpm check`, seventeen service contracts in core plus one in the application, thirty-two durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
+2. **A reference architecture.** About twenty-six thousand lines of TypeScript in one package with one runtime dependency: four layers with a dependency rule enforced by a script in `pnpm check`, eighteen service contracts in core plus one in the application, thirty-four durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
 3. **A systems-engineering experiment.** Whether a project built almost entirely by coding-agent sessions can keep a global architecture intact across months, by making it explicit, inspectable and continuously falsified rather than letting sessions gradually invent it.
 
 The thesis is **fewer concepts and stronger invariants**, not fewer lines or more features.
@@ -77,7 +77,9 @@ The DeepSeek adapter ships `deepseek-flash` (the default; `deepseek-v4-flash`, t
 
 **Delegation with a ceiling.** The model can hand one bounded task to a `subagent`: a child with its own session and log whose authority is fixed at its parent's or narrower and cannot be widened from inside; approvals are off, so an action needing one is refused. A verifier that can *see* is a second `subagent` entry pointed at a vision model, using the `view_image` tool, a built-in row that is off by default.
 
-**Composition from disk.** The default composition is a list of thirty-five plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` shows the result and flags any authority-sensitive row a file changed.
+**Background jobs that report back.** The model can start a long command — a dev server, a slow test run — with `job_start`, keep working, read its output with `job_output` and stop it with `job_cancel`. When a job ends on its own, its notice arrives in the session and wakes an idle agent, a bounded number of times before a person says something; a stop someone asked for never wakes it. A job runs under the session's own authority and ends with its session; if the process running the session dies, the next resume tells the model which jobs were lost.
+
+**Composition from disk.** The default composition is a list of thirty-eight plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` shows the result and flags any authority-sensitive row a file changed.
 
 **One runtime, three ways in.** The headless CLI, the terminal and the browser are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). They display the session log a page at a time and keep no state of their own; several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record.
 
@@ -88,10 +90,10 @@ The DeepSeek adapter ships `deepseek-flash` (the default; `deepseek-v4-flash`, t
 - Windows has no shell-confinement backend and is not getting one. By default a shell command there costs an approval and runs in a fresh shell (`cd` and environment changes do not persist); `--accept none` records that the session accepts an unconfined shell and runs it normally, with file edits still fenced, instead of `danger-full-access`, which drops the fence too.
 - Confinement governs file effects only. A confined command still reaches the network. Its environment is scrubbed of this deployment's declared provider keys and of `MINIDSH_*`, and of nothing else: a credential-shaped variable you set is yours and reaches the shell. That scrub is defence in depth, not a boundary: reads are unfenced, so a credentials file stays readable to a command that looks.
 - The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. A confined shell writes through such a link too, because the OS confines paths; neither backend lets it create one across the workspace boundary (measured under bubblewrap and Seatbelt).
-- Tool execution is sequential and a delegated child is foreground; there are no background jobs.
+- Tool execution is sequential and a delegated child is foreground. A background job's process can outlive a MiniDSH process that is killed (on Windows, on macOS, and unconfined on Linux): the resume reports it lost and does not stop it. On Windows a job runs only in a session that accepts an unconfined shell (`--accept none`).
 - No session deletion, search or rename; no OpenAI adapter; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
 
-What comes next is background jobs ([BLUEPRINT §2](docs/BLUEPRINT.md)).
+What comes next is an OpenAI adapter and web search, then skills and browser verification ([BLUEPRINT §2](docs/BLUEPRINT.md)).
 
 ## The question it investigates
 
@@ -101,7 +103,7 @@ DSH's answer to that pressure is explicit: an *everything-is-a-plugin* harness b
 
 > **What is the minimum modern agent harness that still preserves the architectural properties required for long-term composition, observability, verification, multi-surface evolution and maintainability?**
 
-"Minimum" is measured in concepts, not lines. The working rule is **everything evolvable has a seam** — a composition boundary — and not everything is evolvable: a capability earns one when it may realistically need to be replaced, scoped, disabled or owned by a different lifecycle; a pure helper or a type does not. The answer is concrete: a kernel with five mechanisms, eighteen seams, and everything else ordinary code.
+"Minimum" is measured in concepts, not lines. The working rule is **everything evolvable has a seam** — a composition boundary — and not everything is evolvable: a capability earns one when it may realistically need to be replaced, scoped, disabled or owned by a different lifecycle; a pure helper or a type does not. The answer is concrete: a kernel with five mechanisms, nineteen seams, and everything else ordinary code.
 
 ## Architecture
 
@@ -123,7 +125,7 @@ A script in `pnpm check` enforces the dependency direction (ARCHITECTURE §1), t
 
 **The kernel** (`src/kernel`, about nine hundred lines) is the two Cordis properties in the fewest mechanisms: a context tree where *registration context = visibility = lifetime*, typed service tokens, plugins with a declared dependency lifecycle, disposers run in reverse order, and typed events with an `observe` hook on which runtime invariants are checked.
 
-**Core** (`src/core`) is seventeen service contracts (*keys*), each a Definition with one provider — a core default driver or a capability — and consumers over it; the eighteenth, the composition handle, is the application's.
+**Core** (`src/core`) is eighteen service contracts (*keys*), each a Definition with one provider — a core default driver or a capability — and consumers over it; the nineteenth, the composition handle, is the application's.
 
 | Concern | Keys | Owns |
 |---|---|---|
@@ -159,7 +161,7 @@ MiniDSH reproduced DSH's principles, not its implementation. [DeepSeek Harness](
 
 - **Capabilities have lifecycle and dependency semantics.** DSH's rule that plugins depend on Service Definitions, never concrete providers ([packages/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md)), became the three-role seam: a Definition in core, a Provider and a Consumer in capabilities.
 - **Each agent gets its own registration scope**, disposed when the agent ends ([note of 2026-07-08](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md)).
-- **A tiny model-facing tool surface is enough.** DSH's `minimal` preset ([minimal.patch.yml](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml)) mounts a persona and one persistent shell; MiniDSH's default is three tools (`bash`/`pwsh`, `str_replace_editor`, `subagent`).
+- **A tiny model-facing tool surface is enough.** DSH's `minimal` preset ([minimal.patch.yml](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml)) mounts a persona and one persistent shell (since 2026-10-12 also image reading and compaction); MiniDSH's default is three tools (`bash`/`pwsh`, `str_replace_editor`, `subagent`) plus the three job tools.
 - **The session log is the record and the model-visible history is derived from it** ([session subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/session.md), [compaction subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/compaction.md)).
 - **Bytes beside the log, references in it** ([attachment seam](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/attachment.md)).
 - **Confinement is a spawn wrapper inside the shell provider** ([sandbox subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/sandbox.md), [sandbox-local](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/sandbox-local/README.md)); the bubblewrap profile is adopted flag for flag.
@@ -172,11 +174,11 @@ These are the experiment, each stated in ARCHITECTURE §12 with the reasoning th
 
 - **An own kernel instead of Cordis** — the two properties in five mechanisms and about nine hundred lines.
 - **One package with a dependency gate instead of hundreds.**
-- **Sequential, foreground, one child at a time:** no background jobs, parallel tool calls, continuable children or agent teams.
-- **One protocol over three transports** (stdio, in-process, WebSocket; seventeen JSON-RPC methods) where DSH ships several composition profiles.
+- **Sequential, foreground, one child at a time:** no parallel tool calls, continuable children or agent teams; background jobs are owned by a session, closed `lost` when its process dies, and wake it a bounded number of times, where DSH leaves a lost job's record open and wakes without a bound.
+- **One protocol over three transports** (stdio, in-process, WebSocket; nineteen JSON-RPC methods) where DSH ships several composition profiles.
 - **Two confinement backends, not four:** no Landlock (a native addon) and no Windows backend (DSH's can only ever report partial enforcement).
 - **A terminal client ships** (DSH removed its TUI in a note of 2026-08-04).
-- **History recall appears only when needed:** `history_read` is hidden until the first compaction; DSH's [session-query](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/session-query/tool-session-query/README.md) tools are opt-in for the schemas they add to every request.
+- **History recall appears only when needed:** `history_read` is hidden until the first compaction; DSH's [session-query](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/experimental/tool-session-query/README.md) tools are opt-in for the schemas they add to every request.
 
 ### Where it diverges
 
@@ -188,7 +190,7 @@ ARCHITECTURE §12 carries the reasons.
 
 ### Not built
 
-PTC (DSH's programmatic tool calling); model-written dynamic packages; an MCP client; a Windows confinement backend and Landlock; session deletion; a session search index; per-user identity; agent teams. Each is in BLUEPRINT §2 with the reason; background jobs, a browser tool and a desktop launcher are on its route.
+PTC (DSH's programmatic tool calling); model-written dynamic packages; an MCP client; a Windows confinement backend and Landlock; session deletion; a session search index; per-user identity; agent teams. Each is in BLUEPRINT §2 with the reason; a browser tool and a desktop launcher are on its route.
 
 ## The architecture-first experiment
 

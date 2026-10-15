@@ -1,6 +1,6 @@
 # DSH reference: Web tools, browser use, attachments
 
-> A map: verify against the current repository before relying on a line ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26.
+> Where to research DSH's web tools, browser use and attachments ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26.
 
 ## What exists (at the pin)
 
@@ -12,7 +12,6 @@
 | DeepSeek search | `packages/web/web-search-deepseek` | default-mounted | One Messages-API turn per search; Exa, Perplexity opt-in |
 | `ctx.attachments` + local store | `packages/attachment/attachment-local` | default-mounted | Home-global content-addressed images and files |
 | `ctx.fileUploads` | `packages/client/file-upload` | Web bundle | Streamed intake, staged receipts |
-| Image offload | `packages/compaction/compaction-image-offload` | default-mounted | Over-budget images become text handles, then retry |
 | MCP image bridge | `packages/mcp/mcp-client/src/tools.ts` | opt-in | MCP images to the store; no base64 in events |
 | `ctx.browserUse` | `packages/browser-use/browser-use` | explicit composition | One provider-name slot, no action API |
 | `ctx.computerUse` | `packages/computer-use/computer-use` | explicit composition | The desktop twin; Cua Driver MCP or native, experimental |
@@ -42,15 +41,12 @@
 | `packages/web/web-fetch-http/README.md` | SSRF guard, pinning, redirects, caps | 2026-09-26 |
 | `packages/web/web-search-deepseek/README.md` | Messages-call search, log-only event | 2026-09-26 |
 | `docs/subsystems/attachment.md`, `packages/attachment/attachment/src/types.ts` | Attachment and upload API, persist-before-event; `ImageAttachmentRef`, `FileAttachmentRef` | 2026-09-26 |
-| `packages/attachment/attachment-local/README.md` | Disk layout, fsync chain, hard-link publish, retention | 2026-09-26 |
-| `packages/mcp/mcp-client/README.md` | Image admission; local namespaces | 2026-09-26 |
 | `docs/subsystems/browser-use.md`, `docs/subsystems/computer-use.md` | Registration-only APIs, ownership | 2026-09-26 |
-| `packages/experimental/browser-use-runtime/README.md` | Live-Agent keying, queue, cleanup | 2026-09-26 |
 | `packages/experimental/browser-use-stagehand-native/README.md`, `browser-use-playwright-mcp/README.md` | Native model, env scrub, accounting gap; launch or attach, screenshots as attachments | 2026-09-26 |
 
 ## Likely to go stale
 
-- Since 2026-09-17: tool text and images retained within a token budget (09-21, `mcp-client`, `tool-web`); the runtime library shares one scope and MCP client per installation (09-18). `packages/attachment` had no commit.
+- Since 2026-09-17: tool text and images retained within a token budget (09-21, `mcp-client`, `tool-web`); the runtime library shares one scope and MCP client per installation (09-18).
 - Browser and computer use are twelve days old and experimental: a fourth provider, Stagehand accounting, or a bundle are plausible.
 - `docs/subsystems/web.md` still names a "Code" preset that no longer exists.
 - "Never deleted", unlimited generic files and image-only MCP results are deferred; every limit is a deployment default.
