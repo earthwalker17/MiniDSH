@@ -14,7 +14,7 @@
  * - No test imports this file: the DOM rendering is untested. The window rules
  *   (`wire.js`) and the row projection (`rows.js`) are what the unit tests cover.
  */
-import { describeRow, jobEnded, tokens } from './rows.js'
+import { describeRow, jobEnded, subjectText, tokens } from './rows.js'
 import { SessionWindow, Wire } from './wire.js'
 
 const $ = (id) => document.getElementById(id)
@@ -206,7 +206,7 @@ function renderView() {
   if (open) {
     // The runtime's account of the call leads; the model's `reason` follows in
     // parentheses, where it reads as the claim it is.
-    const says = open.subject ? ` — run \`${open.subject.command}\` under ${open.subject.mode}/${open.subject.enforcement}` : ''
+    const says = open.subject ? ` — ${subjectText(open.subject)}` : ''
     $('approval-text').textContent = `allow ${open.toolName}${says}${open.reason ? ` (${open.reason})` : ''}?`
     // And the literal record beside it. A bound that fired SAYS so and points
     // at the whole thing, rather than showing a shortened call as if it were

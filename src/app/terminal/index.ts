@@ -65,13 +65,19 @@ function confinementLine(view: AuthorityView): string {
  * the only confinement such a host has. Where the shell cannot be sandboxed,
  * accepting that is narrower and keeps the fence; where a scope is offered on
  * this very ask, that is narrower still.
+ *
+ * And the mode advice is SHELL advice. A network request (S18's web search)
+ * asks whatever the sandbox mode or preset — no knob widens egress, only an
+ * exact grant answers a repeat — so the tip names the shell and says so,
+ * rather than promising that a preset stops a prompt it never touches. It is
+ * shown once, on the first ask of either family.
  */
 function firstAskTip(offered: boolean, authority: AuthorityView | undefined): string {
   if (offered) return 'tip: y allows this once; a allows this exact call until this session is resumed or forked (/grants lists them, /revoke takes one back)\n'
   if (authority !== undefined && authority.enforcement === 'none' && authority.accepts === 'full') {
-    return 'tip: this host cannot sandbox the shell. /accept none runs shell commands anyway and keeps file edits fenced; /preset danger-full-access drops the fence too\n'
+    return 'tip: this host cannot sandbox the shell. /accept none runs shell commands anyway and keeps file edits fenced; /preset danger-full-access drops the fence too; no preset or mode stops a network request\'s prompt\n'
   }
-  return 'tip: approvals are one-shot; /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops these prompts\n'
+  return 'tip: approvals are one-shot; for shell commands, /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops those prompts; no preset or mode stops a network request\'s prompt\n'
 }
 
 /** How many sessions `/sessions` prints. A terminal has one screen; the CLI's own listing has all of them. */

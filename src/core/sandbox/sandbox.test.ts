@@ -12,7 +12,7 @@ import { assistantText } from '../../test-support/scripted-adapter.ts'
 import { createUserMessage } from '../llm/message.ts'
 import { AGENTS } from '../agent/index.ts'
 import { asSessionId } from '../ids.ts'
-import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_POLICY, APPROVAL_REQUEST, type ApprovalOutcome } from '../approval/index.ts'
+import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, APPROVAL_REQUEST, type ApprovalAnswer, type ApprovalOutcome } from '../approval/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
 import {
   canonicalPath,
@@ -268,7 +268,7 @@ describe('the authority invariant', () => {
     // here for the same reason the mode vocabulary is.
     const forge = (subject: unknown): void =>
       void agent.session.append(APPROVAL_ASKED, { id: `approval-${agent.session.seq}`, toolName: 'bash', subject } as never)
-    expect(() => forge({ effect: 'network-request', url: 'https://x' })).toThrowError(/unknown effect/)
+    expect(() => forge({ effect: 'fs-delete', path: '/x' })).toThrowError(/unknown effect/)
     expect(() => forge({ effect: 'shell-command', command: 'ls', mode: 'unfenced', enforcement: 'none' })).toThrowError(/unknown mode/)
     expect(() => forge({ effect: 'shell-command', command: 'ls', mode: 'workspace-write', enforcement: 'best-effort' })).toThrowError(
       /unknown enforcement/,
@@ -277,6 +277,32 @@ describe('the authority invariant', () => {
       /command is not a string/,
     )
     expect(() => forge('ls -la')).toThrowError(/not an object/)
+    expect(agent.session.seq).toBe(before)
+  })
+
+  it('admits a well-formed NETWORK subject, ask and grant alike, and refuses a malformed one', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const subject = { effect: 'network-request' as const, destination: 'https://api.tavily.com/search', credential: 'TAVILY_API_KEY', payload: 'node 24 lts' }
+    // Through the seam, pre-commit: the ask lands, the offered scope is taken,
+    // and the grant's provenance check keys the subject like any other.
+    harness.root.on(APPROVAL_REQUEST, async (): Promise<ApprovalAnswer> => ({ outcome: 'allowed-once', by: 'user', grant: true }))
+    expect(await harness.root.get(APPROVAL).request({ agent, toolName: 'web_search', subject })).toBe('allowed-once')
+    const grant = agent.session.events.find((event) => matches(event, APPROVAL_GRANT))
+    expect(grant?.data).toMatchObject({ op: 'grant', toolName: 'web_search', subject })
+    const before = agent.session.seq
+    const forge = (bad: unknown): void =>
+      void agent.session.append(APPROVAL_ASKED, { id: `approval-${agent.session.seq}`, toolName: 'web_search', subject: bad } as never)
+    // An endpoint a person reads as one must be one.
+    expect(() => forge({ ...subject, destination: 'file:///etc/passwd' })).toThrowError(/destination is not an http\(s\) URL/)
+    expect(() => forge({ ...subject, destination: 'api.tavily.com/search' })).toThrowError(/destination is not an http\(s\) URL/)
+    expect(() => forge({ ...subject, destination: undefined })).toThrowError(/destination is not an http\(s\) URL/)
+    // A NAME, never a value: a key pasted into this field would be a secret in a durable record.
+    expect(() => forge({ ...subject, credential: 'tvly-dev-0123456789' })).toThrowError(/credential is not a credential reference name/)
+    expect(() => forge({ ...subject, credential: 7 })).toThrowError(/credential is not a credential reference name/)
+    expect(() => forge({ ...subject, payload: { q: 'x' } })).toThrowError(/payload is not a string/)
+    expect(() => forge({ ...subject, escaped: false })).toThrowError(/escaped is neither absent nor true/)
+    expect(() => forge({ ...subject, truncated: 'yes' })).toThrowError(/truncated is neither absent nor true/)
     expect(agent.session.seq).toBe(before)
   })
 

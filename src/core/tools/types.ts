@@ -44,16 +44,25 @@ export interface ToolResult {
  *
  * How one capability recognises a KIND of tool another registered without
  * importing it (capabilities never import each other) and without hard-coding a
- * name a deployment is free to change. Two exist: the delegation depth cap hides
- * every delegation tool at the cap, whichever row registered it, and a
+ * name a deployment is free to change. Three exist: the delegation depth cap
+ * hides every delegation tool at the cap, whichever row registered it; a
  * compaction summary names the recall tool a deployment mounted, if it mounted
- * one. Both used to be process-global maps or would have been a literal string
- * crossing a capability boundary.
+ * one; and delegation hides every network tool from every child. The first two
+ * used to be process-global maps or would have been a literal string crossing a
+ * capability boundary.
  */
 /** A tool that starts a delegated child agent. */
 export const DELEGATION_TOOL = 'delegation'
 /** A tool that reads back history a compaction shadowed. */
 export const RECALL_TOOL = 'recall'
+/**
+ * A tool whose body sends data off the machine and asks consent for EVERY
+ * call (S18's `web_search`). Its reader is `tool-subagent`, which hides it
+ * from every delegated child: a child's approvals are pinned `never`, which
+ * refuses every network ask before any answerer sees it, so in a child the
+ * tool could only ever spend a paid step learning that.
+ */
+export const NETWORK_TOOL = 'network'
 
 /**
  * A tool definition. The body returns the canonical value; `render` projects

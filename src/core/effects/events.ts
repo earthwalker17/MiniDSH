@@ -79,12 +79,19 @@ export const EFFECT_RECORDED = eventKind<EffectRecorded>('effect/recorded')
  * makes it usable as a grant key: consent to `rm -rf /tmp/x` under
  * `workspace-write` is not consent to the same command under
  * `danger-full-access`. A family that cannot state its authority is not
- * grantable, and the next family must carry its own before it is.
+ * grantable, and the next family must carry its own before it is. For a
+ * NETWORK effect the authority is where the data goes and as whom: consent to
+ * send a query to one endpoint under one credential is not consent to send it
+ * anywhere else, or as anyone else.
  *
- * One family, deliberately, exactly as `EffectRecord` shipped closed at two: a
- * second is a vocabulary change beside its first producer, not a registry.
+ * Two families, closed, exactly as `EffectRecord` is: the second arrived beside
+ * its first producer (S18's web search), and a third is a vocabulary change
+ * beside its own, not a registry.
  */
-export type EffectIntent = {
+export type EffectIntent = ShellIntent | NetworkIntent
+
+/** A shell command about to run, and the sandbox authority it would run under. */
+export type ShellIntent = {
   readonly effect: 'shell-command'
   /** The command as validated, never the model's prose about it. */
   readonly command: string
@@ -97,6 +104,28 @@ export type EffectIntent = {
    */
   readonly escaped?: true
   /** Set when `clampIntent` had to cut a field. A truncated intent is never grantable (`intentKey`). */
+  readonly truncated?: true
+}
+
+/**
+ * Data about to leave the machine: what is sent, where to, and as whom.
+ *
+ * `destination` is treated as UNTRUSTED inside the family even though S18's
+ * only producer fills it from row config: a browser tool (S20's question)
+ * will fill it from model arguments, so the clamp, the key and the invariant
+ * hold it to the rules any model-written field meets, today.
+ */
+export type NetworkIntent = {
+  readonly effect: 'network-request'
+  /** The full URL the request goes to — scheme, host, port and path — never a host alone, which would let one consent cover every path. */
+  readonly destination: string
+  /** The `CredentialRef` NAME the request authenticates as. A name, never a value: this field is durable and rendered. */
+  readonly credential: string
+  /** What leaves the machine: the validated argument the body sends, never the model's prose about it. */
+  readonly payload: string
+  /** As for a shell intent, and set when ANY of the three fields carried a control character: all three are then escaped. */
+  readonly escaped?: true
+  /** Set when `clampIntent` cut the payload or the destination. Never grantable. */
   readonly truncated?: true
 }
 
@@ -159,12 +188,37 @@ function hasControls(text: string): boolean {
  * injective: the field is an IDENTITY, not only a rendering, and two commands
  * sharing a 4000-character prefix would otherwise share one grant. A cut intent
  * keeps its (partial) rendering and loses its key — the fail-closed direction.
+ *
+ * A network intent has three free strings and ONE `escaped` mark, so the mark
+ * covers all three: if any field carries a control character, every field is
+ * escaped. Escaping only the offending one would leave the key unable to say
+ * which field the mark belongs to, and a verbatim `\n` typed in one field
+ * could then meet an escaped newline in another.
  */
+export function clampIntent(intent: ShellIntent): ShellIntent
+export function clampIntent(intent: NetworkIntent): NetworkIntent
+export function clampIntent(intent: EffectIntent): EffectIntent
 export function clampIntent(intent: EffectIntent): EffectIntent {
+  if (intent.effect === 'network-request') return clampNetwork(intent)
   const escaped = hasControls(intent.command)
   const base = escaped ? { ...intent, command: escapeControls(intent.command), escaped: true as const } : intent
   if (base.command.length <= MAX_INTENT_CHARS) return base
   return { ...base, command: base.command.slice(0, MAX_INTENT_CHARS), truncated: true }
+}
+
+function clampNetwork(intent: NetworkIntent): NetworkIntent {
+  const escaped = hasControls(intent.destination) || hasControls(intent.credential) || hasControls(intent.payload)
+  const base: NetworkIntent = escaped
+    ? {
+        ...intent,
+        destination: escapeControls(intent.destination),
+        credential: escapeControls(intent.credential),
+        payload: escapeControls(intent.payload),
+        escaped: true,
+      }
+    : intent
+  if (base.payload.length <= MAX_INTENT_CHARS && base.destination.length <= MAX_INTENT_CHARS) return base
+  return { ...base, destination: base.destination.slice(0, MAX_INTENT_CHARS), payload: base.payload.slice(0, MAX_INTENT_CHARS), truncated: true }
 }
 
 /**
@@ -182,6 +236,25 @@ export function clampIntent(intent: EffectIntent): EffectIntent {
  */
 export function intentKey(toolName: string, intent: EffectIntent): string | undefined {
   if (intent.truncated === true) return undefined
+  if (intent.effect === 'network-request') {
+    // The family name sits where a shell key has its own, after the
+    // length-prefixed tool, so no key of one family can spell one of the other.
+    return [
+      'v1',
+      String(toolName.length),
+      toolName,
+      intent.effect,
+      String(intent.destination.length),
+      intent.destination,
+      String(intent.credential.length),
+      intent.credential,
+      intent.escaped === true ? 'esc' : 'raw',
+      String(intent.payload.length),
+      intent.payload,
+    ].join('\0')
+  }
+  // Byte-identical to the key every shipped grant was minted under: a shell
+  // key that moved would silently end every standing consent in a stored log.
   const parts = [
     'v1',
     String(toolName.length),
@@ -203,6 +276,7 @@ export function describeIntent(intent: EffectIntent): string {
     ...(intent.truncated === true ? [`cut at ${MAX_INTENT_CHARS} characters`] : []),
   ]
   const said = notes.length === 0 ? '' : ` […${notes.join('; ')}]`
+  if (intent.effect === 'network-request') return `send \`${intent.payload}\`${said} to ${intent.destination} as ${intent.credential}`
   return `run \`${intent.command}\`${said} under ${intent.mode}/${intent.enforcement}`
 }
 

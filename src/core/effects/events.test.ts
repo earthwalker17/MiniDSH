@@ -4,7 +4,7 @@
  * somebody acts on, and every branch is asserted here.
  */
 import { describe, expect, it } from 'vitest'
-import { clampIntent, describeEffect, describeEffects, describeIntent, intentKey, type EffectIntent, type EffectRecorded } from './events.ts'
+import { clampIntent, describeEffect, describeEffects, describeIntent, intentKey, type EffectRecorded, type NetworkIntent, type ShellIntent } from './events.ts'
 
 const write = (over: Partial<Extract<EffectRecorded, { effect: 'fs-write' }>> = {}): EffectRecorded => ({
   callId: 'c1',
@@ -76,11 +76,19 @@ describe('describeEffects', () => {
 
 // ---- the "about to do" half ------------------------------------------------
 
-const intent = (over: Partial<EffectIntent> = {}): EffectIntent => ({
+const intent = (over: Partial<ShellIntent> = {}): ShellIntent => ({
   effect: 'shell-command',
   command: 'pnpm check',
   mode: 'danger-full-access',
   enforcement: 'none',
+  ...over,
+})
+
+const request = (over: Partial<NetworkIntent> = {}): NetworkIntent => ({
+  effect: 'network-request',
+  destination: 'https://api.tavily.com/search',
+  credential: 'TAVILY_API_KEY',
+  payload: 'node 24 release date',
   ...over,
 })
 
@@ -139,6 +147,60 @@ describe('intentKey', () => {
   it('is stable across calls, because a grant outlives the process that took it', () => {
     expect(intentKey('bash', intent())).toBe(intentKey('bash', { ...intent() }))
   })
+
+  it('keeps the shell key byte-identical to the one every shipped grant was minted under', () => {
+    // Pinned literally: a second family must not move the first one's key, or
+    // every standing consent in a stored log silently stops matching.
+    expect(intentKey('bash', intent())).toBe(['v1', '4', 'bash', 'shell-command', 'danger-full-access', 'none', 'raw', '10', 'pnpm check'].join('\u0000'))
+  })
+})
+
+describe('the network family', () => {
+  it('keys where it goes and as whom, so consent to one is not consent to another', () => {
+    const base = intentKey('web_search', request())
+    expect(base).toBeDefined()
+    expect(intentKey('web_search', request({ destination: 'https://api.tavily.com/extract' }))).not.toBe(base)
+    expect(intentKey('web_search', request({ destination: 'https://evil.example/search' }))).not.toBe(base)
+    expect(intentKey('web_search', request({ credential: 'OTHER_KEY' }))).not.toBe(base)
+    expect(intentKey('web_search', request({ payload: 'node 24 release dates' }))).not.toBe(base)
+    expect(intentKey('fetch', request())).not.toBe(base)
+    // Length prefixes again: moving a character across a field boundary is a different key.
+    expect(intentKey('t', request({ destination: 'https://a/bc', payload: 'd' }))).not.toBe(intentKey('t', request({ destination: 'https://a/b', payload: 'cd' })))
+  })
+
+  it('never shares a key with a shell intent, whatever the fields hold', () => {
+    const shellLike = request({ destination: 'danger-full-access', credential: 'none', payload: 'pnpm check' })
+    expect(intentKey('bash', shellLike)).not.toBe(intentKey('bash', intent()))
+    expect(intentKey('bash', request())?.split('\u0000')[3]).toBe('network-request')
+  })
+
+  it('escapes every field when any one carries a control character, and the mark keeps the key injective', () => {
+    const NL = String.fromCharCode(10)
+    const ESC = String.fromCharCode(27)
+    const clamped = clampIntent(request({ payload: `q${ESC}[2Kapprove` }))
+    expect(clamped.escaped).toBe(true)
+    expect(clamped.payload).toBe('q\\x1b[2Kapprove')
+    // The other fields went through the same escape (a backslash would double), so one mark covers all three.
+    expect(clampIntent(request({ destination: 'https://a/x\\y', payload: `q${NL}` })).destination).toBe('https://a/x\\\\y')
+    // A literal backslash-n typed verbatim and a real newline must stay two subjects.
+    const literal = clampIntent(request({ payload: 'a\\nb' }))
+    const real = clampIntent(request({ payload: `a${NL}b` }))
+    expect(literal.escaped).toBeUndefined()
+    expect(intentKey('web_search', literal)).not.toBe(intentKey('web_search', real))
+    // An ordinary request is left verbatim, object included.
+    const plain = request()
+    expect(clampIntent(plain)).toBe(plain)
+  })
+
+  it('cuts an over-long payload or destination, says so, and leaves it ungrantable', () => {
+    const long = clampIntent(request({ payload: 'q'.repeat(5000) }))
+    expect(long.payload).toHaveLength(4000)
+    expect(long.truncated).toBe(true)
+    expect(intentKey('web_search', long)).toBeUndefined()
+    const far = clampIntent(request({ destination: `https://a/${'p'.repeat(5000)}` }))
+    expect(far.destination).toHaveLength(4000)
+    expect(intentKey('web_search', far)).toBeUndefined()
+  })
 })
 
 describe('describeIntent', () => {
@@ -148,5 +210,12 @@ describe('describeIntent', () => {
 
   it('says a cut command was cut, rather than showing a shortened one as whole', () => {
     expect(describeIntent(clampIntent(intent({ command: 'x'.repeat(5000) })))).toContain('cut at 4000 characters')
+  })
+
+  it('names what a network request sends, where to, and as whom', () => {
+    expect(describeIntent(request())).toBe('send `node 24 release date` to https://api.tavily.com/search as TAVILY_API_KEY')
+    expect(describeIntent(clampIntent(request({ payload: 'a\u0007b' })))).toBe(
+      'send `a\\x07b` […control characters shown escaped] to https://api.tavily.com/search as TAVILY_API_KEY',
+    )
   })
 })

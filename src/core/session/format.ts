@@ -28,6 +28,10 @@
  * invariant admits only `TOOL_NOT_STARTED` there, so it refuses the seed.
  * That refusal is the conservative direction, and needs no bump.
  *
+ * **What 1.1.0 cannot do with an S18 log.** One carrying a network consent
+ * subject (`effect: 'network-request'`) is one its authority invariant names
+ * malformed, so it refuses to continue it — a refusal again, and no bump.
+ *
  * **Inside a declared format, a malformed line is damage, not format.** A
  * writer that follows the rule above never writes an envelope key or a surface
  * kind its format lacks, so meeting one means the bytes are not what the

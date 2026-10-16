@@ -92,6 +92,12 @@ const SAMPLES: readonly Sample[] = [
     reason: 'run under "danger-full-access": tests',
     subject: { effect: 'shell-command', command: 'pnpm check', mode: 'danger-full-access', enforcement: 'none' },
   }),
+  sample('APPROVAL_ASKED', 'with a network subject', APPROVAL_ASKED, {
+    id: 'approval-10',
+    toolName: 'web_search',
+    callId: 'c3',
+    subject: { effect: 'network-request', destination: 'https://api.tavily.com/search', credential: 'TAVILY_API_KEY', payload: 'node 24 lts date' },
+  }),
   sample('APPROVAL_DECIDED', 'decided', APPROVAL_DECIDED, { id: 'approval-7', outcome: 'allowed-once' }),
   sample('APPROVAL_DECIDED', 'decided by a person', APPROVAL_DECIDED, { id: 'approval-9', outcome: 'allowed-once', decidedBy: 'user' }),
   sample('APPROVAL_GRANT', 'granted', APPROVAL_GRANT, {
@@ -100,6 +106,13 @@ const SAMPLES: readonly Sample[] = [
     toolName: 'pwsh',
     subject: { effect: 'shell-command', command: 'pnpm check', mode: 'danger-full-access', enforcement: 'none' },
     fromApproval: 'approval-9',
+  }),
+  sample('APPROVAL_GRANT', 'granted a network request', APPROVAL_GRANT, {
+    op: 'grant',
+    id: 'grant-12',
+    toolName: 'web_search',
+    subject: { effect: 'network-request', destination: 'https://api.tavily.com/search', credential: 'TAVILY_API_KEY', payload: 'node 24 lts date' },
+    fromApproval: 'approval-10',
   }),
   sample('APPROVAL_GRANT', 'revoked', APPROVAL_GRANT, { op: 'revoke', id: 'grant-11' }),
   sample('EFFECT_RECORDED', 'fs write', EFFECT_RECORDED, { callId: 'c1', effect: 'fs-write', path: '/ws/notes.txt', bytes: 15, sha256: 'a1b2c3d4e5f6a7b8c9d0' }),
@@ -185,6 +198,20 @@ describe('the browser row projection against the plain-text one', () => {
       expect(rendered).toContain('danger-full-access')
       // And the model's own words stay, beside the runtime's account.
       expect(rendered).toContain('tests')
+    }
+    // A network subject is not a shell command with blanks in it: both
+    // projections name what leaves, where to, and as whom — never `run …`.
+    for (const [constant, label] of [
+      ['APPROVAL_ASKED', 'with a network subject'],
+      ['APPROVAL_GRANT', 'granted a network request'],
+    ] as const) {
+      const row = describeRow(find(constant, label))!.text
+      const line = transcriptLines([find(constant, label)]).join('')
+      for (const rendered of [row, line]) {
+        expect(rendered, `${constant} (${label})`).toContain('send `node 24 lts date` to https://api.tavily.com/search as TAVILY_API_KEY')
+        expect(rendered).not.toContain('undefined')
+        expect(rendered).not.toContain('run ')
+      }
     }
     const decidedRow = describeRow(find('APPROVAL_DECIDED', 'decided by a person'))!.text
     const decidedLine = transcriptLines([find('APPROVAL_DECIDED', 'decided by a person')]).join('')

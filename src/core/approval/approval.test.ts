@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { AGENTS } from '../agent/index.ts'
-import { intentKey, type EffectIntent } from '../effects/index.ts'
+import { intentKey, type EffectIntent, type ShellIntent } from '../effects/index.ts'
 import { SANDBOX } from '../sandbox/index.ts'
 import { AUTHORITY_PRESET } from '../presets/index.ts'
 import { END_SEED, TOOL_CALL, type EventEnvelope } from '../session/index.ts'
@@ -84,7 +84,7 @@ describe('approval seam', () => {
       subject: { effect: 'shell-command', command: `ls${ESC}[2Kapprove`, mode: 'workspace-write', enforcement: 'none' },
     })
     const asked = agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!
-    const subject = (asked.data as { subject?: EffectIntent }).subject!
+    const subject = (asked.data as { subject?: ShellIntent }).subject!
     // ESCAPED, not flattened. Replacing each control with a space is
     // many-to-one, and on a consent line that is fatal twice over: a person
     // reads one command where two were written, and the two share a key.
@@ -125,7 +125,7 @@ describe('approval seam', () => {
       toolName: 'bash',
       subject: { effect: 'shell-command', command: 'x'.repeat(5_000), mode: 'workspace-write', enforcement: 'none' },
     })
-    const subject = (agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { subject: EffectIntent }).subject
+    const subject = (agent.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { subject: ShellIntent }).subject
     expect(subject.command).toHaveLength(4_000)
     expect(subject.truncated).toBe(true)
     expect(intentKey('bash', subject)).toBeUndefined()

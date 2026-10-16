@@ -41,6 +41,7 @@
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').SUBAGENT_START>} SubagentStartData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').SUBAGENT_END>} SubagentEndData */
 /** @typedef {DataOf<typeof import('../../core/effects/index.ts').EFFECT_RECORDED>} EffectRecordedData */
+/** @typedef {import('../../core/effects/index.ts').EffectIntent} EffectIntent */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_START>} CompactionStartData */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_END>} CompactionEndData */
 /** @typedef {DataOf<typeof import('../../core/compaction/index.ts').COMPACTION_APPLIED>} CompactionAppliedData */
@@ -88,6 +89,19 @@ export const tokens = (count) => (count < 1000 ? String(count) : `${(count / 100
 
 /** @param {string} text @returns {Row} */
 const note = (text) => ({ cls: 'row note', text })
+
+/**
+ * A consent subject as one clause — `describeIntent`'s words, spelled here
+ * because nothing is imported at runtime. Both families, and only the two:
+ * the authority invariant refuses any other before it reaches a log. Shared
+ * with `app.js`'s approval bar, so the bar and the transcript say the same.
+ * Not a `switch`: the parity gate reads every `case` here as an event kind.
+ * @param {EffectIntent} subject
+ */
+export function subjectText(subject) {
+  if (subject.effect === 'network-request') return `send \`${subject.payload}\` to ${subject.destination} as ${subject.credential}`
+  return `run \`${subject.command}\` under ${subject.mode}/${subject.enforcement}`
+}
 
 /** @param {number | undefined} ms */
 const after = (ms) => (ms === undefined ? '' : ` after ${(ms / 1000).toFixed(1)}s`)
@@ -151,7 +165,7 @@ export function describeRow(event) {
       // browser with no build step and shares nothing with the host but the
       // wire. The two projections must agree on WHETHER an event is visible
       // (`rows.test.ts`), never on its wording.
-      const says = data.subject ? ` run \`${data.subject.command}\` under ${data.subject.mode}/${data.subject.enforcement}` : ''
+      const says = data.subject ? ` ${subjectText(data.subject)}` : ''
       return note(`? ${data.toolName}${says}${data.reason ? `: ${data.reason}` : ''}`)
     }
     case 'approval/decided': {
@@ -170,7 +184,7 @@ export function describeRow(event) {
     case 'approval/grant': {
       const data = /** @type {ApprovalGrantData} */ (event.data)
       if (data.op === 'revoke') return note(`[grant revoked: ${data.id}]`)
-      return note(`[grant ${data.id}: ${data.toolName} run "${data.subject.command}" under ${data.subject.mode}/${data.subject.enforcement}]`)
+      return note(`[grant ${data.id}: ${data.toolName} ${subjectText(data.subject)}]`)
     }
     case 'approval/policy':
       return note(`[approvals: ${/** @type {ApprovalPolicyData} */ (event.data).policy}]`)

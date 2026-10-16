@@ -676,6 +676,9 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'tool-shell',
   'tool-editor',
   'tool-subagent',
+  // Opt-in, so a layer is the only way it mounts: the first tool that sends
+  // data off the machine, and a credential the shell then stops inheriting.
+  'tool-web-search',
   'spill-local',
   'persistence-jsonl',
   'credentials-local',

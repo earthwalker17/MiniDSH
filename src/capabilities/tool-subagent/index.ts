@@ -43,7 +43,7 @@ import {
   type SandboxMode,
 } from '../../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, foldLastAssistantText, foldLastTurnEnd, matches, type Session, type TurnEndReason } from '../../core/session/index.ts'
-import { defineTool, DELEGATION_TOOL, RECALL_TOOL, TOOLS, type ToolContext, type ToolRestriction, type Tools } from '../../core/tools/index.ts'
+import { defineTool, DELEGATION_TOOL, NETWORK_TOOL, RECALL_TOOL, TOOLS, type ToolContext, type ToolRestriction, type Tools } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
 
 export interface SubagentConfig {
@@ -51,7 +51,8 @@ export interface SubagentConfig {
   readonly maxDepth?: number | undefined
   /**
    * The subtractive view every child gets AT DELEGATION over the tools it
-   * inherits (the delegation tool itself is always denied). It lives in
+   * inherits (the delegation tool itself is always denied, and so is every
+   * `NETWORK_TOOL`, whose asks the child's pin refuses). It lives in
    * `setup`, which no continuation re-runs: a child resumed or forked alone
    * keeps its ceiling and pins, not this view or its persona (§13; S21).
    */
@@ -258,7 +259,15 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   // rather than an error it discovers by trying.
   const childMayDelegate = depth + 1 <= deps.config.maxDepth
   const tools = deps.ctx.get(TOOLS)
-  const denied = [...(childMayDelegate ? [] : delegationToolNames(tools)), ...(deps.config.toolFilter?.deny ?? [])]
+  // A network tool asks consent on every call, and this child's approvals are
+  // pinned `never` (below), so every call it made would be refused inside the
+  // seam before anyone was asked. Hidden at every depth, and a deny outranks
+  // an `allow` filter that names it — the pin is not the filter's to lift.
+  const denied = [
+    ...(childMayDelegate ? [] : delegationToolNames(tools)),
+    ...taggedToolNames(tools, NETWORK_TOOL),
+    ...(deps.config.toolFilter?.deny ?? []),
+  ]
   // A recall tool survives an `allow` filter, for the same reason the delegation
   // tool does when the child may still delegate: the filter says what WORK the
   // child is scoped to, and reading back its own shadowed history is not work

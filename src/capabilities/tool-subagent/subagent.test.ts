@@ -18,7 +18,7 @@ import type { ContentBlock, Message } from '../../core/llm/index.ts'
 import { SANDBOX } from '../../core/sandbox/index.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import { matches, SESSION_EVENT, TOOL_RESULT, type EventEnvelope, type Session } from '../../core/session/index.ts'
-import { defineTool, TOOLS } from '../../core/tools/index.ts'
+import { defineTool, NETWORK_TOOL, TOOLS } from '../../core/tools/index.ts'
 import { z } from 'zod'
 import { bootComposition } from '../../app/headless.ts'
 import type { Patch } from '../../app/compose.ts'
@@ -313,6 +313,72 @@ describe('delegation through the full composition', () => {
     expect(refused).toBeDefined()
     expect(eventsOf(handle.agent.session, SUBAGENT_START.type)).toHaveLength(1)
     await handle.dispose()
+  })
+
+  /**
+   * A network tool asks consent on every call, and a child's approvals are
+   * pinned `never`: in a child it could only ever be refused. So it is not in
+   * the child's world at all — at every depth, and even where an `allow`
+   * filter names it — while the parent keeps it.
+   */
+  it('hides a NETWORK-tagged tool from every child, while the parent keeps it', async () => {
+    let bodyRan = 0
+    const network: Patch = {
+      insert: [
+        {
+          id: 'net-probe',
+          plugin: {
+            name: 'net-probe',
+            inject: [TOOLS],
+            apply: (ctx: Context) =>
+              void ctx.get(TOOLS).register(
+                ctx,
+                defineTool({
+                  name: 'net_probe',
+                  description: 'Sends a query off the machine.',
+                  input: z.object({}),
+                  output: z.object({ ok: z.boolean() }),
+                  tags: [NETWORK_TOOL],
+                  render: () => [{ type: 'text', text: 'sent' }],
+                  execute: () => {
+                    bodyRan += 1
+                    return { ok: true }
+                  },
+                }),
+              ),
+          },
+        },
+      ],
+    }
+    for (const filter of [undefined, { allow: ['net_probe', 'str_replace_editor'] }]) {
+      const w = await world([network, ...(filter === undefined ? [] : [{ id: 'tool-subagent', config: { toolFilter: filter } }])])
+      let parentSaw: string[] = []
+      let childSaw: string[] = []
+      w.adapter.script(
+        (request) => {
+          parentSaw = (request.tools ?? []).map((tool) => tool.name)
+          return assistantToolCall('call-1', 'subagent', { description: 'a task', prompt: 'Search the web.' })
+        },
+        (request) => {
+          childSaw = (request.tools ?? []).map((tool) => tool.name)
+          return assistantToolCall('call-2', 'net_probe', {})
+        },
+        assistantText('I could not search.'),
+        assistantText('reported'),
+      )
+      const handle = await w.create()
+      handle.agent.followup(createUserMessage('go'))
+      await handle.agent.whenIdle()
+      expect(parentSaw, `filter ${JSON.stringify(filter)}`).toContain('net_probe')
+      expect(childSaw, `filter ${JSON.stringify(filter)}`).not.toContain('net_probe')
+      expect(childSaw).toContain('str_replace_editor')
+      // Calling it anyway is refused as unknown, and the body never runs.
+      const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+      const child = storedEvents(w.sessionsRoot, start.childId)
+      expect(child.some((event) => event.type === 'tool/result' && (event.data as { error?: { code: string } }).error?.code === 'UNKNOWN_TOOL')).toBe(true)
+      expect(bodyRan).toBe(0)
+      await handle.dispose()
+    }
   })
 
   it('refuses at the depth cap before creating anything, and the parent is told', async () => {

@@ -8,6 +8,7 @@
  */
 import type { Plugin } from '../../kernel/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
+import { credentialRef } from '../credentials/index.ts'
 import { intentKey, type EffectIntent } from '../effects/events.ts'
 import { firstViolation, INVARIANTS, type InvariantFailure, type InvariantInstaller, type LogViolation } from '../invariants/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
@@ -62,19 +63,59 @@ function freshTrace(): Trace {
  * What is wrong with a would-be `EffectIntent`, or `undefined` when nothing is.
  *
  * Read as `unknown` because the payload may be forged: an invariant that
- * trusted the type would check nothing. One family today, closed like the
- * effect record it sits beside.
+ * trusted the type would check nothing. Two families, closed like the effect
+ * record they sit beside; an unknown one is refused.
  */
 function subjectFault(subject: unknown): string | undefined {
   if (typeof subject !== 'object' || subject === null) return 'not an object'
-  const { effect, command, mode, enforcement, escaped, truncated } = subject as Record<string, unknown>
-  if (effect !== 'shell-command') return `unknown effect ${JSON.stringify(effect)}`
-  if (typeof command !== 'string') return 'command is not a string'
-  if (!isSandboxMode(mode)) return `unknown mode ${JSON.stringify(mode)}`
-  if (typeof enforcement !== 'string' || !ENFORCEMENTS.has(enforcement)) return `unknown enforcement ${JSON.stringify(enforcement)}`
+  const { effect, escaped, truncated } = subject as Record<string, unknown>
+  const fault = effect === 'shell-command' ? shellFault(subject) : effect === 'network-request' ? networkFault(subject) : `unknown effect ${JSON.stringify(effect)}`
+  if (fault !== undefined) return fault
   if (escaped !== undefined && escaped !== true) return 'escaped is neither absent nor true'
   if (truncated !== undefined && truncated !== true) return 'truncated is neither absent nor true'
   return undefined
+}
+
+function shellFault(subject: object): string | undefined {
+  const { command, mode, enforcement } = subject as Record<string, unknown>
+  if (typeof command !== 'string') return 'command is not a string'
+  if (!isSandboxMode(mode)) return `unknown mode ${JSON.stringify(mode)}`
+  if (typeof enforcement !== 'string' || !ENFORCEMENTS.has(enforcement)) return `unknown enforcement ${JSON.stringify(enforcement)}`
+  return undefined
+}
+
+/**
+ * The network family's authority is where and as whom, so both are held to a
+ * shape here: a destination a person reads as an endpoint must BE one (a
+ * `file:` or `javascript:` URL is not a network request), and the credential
+ * must be a reference NAME — a value that leaked into this field would be a
+ * secret in a durable, rendered record. The payload is free text by design.
+ */
+function networkFault(subject: object): string | undefined {
+  const { destination, credential, payload } = subject as Record<string, unknown>
+  if (typeof destination !== 'string' || !isHttpUrl(destination)) return 'destination is not an http(s) URL'
+  if (typeof credential !== 'string' || !isCredentialName(credential)) return 'credential is not a credential reference name'
+  if (typeof payload !== 'string') return 'payload is not a string'
+  return undefined
+}
+
+function isHttpUrl(text: string): boolean {
+  try {
+    const { protocol } = new URL(text)
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/** The credential seam's own syntax rule, asked rather than copied. */
+function isCredentialName(text: string): boolean {
+  try {
+    credentialRef(text)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): void {

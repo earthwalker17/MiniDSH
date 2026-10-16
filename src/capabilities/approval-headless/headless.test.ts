@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { APPROVAL, APPROVAL_DECIDED } from '../../core/approval/index.ts'
-import type { EffectIntent } from '../../core/effects/index.ts'
+import type { ShellIntent } from '../../core/effects/index.ts'
 import { matches } from '../../core/session/index.ts'
 import { approvalHeadlessPlugin, type ApprovalHeadlessConfig } from './index.ts'
 
@@ -19,7 +19,7 @@ afterEach(async () => {
   harness = undefined
 })
 
-const subject = (over: Partial<EffectIntent> = {}): EffectIntent => ({
+const subject = (over: Partial<ShellIntent> = {}): ShellIntent => ({
   effect: 'shell-command',
   command: 'pnpm check',
   mode: 'workspace-write',

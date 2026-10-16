@@ -15,6 +15,7 @@ import { foldInbox, INBOX_SPLICED, repairTail, SUBAGENT_END, SUBAGENT_START } fr
 import { COMPACTION_END } from '../core/compaction/events.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, delegationPin, effectiveApprovalPolicy, liveGrants, undecidedApprovals, type ApprovalGrant, type ApprovalPolicy } from '../core/approval/index.ts'
 import type { Attachments } from '../core/attachments/index.ts'
+import { describeIntent } from '../core/effects/index.ts'
 import { foldJobs, JOB_END, noticeJobId, type JobEnd } from '../core/jobs/events.ts'
 import { checkJobsLog } from '../core/jobs/invariant.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
@@ -554,7 +555,10 @@ export function inspectLines(inspection: Inspection): string[] {
   lines.push(
     `authority at the log's end: ${authority.mode ?? 'no mode recorded'}${authority.enforcement === undefined ? '' : ` (recorded enforcement ${authority.enforcement})`} · approvals ${authority.approval ?? 'not recorded'} · ${accepts}`,
   )
-  for (const grant of authority.grants) lines.push(`  grant standing: ${grant.id} ${grant.toolName} \`${preview(grant.subject.command, 80)}\` under ${grant.subject.mode}/${grant.subject.enforcement}`)
+  // Through the family's own clause, so a network grant reads as what it
+  // covers; `preview` because a report over an invalid log must still render,
+  // and such a log may hold a subject the seam's clamp never saw.
+  for (const grant of authority.grants) lines.push(`  grant standing: ${grant.id} ${grant.toolName} ${preview(describeIntent(grant.subject), 160)}`)
   if (authority.delegation !== undefined) {
     const { ceiling, pin, accepts: pinned } = authority.delegation
     lines.push(`  delegation: ceiling ${ceiling ?? 'none'} · approvals pinned ${pin ?? 'none'}${pinned === undefined ? '' : ` · accepts pinned ${pinned.accepts} for ${pinned.forMode}`}`)

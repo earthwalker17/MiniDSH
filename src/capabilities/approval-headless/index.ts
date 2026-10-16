@@ -11,6 +11,11 @@
  * `intentKey` a grant is, so what it can express is exactly what the runtime
  * can identify, and no more: no prefixes, no patterns, no parser.
  *
+ * Entries are SHELL subjects only. A network request (S18's web search) is
+ * not expressible here: approving a query unattended means knowing the query
+ * before the run, which is not a list a deployment can write — so a headless
+ * search needs `--approve`, and without it is refused.
+ *
  * It answers `auto`, never `user`: nobody was asked, and an audit that
  * recorded a config file as a person would be worse than one that recorded
  * nothing. It is also never a grant — a grant is a consent somebody gave, and
