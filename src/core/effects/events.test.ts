@@ -215,7 +215,23 @@ describe('describeIntent', () => {
   it('names what a network request sends, where to, and as whom', () => {
     expect(describeIntent(request())).toBe('send `node 24 release date` to https://api.tavily.com/search as TAVILY_API_KEY')
     expect(describeIntent(clampIntent(request({ payload: 'a\u0007b' })))).toBe(
-      'send `a\\x07b` […control characters shown escaped] to https://api.tavily.com/search as TAVILY_API_KEY',
+      'send `a\\x07b` to https://api.tavily.com/search as TAVILY_API_KEY […control or invisible characters shown escaped]',
     )
+  })
+
+  // The S18 review's reproduction: a visible query with a secret encoded in
+  // Unicode TAG characters after it rendered as the query alone, unmarked,
+  // while the hidden text went out in the request body.
+  it('shows every invisible character a payload or a command would carry, so a consent covers what is sent', () => {
+    const hidden = [...'sk-1'].map((ch) => String.fromCodePoint(0xe0000 + ch.codePointAt(0)!)).join('')
+    const tagged = clampIntent(request({ payload: `node 24 release date${hidden}` }))
+    expect(tagged.escaped).toBe(true)
+    expect(describeIntent(tagged)).toContain('\\u{e0073}\\u{e006b}\\u{e002d}\\u{e0031}')
+    for (const sneaky of ['a​b', 'a‮b', 'a b', 'a️b', 'ab']) {
+      expect(clampIntent(intent({ command: sneaky })).escaped, JSON.stringify(sneaky)).toBe(true)
+      expect(intentKey('bash', clampIntent(intent({ command: sneaky })))).not.toBe(intentKey('bash', clampIntent(intent({ command: 'ab' }))))
+    }
+    // Ordinary non-ASCII text is not invisible and stays verbatim.
+    expect(clampIntent(intent({ command: 'echo café 中文' })).escaped).toBeUndefined()
   })
 })

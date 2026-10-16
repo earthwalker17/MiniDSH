@@ -51,7 +51,8 @@ export const openaiPlugin: Plugin<OpenAIConfig | undefined> = {
       describeKey: () => credentials.describe(ref),
       // See the sibling adapter: an attachment store is optional, never injected.
       resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
-      baseURL: config?.baseURL ?? process.env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL,
+      // Set-but-empty reads as unset, as the OpenAI SDK reads it.
+      baseURL: config?.baseURL ?? (process.env.OPENAI_BASE_URL?.trim() || DEFAULT_BASE_URL),
       defaultMaxTokens: config?.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
       reasoningSummaries: config?.reasoningSummaries ?? true,
     })

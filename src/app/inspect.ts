@@ -555,10 +555,19 @@ export function inspectLines(inspection: Inspection): string[] {
   lines.push(
     `authority at the log's end: ${authority.mode ?? 'no mode recorded'}${authority.enforcement === undefined ? '' : ` (recorded enforcement ${authority.enforcement})`} · approvals ${authority.approval ?? 'not recorded'} · ${accepts}`,
   )
-  // Through the family's own clause, so a network grant reads as what it
-  // covers; `preview` because a report over an invalid log must still render,
-  // and such a log may hold a subject the seam's clamp never saw.
-  for (const grant of authority.grants) lines.push(`  grant standing: ${grant.id} ${grant.toolName} ${preview(describeIntent(grant.subject), 160)}`)
+  // Through the family's own clause with only its free text previewed, so the
+  // authority half — mode and enforcement, or destination and credential, the
+  // fields a grant is keyed on — is never the part an ellipsis cuts; `preview`
+  // because a report over an invalid log must still render, and such a log may
+  // hold a subject the seam's clamp never saw.
+  for (const grant of authority.grants) {
+    const subject = grant.subject
+    const shown =
+      subject.effect === 'network-request'
+        ? describeIntent({ ...subject, payload: preview(subject.payload, 80) })
+        : describeIntent({ ...subject, command: preview(subject.command, 80) })
+    lines.push(`  grant standing: ${grant.id} ${grant.toolName} ${printableText(shown)}`)
+  }
   if (authority.delegation !== undefined) {
     const { ceiling, pin, accepts: pinned } = authority.delegation
     lines.push(`  delegation: ceiling ${ceiling ?? 'none'} · approvals pinned ${pin ?? 'none'}${pinned === undefined ? '' : ` · accepts pinned ${pinned.accepts} for ${pinned.forMode}`}`)

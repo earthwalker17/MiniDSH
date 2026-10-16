@@ -1,4 +1,5 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
+import { isHeaderSafe } from '../../core/credentials/index.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
 import { AnthropicTranslator, ANTHROPIC_PROVIDER, errorCode } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
@@ -271,6 +272,11 @@ export class AnthropicAdapter implements LlmAdapter {
       const where = this.options.describeKey?.()
       throw new LlmError('MISSING_CREDENTIAL', `Anthropic API key not set (expected credential ${this.options.apiKeyRef}${where === undefined ? '' : `: set ${where}`})`)
     }
+    // Refused by reference, never by value: the platform's error for a bad
+    // header quotes it, and an error message is logged (`isHeaderSafe`).
+    if (!isHeaderSafe(apiKey)) {
+      throw new LlmError('INVALID_CREDENTIAL', `Anthropic API key in credential ${this.options.apiKeyRef} contains characters no HTTP header can carry`)
+    }
 
     const idle = new AbortController()
     const combined = request.signal ? AbortSignal.any([idle.signal, request.signal]) : idle.signal
@@ -301,8 +307,10 @@ export class AnthropicAdapter implements LlmAdapter {
     }
 
     if (!response.ok) {
-      if (timer) clearTimeout(timer)
+      // The watchdog stays armed through the error body: one that stalls after
+      // its headers would otherwise hang a run nobody can cancel.
       const text = await response.text().catch(() => '')
+      if (timer) clearTimeout(timer)
       throw classifyHttp(response.status, text, response.headers)
     }
     if (!response.body) {

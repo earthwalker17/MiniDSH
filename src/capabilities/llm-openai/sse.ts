@@ -8,6 +8,8 @@ import { LlmError } from '../../core/llm/index.ts'
 export interface SseEvent {
   readonly event: string
   readonly data: string
+  /** Flushed at end of body without its blank line: complete, or a cut. The reader decides which. */
+  readonly tail?: true
 }
 
 /**
@@ -52,7 +54,7 @@ export async function* parseNamedSse(body: ReadableStream<Uint8Array>, onActivit
     buffer += carry.replace(/\r/g, '\n')
     for (const raw of buffer.split('\n\n')) {
       const parsed = eventOf(raw)
-      if (parsed) yield parsed
+      if (parsed) yield { ...parsed, tail: true }
     }
   } finally {
     reader.cancel().catch(() => {})

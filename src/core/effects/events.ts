@@ -161,16 +161,29 @@ function escapeControls(text: string): string {
     const code = ch.codePointAt(0)!
     if (named[ch] !== undefined) out += named[ch]
     else if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) out += `\\x${code.toString(16).padStart(2, '0')}`
+    else if (INVISIBLE.test(ch)) out += `\\u{${code.toString(16)}}`
     else out += ch
   }
   return out
 }
 
+/**
+ * Characters that render as NOTHING a person can read, in a terminal or a
+ * browser: format characters (zero-width spaces, bidi controls, the Unicode
+ * TAG block), private-use and unassigned code points, the line and paragraph
+ * separators, and the variation selectors. A C0/C1 control at least moves the
+ * cursor; these move nothing, which is worse on a consent line: the S18 review
+ * encoded a secret in TAG characters after a visible query, the line read as
+ * the query alone, and the hidden text was in the POST body. Escaped like a
+ * control, so what a person approves is every character sent.
+ */
+const INVISIBLE = /[\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/u
+
 /** True iff `escapeControls` would change anything but a backslash. */
 function hasControls(text: string): boolean {
   for (const ch of text) {
     const code = ch.codePointAt(0)!
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || INVISIBLE.test(ch)) return true
   }
   return false
 }
@@ -272,11 +285,13 @@ export function intentKey(toolName: string, intent: EffectIntent): string | unde
 /** One intent as one clause, for the line a person answers. Pure, and safe in a terminal. */
 export function describeIntent(intent: EffectIntent): string {
   const notes = [
-    ...(intent.escaped === true ? ['control characters shown escaped'] : []),
+    ...(intent.escaped === true ? ['control or invisible characters shown escaped'] : []),
     ...(intent.truncated === true ? [`cut at ${MAX_INTENT_CHARS} characters`] : []),
   ]
   const said = notes.length === 0 ? '' : ` […${notes.join('; ')}]`
-  if (intent.effect === 'network-request') return `send \`${intent.payload}\`${said} to ${intent.destination} as ${intent.credential}`
+  // The notes close the whole clause: a network intent may cut its destination
+  // as well as its payload, and one escape mark covers all three fields.
+  if (intent.effect === 'network-request') return `send \`${intent.payload}\` to ${intent.destination} as ${intent.credential}${said}`
   return `run \`${intent.command}\`${said} under ${intent.mode}/${intent.enforcement}`
 }
 

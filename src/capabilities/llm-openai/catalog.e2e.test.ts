@@ -30,11 +30,14 @@ async function respond(body: Record<string, unknown>): Promise<{ status: number;
   return { status: response.status, text: await response.text() }
 }
 
-/** The supported set the API names, or `undefined` when every probed level was accepted. */
-async function supported(model: string): Promise<string[] | undefined> {
+/** The supported set the API names, `undefined` when every probed level was accepted, or `'gone'` for a 404. */
+async function supported(model: string): Promise<string[] | undefined | 'gone'> {
   for (const effort of PROBES) {
     const { status, text } = await respond({ model, reasoning: { effort } })
     if (status === 200) continue
+    // Checked before the list is read: a retired model answers 404, and the
+    // probe must say "retire the row" and go on to the others, not stop.
+    if (status === 404) return 'gone'
     const listed = /Supported values are: ([^.]+)\./u.exec(text)
     if (!listed) throw new Error(`${model}: ${status} without a supported-values list: ${text.slice(0, 200)}`)
     return [...listed[1]!.matchAll(/'([a-z]+)'/gu)].map((match) => match[1]!)
@@ -47,8 +50,8 @@ describe.skipIf(!KEY)('OpenAI catalog drift', () => {
     const drift: string[] = []
     for (const row of OPENAI_CATALOG) {
       const efforts = await supported(row.id)
-      const plain = await respond({ model: row.id })
-      if (plain.status === 404) {
+      const plain = efforts === 'gone' ? { status: 404, text: '' } : await respond({ model: row.id })
+      if (efforts === 'gone' || plain.status === 404) {
         drift.push(`${row.id}: 404 — past its shutdown date? retire the row`)
         continue
       }

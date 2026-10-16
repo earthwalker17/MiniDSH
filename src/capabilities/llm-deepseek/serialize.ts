@@ -111,10 +111,14 @@ export function serializeMessages(system: string | undefined, messages: readonly
       // another provider produced has none to give. An empty string is
       // accepted; omission is not. No image path here: an assistant message
       // cannot carry one (`validateStream` refuses the stream that would).
+      // Only this provider's own thought goes back as its own: another
+      // provider's reasoning (an OpenAI summary, Anthropic's thinking) would be
+      // presented as DeepSeek's, which is forging it (S18 review).
+      const own = message.source.kind === 'assistant' && message.source.provider === 'deepseek'
       wire.push({
         role: 'assistant',
         content: textOf(message.content),
-        reasoning_content: reasoningOf(message.content),
+        reasoning_content: own ? reasoningOf(message.content) : '',
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
       })
       continue

@@ -95,8 +95,9 @@ export function catalogEntry(model: string): OpenAICatalogModel | undefined {
   const id = ALIASES.get(model) ?? model
   const exact = OPENAI_CATALOG.find((row) => row.id === id)
   if (exact !== undefined || !SNAPSHOT.test(model)) return exact
+  // The alias is folded under a snapshot too: `gpt-5.6-<date>` is the sol row.
   const base = model.replace(SNAPSHOT, '')
-  return OPENAI_CATALOG.find((row) => row.id === base)
+  return OPENAI_CATALOG.find((row) => row.id === (ALIASES.get(base) ?? base))
 }
 
 /**
@@ -123,5 +124,7 @@ export function canonicalModel(model: string): string {
  * row, measured by the drift probe.
  */
 export function factsFor(model: string): OpenAICatalogModel {
-  return catalogEntry(model) ?? { id: model, name: model, contextWindow: 128_000, totalWindow: 128_000 + 16_384, maxOutputTokens: 16_384, efforts: [], sampling: 'never', modalities: ['text'] }
+  // No output cap of ours: an unknown id's would be a guess, and a guessed cap
+  // would refuse what the provider serves; the deployment default applies.
+  return catalogEntry(model) ?? { id: model, name: model, contextWindow: 128_000, totalWindow: 128_000, maxOutputTokens: Number.POSITIVE_INFINITY, efforts: [], sampling: 'never', modalities: ['text'] }
 }

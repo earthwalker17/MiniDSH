@@ -297,14 +297,19 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
     )
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
-    // An unrecorded route would replay as text-only anyway, so the replay's own
-    // route is asserted: it walked the recording's text-only parent.
+    // The replayed parent took the RECORDED route's facts and was refused its
+    // own look again — so the object below can only be the child's. (Its model
+    // is the replay's own input; the facts and the refusal are what can fail.)
     const replayedParent = readFileSync(join(replaySessions, `${encodeURIComponent(replayed.sessionId)}.jsonl`), 'utf8')
       .trim()
       .split('\n')
       .slice(1)
       .map((line) => JSON.parse(line) as EventEnvelope)
-    expect(replayedParent.find((event) => event.type === 'request/context')?.data, 'the replayed parent ran on another route').toMatchObject({ model: TEXT_ONLY_MODEL })
+    const recordedRoute = parentLog.find((event) => event.type === 'request/context')?.data
+    expect(replayedParent.find((event) => event.type === 'request/context')?.data, 'the replayed parent ran on another route').toEqual(recordedRoute)
+    const replayedLook = replayedParent.find((event) => event.type === 'tool/call' && (event.data as { name: string }).name === 'view_image')
+    const replayedRefusal = replayedParent.find((event) => event.type === 'tool/result' && (event.data as { callId: string }).callId === (replayedLook?.data as { callId?: string } | undefined)?.callId)
+    expect((replayedRefusal?.data as { error?: { code: string } } | undefined)?.error?.code, 'the replayed parent could look for itself').toBe('UNSUPPORTED_CONTENT')
     // The replayed child re-read the image for real: the object is on disk in a
     // home that started empty, under the same content address.
     expect(existsSync(join(replayAttachments, 'v1', 'objects', pngDigest.slice(0, 2), pngDigest)), 'the replay never wrote an attachment, so its image path never ran').toBe(true)

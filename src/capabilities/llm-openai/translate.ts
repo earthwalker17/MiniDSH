@@ -371,7 +371,7 @@ function mapUsage(usage: WireUsage | null | undefined): TokenUsage {
  * cannot succeed, so it must not reach the retry policy as a RATE_LIMIT.
  */
 export function isQuotaCode(code: string | undefined): boolean {
-  return code !== undefined && /^(insufficient_quota|credit_balance_exhausted|\w*spend_limit_exceeded|\w*usage_limit_exceeded)$/.test(code)
+  return code !== undefined && /^(insufficient_quota|credit_balance_exhausted|billing_not_active|access_terminated|\w*spend_limit_exceeded|\w*usage_limit_exceeded)$/.test(code)
 }
 
 /** A failure's wire `code`, as a code a policy can route on. Unknown codes are SERVER: retryable, bounded by the policy. */

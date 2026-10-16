@@ -99,8 +99,15 @@ const note = (text) => ({ cls: 'row note', text })
  * @param {EffectIntent} subject
  */
 export function subjectText(subject) {
-  if (subject.effect === 'network-request') return `send \`${subject.payload}\` to ${subject.destination} as ${subject.credential}`
-  return `run \`${subject.command}\` under ${subject.mode}/${subject.enforcement}`
+  // The same two notes `describeIntent` carries: without them an escaped real
+  // newline reads as a typed `\n`, and a cut subject reads as whole.
+  const notes = [
+    ...(subject.escaped === true ? ['control or invisible characters shown escaped'] : []),
+    ...(subject.truncated === true ? ['cut at 4000 characters'] : []),
+  ]
+  const said = notes.length === 0 ? '' : ` […${notes.join('; ')}]`
+  if (subject.effect === 'network-request') return `send \`${subject.payload}\` to ${subject.destination} as ${subject.credential}${said}`
+  return `run \`${subject.command}\`${said} under ${subject.mode}/${subject.enforcement}`
 }
 
 /** @param {number | undefined} ms */

@@ -47,7 +47,8 @@ export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
       // `tryGet`, not `inject`: an adapter must not REQUIRE an attachment store.
       // Without one it refuses image content instead of failing to mount.
       resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
-      baseURL: config?.baseURL ?? process.env.DEEPSEEK_BASE_URL ?? DEFAULT_BASE_URL,
+      // Set-but-empty reads as unset.
+      baseURL: config?.baseURL ?? (process.env.DEEPSEEK_BASE_URL?.trim() || DEFAULT_BASE_URL),
       defaultMaxTokens: config?.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
     ctx.get(LLM).registerAdapter(ctx, adapter)

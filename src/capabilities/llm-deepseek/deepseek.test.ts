@@ -119,6 +119,14 @@ describe('DeepSeek serialization', () => {
     expect(wire[0]).toEqual({ role: 'assistant', content: 'answer', reasoning_content: 'because' })
   })
 
+  it('never presents another provider\'s reasoning as its own', () => {
+    const wire = serializeMessages(undefined, [
+      createAssistantMessage([{ type: 'reasoning', text: '**Reading the file** summary' }, { type: 'text', text: 'BRAVO-22' }], 'openai', 'gpt-5.4-mini'),
+      createAssistantMessage([{ type: 'reasoning', text: 'a thought' }, { type: 'text', text: 'ok' }], 'anthropic', 'claude-sonnet-5'),
+    ])
+    expect(wire.map((message) => message.reasoning_content)).toEqual(['', ''])
+  })
+
   it('omits tools when there are none', () => {
     expect(serializeTools(undefined)).toBeUndefined()
     expect(serializeTools([{ name: 'x', description: 'd', parameters: { type: 'object' } }])).toEqual([
@@ -160,7 +168,8 @@ describe('DeepSeek adapter options', () => {
     // A deployment default above a model's cap is clamped to the cap, never sent as asked.
     const generous = new DeepSeekAdapter({ apiKeyRef: 'DEEPSEEK_API_KEY', resolveKey: () => 'never-used', baseURL: 'http://127.0.0.1:1', defaultMaxTokens: 500_000 })
     expect(generous.resolveModel('deepseek-flash').defaultMaxTokens).toBe(393_216)
-    expect(generous.resolveModel('deepseek-v5-someday').defaultMaxTokens).toBe(8192)
+    // An unknown id has no cap of ours to clamp to: the deployment default goes, and the provider judges it.
+    expect(generous.resolveModel('deepseek-v5-someday').defaultMaxTokens).toBe(500_000)
   })
 
   it('refuses an output cap above the model\'s and a temperature thinking would ignore, before any I/O', async () => {
@@ -177,12 +186,20 @@ describe('DeepSeek adapter options', () => {
     })
     const first = (request: Parameters<typeof adapter.stream>[0]) => adapter.stream(request)[Symbol.asyncIterator]().next()
     await expect(first({ provider: 'deepseek', model: 'deepseek-flash', messages: [], maxTokens: 393_217 })).rejects.toMatchObject({ code: 'UNSUPPORTED_OPTION' })
-    await expect(first({ provider: 'deepseek', model: 'deepseek-v5-someday', messages: [], maxTokens: 9000 })).rejects.toMatchObject({ code: 'UNSUPPORTED_OPTION' })
-    await expect(first({ provider: 'deepseek', model: 'deepseek-flash', messages: [], temperature: 0.2 })).rejects.toMatchObject({ code: 'UNSUPPORTED_OPTION' })
+    await expect(first({ provider: 'deepseek', model: 'deepseek-flash', messages: [], temperature: 0.2 })).rejects.toThrowError(/effort to "off", or route the session/)
     await expect(first({ provider: 'deepseek', model: 'deepseek-flash', messages: [], temperature: 0.2, reasoningEffort: 'high' })).rejects.toMatchObject({ code: 'UNSUPPORTED_OPTION' })
     expect(resolved).toBe(0)
     // With thinking off the provider honours it, so it passes validation (and fails later, at the unreachable endpoint).
     expect(() => adapter.validateOptions({ provider: 'deepseek', model: 'deepseek-flash', messages: [], temperature: 0.2, reasoningEffort: 'off' })).not.toThrow()
+  })
+
+  it('refuses a key no HTTP header can carry by its reference, before any I/O, never quoting it', async () => {
+    const { DeepSeekAdapter } = await import('./adapter.ts')
+    const adapter = new DeepSeekAdapter({ apiKeyRef: 'DEEPSEEK_API_KEY', resolveKey: () => 'sk-real-part\nsecond-line', baseURL: 'http://127.0.0.1:1', defaultMaxTokens: 8192 })
+    const failure = await adapter.stream({ provider: 'deepseek', model: 'deepseek-flash', messages: [] })[Symbol.asyncIterator]().next().catch((error: unknown) => error)
+    expect(failure).toMatchObject({ code: 'INVALID_CREDENTIAL' })
+    expect((failure as Error).message).toContain('DEEPSEEK_API_KEY')
+    expect((failure as Error).message).not.toContain('sk-real-part')
   })
 
   it('reads the unknown-model 400 as UNKNOWN_MODEL, which nothing retries', async () => {

@@ -21,6 +21,7 @@ import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
 import type { ApprovalOfferId, ApprovedCall, OpenApproval } from '../../core/approval/index.ts'
 import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
 import { asSessionId } from '../../core/ids.ts'
+import { LLM } from '../../core/llm/index.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import { matches, type SessionEventFrame } from '../../core/session/index.ts'
 import { printableText } from '../../core/text.ts'
@@ -104,6 +105,17 @@ export interface TerminalOptions extends BootOptions {
   readonly agentPreset?: string
   /** Injected for tests; defaults to process stdin/stdout. */
   readonly io?: { readonly input: NodeJS.ReadableStream; readonly output: NodeJS.WritableStream }
+}
+
+/** The window an adapter answers with for a route, or nothing when none here can. */
+function windowOf(root: Context, provider: string, model: string): number | undefined {
+  const llm = root.tryGet(LLM)
+  if (llm === undefined || !llm.hasProvider(provider)) return undefined
+  try {
+    return llm.resolveModel(provider, model).contextWindow
+  } catch {
+    return undefined
+  }
 }
 
 export async function runTerminal(options: TerminalOptions): Promise<number> {
@@ -680,7 +692,11 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const init = await client.request<InitializeResult>('initialize')
     const provider = overrides.provider ?? init.defaultAgentOptions.provider
     const model = overrides.model ?? init.defaultAgentOptions.model
-    const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
+    // Asked of the adapter, not looked up in the advertised list: a retired
+    // alias an adapter still resolves (`deepseek-v4-flash`, the 1.0.0 default)
+    // is deliberately unlisted. The catalog is the fallback for a route no
+    // adapter here can answer.
+    const contextWindow = windowOf(host.root, provider, model) ?? init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
     const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
     out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /jobs lists background jobs, /exit quits, Ctrl+C cancels)\n`)
 

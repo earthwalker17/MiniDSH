@@ -323,8 +323,25 @@ describe('OpenAI SSE parser', () => {
     expect(await collect(parseNamedSse(stream, () => {}))).toEqual([
       { event: 'response.created', data: '{"a":1}' },
       { event: 'response.output_text.delta', data: '{"b":2}' },
-      { event: 'response.completed', data: '{"c":3}' },
+      { event: 'response.completed', data: '{"c":3}', tail: true },
     ])
+  })
+
+  // The S18 review's reproduction: a body cut cleanly in the middle of an
+  // event read as MALFORMED_RESPONSE, which nothing retries, where the same cut
+  // at an event boundary is the retryable STREAM_CLOSED.
+  it('reads a body cut in the middle of an event as the retryable STREAM_CLOSED', async () => {
+    const server = await loopback((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end(`${sse([created('gpt-6-luna')])}data: {"type":"response.output_item.ad`)
+    })
+    try {
+      const adapter = new OpenAIAdapter({ apiKeyRef: 'OPENAI_API_KEY', resolveKey: () => 'sk-test', baseURL: server.baseURL, defaultMaxTokens: 1024 })
+      const failure = await collect(adapter.stream({ provider: 'openai', model: 'gpt-6-luna', messages: [] })).catch((error: unknown) => error)
+      expect(failure).toMatchObject({ code: 'STREAM_CLOSED' })
+    } finally {
+      await server.close()
+    }
   })
 })
 
@@ -544,7 +561,8 @@ describe('OpenAI adapter', () => {
       [{ model: 'gpt-6-luna', maxTokens: 128_001 }, 'UNSUPPORTED_OPTION'],
       [{ model: 'gpt-7-nova', reasoningEffort: 'low' }, 'UNSUPPORTED_REASONING_EFFORT'],
       [{ model: 'gpt-7-nova', temperature: 0.2 }, 'UNSUPPORTED_OPTION'],
-      [{ model: 'gpt-7-nova', maxTokens: 16_385 }, 'UNSUPPORTED_OPTION'],
+      // Below the API's measured minimum of 16, for any model.
+      [{ model: 'gpt-6-luna', maxTokens: 15 }, 'UNSUPPORTED_OPTION'],
     ]
     for (const [options, code] of refusals) {
       const stream = adapter.stream({ ...base, ...options })
@@ -566,6 +584,17 @@ describe('OpenAI adapter', () => {
     const missing = keyless.stream({ ...base, model: 'gpt-6-luna' })
     await expect(missing[Symbol.asyncIterator]().next()).rejects.toMatchObject({ code: 'MISSING_CREDENTIAL', message: expect.stringContaining('OPENAI_API_KEY environment variable') })
     expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  // The order the comments promise, pinned: an option refusal costs no disk
+  // read of the images the request carries (S18 review: deleting the first
+  // `validateOptions` in `stream()` used to pass every test).
+  it('refuses an option before it reads a single image', async () => {
+    const watched = watchingStore()
+    const { adapter } = adapterWith({ resolveAttachments: () => watched.store })
+    const refused = adapter.stream({ provider: 'openai', model: 'gpt-6-luna', messages: [userWithImage('look')], temperature: 0.3 })
+    await expect(refused[Symbol.asyncIterator]().next()).rejects.toMatchObject({ code: 'UNSUPPORTED_OPTION' })
+    expect(watched.reads()).toBe(0)
   })
 
   it('honours a temperature exactly where the API does: effort none on an effort-none row', () => {
@@ -632,7 +661,8 @@ describe('OpenAI adapter', () => {
     expect(cap('gpt-6-luna', 1000)).toBe(1000)
     expect(cap('gpt-6-luna', 128_000)).toBe(128_000)
     expect(cap('gpt-6-luna', undefined, 200_000)).toBe(128_000)
-    expect(cap('gpt-7-nova')).toBe(16_384)
+    // An unknown id has no cap of ours: the deployment default goes, and a larger explicit cap is the provider's to judge.
+    expect(cap('gpt-7-nova')).toBe(32_768)
   })
 
   it('advertises per-row facts; a snapshot and the alias resolve to their row, and an unknown id gets conservative ones', () => {
@@ -651,7 +681,7 @@ describe('OpenAI adapter', () => {
     expect(adapter.resolveModel('gpt-5.4').contextWindow).toBe(922_000)
     expect(adapter.resolveModel('gpt-5.4-mini').contextWindow).toBe(272_000)
     expect(adapter.resolveModel('gpt-5.4-pro').contextWindow).toBe(128_000)
-    expect(adapter.resolveModel('gpt-7-nova')).toEqual({ contextWindow: 128_000, defaultMaxTokens: 16_384, reasoning: { efforts: [] }, inputModalities: ['text'] })
+    expect(adapter.resolveModel('gpt-7-nova')).toEqual({ contextWindow: 128_000, defaultMaxTokens: 32_768, reasoning: { efforts: [] }, inputModalities: ['text'] })
     expect(adapterWith({ defaultMaxTokens: 4096 }).adapter.resolveModel('gpt-6-luna').defaultMaxTokens).toBe(4096)
     expect(adapter.listModels().map((model) => model.id)).toEqual([
       'gpt-6-astra',

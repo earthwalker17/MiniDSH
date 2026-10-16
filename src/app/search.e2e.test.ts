@@ -54,12 +54,14 @@ const data = <T>(event: EventEnvelope | undefined): T => (event?.data ?? {}) as 
 const COMPOSITION = JSON.stringify({ patches: [{ insert: [{ id: 'tool-web-search', plugin: 'tool-web-search' }] }] })
 
 /**
- * Each prompt names the tool and forbids the shell: a model that knew nothing
- * could answer the first from memory, so the WORLD assertion below (a URL the
- * search itself returned) is what separates a search from a guess.
+ * Each prompt names the tool and forbids the shell. The first asks for the
+ * LAST result listed, because a well-known page for a well-known query could be
+ * written from memory and still be among the results: which one comes last is
+ * something only the search's own answer says, so the WORLD assertion below
+ * separates reading the results from guessing (S18 review).
  */
 const PROMPTS = [
-  'Use the web_search tool exactly once, with the query: Node.js release schedule. Then use str_replace_editor with the create command to write url.txt in the working directory containing exactly one URL copied verbatim from the search results, and nothing else. Do not use the shell.',
+  'Use the web_search tool exactly once, with the query: Node.js release schedule. Then use str_replace_editor with the create command to write url.txt in the working directory containing exactly the URL of the LAST search result listed, copied verbatim, and nothing else. Do not use the shell.',
   'Use the web_search tool exactly once, with the query: Node.js 26 release date. Then reply in one sentence saying what happened.',
 ] as const
 
@@ -124,7 +126,7 @@ describe.skipIf(!DEEPSEEK || !TAVILY)('S18 live E2E: a network tool under per-qu
     const sources = [...shown.matchAll(/^\s+(https?:\/\/\S+)$/gmu)].map((match) => match[1]!)
     expect(sources.length, `no structured sources were shown:\n${shown.slice(0, 600)}`).toBeGreaterThan(0)
     const written = readFileSync(join(workspace, 'url.txt'), 'utf8').trim().replace(/^<|>$/gu, '')
-    expect(sources, `url.txt holds "${written}", which no search result named`).toContain(written)
+    expect(written, `url.txt holds "${written}"; the results listed ${JSON.stringify(sources)}`).toBe(sources.at(-1))
 
     // ---- refusal: nothing was sent, and the model was told ------------------
     const second = calls.filter((event) => inTurn(event.seq) === 2)
@@ -133,6 +135,10 @@ describe.skipIf(!DEEPSEEK || !TAVILY)('S18 live E2E: a network tool under per-qu
       const query = (JSON.parse(data<{ arguments: string }>(call).arguments) as { query: string }).query
       const ask = asked.find((event) => data<{ callId?: string }>(event).callId === data<{ callId: string }>(call).callId)
       expect(data<{ subject?: Subject }>(ask).subject?.payload, 'each refusal is of the query that call carried').toBe(query)
+      // A PERSON refused it: NETWORK_DENIED alone would also follow an
+      // unavailable or cancelled ask.
+      const decision = decided.find((event) => data<{ id: string }>(event).id === data<{ id: string }>(ask).id)
+      expect(data<{ outcome: string; decidedBy?: string }>(decision)).toMatchObject({ outcome: 'rejected', decidedBy: 'user' })
       expect(data<{ error?: { code: string } }>(resultOf(data<{ callId: string }>(call).callId)).error?.code).toBe('NETWORK_DENIED')
     }
 

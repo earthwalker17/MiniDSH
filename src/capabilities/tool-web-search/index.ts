@@ -48,7 +48,7 @@
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { APPROVAL } from '../../core/approval/index.ts'
-import { CREDENTIALS, credentialRef, type CredentialRef } from '../../core/credentials/index.ts'
+import { CREDENTIALS, credentialRef, type CredentialRef, isHeaderSafe } from '../../core/credentials/index.ts'
 import type { NetworkIntent } from '../../core/effects/index.ts'
 import { excerptWithSpill, excerptWithoutSpill, SPILL } from '../../core/spill/index.ts'
 import { printableText } from '../../core/text.ts'
@@ -136,8 +136,10 @@ const InputSchema = z.object({
 })
 type Input = z.infer<typeof InputSchema>
 
+
 export type WebSearchErrorCode =
   | 'SEARCH_CREDENTIAL_MISSING'
+  | 'SEARCH_CREDENTIAL_INVALID'
   | 'NETWORK_DENIED'
   | 'SEARCH_AUTH'
   | 'SEARCH_RATE_LIMIT'
@@ -213,6 +215,20 @@ function buildSearchTool(ctx: Context, settings: SearchSettings) {
   const { ref, destination } = settings
   const missing = (): WebSearchError =>
     new WebSearchError('SEARCH_CREDENTIAL_MISSING', `web search has no API key (expected credential ${ref}: set ${credentials.describe(ref)}); nothing was sent`)
+  /**
+   * The key, or a refusal naming only its reference. A value no HTTP header
+   * can carry (a stray newline from a multi-line file, a NUL) is refused here,
+   * because the platform's own error for it QUOTES the header value — and a
+   * tool result is durable and model-visible (S18 review).
+   */
+  const usableKey = (): string => {
+    const key = credentials.resolve(ref)
+    if (key === undefined) throw missing()
+    if (!isHeaderSafe(key)) {
+      throw new WebSearchError('SEARCH_CREDENTIAL_INVALID', `the API key in credential ${ref} contains characters no HTTP header can carry; nothing was sent`)
+    }
+    return key
+  }
   return defineTool({
     name: TOOL_NAME,
     description: DESCRIPTION,
@@ -232,7 +248,7 @@ function buildSearchTool(ctx: Context, settings: SearchSettings) {
       if (!agent) throw new Error('the web search tool requires an owning agent')
       // Before the ask: a deployment with no key must not spend a person's
       // attention on a query that could never be sent.
-      if (credentials.resolve(ref) === undefined) throw missing()
+      usableKey()
       const subject: NetworkIntent = { effect: 'network-request', destination, credential: ref, payload: args.query }
       const outcome = await approval.request({
         agent,
@@ -247,8 +263,7 @@ function buildSearchTool(ctx: Context, settings: SearchSettings) {
       // Resolved again, per operation: the consent may have taken minutes, a
       // rotation in between takes effect, and the value is never held across
       // a person's wait.
-      const key = credentials.resolve(ref)
-      if (key === undefined) throw missing()
+      const key = usableKey()
       // A cancellation that landed as consent resolved is still "nothing left".
       if (exec.callSignal.aborted) throw new WebSearchError('SEARCH_CANCELLED', 'web search was cancelled; nothing was sent')
       const sources = await search(args.query, key, exec, settings)
@@ -284,8 +299,11 @@ async function search(query: string, key: string, exec: ToolContext, settings: S
     if (deadline.aborted) return new WebSearchError('SEARCH_TIMEOUT', `web search timed out after ${settings.timeoutMs}ms`)
     // A refused redirect lands here too: undici reports it as a fetch failure
     // whose cause says so.
-    const cause = error instanceof Error && error.cause instanceof Error ? ` (${error.cause.message})` : ''
-    return new WebSearchError('SEARCH_TRANSPORT', `web search failed in transport: ${error instanceof Error ? error.message : String(error)}${cause}`)
+    // Never the platform's message verbatim: some of them quote a request
+    // header, and the one header here carries the key.
+    const said = (text: string): string => text.split(key).join('[redacted]')
+    const cause = error instanceof Error && error.cause instanceof Error ? ` (${said(error.cause.message)})` : ''
+    return new WebSearchError('SEARCH_TRANSPORT', `web search failed in transport: ${said(error instanceof Error ? error.message : String(error))}${cause}`)
   }
   try {
     const response = await fetch(settings.destination, {

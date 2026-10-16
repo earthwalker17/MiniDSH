@@ -430,7 +430,9 @@ describe.skipIf(!DEEPSEEK || !OPENAI)('S18 live E2E: an OpenAI leg through the s
       })
     const openaiMessages = assistants.filter((entry) => entry.source.provider === 'openai')
     expect(openaiMessages.length, 'OpenAI answered turns 2 and 3').toBeGreaterThanOrEqual(2)
-    expect(assistants.filter((entry) => entry.source.replayState?.response.kind === 'openai').every((entry) => entry.source.provider === 'openai')).toBe(true)
+    const enveloped = assistants.filter((entry) => entry.source.replayState?.response.kind === 'openai')
+    expect(enveloped.length, 'no OpenAI envelope was recorded at all').toBeGreaterThan(0)
+    expect(enveloped.every((entry) => entry.source.provider === 'openai')).toBe(true)
     const hasEncrypted = (entry: (typeof assistants)[number]): boolean =>
       entry.source.replayState?.blocks?.some((block) => block?.type === 'reasoning' && typeof block.encrypted_content === 'string') === true
     const callStep = openaiMessages.find((entry) => turnOf(entry.seq) === 2 && entry.message.content.some((block) => block.type === 'tool-call'))
@@ -439,6 +441,7 @@ describe.skipIf(!DEEPSEEK || !OPENAI)('S18 live E2E: an OpenAI leg through the s
       `turn-2 tool step ${callStep === undefined ? 'MISSING' : `at seq ${callStep.seq}`}; usage ${JSON.stringify(openaiMessages.map((entry) => entry.usage))}`
     console.log(`[routing openai] ${why}`)
     expect(callStep, `OpenAI's turn 2 made no tool call — ${why}`).toBeDefined()
+    expect(callStep!.source.replayState?.response.kind, 'the tool step carries no OpenAI envelope').toBe('openai')
     expect(hasEncrypted(callStep!), `the tool step carried no encrypted reasoning — ${why}`).toBe(true)
 
     // ---- the follow-up request of that step, built offline by the real serializer
@@ -454,9 +457,12 @@ describe.skipIf(!DEEPSEEK || !OPENAI)('S18 live E2E: an OpenAI leg through the s
     expect(items.some((item) => item.type === 'reasoning' && item.encrypted_content === envelope.encrypted_content), 'the step\'s own encrypted reasoning went back with its call').toBe(true)
     expect(items.some((item) => item.type === 'function_call' && item.call_id === call.id && item.id?.startsWith('fc_') === true), 'the call went back with its item id').toBe(true)
     expect(items.some((item) => item.type === 'function_call_output' && item.call_id === call.id)).toBe(true)
-    // Every reasoning item sent is one OpenAI itself produced: DeepSeek's turn-1 thought is dropped, never forged.
-    const openaiEncrypted = new Set(openaiMessages.flatMap((entry) => (entry.source.replayState?.blocks ?? []).map((block) => block?.encrypted_content)).filter((value): value is string => typeof value === 'string'))
-    expect(items.filter((item) => item.type === 'reasoning').every((item) => item.encrypted_content !== undefined && openaiEncrypted.has(item.encrypted_content))).toBe(true)
+    // The family rule on the recorded history: the SAME messages serialized for
+    // another catalogued model carry no reasoning item and no item id — the
+    // sealed reasoning goes back only to the model that wrote it.
+    const elsewhere = serializeOpenAI(surfaceUpTo(followUp!.seq), new Map(), 'gpt-6-sol') as unknown as { type?: string; id?: string }[]
+    expect(elsewhere.filter((item) => item.type === 'reasoning'), 'reasoning crossed to another model').toHaveLength(0)
+    expect(elsewhere.filter((item) => item.id !== undefined), 'an item id crossed to another model').toHaveLength(0)
 
     // ---- the world: what OpenAI read, and what DeepSeek read back ------------
     const texts = assistantTexts(events)

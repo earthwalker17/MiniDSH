@@ -206,6 +206,25 @@ describe('consent, before anything leaves', () => {
     expect(f.server.seen, 'the stand-in received a request nobody consented to').toHaveLength(0)
   })
 
+  // The S18 review's reproduction: a key with a stray newline made the
+  // platform's header error QUOTE it, and that message was the tool result —
+  // durable, and sent to the model on the next request.
+  it('refuses a key no header can carry, naming only its reference, and never echoes it', async () => {
+    const f = await setup({ key: `${KEY}\nsecond-line` })
+    let asked = 0
+    f.answer(async () => {
+      asked += 1
+      return 'allowed-once'
+    })
+    const outcome = await f.run('anything')
+    expect(outcome).toMatchObject({ isError: true, code: 'SEARCH_CREDENTIAL_INVALID' })
+    expect(outcome.text).toContain('TAVILY_API_KEY')
+    expect(outcome.text).not.toContain(KEY)
+    expect(JSON.stringify(f.agent.session.events)).not.toContain(KEY)
+    expect(asked).toBe(0)
+    expect(f.server.seen).toHaveLength(0)
+  })
+
   it('without a key, refuses and names where to put one — asking nobody, sending nothing', async () => {
     const f = await setup()
     let asked = 0
@@ -241,9 +260,11 @@ describe('consent, before anything leaves', () => {
   })
 
   it('arms its own deadline only after consent, so a person deliberating never spends it', async () => {
-    const f = await setup({ key: KEY, config: { timeoutMs: 300 } })
+    // A deliberation longer than the deadline, with room for a loaded host:
+    // the request after it must still have the whole deadline to itself.
+    const f = await setup({ key: KEY, config: { timeoutMs: 2_000 } })
     f.answer(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 700))
+      await new Promise((resolve) => setTimeout(resolve, 3_000))
       return 'allowed-once'
     })
     f.server.respond = results({ title: 'ok', url: 'https://example.com/', content: '' })
@@ -252,7 +273,7 @@ describe('consent, before anything leaves', () => {
     f.server.respond = () => {}
     const hung = await f.run('silent provider')
     expect(hung).toMatchObject({ isError: true, code: 'SEARCH_TIMEOUT' })
-  })
+  }, 15_000)
 
   it('reports a cancellation after the query was sent as what it is', async () => {
     const f = await setup({ key: KEY })

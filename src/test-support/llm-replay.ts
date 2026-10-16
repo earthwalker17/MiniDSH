@@ -198,7 +198,14 @@ export function providersIn(events: readonly EventEnvelope[]): string[] {
   return [...providers]
 }
 
-/** The window the log recorded per route, so a replay meters what the recording metered. */
+/**
+ * The window the log recorded per route, so a replay meters what the recording
+ * metered. LAST record wins per route: a log whose route kept its name while
+ * its facts moved — a 1.1.0 `deepseek-v4-flash` segment (text, 1M) resumed
+ * under S18's catalog (text and image, 1,048,576) — replays every step with
+ * the later facts (the modality fold below likewise). Exact for every log
+ * recorded under one catalog, which is every arc's.
+ */
 export function windowsIn(events: readonly EventEnvelope[]): Map<string, number> {
   const windows = new Map<string, number>()
   for (const event of events) {

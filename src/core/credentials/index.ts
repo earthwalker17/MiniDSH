@@ -20,6 +20,18 @@ export function credentialRef(name: string): CredentialRef {
   return name as CredentialRef
 }
 
+/**
+ * Whether a resolved value can travel as an HTTP header (a bearer token, an
+ * API key): printable ASCII, no space. Checked by every consumer BEFORE the
+ * request, because the platform's own error for a bad header value QUOTES the
+ * value, and an error message is logged — the S18 review reproduced a key with
+ * a stray newline (a multi-line file, a pasted line break) reaching a durable,
+ * model-visible tool result that way.
+ */
+export function isHeaderSafe(value: string): boolean {
+  return /^[\x21-\x7e]+$/.test(value)
+}
+
 export interface Credentials {
   /**
    * The value behind a reference, or `undefined` when unconfigured. Resolved

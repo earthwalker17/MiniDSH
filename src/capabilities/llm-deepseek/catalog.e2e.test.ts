@@ -12,7 +12,7 @@
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
 import { describe, expect, it } from 'vitest'
-import { deepseekCatalog } from './adapter.ts'
+import { DeepSeekAdapter, deepseekCatalog } from './adapter.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const BASE = process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com'
@@ -31,6 +31,7 @@ describe.skipIf(!KEY)('DeepSeek catalog drift', () => {
     expect(response.status).toBe(200)
     const listed = ((await response.json()) as { data: ListedModel[] }).data
     const catalog = deepseekCatalog()
+    const adapter = new DeepSeekAdapter({ apiKeyRef: 'DEEPSEEK_API_KEY', resolveKey: () => KEY, baseURL: BASE, defaultMaxTokens: 8192 })
     // A model DeepSeek lists that the snapshot lacks gets the conservative
     // unlisted facts: text-only and a small window. That is safe, and it is
     // still drift worth a session's attention.
@@ -46,13 +47,36 @@ describe.skipIf(!KEY)('DeepSeek catalog drift', () => {
         defaultEffort: live.effort?.default_level,
       }
       process.stderr.write(`[deepseek catalog] ${row.id}: ${JSON.stringify(facts)}\n`)
+      // The expectation is the ADAPTER's answer, not a copy of it: an edit to
+      // the effort vocabulary or its default must meet the provider here.
+      const reasoning = adapter.resolveModel(row.id).reasoning
       expect(facts, `${row.id} drifted from the snapshot`).toEqual({
         contextWindow: row.contextWindow,
         maxOutputTokens: row.maxOutputTokens,
         modalities: [...row.modalities].toSorted(),
-        efforts: ['low', 'high', 'max'],
-        defaultEffort: 'high',
+        efforts: reasoning.efforts.filter((effort) => effort !== 'off'),
+        defaultEffort: reasoning.defaultEffort,
       })
+    }
+  })
+
+  // The retired names take deepseek-flash's facts, images included, because
+  // DeepSeek serves them AS that model — "temporarily", with no end date. One
+  // token each says whether that is still so; a re-route to a text-only model
+  // would otherwise have its images ignored without a word.
+  it('still serves each retired alias as the model whose facts it takes', { timeout: 60_000 }, async () => {
+    const adapter = new DeepSeekAdapter({ apiKeyRef: 'DEEPSEEK_API_KEY', resolveKey: () => KEY, baseURL: BASE, defaultMaxTokens: 8192 })
+    for (const alias of ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']) {
+      const response = await fetch(`${BASE}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: alias, max_tokens: 1, thinking: { type: 'disabled' }, messages: [{ role: 'user', content: 'ok' }] }),
+      })
+      const served = ((await response.json()) as { model?: string }).model
+      process.stderr.write(`[deepseek catalog] ${alias}: ${response.status}, served as ${served}\n`)
+      expect(response.status, `${alias} is no longer served: drop the alias`).toBe(200)
+      expect(served, `${alias} is served as another model now: its facts must move`).toBe('deepseek-flash')
+      expect(adapter.resolveModel(alias)).toEqual(adapter.resolveModel('deepseek-flash'))
     }
   })
 })

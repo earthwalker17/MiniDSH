@@ -1,4 +1,5 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
+import { isHeaderSafe } from '../../core/credentials/index.ts'
 import { parseSse } from './sse.ts'
 import { DeepSeekTranslator, parseWireChunk } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
@@ -63,11 +64,14 @@ const ALIASES: Readonly<Record<string, string>> = {
  * An id this snapshot does not know: conservative on every axis it could get
  * wrong. Text only, because a model that ignores an image says nothing about
  * it (`deepseek-v4-pro`, above); a window that makes compaction act early
- * rather than an overflow the meter never saw coming; the deployment's default
- * output cap. Today the provider refuses any such id with a 400 naming the two
- * it serves (`UNKNOWN_MODEL`), so this matters for the model it ships next.
+ * rather than an overflow the meter never saw coming. No output cap of ours:
+ * one would be a guess, and a guessed cap refusing what the provider serves is
+ * worse than none (a stored session with an explicit `maxTokens` would fail
+ * every step), so the deployment default applies and the provider judges.
+ * Today the provider refuses any such id with a 400 naming the two it serves
+ * (`UNKNOWN_MODEL`), so this matters for the model it ships next.
  */
-const UNLISTED = { contextWindow: 131_072, maxOutputTokens: 8192, modalities: ['text'] as readonly ModelModality[] }
+const UNLISTED = { contextWindow: 131_072, maxOutputTokens: Number.POSITIVE_INFINITY, modalities: ['text'] as readonly ModelModality[] }
 
 /** The snapshot, for the live drift probe that holds it to `GET /models`. */
 export function deepseekCatalog(): readonly CatalogModel[] {
@@ -145,7 +149,7 @@ export class DeepSeekAdapter implements LlmAdapter {
     if (request.temperature !== undefined && request.reasoningEffort !== 'off') {
       throw new LlmError(
         'UNSUPPORTED_OPTION',
-        `DeepSeek ignores temperature while thinking, which is on unless reasoning effort is "off"; set the effort to "off" or drop the temperature`,
+        `DeepSeek ignores temperature while thinking, which is on unless reasoning effort is "off": set the effort to "off", or route the session to a model that honours a temperature (a recorded temperature cannot be cleared)`,
       )
     }
   }
@@ -167,6 +171,11 @@ export class DeepSeekAdapter implements LlmAdapter {
       // may go — the store is the only thing that knows its own layers.
       const where = this.options.describeKey?.()
       throw new LlmError('MISSING_CREDENTIAL', `DeepSeek API key not set (expected credential ${this.options.apiKeyRef}${where === undefined ? '' : `: set ${where}`})`)
+    }
+    // Refused by reference, never by value: the platform's error for a bad
+    // header quotes it, and an error message is logged (`isHeaderSafe`).
+    if (!isHeaderSafe(apiKey)) {
+      throw new LlmError('INVALID_CREDENTIAL', `DeepSeek API key in credential ${this.options.apiKeyRef} contains characters no HTTP header can carry`)
     }
     const wire = {
       model: request.model,
@@ -210,8 +219,9 @@ export class DeepSeekAdapter implements LlmAdapter {
     }
 
     if (!response.ok) {
-      if (timer) clearTimeout(timer)
+      // The watchdog stays armed through the error body, as in the sibling adapters.
       const body = await response.text().catch(() => '')
+      if (timer) clearTimeout(timer)
       throw classifyHttp(response.status, body, response.headers)
     }
     if (!response.body) {

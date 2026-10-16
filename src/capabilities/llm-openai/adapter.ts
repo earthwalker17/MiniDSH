@@ -1,4 +1,5 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
+import { isHeaderSafe } from '../../core/credentials/index.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
 import { resolveRequestImages } from '../../core/llm/content.ts'
 import { catalogEntry, factsFor, OPENAI_CATALOG, type OpenAICatalogModel } from './catalog.ts'
@@ -16,6 +17,8 @@ export const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
  */
 export const DEFAULT_MAX_TOKENS = 32_768
 const IDLE_TIMEOUT_MS = 300_000
+/** The smallest `max_output_tokens` the Responses API accepts. */
+const MIN_OUTPUT_TOKENS = 16
 // No version in it, for the reason the sibling adapters give: one version string, in package.json.
 const USER_AGENT = 'minidsh (+https://github.com/earthwalker17/MiniDSH)'
 
@@ -87,10 +90,16 @@ export class OpenAIAdapter implements LlmAdapter {
         throw new LlmError('UNSUPPORTED_OPTION', `OpenAI model "${request.model}" does not accept a temperature at any reasoning effort (the API returns 400)`)
       }
       if (effective !== 'none') {
-        throw new LlmError('UNSUPPORTED_OPTION', `OpenAI model "${request.model}" accepts a temperature only at reasoning effort "none", and this request's effort is "${effective ?? 'unknown'}" (the API returns 400): name effort none, or drop the temperature`)
+        throw new LlmError('UNSUPPORTED_OPTION', `OpenAI model "${request.model}" accepts a temperature only at reasoning effort "none", and this request's effort is "${effective ?? 'unknown'}" (the API returns 400): name effort none, or route the session to a model that honours a temperature (a recorded temperature cannot be cleared)`)
       }
     }
-    if (request.maxTokens !== undefined && request.maxTokens > entry.maxOutputTokens) {
+    // Measured 2026-10-16: below 16 is a 400 naming the minimum.
+    if (request.maxTokens !== undefined && request.maxTokens < MIN_OUTPUT_TOKENS) {
+      throw new LlmError('UNSUPPORTED_OPTION', `OpenAI takes an output cap of at least ${MIN_OUTPUT_TOKENS} tokens, but the request asks for ${request.maxTokens}`)
+    }
+    // A cap is refused only against a KNOWN model's: an unknown id's is a
+    // guess, and a guess must never refuse what the provider would serve.
+    if (known && request.maxTokens !== undefined && request.maxTokens > entry.maxOutputTokens) {
       throw new LlmError('UNSUPPORTED_OPTION', `OpenAI model "${request.model}" caps output at ${entry.maxOutputTokens} tokens, but the request asks for ${request.maxTokens}`)
     }
   }
@@ -165,6 +174,11 @@ export class OpenAIAdapter implements LlmAdapter {
       const where = this.options.describeKey?.()
       throw new LlmError('MISSING_CREDENTIAL', `OpenAI API key not set (expected credential ${this.options.apiKeyRef}${where === undefined ? '' : `: set ${where}`})`)
     }
+    // Refused by reference, never by value: the platform's error for a bad
+    // header quotes it, and an error message is logged (`isHeaderSafe`).
+    if (!isHeaderSafe(apiKey)) {
+      throw new LlmError('INVALID_CREDENTIAL', `OpenAI API key in credential ${this.options.apiKeyRef} contains characters no HTTP header can carry`)
+    }
 
     const idle = new AbortController()
     const combined = request.signal ? AbortSignal.any([idle.signal, request.signal]) : idle.signal
@@ -194,8 +208,10 @@ export class OpenAIAdapter implements LlmAdapter {
     }
 
     if (!response.ok) {
-      if (timer) clearTimeout(timer)
+      // The watchdog stays armed through the error body: one that stalls after
+      // its headers would otherwise hang a run nobody can cancel.
       const text = await response.text().catch(() => '')
+      if (timer) clearTimeout(timer)
       throw classifyHttp(response.status, text, response.headers)
     }
     if (!response.body) {
@@ -206,7 +222,7 @@ export class OpenAIAdapter implements LlmAdapter {
     const translator = new OpenAITranslator()
     try {
       for await (const event of parseNamedSse(response.body, resetIdle)) {
-        const data = parseWireEvent(event.data)
+        const data = parseTail(event)
         // Every event names itself in its own `type`; the SSE name is the fallback.
         for (const chunk of translator.push(typeof data.type === 'string' ? data : { ...data, type: event.event })) yield chunk
         if (translator.complete) break
@@ -217,6 +233,20 @@ export class OpenAIAdapter implements LlmAdapter {
       if (timer) clearTimeout(timer)
     }
     if (!translator.complete) throw new LlmError('STREAM_CLOSED', 'OpenAI stream ended without a terminal response event')
+  }
+}
+
+/**
+ * An event, parsed; one flushed at end of body that does not parse is a body
+ * CUT mid-event, the same dropped connection STREAM_CLOSED names one event
+ * later, so it is retryable rather than MALFORMED_RESPONSE.
+ */
+function parseTail(event: { readonly data: string; readonly tail?: true }): Record<string, unknown> {
+  try {
+    return parseWireEvent(event.data)
+  } catch (error) {
+    if (event.tail === true) throw new LlmError('STREAM_CLOSED', 'OpenAI stream was cut in the middle of an event')
+    throw error
   }
 }
 
