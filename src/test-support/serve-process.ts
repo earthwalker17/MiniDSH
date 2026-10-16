@@ -30,6 +30,12 @@ export interface ServeOptions {
   readonly sandbox?: string
   /** Extra argv for the spawned host (e.g. `--patch`). */
   readonly args?: readonly string[]
+  /**
+   * Variables the host must NOT inherit: an arc that proves a key reaches its
+   * row through the home's `credentials.json` (the search arc) removes it from
+   * the environment, or the store path would never be exercised.
+   */
+  readonly withoutEnv?: readonly string[]
 }
 
 /**
@@ -39,8 +45,9 @@ export interface ServeOptions {
  * developer who exported one would fail that arc for a reason it does not test.
  * The unit tests isolate the same precedence by passing `env: {}` explicitly.
  */
-function childEnv(home: string): NodeJS.ProcessEnv {
+function childEnv(home: string, without: readonly string[] = []): NodeJS.ProcessEnv {
   const { MINIDSH_MODEL: _ambient, ...rest } = process.env
+  for (const name of without) delete rest[name]
   return { ...rest, MINIDSH_HOME: home }
 }
 
@@ -58,7 +65,7 @@ export class ServeProcess {
     if (options.approve) argv.push('--approve')
     if (options.sandbox) argv.push('--sandbox', options.sandbox)
     if (options.args) argv.push(...options.args)
-    this.child = spawn(process.execPath, argv, { env: childEnv(home), stdio: ['pipe', 'pipe', 'pipe'] })
+    this.child = spawn(process.execPath, argv, { env: childEnv(home, options.withoutEnv), stdio: ['pipe', 'pipe', 'pipe'] })
     spawned.push(this.child)
     this.exited = new Promise((resolve) => this.child.on('exit', (code) => resolve(code)))
     this.child.stderr!.on('data', (chunk: Buffer) => {

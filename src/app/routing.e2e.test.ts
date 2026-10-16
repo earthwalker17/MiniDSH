@@ -17,7 +17,8 @@
  *
  * Requires DEEPSEEK_API_KEY and ANTHROPIC_API_KEY; skipped otherwise.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -27,7 +28,12 @@ import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/co
 import { LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/index.ts'
 import { foldRequestContext, type EventEnvelope } from '../core/session/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
-import { createUserMessage } from '../core/llm/message.ts'
+import { createUserMessage, restoreMessage } from '../core/llm/message.ts'
+import type { Message } from '../core/llm/types.ts'
+import type { ResolvedImage } from '../core/llm/content.ts'
+import { serializeMessages as serializeDeepSeek } from '../capabilities/llm-deepseek/index.ts'
+import { serializeInput as serializeOpenAI } from '../capabilities/llm-openai/index.ts'
+import { QUADRANT_COLOURS, quadPng } from '../test-support/images.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
@@ -35,6 +41,7 @@ import { bootComposition } from './headless.ts'
 
 const DEEPSEEK = process.env.DEEPSEEK_API_KEY
 const ANTHROPIC = process.env.ANTHROPIC_API_KEY
+const OPENAI = process.env.OPENAI_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
 /**
  * Low enough that three file reads cross it for real, and no lower.
@@ -303,5 +310,221 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     // very file, so asserting the file's contents could not fail.)
     const replayedResults = replayedEvents.filter((event) => event.type === 'tool/result')
     expect(replayedResults.some((event) => JSON.stringify(event.data).includes('ALPHA-11')), 'the replayed session never read alpha.txt back').toBe(true)
+  })
+})
+
+/**
+ * The S18 OpenAI leg: a third provider through the same unchanged loop, on the
+ * Responses API, with the two things that make that wire different from the
+ * other two proved where they matter.
+ *
+ *   route as a fact      DeepSeek → OpenAI → DeepSeek over the wire, one
+ *                        `agent/options{change}` per switch, a `request/context`
+ *                        per route carrying each provider's real input window
+ *   encrypted reasoning  an OpenAI step that calls a tool carries its reasoning
+ *                        item's `encrypted_content` in the envelope, and the
+ *                        follow-up request of the SAME step is built with it.
+ *                        The API returns 200 whether or not it is sent
+ *                        (measured 2026-10-16), so this is asserted on the real
+ *                        serializer, offline, over the recorded history
+ *   an image in a tool result  `view_image` on OpenAI: the PNG the test drew
+ *                        inside `function_call_output`, read back in drawn order
+ *   foreign history      OpenAI over DeepSeek's turn (its reasoning dropped),
+ *                        DeepSeek over OpenAI's (the image still in the tool
+ *                        message)
+ *   replay               the three-route log replays keylessly and the image
+ *                        path really runs again
+ *
+ * The model is the cheapest that exercises BOTH premises, measured 2026-10-16
+ * with this leg's own fixture and prompts, four trials each: gpt-5.4-mini read
+ * the drawn quadrants inside a tool output 4/4 and reasoned before its call
+ * 4/4. gpt-6-luna (cheaper) misread the quadrants in every trial, gpt-5.6-luna
+ * read them 1 time in 4, and gpt-5-nano passed both but its only snapshot shuts
+ * down 2026-12-11 — a gate built on it would rot by itself. Effort `high`, and
+ * a turn-2 prompt that makes the model decide, because a bare "read bravo.txt"
+ * went straight to the tool with no reasoning item to carry.
+ *
+ * Requires DEEPSEEK_API_KEY and OPENAI_API_KEY; skipped otherwise. A LOCAL
+ * gate: live.yml carries no OpenAI secret (ARCHITECTURE §10).
+ */
+const OPENAI_MODEL = 'gpt-5.4-mini'
+const QUAD_PX = 96
+
+describe.skipIf(!DEEPSEEK || !OPENAI)('S18 live E2E: an OpenAI leg through the same loop', () => {
+  it('routes DeepSeek → OpenAI → DeepSeek, carries encrypted reasoning through a tool step, reads an image in a tool result, and replays', { timeout: 900_000 }, async () => {
+    const workspace = tempDir('minidsh-e2e18-ws-')
+    const home = tempDir('minidsh-e2e18-home-')
+    seedWorkspace(workspace)
+    const png = quadPng(QUAD_PX)
+    writeFileSync(join(workspace, 'quad.png'), png)
+    // No compaction budget: a summary between the tokens and the last answer
+    // would confound what this leg measures (asserted absent below).
+    writeFileSync(join(home, 'composition.json'), JSON.stringify({ patches: [{ insert: [{ id: 'tool-view-image', plugin: 'tool-view-image' }] }] }), 'utf8')
+
+    // Turn 2 makes the model DECIDE before it calls: measured 2026-10-16, a
+    // bare "read bravo.txt" went straight to the tool with no reasoning item
+    // (gpt-6-luna, 0 of 3 at `high` and `xhigh`), so the step this leg exists
+    // for had nothing to carry; this wording reasoned first every time. The
+    // premise is the model's, and it is pinned in the words.
+    const PROMPTS = [
+      'Using the file editor tool (not the shell), read alpha.txt and reply with only the marker token it contains.',
+      'The workspace holds alpha.txt, bravo.txt and charlie.txt; each contains one marker token whose first letter matches the first letter of its file name. Work out which single file holds the marker that starts with B, read ONLY that file with the file editor tool (not the shell), and reply with only the marker token.',
+      'Call the view_image tool on quad.png, then reply with its four quadrant colours in the order top-left, top-right, bottom-left, bottom-right, as one comma-separated line of four lowercase colour words and nothing else.',
+      'List every marker token you have found so far in this conversation, one per line, and nothing else.',
+    ] as const
+    const OPENAI_ROUTE = { provider: 'openai', model: OPENAI_MODEL, reasoningEffort: 'high' } as const
+    const DEEPSEEK_ROUTE = { provider: 'deepseek', model: 'deepseek-flash' } as const
+
+    const serve = new ServeProcess(workspace, home, { approve: true })
+    const init = await serve.request<{ providers: { id: string; models: { id: string; contextWindow: number; inputModalities?: string[] }[] }[] }>('initialize')
+    const advertised = init.providers.find((provider) => provider.id === 'openai')?.models.find((model) => model.id === OPENAI_MODEL)
+    expect(advertised, 'the OpenAI adapter is mounted by default and lists the validation model').toMatchObject({ contextWindow: 272_000, inputModalities: ['text', 'image'] })
+
+    const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: PROMPTS[0], agentOptions: DEEPSEEK_ROUTE })
+    await serve.waitForCompletedTurn(sessionId, 1)
+    await serve.request('session/model', { sessionId, ...OPENAI_ROUTE })
+    await serve.request('session/prompt', { sessionId, text: PROMPTS[1] })
+    await serve.waitForCompletedTurn(sessionId, 2)
+    await serve.request('session/prompt', { sessionId, text: PROMPTS[2] })
+    await serve.waitForCompletedTurn(sessionId, 3)
+    await serve.request('session/model', { sessionId, ...DEEPSEEK_ROUTE })
+    await serve.request('session/prompt', { sessionId, text: PROMPTS[3] })
+    await serve.waitForCompletedTurn(sessionId, 4)
+    const events = (await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId })).events
+    await serve.shutdown()
+
+    const turnOf = (seq: number): number => {
+      let turn = 0
+      for (const event of events) {
+        if (event.seq > seq) break
+        if (event.type === 'turn/start') turn = (event.data as { turn: number }).turn
+      }
+      return turn
+    }
+    const ended = events.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)
+    expect(ended, 'every turn completed').toEqual(['completed', 'completed', 'completed', 'completed'])
+
+    // ---- the route is one durable fact per switch ---------------------------
+    const options = events.filter((event) => event.type === AGENT_OPTIONS.type).map((event) => event.data as { options: { provider: string }; reason: string })
+    expect(options.map((record) => [record.reason, record.options.provider])).toEqual([
+      ['initial', 'deepseek'],
+      ['change', 'openai'],
+      ['change', 'deepseek'],
+    ])
+    const contexts = events.filter((event) => event.type === 'request/context').map((event) => event.data as { provider: string; model: string; contextWindow?: number; inputModalities?: string[] })
+    expect(contexts).toEqual([
+      { provider: 'deepseek', model: 'deepseek-flash', contextWindow: 1_048_576, inputModalities: ['text', 'image'] },
+      { provider: 'openai', model: OPENAI_MODEL, contextWindow: 272_000, inputModalities: ['text', 'image'] },
+      { provider: 'deepseek', model: 'deepseek-flash', contextWindow: 1_048_576, inputModalities: ['text', 'image'] },
+    ])
+    expect(events.filter((event) => event.type === COMPACTION_START.type), 'no summary stands between the tokens and the answers').toHaveLength(0)
+
+    // ---- envelopes ride their own provider's messages only ------------------
+    type Envelope = { response: { kind?: string }; blocks?: ({ type: string; encrypted_content?: string } | null)[] }
+    type Source = { provider: string; model: string; replayState?: Envelope }
+    const assistants = events
+      .filter((event) => event.type === 'assistant/message')
+      .map((event) => {
+        const message = (event.data as { message: Message }).message
+        return { seq: event.seq, message, source: message.source as unknown as Source, usage: (event.data as { usage?: Record<string, number> }).usage }
+      })
+    const openaiMessages = assistants.filter((entry) => entry.source.provider === 'openai')
+    expect(openaiMessages.length, 'OpenAI answered turns 2 and 3').toBeGreaterThanOrEqual(2)
+    expect(assistants.filter((entry) => entry.source.replayState?.response.kind === 'openai').every((entry) => entry.source.provider === 'openai')).toBe(true)
+    const hasEncrypted = (entry: (typeof assistants)[number]): boolean =>
+      entry.source.replayState?.blocks?.some((block) => block?.type === 'reasoning' && typeof block.encrypted_content === 'string') === true
+    const callStep = openaiMessages.find((entry) => turnOf(entry.seq) === 2 && entry.message.content.some((block) => block.type === 'tool-call'))
+    const why =
+      `OpenAI messages ${openaiMessages.length}, with encrypted reasoning ${openaiMessages.filter(hasEncrypted).length}; ` +
+      `turn-2 tool step ${callStep === undefined ? 'MISSING' : `at seq ${callStep.seq}`}; usage ${JSON.stringify(openaiMessages.map((entry) => entry.usage))}`
+    console.log(`[routing openai] ${why}`)
+    expect(callStep, `OpenAI's turn 2 made no tool call — ${why}`).toBeDefined()
+    expect(hasEncrypted(callStep!), `the tool step carried no encrypted reasoning — ${why}`).toBe(true)
+
+    // ---- the follow-up request of that step, built offline by the real serializer
+    const surfaceUpTo = (seq: number): Message[] =>
+      events
+        .filter((event) => event.seq < seq && (event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result'))
+        .map((event) => restoreMessage((event.data as { message: Message }).message))
+    const followUp = events.find((event) => event.type === 'assistant/message' && event.seq > callStep!.seq && turnOf(event.seq) === 2)
+    expect(followUp, 'the tool step had no follow-up answer').toBeDefined()
+    const items = serializeOpenAI(surfaceUpTo(followUp!.seq), new Map(), OPENAI_MODEL) as unknown as { type?: string; encrypted_content?: string; call_id?: string; id?: string }[]
+    const envelope = callStep!.source.replayState!.blocks!.find((block) => block?.type === 'reasoning')!
+    const call = callStep!.message.content.find((block) => block.type === 'tool-call') as { id: string }
+    expect(items.some((item) => item.type === 'reasoning' && item.encrypted_content === envelope.encrypted_content), 'the step\'s own encrypted reasoning went back with its call').toBe(true)
+    expect(items.some((item) => item.type === 'function_call' && item.call_id === call.id && item.id?.startsWith('fc_') === true), 'the call went back with its item id').toBe(true)
+    expect(items.some((item) => item.type === 'function_call_output' && item.call_id === call.id)).toBe(true)
+    // Every reasoning item sent is one OpenAI itself produced: DeepSeek's turn-1 thought is dropped, never forged.
+    const openaiEncrypted = new Set(openaiMessages.flatMap((entry) => (entry.source.replayState?.blocks ?? []).map((block) => block?.encrypted_content)).filter((value): value is string => typeof value === 'string'))
+    expect(items.filter((item) => item.type === 'reasoning').every((item) => item.encrypted_content !== undefined && openaiEncrypted.has(item.encrypted_content))).toBe(true)
+
+    // ---- the world: what OpenAI read, and what DeepSeek read back ------------
+    const texts = assistantTexts(events)
+    const finalOf = (turn: number): string => {
+      const index = assistants.map((entry, position) => ({ entry, position })).filter(({ entry }) => turnOf(entry.seq) === turn).at(-1)!.position
+      return texts[index]!.toLowerCase()
+    }
+    expect(finalOf(2)).toContain('bravo-22')
+    const colours = finalOf(3)
+    const positions = QUADRANT_COLOURS.map((colour) => colours.indexOf(colour))
+    const inOrder = positions.every((position) => position >= 0) && positions.every((position, index) => index === 0 || position > positions[index - 1]!)
+    expect(inOrder, `OpenAI answered "${colours}"; the test drew ${QUADRANT_COLOURS.join(', ')}`).toBe(true)
+    expect(finalOf(4)).toContain('alpha-11')
+    expect(finalOf(4)).toContain('bravo-22')
+
+    // DeepSeek's turn-4 request still shows OpenAI's tool result as the image itself.
+    const digest = createHash('sha256').update(png).digest('hex')
+    const object = join(home, 'attachments', 'v1', 'objects', digest.slice(0, 2), digest)
+    expect(existsSync(object), 'view_image committed the drawn PNG').toBe(true)
+    const turn4 = events.find((event) => event.type === 'turn/start' && (event.data as { turn: number }).turn === 4)!
+    const history = surfaceUpTo(turn4.seq)
+    const imageRef = history
+      .flatMap((message) => message.content)
+      .flatMap((block) => (block.type === 'tool-result' ? block.content : []))
+      .find((block): block is Extract<Message['content'][number], { type: 'image' }> => block.type === 'image')
+    expect(imageRef, 'an image reached history through OpenAI\'s tool result').toBeDefined()
+    const images = new Map<string, ResolvedImage>([[imageRef!.attachment.id, { ref: imageRef!.attachment, data: readFileSync(object) }]])
+    const deepseekWire = serializeDeepSeek(undefined, history, images)
+    expect(deepseekWire.some((message) => message.role === 'tool' && Array.isArray(message.content) && message.content.some((part) => part.type === 'image_url'))).toBe(true)
+
+    // ---- the three-route log is its own oracle, image path included ---------
+    const replayWorkspace = tempDir('minidsh-e2e18-replay-ws-')
+    seedWorkspace(replayWorkspace)
+    writeFileSync(join(replayWorkspace, 'quad.png'), png)
+    const replayAttachments = tempDir('minidsh-e2e18-replay-attachments-')
+    const file = loadCompositionFile(join(home, 'composition.json'))!
+    let replayHandle: ReturnType<typeof installLlmReplay> | undefined
+    const root = await bootComposition({
+      sessionsRoot: tempDir('minidsh-e2e18-replay-'),
+      attachmentsRoot: replayAttachments,
+      approve: true,
+      logger: silent,
+      patches: [
+        { id: 'llm-deepseek', disabled: true },
+        { id: 'llm-anthropic', disabled: true },
+        { id: 'llm-openai', disabled: true },
+      ],
+      configLayers: [{ name: 'home', patches: await toPatches(file, home) }],
+      prepare: (context) => {
+        replayHandle = installLlmReplay(context, { events })
+      },
+    })
+    try {
+      const handle = await root.get(AGENTS).create(root, { cwd: replayWorkspace, agentOptions: DEEPSEEK_ROUTE })
+      for (const [index, text] of PROMPTS.entries()) {
+        if (index === 1) handle.agent.configure(OPENAI_ROUTE)
+        if (index === 3) handle.agent.configure(DEEPSEEK_ROUTE)
+        handle.agent.followup(createUserMessage(text))
+        await handle.agent.whenIdle()
+      }
+      const replayed = handle.agent.session.events.filter((event) => event.type === 'request/context').map((event) => (event.data as { provider: string }).provider)
+      expect(replayed).toEqual(['deepseek', 'openai', 'deepseek'])
+      await handle.dispose()
+    } finally {
+      await root.dispose()
+    }
+    expect(replayHandle!.providers.toSorted()).toEqual(['deepseek', 'openai'])
+    replayHandle!.assertConsumed()
+    expect(existsSync(join(replayAttachments, 'v1', 'objects', digest.slice(0, 2), digest)), 'the replay never re-read the image, so its image path never ran').toBe(true)
   })
 })
