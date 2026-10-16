@@ -84,7 +84,7 @@ const ARCHITECTURE_HEADINGS = [
   '## 2. Kernel (`src/kernel`)',
   '## 3. Core contracts (`src/core`)',
   '## 4. Canonical facts: the session log',
-  '## 5. LLM vocabulary and the two adapters',
+  '## 5. LLM vocabulary and the adapters',
   '## 6. The loop and the tool pipeline',
   '## 7. Authority',
   '## 8. Surfaces',

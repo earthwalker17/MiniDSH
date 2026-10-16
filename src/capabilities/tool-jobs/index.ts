@@ -8,8 +8,8 @@
  *
  * **Never an escalation.** A job runs under the session's own policy and the
  * acceptance it recorded, resolved inside `launch` so a switch landing while
- * it starts is one the registry already watches. A grant covers ONE call
- * (§7), and a job outlives the call that started it, so there is no
+ * it starts is one the registry already watches. An escalation's consent is
+ * to ONE call (§7), and a job outlives the call that started it, so there is no
  * `sandbox_permissions` here: a command that needs more runs in the
  * foreground, where the shell tool can ask.
  */

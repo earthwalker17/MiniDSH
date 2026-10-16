@@ -132,6 +132,13 @@ export type StreamChunk =
 export type ModelModality = 'text' | 'image'
 
 export interface ResolvedModel {
+  /**
+   * What compaction budgets against and the meter reads: the most PROMPT a
+   * request may carry. Where a provider states a separate input cap it is
+   * that (OpenAI's 922K of a 1.05M window, Anthropic's `max_input_tokens`);
+   * where input and output share one window it is the window (DeepSeek's
+   * `context_window`), and the default output cap is the headroom left.
+   */
   readonly contextWindow: number
   readonly defaultMaxTokens: number
   readonly reasoning: { readonly efforts: readonly string[]; readonly defaultEffort?: string }

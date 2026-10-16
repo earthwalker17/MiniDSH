@@ -119,7 +119,7 @@ export function canonicalModel(model: string): string {
  * unmeasured id is a guess, and a refusal names the fix; a reasoning field is
  * not sent at all, since an id this table has never seen may be a model that
  * takes none. Text only, because a provider that silently drops an image is a
- * measured fact of this seam (`deepseek-v4-pro`, §5): an image route has to be
+ * measured fact of this seam (`deepseek-v4-pro`, §13): an image route has to be
  * known before images are admitted to it. A model this table lacks is one
  * row, measured by the drift probe.
  */

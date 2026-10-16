@@ -30,7 +30,7 @@ Requirements:
 - **Node 24** or newer.
 - **Windows:** PowerShell 7 (`pwsh`), never 5.1; a missing `pwsh` is refused by name. Windows has no shell confinement, so a shell command there is refused until the session accepts that (`--accept none`) — see [Status and limitations](#status-and-limitations).
 - **Linux:** `bubblewrap` (`apt install bubblewrap`) if you want shell commands confined by the operating system instead of approved one by one. **macOS** needs nothing extra.
-- **A provider key:** `DEEPSEEK_API_KEY` for the default provider, `ANTHROPIC_API_KEY` for Anthropic — in the environment, or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}`. A run without one stops and names the key it expected.
+- **A provider key:** `DEEPSEEK_API_KEY` for the default provider, `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI (and `TAVILY_API_KEY` for the opt-in web search) — in the environment, or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}`. A run without one stops and names the key it expected.
 
 ```sh
 npm install -g minidsh            # or run it without installing: npx minidsh …
@@ -73,13 +73,15 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 **Switch models mid-conversation.** The route — provider, model, reasoning effort — is a durable fact a session can change at any point (`--provider`/`--model`, `/model anthropic/claude-sonnet-5`, or `session/model` over the protocol), and the log records it. A `model-roles` entry in `composition.json` maps a *purpose* — the compaction summary, a delegated child — to a different route. An option a provider cannot honour is refused, never silently dropped.
 
-The DeepSeek adapter ships `deepseek-flash` (the default; `deepseek-v4-flash`, the 1.0.0 default, is still accepted and served as the same model), `deepseek-v4-pro` and a vision model; the Anthropic adapter ships the Claude 5 and 4 families with per-model facts measured against the live API.
+The DeepSeek adapter ships `deepseek-flash` (the default, which reads images; the retired `deepseek-v4-flash` names are served as it) and the text-only `deepseek-v4-pro`; the Anthropic adapter the Claude 5 and 4 families; the OpenAI adapter the GPT-6 and GPT-5 families on the Responses API. Every effort set was measured against the live API (and every DeepSeek window and cap), and a drift probe re-measures DeepSeek's and OpenAI's.
 
 **Delegation with a ceiling.** The model can hand one bounded task to a `subagent`: a child with its own session and log whose authority is fixed at its parent's or narrower and cannot be widened from inside; approvals are off, so an action needing one is refused. A verifier that can *see* is a second `subagent` entry pointed at a vision model, using the `view_image` tool, a built-in row that is off by default.
 
 **Background jobs that report back.** The model can start a long command — a dev server, a slow test run — with `job_start`, keep working, read its output with `job_output` and stop it with `job_cancel`. When a job ends on its own, its notice arrives in the session and wakes an idle agent, a bounded number of times before a person says something; a stop someone asked for never wakes it. A job runs under the session's own authority and ends with its session; if the process running the session dies, the next resume tells the model which jobs were lost.
 
-**Composition from disk.** The default composition is a list of thirty-eight plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` shows the result and flags any authority-sensitive row a file changed.
+**Web search, when you mount it.** One `composition.json` row adds `web_search` (Tavily). Every query asks first, naming the exact text that would leave the machine, where it goes and under which credential; results are titles, URLs and snippets behind a fixed untrusted-content notice. A delegated child is not offered it.
+
+**Composition from disk.** The default composition is a list of thirty-nine plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` shows the result and flags any authority-sensitive row a file changed.
 
 **One runtime, three ways in.** The headless CLI, the terminal and the browser are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). They display the session log a page at a time and keep no state of their own; several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record.
 
@@ -91,9 +93,9 @@ The DeepSeek adapter ships `deepseek-flash` (the default; `deepseek-v4-flash`, t
 - Confinement governs file effects only. A confined command still reaches the network. Its environment is scrubbed of this deployment's declared provider keys and of `MINIDSH_*`, and of nothing else: a credential-shaped variable you set is yours and reaches the shell. That scrub is defence in depth, not a boundary: reads are unfenced, so a credentials file stays readable to a command that looks.
 - The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. A confined shell writes through such a link too, because the OS confines paths; neither backend lets it create one across the workspace boundary (measured under bubblewrap and Seatbelt).
 - Tool execution is sequential and a delegated child is foreground. A background job's process can outlive a MiniDSH process that is killed (on Windows, on macOS, and unconfined on Linux): the resume reports it lost and does not stop it. On Windows a job runs only in a session that accepts an unconfined shell (`--accept none`).
-- No session deletion, search or rename; no OpenAI adapter; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
+- Nothing confines the network: web search is consent per query, and there is no `web_fetch`. No session deletion, search or rename; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
 
-What comes next is an OpenAI adapter and web search, then skills and browser verification ([BLUEPRINT §2](docs/BLUEPRINT.md)).
+What comes next is skills, then browser verification ([BLUEPRINT §2](docs/BLUEPRINT.md)).
 
 ## The question it investigates
 
