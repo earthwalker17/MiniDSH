@@ -54,6 +54,6 @@ export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
   },
 }
 
-export { DEEPSEEK_PROVIDER, DeepSeekAdapter } from './adapter.ts'
+export { classifyHttp, DEEPSEEK_PROVIDER, DeepSeekAdapter, deepseekCatalog } from './adapter.ts'
 export { DeepSeekTranslator, parseWireChunk } from './translate.ts'
 export { serializeMessages, serializeTools } from './serialize.ts'

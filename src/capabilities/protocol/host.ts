@@ -1238,14 +1238,22 @@ export class ProtocolHost {
   }
 
   /**
-   * The window a route's adapter advertises, for a session that has not yet
+   * The window a route's adapter answers with, for a session that has not yet
    * written a `request/context`. The log's own record wins the moment there is
-   * one — this only answers "before the first request".
+   * one — this only answers "before the first request". Asked of the adapter,
+   * not looked up in the advertised catalog: a retired alias an adapter still
+   * resolves (`deepseek-v4-flash`, the 1.0.0 default, still in users'
+   * settings) is deliberately unlisted.
    */
   private catalogWindow(options: AgentOptions | undefined): number | undefined {
     if (!options) return undefined
-    const provider = this.ctx.get(LLM).providers().find((entry) => entry.id === options.provider)
-    return provider?.models.find((model) => model.id === options.model)?.contextWindow
+    const llm = this.ctx.get(LLM)
+    if (!llm.hasProvider(options.provider)) return undefined
+    try {
+      return llm.resolveModel(options.provider, options.model).contextWindow
+    } catch {
+      return undefined
+    }
   }
 
   /**

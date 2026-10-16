@@ -7,7 +7,7 @@
  * `composition.json` — so the arc also re-proves that the composition layers
  * reproduce a world.
  *
- *   admission    the parent is on `deepseek-v4-flash`, which cannot see images,
+ *   admission    the parent is on `deepseek-v4-pro`, which cannot see images,
  *                so its own `view_image` call is refused BEFORE any file is
  *                read, and the refusal names delegation
  *   the plane    the verifier child, routed to the vision model by one
@@ -46,11 +46,16 @@ const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
 
 /**
- * The route that can see. Named here rather than in `compose()` so no shipped
- * session inherits an `-exp` id, and so the arc's own composition is what
- * chooses it — which is where a deployment would choose it too.
+ * The route that can see, and the one that cannot. Since S18 the shipped
+ * default (`deepseek-flash`) reads images, so the premise this arc tests — a
+ * parent that cannot look, delegating to a child that can — needs a parent
+ * pinned to a text-only route. `deepseek-v4-pro` is one (measured 2026-10-16:
+ * it ignores an image in a user or a tool message), and the catalog says so.
+ * The child's route is the arc's own composition's choice, which is where a
+ * deployment would make it too.
  */
-const VISION_MODEL = 'deepseek-v4-flash-vision-exp'
+const VISION_MODEL = 'deepseek-flash'
+const TEXT_ONLY_MODEL = 'deepseek-v4-pro'
 
 /**
  * 96×96 is the size two live probes read correctly on this route. A smaller
@@ -148,7 +153,7 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
     // No --approve: a consent would have to be a real decision, and the child is
     // pinned `never` so it can never ask for one.
     const serve = new ServeProcess(workspace, home, {})
-    const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: TASK })
+    const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: TASK, agentOptions: { provider: 'deepseek', model: TEXT_ONLY_MODEL } })
     await serve.waitForCompletedTurn(sessionId, 1)
 
     const parentLog = (await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId })).events
@@ -160,6 +165,11 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
     }
 
     // ---- admission: the parent's own look is refused, before any read -------
+    // The parent's route is the premise: text-only by the CATALOG, which is what
+    // admission reads. Asserted first, so a reshaped default can never quietly
+    // turn this into an arc about a parent that could see all along.
+    const parentRoute = parentLog.filter((event) => event.type === 'request/context').map((event) => event.data as { model: string; inputModalities?: string[] })
+    expect(parentRoute[0], 'the parent recorded no route').toMatchObject({ model: TEXT_ONLY_MODEL, inputModalities: ['text'] })
     const look = named('view_image')
     expect(look.call, `the model never called view_image; it called: ${calls.map((c) => c.name).join(', ') || 'nothing'}`).toBeDefined()
     expect(look.result?.error?.code, 'a text-only route must refuse an image before reading one').toBe('UNSUPPORTED_CONTENT')
@@ -272,7 +282,7 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
       {
         task: TASK,
         cwd: replayWorkspace,
-        model: 'deepseek-v4-flash',
+        model: TEXT_ONLY_MODEL,
         approve: true,
         sessionsRoot: replaySessions,
         attachmentsRoot: replayAttachments,
@@ -287,6 +297,14 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
     )
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
+    // An unrecorded route would replay as text-only anyway, so the replay's own
+    // route is asserted: it walked the recording's text-only parent.
+    const replayedParent = readFileSync(join(replaySessions, `${encodeURIComponent(replayed.sessionId)}.jsonl`), 'utf8')
+      .trim()
+      .split('\n')
+      .slice(1)
+      .map((line) => JSON.parse(line) as EventEnvelope)
+    expect(replayedParent.find((event) => event.type === 'request/context')?.data, 'the replayed parent ran on another route').toMatchObject({ model: TEXT_ONLY_MODEL })
     // The replayed child re-read the image for real: the object is on disk in a
     // home that started empty, under the same content address.
     expect(existsSync(join(replayAttachments, 'v1', 'objects', pngDigest.slice(0, 2), pngDigest)), 'the replay never wrote an attachment, so its image path never ran').toBe(true)

@@ -106,7 +106,7 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
       JSON.stringify({
         patches: [
           { id: 'compaction', config: { budgetTokens: BUDGET, thresholdRatio: 0.5, retainRatio: 0.25, maxTokens: 1024 } },
-          { id: 'model-roles', config: { roles: { compaction: { provider: 'deepseek', model: 'deepseek-v4-flash' } } } },
+          { id: 'model-roles', config: { roles: { compaction: { provider: 'deepseek', model: 'deepseek-flash' } } } },
         ],
       }),
       'utf8',
@@ -133,13 +133,13 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     // Both adapters are mounted, and each advertises its own real windows.
     const deepseek = init.providers.find((provider) => provider.id === 'deepseek')!
     const anthropic = init.providers.find((provider) => provider.id === 'anthropic')!
-    expect(deepseek.models.some((model) => model.contextWindow === 1_000_000)).toBe(true)
+    expect(deepseek.models.find((model) => model.id === 'deepseek-flash')?.contextWindow).toBe(1_048_576)
     expect(anthropic.models.find((model) => model.id === 'claude-haiku-4-5-20251001')?.contextWindow).toBe(200_000)
 
     // ---- turn 1 and 2: DeepSeek, with a real tool call --------------------
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', {
       text: PROMPTS[0],
-      agentOptions: { provider: 'deepseek', model: 'deepseek-v4-flash' },
+      agentOptions: { provider: 'deepseek', model: 'deepseek-flash' },
     })
     await serve.waitForCompletedTurn(sessionId, 1)
     await serve.request('session/prompt', { sessionId, text: PROMPTS[1] })
@@ -173,7 +173,7 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     // adapter advertises — two genuinely different answers from two providers,
     // which is what a replay reads back instead of asking a live adapter.
     expect(contexts).toEqual([
-      { provider: 'deepseek', model: 'deepseek-v4-flash', contextWindow: 1_000_000, inputModalities: ['text'] },
+      { provider: 'deepseek', model: 'deepseek-flash', contextWindow: 1_048_576, inputModalities: ['text', 'image'] },
       { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', contextWindow: 200_000, inputModalities: ['text', 'image'] },
     ])
     expect(foldRequestContext(events)!.provider).toBe('anthropic')
@@ -255,7 +255,7 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     expect(aux.purpose).toBe('compaction')
     // The summary went down the ROLE's route — a different provider from the
     // loop's own at that moment, and the log names it.
-    expect([aux.provider, aux.model]).toEqual(['deepseek', 'deepseek-v4-flash'])
+    expect([aux.provider, aux.model]).toEqual(['deepseek', 'deepseek-flash'])
     expect(aux.usage!.inputTokens + (aux.usage!.cacheReadTokens ?? 0)).toBeGreaterThan(0)
 
     // ---- the mixed log is still its own oracle ------------------------------
@@ -279,7 +279,7 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
       },
     })
     try {
-      const handle = await root.get(AGENTS).create(root, { cwd: replayWorkspace, agentOptions: { provider: 'deepseek', model: 'deepseek-v4-flash' } })
+      const handle = await root.get(AGENTS).create(root, { cwd: replayWorkspace, agentOptions: { provider: 'deepseek', model: 'deepseek-flash' } })
       // The same prompts, in order, with the SAME switch at the same point:
       // the replayed session walks the path the recording walked.
       for (const [index, text] of PROMPTS.entries()) {
