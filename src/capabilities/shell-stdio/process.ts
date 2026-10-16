@@ -77,9 +77,12 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * Two removals, one rule each. **Secrecy**: the credential references this
  * deployment DECLARED (`ctx.credentials`, the only thing that can know a row
  * renamed its own `apiKeyEnv`) — exactly those, and nothing for merely
- * looking like one. `GOOGLE_APPLICATION_CREDENTIALS`, an undeclared
- * `OPENAI_API_KEY`, a `PASSWORD` in the user's profile all pass: they are the
- * user's, not the harness's, and the shell child is the user's shell. (S16.5
+ * looking like one. `GOOGLE_APPLICATION_CREDENTIALS`, a `MOONSHOT_API_KEY` no
+ * mounted row reads, a `PASSWORD` in the user's profile all pass: they are the
+ * user's, not the harness's, and the shell child is the user's shell. A key is
+ * withheld exactly while a row that declares it is MOUNTED — `OPENAI_API_KEY`
+ * since the OpenAI adapter became a shipped row (S18), `TAVILY_API_KEY` only
+ * where the opt-in search row is. (S16.5
  * deleted the `/KEY|TOKEN|SECRET|PASSWORD/i` heuristic upstream still ships:
  * a variable withheld for its NAME broke ordinary work — a path-valued
  * `*_CREDENTIALS` first — while withholding no credential MiniDSH consumes.)

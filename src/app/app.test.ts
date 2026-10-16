@@ -157,14 +157,14 @@ describe('headless runner (real composition, scripted model)', () => {
     const { AGENTS } = await import('../core/agent/index.ts')
     const { CREDENTIALS } = await import('../core/credentials/index.ts')
     const { SHELL } = await import('../core/shell/index.ts')
-    const vars = { DEEPSEEK_API_KEY: 'deepseek-secret', ANTHROPIC_API_KEY: 'anthropic-secret', GOOGLE_APPLICATION_CREDENTIALS: '/home/me/gcp.json' }
+    const vars = { DEEPSEEK_API_KEY: 'deepseek-secret', ANTHROPIC_API_KEY: 'anthropic-secret', OPENAI_API_KEY: 'openai-secret', GOOGLE_APPLICATION_CREDENTIALS: '/home/me/gcp.json' }
     const previous = new Map(Object.keys(vars).map((name) => [name, process.env[name]] as const))
     for (const [name, value] of Object.entries(vars)) process.env[name] = value
     // No `llm-deepseek` disable patch: the claim is about what the SHIPPED rows declare.
     const adapter = new ScriptedAdapter()
     const root = await bootComposition({ sessionsRoot, logger: silent, prepare: (context) => void context.get(LLM).registerAdapter(context, adapter) })
     try {
-      expect(root.get(CREDENTIALS).declaredRefs().toSorted()).toEqual(['ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY'])
+      expect(root.get(CREDENTIALS).declaredRefs().toSorted()).toEqual(['ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY', 'OPENAI_API_KEY'])
       const handle = await root.get(AGENTS).create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
       try {
         const shell = root.get(SHELL).sessionFor(handle.agent)
@@ -173,6 +173,8 @@ describe('headless runner (real composition, scripted model)', () => {
           (await shell.exec({ command: process.platform === 'win32' ? `Write-Output $env:${name}` : `echo $${name}`, policy, timeoutMs: 30_000 })).output
         expect(await read('DEEPSEEK_API_KEY')).not.toContain('deepseek-secret')
         expect(await read('ANTHROPIC_API_KEY')).not.toContain('anthropic-secret')
+        // Since S18 the OpenAI adapter is a shipped row, so its key is the harness's, not the user's.
+        expect(await read('OPENAI_API_KEY')).not.toContain('openai-secret')
         // Credential-shaped, and the user's: it reaches the user's shell.
         expect(await read('GOOGLE_APPLICATION_CREDENTIALS')).toContain('/home/me/gcp.json')
       } finally {

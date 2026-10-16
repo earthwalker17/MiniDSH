@@ -26,6 +26,7 @@ import { credentialsLocalPlugin } from '../capabilities/credentials-local/index.
 import { settingsLocalPlugin } from '../capabilities/settings-local/index.ts'
 import { anthropicPlugin } from '../capabilities/llm-anthropic/index.ts'
 import { deepseekPlugin } from '../capabilities/llm-deepseek/index.ts'
+import { openaiPlugin } from '../capabilities/llm-openai/index.ts'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
 import { fsObservationPolicyPlugin } from '../capabilities/fs-observation-policy/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
@@ -41,6 +42,7 @@ import { toolShellPlugin } from '../capabilities/tool-shell/index.ts'
 import { toolJobsPlugin } from '../capabilities/tool-jobs/index.ts'
 import { toolSubagentPlugin } from '../capabilities/tool-subagent/index.ts'
 import { toolHistoryPlugin } from '../capabilities/tool-history/index.ts'
+import { toolWebSearchPlugin } from '../capabilities/tool-web-search/index.ts'
 
 export interface Row {
   readonly id: string
@@ -67,6 +69,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       llmPlugin,
       deepseekPlugin,
       anthropicPlugin,
+      openaiPlugin,
       retryPlugin,
       modelRolesPlugin,
       toolsPlugin,
@@ -90,6 +93,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       toolSubagentPlugin,
       toolHistoryPlugin,
       toolViewImagePlugin,
+      toolWebSearchPlugin,
       contextRuntimePlugin,
       workspaceInstructionsPlugin,
       agentPlugin,
@@ -334,9 +338,11 @@ export function compose(options: ComposeOptions): Row[] {
   if (options.settingsStorePath !== undefined) rows.push(defineRow('settings', settingsLocalPlugin, { path: options.settingsStorePath }))
   rows.push(defineRow('llm', llmPlugin))
   rows.push(defineRow('llm-deepseek', deepseekPlugin, {}))
-  // Both providers are always routable; a missing key bites only when a
+  // Every provider is always routable; a missing key bites only when a
   // request is actually routed there, and the catalog then says what exists.
+  // Mounting one also DECLARES its key, so the model's shell never sees it.
   rows.push(defineRow('llm-anthropic', anthropicPlugin, {}))
+  rows.push(defineRow('llm-openai', openaiPlugin, {}))
   rows.push(defineRow('llm-retry', retryPlugin, {}))
   // Empty by default: a deployment names its roles by patching this row.
   rows.push(defineRow('model-roles', modelRolesPlugin, {}))
