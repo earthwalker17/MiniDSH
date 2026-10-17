@@ -101,7 +101,7 @@ describe('LlmRuntime', () => {
     const catalog = llm.providers()
     expect(catalog).toHaveLength(1)
     expect(catalog[0]!.id).toBe('scripted')
-    // The adapter's own facts plus the window `resolveModel` enriches it with (§5).
+    // The adapter's own facts plus the window `resolveModel` enriches it with (`core/llm/runtime.ts`).
     expect(catalog[0]!.models).toHaveLength(1)
     expect(catalog[0]!.models[0]).toMatchObject({ id: 'scripted-model', name: 'Scripted Model', contextWindow: 100_000 })
   })

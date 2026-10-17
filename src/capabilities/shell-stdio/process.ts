@@ -491,7 +491,8 @@ export class ShellProcess implements ShellSession {
 
   /**
    * A job's process: `runOneShot`'s spawn, without its deadline and without
-   * waiting for the exit. The order is the contract (ARCHITECTURE §7):
+   * waiting for the exit. The order is the contract (ARCHITECTURE §7 holds only its
+   * consequence: a job runs under the stamp its start resolved):
    * `confine()` refuses what this world cannot deliver for what the caller
    * accepts, a disposed shell starts nothing, and the spawned child enters the
    * reap set in the same tick, so no await sits between the policy the caller

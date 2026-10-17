@@ -67,35 +67,32 @@ Nineteen service keys: eighteen `core` (below) + app-only `app-composition`; `lo
 The log is the single source of truth: `{type, seq, time, data}`, `seq === log.length`, frozen at append.
 
 - **Three tiers** (`core/session/types.ts`). **Surface** kinds (`user/message`, `assistant/message`, `tool/result`) carry `surfaceOp` and `sourceEventSeqs`; model history is their fold (`deriveEventMessage`). Every other kind is log-only: a **fact**, or **trace** (`TRACE_TYPES`) if nothing folds it at runtime; folds walk `Session.facts`, the log without its trace.
-- **Vocabulary: 34 kinds**, by owner under `core/`, fields at each declaration. session: `turn/start|end`, `step/start|end`, `user/message`, `assistant/chunk|message`, `tool/call|dispatch|result`, `request/header|context`, `session/title|end-seed|lifecycle`; agent: `agent/options`, `inbox/spliced`, `subagent/start|end` (the PARENT's log); approval: `approval/asked|decided|grant|policy`; sandbox: `sandbox/mode|acceptance`; presets: `authority/preset`; compaction: `compaction/start|applied|end`; effects: `effect/recorded`; jobs: `job/start|end`; llm: `llm/aux-call`; plus `composition/applied` (`capabilities/composition-record`).
-- **Format** (`core/session/format.ts`): the header's `version` alone. A writer continues only its own format, forks an older one, refuses a newer one (`SessionFormatError`, not damage).
-- **Every lifecycle opens with `session/lifecycle`** (seq 0, or right after its `session/end-seed`): `dispatch` (a durable `tool/dispatch` precedes every body), `durability: 'synced'`, `salvage`. Readers use its claims, never its presence (`core/session/types.ts`); `core/session/invariant.ts` pins its place and types its claims.
-- **The route is one fact in two records.** `agent/options` is the BASE (`configure` writes `change`); `request/context` the EFFECTIVE route, window and modalities per step (§6); a role rewrites header and context, never the base. Both `request/*` are written only on change; a field added to a written-on-change record reads as absent in any session that never rewrites it (`core/loop/driver.ts`).
-- **The header** (`SessionHeader`, JSONL line 1) is immutable identity and lineage: fork, delegation with `delegatedByCallId`, `agentPreset` (`core/session/types.ts`).
-- **Opening facts** land before publication: `agent/options{initial}`, `approval/policy{initial}`, `sandbox/mode{initial}`, `composition/applied` (a delegated child's are §7's).
-- **Arrival versus rewrite.** An arriving `user/message` sits inside an open turn; one that REPLACES a range may land between turns (`core/session/invariant.ts`).
-- **The durable inbox** is `inbox/spliced`, op-shaped (`core/agent/events.ts`): a claim commits after the messages it entered, so a crash re-delivers, never loses. Disposal RECORDS step input, quiet, for the next lifecycle (`core/loop/driver.ts`); a person's cancel keeps a job's end notice, quiet (`Inbox.clear`); a resume wakes iff a WAKING insert was restored, a fork never (`core/loop/factory.ts`).
+- **Vocabulary: 34 kinds**, by owner. session: `turn/start|end`, `step/start|end`, `user/message`, `assistant/chunk|message`, `tool/call|dispatch|result`, `request/header|context`, `session/title|end-seed|lifecycle`; agent: `agent/options`, `inbox/spliced`, `subagent/start|end` (the PARENT's log); `approval/asked|decided|grant|policy`; `sandbox/mode|acceptance`; presets: `authority/preset`; `compaction/start|applied|end`; `effect/recorded`; `job/start|end`; `llm/aux-call`; `composition/applied` (`capabilities/composition-record`).
+- **Format** (`core/session/format.ts`): the header's `version` alone; a writer continues its own format, forks an older one, refuses a newer one (`SessionFormatError`, not damage).
+- **Every lifecycle opens with `session/lifecycle`** (seq 0, or right after its `session/end-seed`; placed and typed by `core/session/invariant.ts`): `dispatch` (a durable `tool/dispatch` precedes every body), `durability: 'synced'`, `salvage`. Readers use its claims, never its presence (`core/session/types.ts`).
+- **The route is one fact in two records.** `agent/options` is the BASE (`configure` writes `change`); `request/context` the EFFECTIVE route, window and modalities per step (§6); a role rewrites header and context, never the base. Both `request/*` are written only on change; a field added to such a record reads as absent where never rewritten (`core/loop/driver.ts`).
+- **The header** (`SessionHeader`) is immutable identity and lineage: fork, `delegatedByCallId`, `agentPreset`. **Opening facts** land before publication: `agent/options{initial}`, `approval/policy{initial}`, `sandbox/mode{initial}`, `composition/applied` (a delegated child's are §7's).
+- **Arrival versus rewrite.** An arriving `user/message` sits in an open turn; a range REPLACE may land between turns (`core/session/invariant.ts`).
+- **The durable inbox** is `inbox/spliced`, op-shaped (`core/agent/events.ts`): a claim commits after the messages it entered, so a crash re-delivers, never loses; disposal records late step input, a person's cancel keeps a job's end notice, both quiet (`core/loop/driver.ts`, `Inbox.clear`). A resume wakes iff a WAKING insert was restored, a fork never (`core/loop/factory.ts`).
 - **A job is a bracket outside every step** (`core/jobs/events.ts`): `job/start` once spawned, ONE `job/end`; its notice follows the end in one JS turn, only through the inbox.
-- **Crash repair closes everything the log left open** (`repairTail`, `core/agent/repair.ts`). Resume and cold fork run a STATIC list, innermost first: `subagent/end{interrupted}`; `compaction/end{declined: unclosed}`; `repairInterruptedTail` (`core/session/repair.ts`); jobs LAST: `job/end{lost}` plus a QUIET notice, or the notice an end never got. A fork closes its sliced seed's jobs too. Closers are pure (a cold read and a durable repair produce identical bytes) and state only what the log proves.
-- **A synthetic result states the evidence** (`classify`, `core/session/repair.ts`): no `tool/call` ⇒ `TOOL_NOT_STARTED`; a `tool/dispatch` or a recorded effect ⇒ `TOOL_OUTCOME_UNKNOWN`; neither ⇒ `TOOL_NOT_STARTED` only where the open turn's own lifecycle claims `dispatch` and `synced`, else unknown. Under salvage, or a log a live writer holds (`heldByWriter`), every owed call is unknown; an unknown result names the call's effects recorded in the step.
-- **An effect is recorded by the code that caused it, after it happens** (`core/effects/events.ts`): `fs-local` and `shell-stdio` append `effect/recorded` (`fs-write | shell-command`, keyed by `callId`). **Presence is proof; absence proves nothing.** Closed families, no exactly-once (§13). `EffectIntent` is the "about to do" half, two closed families (`shell-command`, `network-request`): never logged alone, only a consent's `subject` and a grant's identity (§7).
+- **Crash repair closes everything the log left open** (`repairTail`, `core/agent/repair.ts`). Resume and cold fork run a STATIC list, innermost first: `subagent/end{interrupted}`; `compaction/end{declined: unclosed}`; `repairInterruptedTail` (`core/session/repair.ts`); jobs LAST: `job/end{lost}` plus a QUIET notice, or the notice an end never got. Closers are pure (a cold read predicts a repair byte for byte) and state only what the log proves.
+- **A synthetic result states the evidence** (`classify`, `core/session/repair.ts`): no `tool/call` ⇒ `TOOL_NOT_STARTED`; a `tool/dispatch` or a recorded effect ⇒ `TOOL_OUTCOME_UNKNOWN`; neither ⇒ not started only where the open turn's lifecycle claims `dispatch` and `synced`, else unknown. Under salvage, or in a log a live writer holds (`heldByWriter`), every owed call is unknown; an unknown result names the call's effects recorded in the step.
+- **An effect is recorded by the code that caused it, after it happens** (`core/effects/events.ts`): `fs-local` and `shell-stdio` append `effect/recorded` (`fs-write | shell-command`, keyed by `callId`). **Presence is proof; absence proves nothing.** Closed families, no exactly-once (§13). `EffectIntent`, the "about to do" half (`shell-command`, `network-request`), is never logged alone: only as a consent's `subject` and a grant's identity (§7).
 - **A `session/event` listener may not append synchronously**: a nested append persists before its cause (`damaged` at resume); queue a microtask (`core/session/store.ts`).
 - **Model-visible ⟺ logged.** Every request equals `deriveMessages()` plus the folded `request/header`; checked at `llm/stream` preflight (`core/loop/invariant.ts`).
-- **Persistence is a subscriber** (`persistence-jsonl`): `sessions/<id>.jsonl` (§9), materialized at its first conversation fact. A torn final line moves to `.torn`; deeper corruption is `damaged` and refuses attach. **A resolved `session/flush` is on stable storage** (`durability: 'synced'`); a failed write or sync fails every later flush (§13).
-- **Single writer per stored session.** A `<id>.jsonl.lock` lease is held from publication to disposal, reclaimed only from a provably dead same-host holder; a held one rejects a resume inside its creation transaction, before paid work. **Reads never lock.**
+- **Persistence is a subscriber** (`persistence-jsonl`): `sessions/<id>.jsonl` (§9) under ONE writer: a `.lock` lease from publication to disposal, reclaimed only from a provably dead same-host holder, refuses a second resume before paid work; **reads never lock**. A torn final line moves to `.torn`; deeper corruption is `damaged` and refuses attach. **A resolved `session/flush` is on stable storage** (`durability: 'synced'`); a failed write or sync fails every later flush (§13).
 
 ## 5. LLM vocabulary and the adapters
 
 `core/llm/types.ts` is the provider-neutral vocabulary: closed `ContentBlock` and `StreamChunk` unions, `LlmFailure` (policies route on `code`, never message text) and DISJOINT `TokenUsage`.
 
-- **Adapters are deployment-global** (§2), registered on `llm` from an unscoped owner (`core/llm/runtime.ts`).
-- **Refuse before I/O, never degrade.** An option or modality the provider cannot honour is `UNSUPPORTED_OPTION`, `UNSUPPORTED_REASONING_EFFORT` or `UNSUPPORTED_CONTENT` before any I/O, never dropped, aliased or clamped: the logged request is the served one.
-- **Replay state.** A signing provider's opaque `ReplayEnvelope` rides the terminal `finish` onto the assistant source; the `llm/stream` terminal continuation strips it for any other provider AFTER the reconstruction observer.
-- **Retry is a capability** (`llm-retry`, on `agent/request-error`), so failed attempts stay durable. A model call that is not a turn is `runAuxCall`: one log-only `llm/aux-call` (§4).
-- **Images: a reference plus a STORED descriptor** (`core/llm/content.ts`), committed before the event that carries it is appended. **Refuse at admission** (before any I/O, when the STEP's route lacks `image`) and **substitute at projection** (a text-only route is sent `block.text`); lost bytes fail `ATTACHMENT_UNREADABLE` (§13).
-- **Three adapters**, `llm-deepseek` (Chat Completions), `llm-anthropic` (Messages) and `llm-openai` (Responses, stateless: `store: false`), state their wire rules in their own code.
-- **A catalog is a dated snapshot in source, never fetched**: `resolveModel` is synchronous and feeds admission and metering, and `request/context` records each step's facts, so a replay never asks. A live drift probe (`catalog.e2e.test.ts`: DeepSeek, OpenAI) holds it to the provider. `contextWindow` is what compaction budgets against (`core/llm/types.ts`); an unknown id gets conservative facts, except in `llm-anthropic` (§13).
-- **Encrypted reasoning replays only to the model that wrote it** (`llm-openai/serialize.ts`), a pure function of the logged `source.model`, so model-visible ⟺ logged holds; foreign reasoning is dropped, never forged.
+- **Adapters are deployment-global** (§2), registered on `llm` from an unscoped owner (`core/llm/runtime.ts`): `llm-deepseek` (Chat Completions), `llm-anthropic` (Messages), `llm-openai` (Responses, stateless: `store: false`).
+- **Refuse before I/O, never degrade.** An option or modality the provider cannot honour fails `UNSUPPORTED_OPTION`, `UNSUPPORTED_REASONING_EFFORT` or `UNSUPPORTED_CONTENT`, never dropped, aliased or clamped: the logged request is the served one.
+- **Replay state.** A signing provider's opaque `ReplayEnvelope` rides `finish` onto the assistant source; the `llm/stream` terminal continuation strips it for any other provider, AFTER the reconstruction observer.
+- **Retry is a capability** (`llm-retry`, on `agent/request-error`), so failed attempts stay durable. A call that is not a turn is `runAuxCall`: one log-only `llm/aux-call` (§4).
+- **Images: a reference plus a STORED descriptor** (`core/llm/content.ts`), committed before its event. **Refuse at admission** (when the STEP's route lacks `image`), **substitute at projection** (a text-only route gets `block.text`); lost bytes fail `ATTACHMENT_UNREADABLE` (§13).
+- **A catalog is a dated source snapshot, never fetched** (`resolveModel` is synchronous), held to the provider by a live drift probe (`catalog.e2e.test.ts`: DeepSeek, OpenAI). `contextWindow` is what compaction budgets against (`core/llm/types.ts`); an unknown id gets conservative facts, except in `llm-anthropic` (§13).
+- **Encrypted reasoning replays only to the model that wrote it** (`llm-openai/serialize.ts`), a pure function of the logged `source.model`; foreign reasoning is dropped, never forged.
 
 ## 6. The loop and the tool pipeline
 
@@ -104,30 +101,29 @@ The log is the single source of truth: `{type, seq, time, data}`, `seq === log.l
 ```
 followup(m) → next-turn FIFO (wakes)   steer(m) → next-step (wakes)   inject(m) → next-step (no wake)
 turn/start
-  claim → resolveCallConfig (agent/request) → request/context when changed
+  claim → resolveCallConfig (agent/request; per step, retries too) → request/context when changed
         → agent/pre-step (waterfall: reject | enter{messages})   reject ⇒ turn/end{blocked}
   step/start → user/message per entered message
   prompt.assemble → request/header when changed
   CHECKPOINT → llm.stream(frozen request) → assistant/chunk{attempt}* → assistant/message{usage}
        finish error ⇒ agent/request-error (waterfall) → retry (next attempt, same route) | turn/end{error}
   tool calls in model order: tool/call → CHECKPOINT → tools.execute → [gate → tool/dispatch → CHECKPOINT → body] → tool/result
-       (cancel ⇒ ABORTED_BEFORE_DISPATCH results; a lost write ⇒ DURABILITY_LOST results, none run)
+       (cancel ⇒ ABORTED_BEFORE_DISPATCH; a lost write ⇒ DURABILITY_LOST, none run)
   step/end → next step while tools owe a request or next-step input exists (≤ maxSteps)
   agent/turn-stopping (serial) → re-read inbox
 turn/end{reason} (exactly once) → session/flush → next turn or idle
 ```
 
-- **Durable before every action.** A CHECKPOINT is `session.flush()` (§4); a lost write ends the turn `DURABILITY_LOST`. The DRIVER writes `tool/dispatch` after the gate, via `ToolCall.onDispatch` awaited INSIDE the `tools/execute` terminal continuation, so a middleware answering without `next()` replaces the body and writes no dispatch (`core/tools/registry.ts`).
-- **The route is resolved once per step**, before `agent/pre-step`, fixed for the step, retries included; a switch lands at the next step.
+- **The route is resolved once per step**, fixed for its retries; a switch lands at the next step.
+- **Durable before every action.** A CHECKPOINT is `session.flush()` (§4). The DRIVER writes `tool/dispatch` after the gate via `ToolCall.onDispatch`, awaited INSIDE the `tools/execute` terminal continuation: a middleware answering without `next()` replaces the body and writes no dispatch (`core/tools/registry.ts`).
 - **Pipeline**, in the acting agent's scope: validate → `tools/pre-execute` → deny-only guards → `ask` ⇒ `approval.request` → deadline → `tools/execute` (around-middleware) → body → `render` → `tools/post-execute` → `tools/result`. A throw is an `isError` result `{name, code}`; the model sees only `{name, description, parameters}`.
-- **Deadlines are the pipeline's**, clocked after the gate; `timeoutMs: null` opts out (a tool asking consent in its body must, on `callSignal`); expiry is `TOOL_TIMEOUT`, the signal aborted, the body abandoned, not awaited.
-- **Pressure** is `core/metering`, a pure fold over log facts (§11).
-- **Compaction** (`compaction-basic`: pressure, overflow, `compactNow`): the kept tail never begins with a `tool/result`. Its summary is an `llm/aux-call`; an applied attempt writes `compaction/applied`, then one replacing `user/message` citing every shadowed seq. **The hazard is the await**: `planIsLive` is re-checked with no `await` before the append.
+- **Deadlines are the pipeline's**: `timeoutMs: null` opts out (a tool asking consent in its body must, on `callSignal`); expiry is `TOOL_TIMEOUT`, the signal aborted, the body abandoned, not awaited.
+- **Compaction** (`compaction-basic`) runs on pressure (`core/metering`, §11), on overflow or on `compactNow`, and keeps **the pairing rule**: the kept tail never begins with a `tool/result`. An applied attempt writes `compaction/applied`, then one replacing `user/message` citing every shadowed seq. **The hazard is the await**: `planIsLive` is re-checked with no `await` before the append.
 - **Bounded recall** (`tool-history`): `history_read` reads only this session's shadowed seqs, hidden until the first applied compaction; a call over budget is refused, not truncated.
-- **Spill** (`core/spill`) is the producing tool's call (§3); the model gets an excerpt and the path.
-- **An `agent/pre-step` listener may add to a batch, never create one**: an empty first step ends the turn (`core/loop/driver.ts`). `AGENTS.md` enters this way, as a durable `user/message`, never a prompt section (§3).
-- **Jobs** (`core/jobs/index.ts`): only a job's OWN end, with no stop asked for, may wake its owner, under the wake budget (`foldJobWakes`); every other end is quiet; one a tool call reports (`reportedBy`) sends no notice. Headless and a delegated child `stopAll` in the `whenIdle` continuation, before any await.
-- **Lifecycle.** `dispose` = cancel → `whenIdle` → scope unwind (jobs stopped, each end recorded, synced) → agent, then session, detach (`core/loop/factory.ts`); a detached session refuses appends (`SESSION_CLOSED`).
+- **Spill** (`core/spill`) is the producing tool's call (§3): an excerpt plus the path.
+- **An `agent/pre-step` listener may add to a batch, never create one**: an empty first step ends the turn (`core/loop/driver.ts`). `AGENTS.md` and the skill list enter so, as durable plugin `user/message`s, never a prompt section (§3); the list, outermost, appends a fresh render only when it differs from the newest LIVE one, so a compaction re-enters it (`capabilities/skills`).
+- **Jobs** (`core/jobs/index.ts`): only a job's OWN end, with no stop asked for, may wake its owner, under the wake budget (`foldJobWakes`); every other end is quiet; one a tool call reports (`reportedBy`) sends no notice. Headless and a delegated child `stopAll` in the `whenIdle` continuation, before any await (`app/headless.ts`, `tool-subagent`).
+- **Lifecycle.** `dispose` = cancel → `whenIdle` → scope unwind (jobs stopped, recorded, synced) → agent, then session, detach (`core/loop/factory.ts`); a detached session refuses appends (`SESSION_CLOSED`).
 
 ## 7. Authority
 
@@ -136,20 +132,19 @@ The model proposes, policy decides, the effect boundary enforces; every decision
 - **One stamp.** `SandboxExecutionPolicy{mode, workspaceRoot}` resolves per call from `ctx.sandbox`, never caller-assembled; mode governs FILE EFFECTS only. The root is the immutable `SessionHeader.cwd`. `writableRoots(policy)` is a CEILING for `fs` and `shell`: grant less, never more (`core/sandbox/index.ts`).
 - **Enforcement lives at the effect, not the gate.** `fs-local` canonicalizes and contains every write in process, refusing `FS_SANDBOX_DENIED` before any effect; reads always pass. It follows symbolic links itself (`core/sandbox/paths.ts`) but cannot detect a hard link (§13).
 - **Untrusted code is the shell's problem.** `shell-stdio/confine/` wraps the spawn: bwrap on Linux, Seatbelt on macOS, none on Windows (§13). Each is PROBED with its real `read-only` profile, and `enforcement` is recorded at agent creation (`enforcementFor`).
-- **Spawn-time binding.** A backend wraps the persistent child once, under the session's policy; a durable `setMode` replaces it. An approved one-shot escalation is a throwaway child, wrapped like any spawn (`danger-full-access` alone runs unwrapped), leading its own POSIX process group, reaped at disposal; a job's process too (`shell-stdio/process.ts`).
+- **Spawn-time binding.** A backend wraps the persistent child once, under the session's policy; a durable `setMode` replaces it. An approved one-shot escalation and a job's process are throwaway children wrapped like any spawn (`danger-full-access` alone runs unwrapped) and reaped at disposal, each leading its own POSIX process group (`shell-stdio/process.ts`).
 - **A record is not a fence.** `effect/recorded` (§4) sits beside the boundary; losing one loses evidence, never containment.
 - **The escalation path.** A refusal is a fact with one legitimate move: the SAME command once more with `sandbox_permissions` (strictly wider) and a `justification`, `ctx.approval` consenting to that call. Under a backend a denial reads as a failing command; its words earn a hint, never a classification (`tool-shell`; §13).
-- **Consent is to the runtime's record.** An ask's `subject` is an `EffectIntent` (§4) the REQUESTER builds from validated arguments, naming the authority the effect would run under (`tool-shell`: `{command, mode, enforcement}`; a network request: where it goes and as whom, `{destination, credential, payload}`); the model's `justification` stays in `reason`, clamped (§3), never in the subject.
-- **Acceptance.** The `enforcement` beside a stamp is a HOST fact of the shell world; `sandbox/acceptance{accepts, forMode, reason}` is a DECISION, `full` (default), `partial` or `none`, for exactly `forMode`, as the shell's refusal is mode-blind (`core/sandbox/events.ts`). Read per call (`acceptsFor`), it relaxes the REFUSAL, never a backend; the fs fence and ceiling stand. `--accept` sets the row's default; a weakened one is stamped per confinable mode at a top-level opening (`stampAcceptance`), a child's pin for its `forMode` alone (`open`).
-- **A consent may outlive one call, never its lifecycle.** `approval/grant` is log-only, identified by `toolName` plus the exact subject's `intentKey`: a REPEATED IDENTICAL action, not a policy language. A grant is live only once its own ask is `allowed-once`, and until any `approval/policy`, `sandbox/mode`, `sandbox/acceptance` or `authority/preset` follows, or the lifecycle ends (`session/end-seed`: a resume or a fork asks again) (`core/approval/events.ts`).
-- **Offers are the fold's.** `openApprovals` computes `offers`; the seam re-runs it before minting, and only the host reports taking one (`approval/answer{offer}`), so headless mints none. `grants`/`revoke` list and end one.
-- **Every decision is durable.** The setter IS the event (`sandbox/mode`, `approval/policy`, acceptance, grants): `initial` before publication (§4), `change` only on change, sandbox `resume` when a resumed host enforces differently; `context-runtime`, never the service, writes what the model reads. Precedence: approved one-shot escalation > recorded fold > composition default. `approval-headless` fails closed (`unavailable`) except under `--approve` or an exact `allow` entry.
+- **Consent is to the runtime's record.** An ask's `subject` is an `EffectIntent` (§4) the REQUESTER builds from validated arguments, naming the authority the effect would run under (for a network request, where it goes and as whom); the model's `justification` stays in `reason`, clamped (§3), never in the subject.
+- **Acceptance.** The `enforcement` beside a stamp is a HOST fact; `sandbox/acceptance` is a DECISION, `full` (default), `partial` or `none`, for exactly the mode it names (`core/sandbox/events.ts`). Read per call (`acceptsFor`), it relaxes the shell's REFUSAL, never a backend; the fs fence and ceiling stand. `--accept` sets the row's default; a weakened one is stamped per confinable mode at a top-level opening (`stampAcceptance`), a child's pin for its `forMode` alone (`open`).
+- **A consent may outlive one call, never its lifecycle.** `approval/grant` is log-only, identified by `toolName` plus the exact subject's `intentKey`: a REPEATED IDENTICAL action, not a policy language. A grant is live only once its own ask is `allowed-once`, and until any `approval/policy`, `sandbox/mode`, `sandbox/acceptance` or `authority/preset` follows, or the lifecycle ends (`session/end-seed`: a resume or a fork asks again) (`core/approval/events.ts`). Only an offer the fold (`openApprovals`) still makes is minted, so no answerer buys one nobody was offered, and headless takes none; `grants` lists them, `revoke` ends one.
+- **Every decision is durable.** The setter IS the event (`sandbox/mode`, `approval/policy`, acceptance, grants): `initial` before publication (§4), `change` only on change, sandbox `resume` when a resumed host enforces differently; `context-runtime`, never the service, tells the model. Precedence: approved one-shot escalation > recorded fold > composition default. `approval-headless` fails closed (`unavailable`) except under `--approve` or an exact `allow` entry.
 - **A delegated child opens under a ceiling.** `tool-subagent` captures the parent's authority and stamps it in `setup`, `reason:'delegation'`: the mode as a CEILING, approvals pinned `never`, acceptance `strictest(parent, row)` as a PIN. Widening is refused (`SANDBOX_CEILING`, `APPROVAL_PINNED`) and so is `setAcceptance` on any delegated session; narrowing is legal. A continuation keeps them: `fork` refuses a boundary below the opening stamps (§13).
 - **A network tool asks per call and never reaches a child.** No backend confines the network, so a `NETWORK_TOOL`-tagged tool asks consent in its body before any byte leaves, every call, with exact grants (`tool-web-search`); `tool-subagent` hides every such tool from a child at delegation, whose `never` pin refuses it anyway (`core/tools/types.ts`; §13).
 - **A job runs under the stamp its start resolved, never an escalation**, and a `change` of `sandbox/mode` or `sandbox/acceptance` ends its owner's jobs, a start in flight included (`core/jobs/index.ts`).
 - **Presets select, the knobs decide.** `authority/preset` is a log-only intent written before `setMode`/`setPolicy`; the current preset is DERIVED (`core/presets`).
 - **Consent-by-composition.** `approval/request` dispatches in the asking agent's scope, so a preset-mounted (§9) answerer can auto-approve for its own agent: code-equivalent trust, every pair audited. It cannot widen enforcement (the fence and shell resolve the global `SANDBOX`) nor reach a deployment-global registry.
-- **`core-authority`** (`core/sandbox/invariant.ts`) rejects a forged authority fact or subject pre-commit, holds every approval to one decision and a delegated session to its ceiling and pins, and refuses an `approval/grant` naming no open `intentKey`-identical ask in this log, truncated, or written by a delegated session.
+- **`core-authority`** (`core/sandbox/invariant.ts`) refuses pre-commit a forged authority fact or subject, a second decision on one ask, a delegated session past its ceiling or pins, and a grant naming no open `intentKey`-identical ask in this log, nor one in a delegated session or on a truncated subject.
 
 ## 8. Surfaces
 
@@ -162,7 +157,7 @@ A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval
 | method | rule |
 |---|---|
 | `initialize` | the catalog, defaults (live from settings) and workspaces |
-| `session/prompt` | no id creates, live delivers, stored resumes; `cwd`/`workspaceId` place a NEW session under `workspaceRoots`, refused beside `sessionId`; a route no adapter here serves is refused |
+| `session/prompt` | no id creates, live delivers, stored resumes; `cwd`/`workspaceId` place a NEW session under `workspaceRoots` (not beside `sessionId`); a route no adapter serves is refused |
 | `session/attach` | subscribes BEFORE the cut; `view` is the folds a page cannot compute, nothing pending or running on a cold read |
 | `session/page` | beneath the attach cut |
 | `session/detach` | no id narrows to NOTHING |
@@ -173,32 +168,33 @@ A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval
 | `approval/answer` | first answer wins; only from a connection that may see the session; an `offer` the fold did not make is refused |
 | `approval/revoke` | ends one grant (§7) |
 | `job/cancel` | a PERSON stops one job of a live session: `by: user`, notice quiet |
-| `control/subscribe` | a baseline of live sessions, then `control.summary` whatever the connection watches |
+| `control/subscribe` | a live-session baseline, then `control.summary` whatever it watches |
 | `session/authority` | each switch IS its durable event |
 | `session/model` | no fields reads; the given fields are ONE `agent/options{change}`, iff the base changes |
 | `settings/describe`, `settings/get`, `settings/set` | `expectedRevision` REQUIRED |
 | `shutdown` | refused on a socket unless its carrier says `allowShutdown` |
 
-Notifications: `session.event`, `session.status`, `session.view`, `settings.changed`, `control.summary`; approval frames ARE the durable events; no DTO layer or protocol version until a client ships independently (`frames.ts`).
+Notifications: `session.event`, `session.status`, `session.view`, `settings.changed`, `control.summary`; approval frames ARE the durable events; no DTO layer or protocol version until a client ships apart (`frames.ts`).
 
 - **Attach contract.** A message-aligned tail page at a `cursor` (`core/session/page.ts`), never the trace tier (`Session.facts`, §4), so a bare seq dedups. A client pages back, repairs a hole with a bounded `session/events` and re-attaches on reconnect, replacing its window: no lower-bound cursor, by design. No client folds the surface; a cold read never resumes.
-- **Multi-client.** A connection owns only its sink, its watch set (narrowed by its first attach) and whether it subscribes to the control plane; a disconnect disposes nothing. A question stays parked while some connection COULD answer it, a watcher or a control subscriber, else settles `unavailable`; only one it was shown may answer (`protocol/host.ts`).
-- **Backpressure is tier-aware** (`transport-ws.ts`): `session/event` is a synchronous contained emit, so no listener may suspend the loop; past a soft limit the trace tier drops, nothing else (summaries included); past a hard one the socket closes `slow-client`.
-- **The terminal** (`app/terminal`) is a protocol client that retains nothing of a session; a consent line shows the trusted subject, else the joined call, never a bare tool name. Its `resume`/`fork` are prepared by app assembly, not the wire: no wire method forks.
-- **The browser** (`app/web/`, plain ES modules) GROWS its transcript and never rebuilds it (`wire.js`, `rows.js`). It is an authority surface (`app/web.ts`): loopback unless `--host`, a one-shot token traded for a signed cookie, checked with a Host/Origin fence.
+- **Multi-client.** A connection owns only its sink, its watch set (narrowed by its first attach) and its control-plane subscription; a disconnect disposes nothing. A question stays parked while a watcher or control subscriber COULD answer it, else settles `unavailable`; only one it was shown may answer (`protocol/host.ts`).
+- **Backpressure is tier-aware** (`transport-ws.ts`): `session/event` is a synchronous contained emit, so no listener may suspend the loop; past a soft limit only the trace tier drops (summaries kept); past a hard one the socket closes `slow-client`.
+- **The terminal** (`app/terminal`) is a protocol client that retains nothing of a session; a consent line shows the trusted subject, else the joined call, never a bare tool name. App assembly, not the wire, prepares its `resume`/`fork`: no wire method forks.
+- **The browser** (`app/web/`, plain ES modules) GROWS its transcript, never rebuilds it (`wire.js`, `rows.js`). An authority surface (`app/web.ts`): loopback unless `--host`, a one-shot token traded for a signed cookie, a Host/Origin fence.
 
 ## 9. Composition, configuration and packaging
 
 MiniDSH IS data: composition rows plus disk layers (`app/compose.ts`, `app/config.ts`). Settings (`core/settings`) and credentials (`core/credentials`) are separate planes; **authority is never configuration**: a recorded event beats any composition default by fold precedence (§7).
 
-- **Home.** `MINIDSH_HOME` (default `~/.minidsh`): `sessions/`, `spill/`, `attachments/v1/` (home-global: forks share objects), `composition.json`, `settings.json` (the only configuration file MiniDSH writes), `credentials.json`, `AGENTS.md`. Only `app/home.ts` resolves paths; plugins get them as config.
+- **Home.** `MINIDSH_HOME` (default `~/.minidsh`): `sessions/`, `spill/`, `attachments/v1/`, `composition.json`, `settings.json` (the only configuration file MiniDSH writes), `credentials.json`, `AGENTS.md`, `skills/`. Only `app/home.ts` resolves paths; plugins get them as config.
 - **Layers.** built-ins (`compose()`) → app → home `composition.json` → `--patch` files; a patch replaces a row's WHOLE config. A disk `plugin` is a builtin name or a module path whose own imports are its problem (§13).
-- **Trust.** `composition.json` is code-equivalent trust, never a persistence target. No workspace layer: a repository may say how it likes its code, never what the harness may do. `minidsh config` flags authority-sensitive rows a layer changed; explicit authority flags are a durable per-session switch (`applyAuthority`), a resumed session included.
-- **Recomposition.** `composition-record` appends `composition/applied` at agent creation iff it changed. The spine `{session, llm, tools, prompt, agent, loop, persistence}` refuses removal or reconfiguration while agents are live (`app/compose.ts`).
-- **Agent presets.** `agentPresets` in `composition.json` mount per-agent worlds on the agent scope, named in the session header so a resume or a delegated child composes the same world (§7 for what they cannot reach).
+- **Trust.** `composition.json` is code-equivalent trust, never a persistence target. No workspace layer: a repository may say how it likes its code, never what the harness may do. `minidsh config` flags authority-sensitive rows a layer changed; an explicit authority flag is a durable per-session switch (`applyAuthority`), on resume too.
+- **Skills are data** (`capabilities/skills`): `SKILL.md` directories under, in precedence, `$MINIDSH_HOME/skills` (user), the package's `skills/` (bundled) and a repository's `.agents/skills`/`.claude/skills`, which never replaces another (the operator is warned, the model never told). The app fills the first two into a `skills` row naming none, AFTER layering (`withSkillRoots`). A skill registers nothing; its scripts are shell commands under the session's authority.
+- **Recomposition.** The spine `{session, llm, tools, prompt, agent, loop, persistence}` refuses removal or reconfiguration while agents are live (`app/compose.ts`).
+- **Agent presets.** `agentPresets` in `composition.json` mount per-agent worlds on the agent scope, named in the session header so a resume or delegated child composes the same world (§7 for what they cannot reach).
 - **Settings.** `agent` defaults: flags → `MINIDSH_MODEL` → `settings.json` → built-ins, read live per new session by a wire host (§8); on resume the log's route wins, and an explicit flag overrides it as `agent/options{resume}` (`core/agent/index.ts`).
-- **Defaults.** Authority `workspace-write` + `ask`; `shell-stdio` `confinement: auto | none | bwrap | seatbelt`. A shell child's environment is built, not inherited: the credential refs the mounted rows declared and `MINIDSH_*` removed, nothing for a name's shape (`shell-stdio/process.ts`; §13).
-- **Packaging.** npm ships the `scripts/build.ts` emit with no `main` or `exports`: a binary, not an importable surface (BLUEPRINT §3); `bin/minidsh.js` picks source or `dist/` by package shape.
+- **Defaults.** Authority `workspace-write` + `ask`; `shell-stdio` `confinement: auto`. A shell child's environment is built, not inherited: the credential refs the mounted rows declared and `MINIDSH_*` removed, nothing for a name's shape (`shell-stdio/process.ts`; §13).
+- **Packaging.** npm ships the `scripts/build.ts` emit as a binary, with no `main` or `exports` (BLUEPRINT §3).
 
 **Retention: content is never swept; an affordance may expire.** Spill is the one affordance: its excerpt is already what the model saw. `spill-local` sweeps it once at load, never on disposal (a fork inherits its parent's locators).
 
@@ -212,23 +208,24 @@ MiniDSH IS data: composition rows plus disk layers (`app/compose.ts`, `app/confi
 
 Tests mount real compositions; only the model is scripted or replayed (`test-support/llm-replay.ts`). E2E asserts the world, never the agent's report.
 
-- **Runtime invariants run in every test and live** (`compose()` mounts them). Cross-capability claims are tested on the full composition (`app.test.ts`, `bootComposition`).
-- **Gates.** `pnpm check` plus a packed-tarball install smoke on Ubuntu, macOS and Windows (`check.yml`). A leg may not pass having proved nothing: `MINIDSH_EXPECT_CONFINEMENT=1` (Linux, macOS, `live.yml`) fails a skipped confinement test, `MINIDSH_EXPECT_SHELL=1` a missing dialect.
+- **Runtime invariants run in every test and live.** Cross-capability claims are tested on the full composition (`app.test.ts`, `bootComposition`).
+- **Gates.** `pnpm check` plus a packed-tarball install smoke on Ubuntu, macOS and Windows (`check.yml`). A leg may not pass having proved nothing: `MINIDSH_EXPECT_CONFINEMENT`, `_SHELL` and `_PYTHON` fail a skipped confinement, dialect or Python test.
 - **Fixtures.** Real 1.0.0 and S16 logs (`test-support/fixtures/`) are verified, repaired, salvaged and replayed.
 - **Live arcs** (`pnpm test:e2e`) run over `minidsh serve` stdio, `web` over `minidsh web`; the OpenAI leg, `search` and the OpenAI drift probe are LOCAL (no secret in `live.yml`).
 
 | arc | what it proves |
 |---|---|
-| `live` | a mid-turn SIGKILL, repaired and finished by a second process as a cold `verify` between them predicts; a kill inside the call window reads `TOOL_OUTCOME_UNKNOWN` iff a `tool/dispatch` names the call |
-| `authority` | an edit lands, `effect/recorded` sha256 matching; one outside is refused and absent; the shell branches on reported enforcement (unconfined: escalate, approve; confined: no host file); `read-only` refuses a write; cold `inspect` equals live authority |
+| `live` | a mid-turn SIGKILL: a second process repairs and finishes as a cold `verify` predicts; a call-window kill is `TOOL_OUTCOME_UNKNOWN` iff `tool/dispatch` names it |
+| `authority` | an edit lands, recorded; one outside is refused; the shell escalates unconfined, writes no host file confined; `read-only` refuses; cold `inspect` agrees |
 | `composition` | a disk composition loads a module tool; `settings.json` picks the route |
-| `context` | a real budget crossing compacts, the replace citing exactly the shadowed seqs; AGENTS.md obeyed; a spilled value read back |
-| `routing` | DeepSeek → Anthropic mid-session, one route fact; a `compaction` role; an OpenAI leg: a tool step's encrypted reasoning (checked offline), an image in a tool result, three routes replayed |
-| `delegation` | a bounded child under `reason: 'delegation'`, approvals refused, not widenable |
-| `verification` | a text-only parent's (`deepseek-v4-pro`) `view_image` refused `UNSUPPORTED_CONTENT`; a `model-roles`-routed child (`deepseek-flash`) reads a test-drawn PNG |
-| `search` | consent per query over the wire, its subject exact; the URL written came from the sources shown; a refusal sends nothing |
+| `context` | a real budget crossing compacts, citing exactly the shadowed seqs; AGENTS.md obeyed; a spilled value read back |
+| `routing` | DeepSeek → Anthropic mid-session, one route fact; a `compaction` role; OpenAI encrypted reasoning and a tool-result image; three routes replayed |
+| `delegation` | a child under its delegation ceiling: approvals refused, not widenable |
+| `verification` | a text-only parent's `view_image` refused; a role-routed child reads a test-drawn PNG |
+| `search` | consent per query, its subject exact; the URL written came from the sources shown; a refusal sends nothing |
 | `web` | cookie sign-in; two clients on one host; a wire consent; paging to seq 0; a socket killed mid-turn |
-| `jobs` | a job's own end wakes an idle agent, replayed keylessly; a host killed with a job running: cold `verify` predicts `lost`, the resumed model is told |
+| `jobs` | a job's own end wakes an idle agent; a host killed mid-job: cold `verify` predicts `lost`, the resumed model is told |
+| `skills` | a PDF and a CSV become `report.docx` via the listed office skill, read with ordinary tools first; helper stamp, outside reader, no consent, byte-identical replay |
 
 **A live arc's premise is an assumption about the model, and it decays silently**: with ONE separating assertion, ask what a model knowing nothing would answer.
 
@@ -240,8 +237,8 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | a model-facing capability | `capabilities/tool-<x>` on `tools` |
 | a plugin's configuration | a strict `Plugin.config` schema (§2) |
 | an execution world | `fs`/`shell` providers; tools untouched |
-| a shell confinement backend | `shell-stdio/confine/` (§7), bounded by `writableRoots` |
-| an authority knob | a log-only event, a `findLast` fold and a default (§7); copy `sandbox/acceptance` (delegation pin, `auditLines`, both projections) |
+| a shell confinement backend | `shell-stdio/confine/` (§7) |
+| an authority knob | a log-only event, a `findLast` fold, a default (§7); copy `sandbox/acceptance`: delegation pin, `auditLines`, both projections |
 | an authority preset | a presets-table entry (§7) |
 | a capability, no code edit | a `composition.json` row (§9) |
 | a user-adjustable default | `core/settings` if the wire sets it, else row config; never authority |
@@ -249,8 +246,9 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | a per-agent bundle | an `agentPresets` list (§9) |
 | a policy/approval answerer | `tools/pre-execute` / `approval/request` listeners; guards (§6) |
 | durable state | an event kind (§4) |
-| an event's human line | `app/present.ts` AND `app/web/rows.js` (`rows.test.ts` checks) |
+| an event's human line | `app/present.ts` AND `app/web/rows.js` |
 | context for the model | `agent.inject()` or `agent/pre-step`, never prompt text |
+| know-how the model may use | a skill: a `SKILL.md` directory, helpers inside; data, never code or authority (`skills/README.md`) |
 | a surface | `app/` or a package under the §8 contract; zero semantics |
 | a carrier | a protocol `Carrier`: framing, flow control only |
 | a named place to work | a `workspaces` entry: addressing, not a grant |
@@ -260,8 +258,8 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | context management | a `core/compaction` provider (§6); a pruner keeps the pairing rule |
 | a context-pressure number | `core/metering`: the one pure fold |
 | oversized tool output | `core/spill`, via the producing tool (§6) |
-| an attachment kind | raster: an `attachments-local` header probe; else a vocabulary change (`AttachmentRef`, `ModelModality`, `ContentBlock`, each adapter's serializer, the meter) |
-| a network tool | `capabilities/tool-<x>`, tagged `NETWORK_TOOL`: consent per call (`network-request`), the request in its body, no effect record yet |
+| an attachment kind | raster: an `attachments-local` header probe; else a vocabulary change (`AttachmentRef`, `ModelModality`, `ContentBlock`, each serializer, the meter) |
+| a network tool | a `tool-<x>` tagged `NETWORK_TOOL` (§7) |
 | a non-text producer | as `tool-view-image` (§5) |
 | a verifier | a `tool-subagent` row + `model-roles` entry |
 | a model role | a `model-roles` entry; never the base route (§4) |
@@ -273,7 +271,7 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | a consent subject for one | an `EffectIntent` naming its AUTHORITY (§7) |
 | a durable step in the tool pipeline | `ToolCall.onDispatch`: cannot replace the body (§6) |
 | work that outlives its call | `jobs.start` with the producer's `launch`, never a detached promise |
-| a background producer | a world's own `start` verb, refused like its `exec` (`ShellSession.start`); a second job kind changes `JobKind` |
+| a background producer | a world's `start` verb, refused like its `exec` (`ShellSession.start`); a second kind changes `JobKind` |
 | a session's name | `core/session/title` (§4), written by `session-title` |
 | a whole-log check | a pure `check*Log` beside the owner's invariant; `app/inspect.ts` composes |
 | a format change | `core/session/format.ts` |
@@ -282,21 +280,22 @@ No row here → an architecture question first.
 
 ## 12. Divergences from DeepSeek Harness (the ones that still shape decisions)
 
-MiniDSH's decision and its reason; upstream's mechanism and each claim's verdict at the pin are in `references/assumptions.md`.
+MiniDSH's decision and reason; upstream's mechanism and its verdict at the pin: `references/assumptions.md`.
 
-- **Scale and substrate.** Own kernel, not Cordis: the paper's two composability properties from the fewest mechanisms (§2); a `{parse}` config contract, not a schema library; one package plus a dependency gate (§1).
-- **Concurrency.** Sequential tools, one foreground child; agent-owned jobs, waking bounded, a lost one closed `lost` and told (DSH: unbounded wakes, its cap having stalled sessions unseen; a lost job's bracket open).
-- **The wire.** One JSON-RPC protocol in DSH's SDK shape, bounded where DSH's is not: trace-free pages under a ceiling, tier-aware drops instead of uncapped queues, unseen approvals settling `unavailable` (§8).
-- **Consent.** A trusted `subject` and the joined call on every ask (DSH: model prose); exact-subject session grants (DSH: an open scope question); acceptance of `none` (DSH cannot express it).
-- **Confinement.** bwrap and Seatbelt; no Landlock (a native launcher this no-build tree cannot carry), no Windows backend (§13); probed even alone; a shell child's environment loses only declared credential names and `MINIDSH_*`, where DSH's `scrubbedParentEnv` pattern-matches names.
-- **The ceiling.** `writableRoots` is the workspace root alone, for `fs` and `shell`; DSH adds the temp roots, where MiniDSH's test workspaces live.
-- **Durability.** A durable `tool/dispatch` after the gate, recorded effects (DSH: no top-level dispatch; snapshots); plain JSONL under a write lease, synced checkpoints, per-lifecycle writer claims (DSH: fsynced checksummed generations naming no writer).
-- **Delegation and routing.** An enforced delegation ceiling (DSH: a seeded pin); `subagent/start|end` in the parent's log, every unpaired bracket closed by repair (DSH brackets workflow members, not subagents, and repairs its own tail turn only); `delegatedByCallId`; model roles over a durable base route.
+- **Scale and substrate.** Own kernel, not Cordis: its two composability properties in the fewest mechanisms (§2); a `{parse}` config contract, not a schema library; one package plus a dependency gate (§1).
+- **Concurrency.** Sequential tools, one foreground child; agent-owned jobs, waking bounded, a lost one closed `lost` and told (DSH: unbounded, a lost one left open).
+- **The wire.** One JSON-RPC protocol in DSH's SDK shape, bounded where DSH's is not: trace-free pages under a ceiling, tier-aware drops, unseen approvals settling `unavailable` (§8).
+- **Consent.** A trusted `subject` and the joined call on every ask (DSH: model prose); exact-subject session grants (DSH: none); acceptance of `none` (DSH cannot express it).
+- **Confinement.** bwrap and Seatbelt, each probed even alone; no Landlock (a native launcher this no-build tree cannot carry), no Windows backend (§13); a shell child loses only declared credential names and `MINIDSH_*` (DSH: a name pattern).
+- **The ceiling.** `writableRoots` is the workspace root alone; DSH adds the temp roots, where MiniDSH's test workspaces live.
+- **Durability.** A durable `tool/dispatch` after the gate and recorded effects; plain JSONL under a write lease, synced checkpoints, per-lifecycle writer claims (DSH: no top-level dispatch; checksummed generations naming no writer).
+- **Delegation and routing.** An enforced delegation ceiling (DSH: a seeded pin); `subagent/start|end` in the parent's log, every unpaired bracket closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
 - **Context.** No tool-result pruner (tools bound their output); recall gated, not opt-in, over this session's shadowed spans.
 - **Surfaces.** A terminal ships as a protocol client over an in-process carrier (DSH deleted its own).
-- **Providers.** Three direct adapters, each a source catalog, two held by a drift probe (DSH: DeepSeek routes, one reading `/models` live; OpenAI only through a dormant generic adapter); an unknown DeepSeek id gets conservative facts (DSH: text-only at the full 1M).
+- **Providers.** Three direct adapters, each a source catalog, two held by a drift probe; an unknown DeepSeek id gets conservative facts (DSH: text-only at the full 1M).
 - **Web.** One opt-in search tool, consent per query, structured sources only, no fetch (DSH: both default-mounted, unconsented, prose results).
-- **Not built.** `web_fetch`, PTC, model-written packages (`node:vm` is no boundary), an MCP bridge, a session search index, a workspace config layer (§9), per-user identity.
+- **Skills.** Name, description and absolute path, read with ordinary tools, worded optional (DSH: a mandatory `skill` tool); a repository skill never shadows (DSH: workspace first, ungated); documents on Node alone (DSH: Python and LibreOffice, no PDF).
+- **Not built**, and why: `BLUEPRINT.md` §2 (refused) and §3 (open).
 
 ## 13. Known limitations (current)
 
@@ -305,19 +304,19 @@ Know these before changing the code near them. One line each; the owning code sa
 **Authority**
 
 - Windows has no confinement backend and will not: DSH's is `partial`, with a hard-link escape and standing ACL changes.
-- On Windows, until a session accepts `none` (§7), every shell command costs an escalation to `danger-full-access` in a throwaway shell, a delegated child (pinned `never`) runs none, and `danger-full-access` ends the prompts only by dropping the fs fence.
-- On Windows a tree is killed only while its root lives. On POSIX an unwrapped persistent child (`danger-full-access`, `confinement: none`) is not detached, so a timed-out or backgrounded command's descendants outlive it.
-- A job's process can outlive its host: a SIGKILL, or an unhandled stop of `serve`/`web`, leaves Windows, Seatbelt and unwrapped POSIX jobs running (bwrap's die with it); `lost` says so, and no resume re-adopts or kills one.
-- An acceptance is silently inert where a backend exists, by design: a session carried onto a confining host is confined again, and the model is told so, not that its acceptance is inert.
-- A grant ends with its lifecycle (§7). The browser can take an offered scope but not list or revoke one.
-- **A hard link defeats both fences.** One in the workspace to an outside inode passes the fs fence undetected; a write through it lands OUTSIDE the workspace. A confined shell writes through it too, as the OS confines paths (measured, `confine.test.ts`); neither backend lets a confined command create one across the boundary, nor write an outside path that also has a workspace name.
-- `full` is a PROFILE claim proven by the probe, not measured per call; no backend reports `partial` (a row may accept it).
+- On Windows, until a session accepts `none` (§7), every shell command costs an escalation to `danger-full-access`, a delegated child (pinned `never`) runs none, and `danger-full-access` ends the prompts only by dropping the fs fence.
+- On Windows a tree is killed only while its root lives; on POSIX an unwrapped persistent child (`danger-full-access`, `confinement: none`) is not detached: a timed-out or backgrounded command's descendants outlive it.
+- A job's process outlives a killed host (SIGKILL, or an unhandled `serve`/`web` stop) except under bwrap; `lost` says so, and no resume re-adopts or kills one.
+- An acceptance is inert where a backend exists: a session carried onto a confining host is confined again and told so, not that its acceptance is inert.
+- The browser can take an offered grant scope but not list or revoke one.
+- **A hard link defeats both fences.** A workspace link to an outside inode passes the fs fence and a confined shell alike: the write lands OUTSIDE (measured, `confine.test.ts`). A confined command can neither create one across the boundary nor write an outside path that also has a workspace name.
+- `full` is a PROFILE claim the probe proves, not measured per call; no backend reports `partial`.
 - Under bwrap a path beneath the ephemeral `/tmp` is invisible, not read-only, so its denial gets no hint; macOS has no writable temp: a tool needing one escalates.
 - macOS is proven by CI alone.
 - The `shell` row is outside the spine (`app/compose.ts`): after a live `reconfigure`, `enforcementFor` and a stamp answer for a world no command runs in.
 - A shell child's environment withholds variables, not credentials (§9): every undeclared secret passes whatever its name, `SSH_AUTH_SOCK` and the proxy variables stay, `credentials.json` is readable, and the network is open.
 - A delegation or network tool an agent preset registers lives in the child's scope, which `restrict` cannot hide and the depth cap does not count: a cost bound, not a fence.
-- A network request is consented, never confined or recorded (no `effect/recorded` family); an opt-in row's key is withheld from a shell child only while that row is mounted; headless consent needs `--approve` (allow entries are shell-only).
+- A network request is consented, never confined or recorded; headless, only `--approve` allows one. An opt-in row's key is withheld from a shell child only while that row is mounted.
 - A module-loaded plugin is arbitrary code; `minidsh config`'s warnings are advisory.
 
 **Context**
@@ -327,6 +326,8 @@ Know these before changing the code near them. One line each; the owning code sa
 - The meter sees a prompt or tool-set change a step late and charges images on text-only routes; a smaller role may be asked for a summary past its output cap.
 - Workspace instructions are read once per entry, not watched.
 - A notice the wake budget held waits for a human message; only the browser's badge flags it.
+- A skill is context, never a boundary: nothing makes the model read one, its body is an ordinary tool result, no `/name` invokes one, and an unreadable user or bundled root freezes the list; every root is re-scanned on each non-empty batch (prompts, steers, job notices).
+- Without a renderer the document skills check content, not appearance; `pdf build` writes Latin text only, `pdf read` has no OCR or decryption, `office build` no images or charts.
 
 **Sessions and stores**
 
@@ -334,7 +335,7 @@ Know these before changing the code near them. One line each; the owning code sa
 - Spill is swept only at load (§9): a long-running host waits for a restart; a repeated `callId` overwrites.
 - A lost attachment is turn-fatal (`ATTACHMENT_UNREADABLE`); image validation is header-only; one image producer, no client upload.
 - No session deletion, search, rename or model-written title: each needs a projection past `persistence.list()`'s bounded prefix.
-- **Crash repair is as sharp as the lifecycle (§4).** Without `synced`, a never-logged call reads not started, sound only for a process crash; a crash in a tool's in-body consent (`tool-shell`, `tool-web-search`) reads unknown. A repaired `subagent/end` has no cost, salvage closers are placeholders, and salvage damage between turns leaves the model no sign (the CLI warns).
+- **Crash repair is as sharp as the lifecycle (§4).** Without `synced`, a never-logged call reads not started, sound only for a process crash; a crash inside a tool's own consent reads unknown. A repaired `subagent/end` has no cost, salvage closers are placeholders, and salvage damage between turns leaves the model no sign (the CLI warns).
 - Effect records cover only `ctx.fs` and `ctx.shell` (not a command's own writes, spill or attachments), may over-report a shell that died between commands, and may follow an abandoned body's result (§6).
 - `synced` is as honest as the disk, and Windows cannot sync a new log's directory; after a power cut a zero-filled tail reads torn, zeros before a surviving line damaged (`--salvage`).
 - A pre-S16 log names neither a deployment-default acceptance nor an error result's origin (gate or body).
@@ -344,21 +345,21 @@ Know these before changing the code near them. One line each; the owning code sa
 **Surfaces**
 
 - `session/events` has no host ceiling: any range, every tier (§8). No RPC deadline or client timeout; the backpressure limits are unmeasured.
-- `session.view` is re-sent on a status change only to mark a held notice, so its `status` goes stale; a reconnect loses the paging position and, for a sole watcher, a pending approval; only `control.summary`, to a control subscriber, announces disposal.
+- `session.view`'s `status` goes stale (re-sent only to mark a held notice); a reconnect loses the paging position and, for a sole watcher, a pending approval; only `control.summary` announces disposal.
 - Detaching one session narrows an un-narrowed client to nothing.
-- `minidsh web` has no graceful stop (`shutdown` is refused on a socket): the next process repairs and reclaims the lease.
-- `workspaceRoots` is always `[cwd]` (nothing reaches the `workspaces` seam) and bounds only NEW sessions: a wire client may resume one outside it.
+- `minidsh web` has no graceful stop: the next process repairs and reclaims the lease.
+- `workspaceRoots` is always `[cwd]` and bounds only NEW sessions: a wire client may resume one outside it.
 - One principal, no accounts: the browser authenticates nobody (§8) and cannot switch a session's route.
 - Windows needs `pwsh` 7, never 5.1; a command reading stdin blocks until its deadline.
 
 **Delegation and providers**
 
 - A delegated child's cost is summed in `subagent/end`, not the parent's meter; it dies with its tool call, its log stays.
-- A resumed or forked child keeps its ceiling and pins but not its tool filter, depth-cap or network denial, or persona: those live in `setup`, which no continuation re-runs (its `request/header` records what it saw; S21).
+- A resumed or forked child keeps its ceiling and pins but not its tool filter, depth cap, network denial or persona, which live in `setup`, never re-run by a continuation (S21).
 - Replay binds sessions to logs in first-request order: exact while delegation is serial, undefined once it is not (S21).
-- A replay reproduces decisions, not the workspace: a recorded absolute path cannot land in a fresh root, yet `assertConsumed()` passes; arc prompts pin relative paths (steering, not a fence).
+- A replay reproduces decisions, not the workspace: a recorded absolute path cannot land in a fresh root, yet `assertConsumed()` passes; arc prompts pin relative paths.
 - An installed-package plugin (§9) reaches seams only by deep path into `dist/`; only an in-repo fixture is proven.
-- No Moonshot adapter. `llm-anthropic` has no drift probe; OpenAI's guards effort sets and defaults, not windows or caps (the API accepts any cap). An unknown Anthropic id gets its family's row, else 200K/8192 with images; a split family needs a row per member; `deepseek-v4-pro` accepts an image and ignores it: admission is the catalog's. The retired `deepseek-v4-flash` names resolve to `deepseek-flash` while DeepSeek still routes them; `llm-deepseek` refuses `temperature` unless the effort is `off` (thinking ignores it).
+- OpenAI's drift probe guards effort sets and defaults, not windows or caps. An unknown Anthropic id gets its family's row, else 200K/8192 with images; `deepseek-v4-pro` accepts an image and ignores it: admission is the catalog's. Retired `deepseek-v4-flash` names resolve to `deepseek-flash` while DeepSeek routes them; `llm-deepseek` refuses `temperature` unless the effort is `off`.
 - Composition changes need a restart.
 
 ## 14. File map
@@ -377,11 +378,12 @@ src/capabilities/
   fs-local/ · fs-observation-policy/ · tool-editor/ · attachments-local/ · tool-view-image/ · tool-jobs/ · tool-web-search/
   shell-stdio/ (confine/) · tool-shell/ · approval-headless/ · authority-presets/
   persistence-jsonl/ · credentials-local/ · settings-local/ · spill-local/ · composition-record/
-  context-runtime/ · workspace-instructions/ · compaction-basic/ · session-title/
+  context-runtime/ · workspace-instructions/ · skills/ · compaction-basic/ · session-title/
   protocol/ (frames · host · connection · transport-*)
 src/app/     cli · home · compose · config · settings · version · headless · serve · web · present · inspect (the cold readers)
              web/ · terminal/ · *.e2e.test.ts
 src/test-support/ scripted-adapter · harness · llm-replay · serve-process · web-process · fixtures/
+skills/      office/ · pdf/: bundled data, SKILL.md plus zero-dependency helpers (README: authoring, provenance)
 scripts/     build · check-deps (+ deps-graph, its pure half) · check-docs · doc-registers · count-lines
 bin/         minidsh.js
 .github/     workflows/ (check, live, release) · ISSUE_TEMPLATE/ · PULL_REQUEST_TEMPLATE
