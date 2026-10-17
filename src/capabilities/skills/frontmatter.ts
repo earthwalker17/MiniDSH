@@ -126,7 +126,11 @@ function quoted(first: string, continuation: readonly string[]): string | undefi
           const width = next === 'x' ? 2 : next === 'u' ? 4 : 8
           const hex = line.slice(i + 2, i + 2 + width)
           if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length !== width) return undefined
-          out += String.fromCodePoint(Number.parseInt(hex, 16))
+          const code = Number.parseInt(hex, 16)
+          // Past U+10FFFF `fromCodePoint` THROWS, and a lone surrogate is no
+          // character: both are a value nobody meant, refused like a bad escape.
+          if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return undefined
+          out += String.fromCodePoint(code)
           i += 1 + width
           continue
         }

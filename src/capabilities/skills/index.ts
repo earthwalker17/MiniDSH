@@ -34,12 +34,13 @@ import { AGENT_PRE_STEP, type Agent, type PreStepDecision } from '../../core/age
 import { FS } from '../../core/fs/index.ts'
 import { createPluginMessage, messageText } from '../../core/llm/message.ts'
 import { matches, USER_MESSAGE } from '../../core/session/index.ts'
+import { printableText } from '../../core/text.ts'
 import { discoverSkills, type SkillRoot } from './discover.ts'
 import { renderSkillList, RETIREMENT } from './render.ts'
 
 export { discoverSkills, DEFAULT_WORKSPACE_DIRS, DEFAULT_MAX_SKILL_BYTES, MAX_ENTRIES_PER_ROOT } from './discover.ts'
 export type { DiscoveryConfig, ScannedRoot, SkillDiscovery, SkillEntry, SkillOrigin, SkillRoot, SkippedSkill } from './discover.ts'
-export { oneLine, renderSkillList, RETIREMENT, SKILL_LIST_PREAMBLE } from './render.ts'
+export { fitSkillList, oneLine, renderSkillList, RETIREMENT, SKILL_LIST_PREAMBLE } from './render.ts'
 export { isSkillName, parseSkillFile } from './frontmatter.ts'
 
 export interface SkillsConfig {
@@ -132,14 +133,16 @@ export const skillsPlugin: Plugin<SkillsConfig> = {
 
     // Operator diagnostics, once per instance: a skipped path is the
     // operator's business (a shadowed repo skill, a broken front-matter), never
-    // the model's — the model is not told what it was not offered.
+    // the model's — the model is not told what it was not offered. Both halves
+    // are text a repository wrote (a path, a quoted front-matter line), bound
+    // for the operator's terminal: neutralized as `core/text.ts` says.
     const warned = new Set<string>()
     const warn = (skipped: readonly { path: string; reason: string }[]): void => {
       for (const { path, reason } of skipped) {
         const key = `${path}\0${reason}`
         if (warned.has(key)) continue
         warned.add(key)
-        ctx.logger.warn(`skills: ${path} is not listed: ${reason}`)
+        ctx.logger.warn(`skills: ${printableText(path)} is not listed: ${printableText(reason)}`)
       }
     }
 

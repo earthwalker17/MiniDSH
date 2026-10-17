@@ -39,14 +39,29 @@ function byteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8')
 }
 
-/** One line of foreign text: controls neutralized, whitespace runs collapsed, clamped by code point with `…`. */
+/**
+ * One line of foreign text: controls, format and bidi characters and line or
+ * paragraph separators become spaces, whitespace runs collapse, angle brackets
+ * are escaped (a repository's `</system-reminder>` would otherwise close the
+ * runtime's own frame around it), and it is clamped by code point with `…`.
+ */
 export function oneLine(text: string, maxChars: number): string {
-  const flat = printableText(text).replace(/\s+/g, ' ').trim()
+  const flat = printableText(text)
+    .replace(/[\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
   const chars = Array.from(flat)
   return chars.length <= maxChars ? flat : `${chars.slice(0, Math.max(0, maxChars - 1)).join('')}…`
 }
 
-/** `printableText` only: a path keeps its spaces, because a collapsed one would name another file. */
+/**
+ * `printableText` only, never collapsed: discovery already refuses a path
+ * holding anything this line could not show (`UNSHOWABLE`), so for a
+ * discovered entry this is the path verbatim; it stays as the guard for any
+ * other caller, because a line break here would forge an entry below it.
+ */
 function skillLine(entry: SkillEntry): string {
   return `- ${entry.name}: ${oneLine(entry.description, MAX_DESCRIPTION_CHARS)} (${entry.origin}: ${printableText(entry.path)})`
 }
@@ -55,22 +70,38 @@ function notice(count: number): string {
   return `${count} more ${count === 1 ? 'skill is' : 'skills are'} installed but not listed.`
 }
 
+/** Precedence order, then name in plain code-unit order: the same bytes on every host. */
+function ordered(listed: readonly SkillEntry[]): SkillEntry[] {
+  return listed.toSorted((a, b) => ORIGIN_RANK[a.origin] - ORIGIN_RANK[b.origin] || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+}
+
 /**
- * The whole list within `maxBytes` (UTF-8), or `undefined` when there is
- * nothing to list or not even the preamble fits. Over budget, entries drop
- * from the END — workspace skills first, then bundled, by the sort — and a
- * count says how many, so the model knows the list is partial rather than
- * believing it complete.
+ * The list within `maxBytes` (UTF-8) and how many entries it holds, or
+ * `undefined` when there is nothing to list or not even the preamble fits.
+ * Over budget, entries drop from the END — workspace skills first, then
+ * bundled, by the sort — and a count says how many, so the model knows the
+ * list is partial rather than believing it complete. One pass over prefix
+ * sums: the scan runs on every prompt.
  */
-export function renderSkillList(listed: readonly SkillEntry[], maxBytes: number): string | undefined {
+export function fitSkillList(listed: readonly SkillEntry[], maxBytes: number): { readonly text: string; readonly kept: readonly SkillEntry[] } | undefined {
   if (listed.length === 0) return undefined
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) return undefined
-  const lines = listed.toSorted((a, b) => ORIGIN_RANK[a.origin] - ORIGIN_RANK[b.origin] || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map(skillLine)
+  const entries = ordered(listed)
+  const lines = entries.map(skillLine)
   const head = `${OPEN}${SKILL_LIST_PREAMBLE}\n\n`
+  const frame = byteLength(head) + byteLength(CLOSE)
+  // prefix[k] = bytes of the first k lines joined by '\n'.
+  const prefix = [0]
+  for (const [index, line] of lines.entries()) prefix.push(prefix[index]! + byteLength(line) + (index > 0 ? 1 : 0))
   for (let kept = lines.length; kept >= 0; kept--) {
+    const tail = kept < lines.length ? byteLength(notice(lines.length - kept)) + (kept > 0 ? 1 : 0) : 0
+    if (frame + prefix[kept]! + tail > maxBytes) continue
     const body = [...lines.slice(0, kept), ...(kept < lines.length ? [notice(lines.length - kept)] : [])].join('\n')
-    const text = `${head}${body}${CLOSE}`
-    if (byteLength(text) <= maxBytes) return text
+    return { text: `${head}${body}${CLOSE}`, kept: entries.slice(0, kept) }
   }
   return undefined
+}
+
+export function renderSkillList(listed: readonly SkillEntry[], maxBytes: number): string | undefined {
+  return fitSkillList(listed, maxBytes)?.text
 }

@@ -9,7 +9,7 @@
  */
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
@@ -18,7 +18,7 @@ import { LLM } from '../core/llm/index.ts'
 import { createUserMessage, messageText } from '../core/llm/message.ts'
 import { canonicalPath } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { skillsPlugin, type SkillDiscovery } from '../capabilities/skills/index.ts'
+import { renderSkillList, skillsPlugin, type SkillDiscovery } from '../capabilities/skills/index.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
 import { main } from './cli.ts'
 import { builtinPlugins, compose, defaultDialect, fillSkillRoots, type Row } from './compose.ts'
@@ -99,9 +99,11 @@ describe('the row', () => {
   it('names the home and the package as the deployment roots, the same path from src/ and dist/', () => {
     const home = tempDir('minidsh-skills-home-')
     const packageRoot = fileURLToPath(new URL('../../', import.meta.url))
+    // Canonical: the host's own spelling (macOS /var is /private/var), so the
+    // recorded composition does not change with how the binary was launched.
     expect(skillRootsFor(home)).toEqual([
-      { path: join(home, 'skills'), origin: 'user' },
-      { path: resolve(packageRoot, 'skills'), origin: 'bundled' },
+      { path: join(realpathSync.native(home), 'skills'), origin: 'user' },
+      { path: realpathSync.native(resolve(packageRoot, 'skills')), origin: 'bundled' },
     ])
     const previous = process.env.MINIDSH_HOME
     process.env.MINIDSH_HOME = home
@@ -111,6 +113,18 @@ describe('the row', () => {
       if (previous === undefined) delete process.env.MINIDSH_HOME
       else process.env.MINIDSH_HOME = previous
     }
+  })
+
+  /**
+   * `MINIDSH_HOME=../home` is how check.yml's tarball step runs the installed
+   * binary. `join` kept the home relative, the row refuses a relative root, and
+   * every boot failed: `config`, `run`, `serve`, `skills` (review, S19).
+   */
+  it('makes a relative home absolute, because the skills row refuses a relative root', () => {
+    const roots = skillRootsFor(join('..', 'a-relative-home'))
+    for (const root of roots) expect(isAbsolute(root.path), root.path).toBe(true)
+    expect(roots[0]!.path.endsWith(join('a-relative-home', 'skills'))).toBe(true)
+    expect(() => skillsPlugin.config!.parse({ maxBytes: 8_000, roots })).not.toThrow()
   })
 })
 
@@ -339,6 +353,29 @@ describe('minidsh skills', () => {
     expect(workspaceOnly.roots.every((root) => root.origin === 'workspace')).toBe(true)
     // With no user root, the repository's own alpha is no longer shadowed.
     expect(workspaceOnly.listed.find((skill) => skill.name === 'fixture-alpha')?.path).toBe(repoShadow)
+  })
+
+  it('calls offered only what fits the row\'s byte budget, and reports the dropped tail', async () => {
+    const { home, cwd } = fixture()
+    const roomy = JSON.parse((await cli(home, ['skills', '--json', '--cwd', cwd, '--patch', patchFile([{ id: 'skills', config: { maxBytes: 8_000, roots: [] } }])])).out) as SkillDiscovery
+    expect(roomy.listed).toHaveLength(2)
+    // One byte short of the whole list: the session's render must drop one.
+    const budget = Buffer.byteLength(renderSkillList(roomy.listed, 1_000_000)!, 'utf8') - 1
+    const tight = await cli(home, ['skills', '--json', '--cwd', cwd, '--patch', patchFile([{ id: 'skills', config: { maxBytes: budget, roots: [] } }])])
+    expect(tight.code, tight.err).toBe(0)
+    const found = JSON.parse(tight.out) as SkillDiscovery
+    expect(found.listed).toHaveLength(1)
+    expect(found.skipped.filter((skip) => skip.reason.startsWith(`over the skills row's maxBytes (${budget})`))).toHaveLength(1)
+  })
+
+  it('works under a RELATIVE home, as check.yml runs the installed binary', async () => {
+    const { home, cwd, userSkill } = fixture()
+    const relativeHome = relative(process.cwd(), home)
+    // The test means something only where the temp dir shares the cwd's drive.
+    expect(isAbsolute(relativeHome), relativeHome).toBe(false)
+    const run = await cli(relativeHome, ['skills', '--json', '--cwd', cwd])
+    expect(run.code, run.err).toBe(0)
+    expect((JSON.parse(run.out) as SkillDiscovery).listed.find((skill) => skill.name === 'fixture-alpha')?.path).toBe(userSkill)
   })
 
   it('says so when the row is disabled, refuses a bad row config and an unknown flag, and is in the help', async () => {

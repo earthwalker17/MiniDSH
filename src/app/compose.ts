@@ -283,6 +283,11 @@ export function mount(root: Context, rows: readonly Row[]): Composition {
  * Matched by CAPABILITY, not row id, as `--preset` validation matches the
  * presets row: a layer may insert the plugin under any id. `roots` omitted
  * (hermetic tests) leaves every row as it is, so only workspace dirs are read.
+ *
+ * Boot only. A live `reconfigure` or `insert` mounts its config as given and
+ * registers its listener LAST, so the row would lose both its roots and its
+ * outermost pre-step place; nothing calls either for this row, and composition
+ * changes need a restart (ARCHITECTURE §13).
  */
 export function fillSkillRoots(rows: readonly Row[], roots: readonly SkillRoot[] | undefined): Row[] {
   return rows.map((row) => {

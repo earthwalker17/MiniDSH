@@ -30,7 +30,15 @@
  * So: a root whose listing fails ENOENT/ENOTDIR is absent; any other failure,
  * and a `SKILL.md` a listing showed but a read could not return, makes the
  * scan INCOMPLETE — and an incomplete scan changes nothing the model sees.
- * `stat` is consulted only as a size hint before a read, never to decide.
+ * `stat` never decides absence; it decides only what is safe to read — a
+ * `SKILL.md` that is not a regular file (a FIFO, a link to `/dev/zero`) is
+ * skipped unread, because reading one blocks forever or never ends.
+ *
+ * **Only the operator's roots can freeze the list.** A failure under a
+ * WORKSPACE root is a warned skip, never "incomplete": a repository that ships
+ * a link loop or an unreadable entry would otherwise hold every user and
+ * bundled skill off the list — the same "a checkout may not rewrite the
+ * operator's know-how" rule, reached by breaking the scan instead of by name.
  *
  * Reads go through `readBytes`, which emits no `fs/observed`: the runtime
  * reading a skill's front-matter is not the model reading the file, and must
@@ -147,7 +155,13 @@ export async function discoverSkills(fs: Fs, cwd: string, config: DiscoveryConfi
   const skipped: SkippedSkill[] = []
   const roots: ScannedRoot[] = []
   let complete = true
-  const incomplete = (path: string, why: string): void => {
+  // A failure under the operator's roots freezes the list; under a workspace
+  // root it is only a skip (the module comment says why).
+  const failed = (origin: SkillOrigin, path: string, why: string): void => {
+    if (origin === 'workspace') {
+      skipped.push({ path, reason: `${why}; a repository entry that cannot be read is skipped` })
+      return
+    }
     complete = false
     skipped.push({ path, reason: `${why}; the scan is incomplete, so the list a session already has stands` })
   }
@@ -161,18 +175,21 @@ export async function discoverSkills(fs: Fs, cwd: string, config: DiscoveryConfi
     }
   } catch (error) {
     // `fs.resolve` refuses a path whose identity the host will not disclose.
-    incomplete(cwd, `the walk to the project root failed (${describeFailure(error)})`)
+    failed('workspace', cwd, `the walk to the project root failed (${describeFailure(error)})`)
   }
 
   const candidates: Candidate[] = []
   const seenFiles = new Map<string, string>()
+  // One budget across EVERY workspace root, not one per root: a deep cwd has
+  // two workspace roots per level, and each scan runs on every prompt.
+  let workspaceBudget = MAX_ENTRIES_PER_ROOT
   for (const root of ordered) {
     let target: FsTarget
     try {
       target = fs.resolve(root.path, cwd)
     } catch (error) {
       roots.push({ path: root.path, origin: root.origin, present: true })
-      incomplete(root.path, `the root cannot be resolved (${describeFailure(error)})`)
+      failed(root.origin, root.path, `the root cannot be resolved (${describeFailure(error)})`)
       continue
     }
     let entries: DirEntry[]
@@ -181,21 +198,23 @@ export async function discoverSkills(fs: Fs, cwd: string, config: DiscoveryConfi
     } catch (error) {
       const absent = isAbsence(error)
       roots.push({ path: target.path, origin: root.origin, present: !absent })
-      if (!absent) incomplete(target.path, `the root cannot be listed (${describeFailure(error)})`)
+      if (!absent) failed(root.origin, target.path, `the root cannot be listed (${describeFailure(error)})`)
       continue
     }
     roots.push({ path: target.path, origin: root.origin, present: true })
     const dirs = entries
       .filter((entry) => entry.type !== 'file' && !entry.name.startsWith('.') && entry.name !== 'node_modules')
       .toSorted(byName)
-    if (dirs.length > MAX_ENTRIES_PER_ROOT) {
-      skipped.push({ path: target.path, reason: `${dirs.length - MAX_ENTRIES_PER_ROOT} entries past the first ${MAX_ENTRIES_PER_ROOT} of this root were not read` })
+    const cap = root.origin === 'workspace' ? Math.min(MAX_ENTRIES_PER_ROOT, workspaceBudget) : MAX_ENTRIES_PER_ROOT
+    if (dirs.length > cap) {
+      skipped.push({ path: target.path, reason: `${dirs.length - cap} entries past the first ${cap} were not read (at most ${MAX_ENTRIES_PER_ROOT} per root, and across all workspace roots)` })
     }
-    for (const entry of dirs.slice(0, MAX_ENTRIES_PER_ROOT)) {
+    if (root.origin === 'workspace') workspaceBudget -= Math.min(dirs.length, cap)
+    for (const entry of dirs.slice(0, cap)) {
       const found = await readCandidate(fs, cwd, target.path, entry, root.origin, maxSkillBytes)
       if (found.kind === 'none') continue
       if (found.kind === 'incomplete') {
-        incomplete(found.path, found.reason)
+        failed(root.origin, found.path, found.reason)
         continue
       }
       if (found.kind === 'skip') {
@@ -253,6 +272,9 @@ type Read =
 
 const utf8 = new TextDecoder('utf-8', { fatal: true })
 
+/** What a rendered path may not hold: controls, format and bidi characters, line and paragraph separators, angle brackets. */
+const UNSHOWABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}<>]/u
+
 /** One `<root>/<entry>`: not a skill, a skip with its reason, an incomplete read, or a candidate. */
 async function readCandidate(fs: Fs, cwd: string, rootPath: string, entry: DirEntry, origin: SkillOrigin, maxSkillBytes: number): Promise<Read> {
   const spelled = join(rootPath, entry.name)
@@ -279,9 +301,18 @@ async function readCandidate(fs: Fs, cwd: string, rootPath: string, entry: DirEn
   } catch (error) {
     return { kind: 'incomplete', path: spelled, reason: `its SKILL.md cannot be resolved (${describeFailure(error)})` }
   }
-  // A size hint only: `stat` cannot say why it failed, so its silence decides nothing.
+  // `stat` cannot say why it failed, so its silence is a failure to read, never
+  // an absence; a FIFO or a link to a device is skipped UNREAD — a read of one
+  // blocks forever (a FIFO) or never ends (`/dev/zero`), wedging every prompt.
   const info = await fs.stat(skill)
-  if (info !== undefined && info.size > maxSkillBytes) return { kind: 'skip', path: skill.path, reason: `larger than ${maxSkillBytes} bytes` }
+  if (info === undefined) return { kind: 'incomplete', path: skill.path, reason: 'cannot be inspected' }
+  if (info.type !== 'file') return { kind: 'skip', path: skill.path, reason: 'not a regular file' }
+  if (info.size > maxSkillBytes) return { kind: 'skip', path: skill.path, reason: `larger than ${maxSkillBytes} bytes` }
+  // A path the list could not show verbatim is not offered: a line or
+  // paragraph separator, a format or bidi character, or an angle bracket would
+  // let a repository forge a second entry or a closing tag inside the list, and
+  // a neutralized spelling would name a file that does not exist.
+  if (UNSHOWABLE.test(skill.path)) return { kind: 'skip', path: skill.path, reason: 'its path holds a control, format or separator character, or an angle bracket' }
   let bytes: Uint8Array
   try {
     ;({ bytes } = await fs.readBytes(skill, {}))
@@ -296,7 +327,14 @@ async function readCandidate(fs: Fs, cwd: string, rootPath: string, entry: DirEn
   } catch {
     return { kind: 'skip', path: skill.path, reason: 'not valid UTF-8' }
   }
-  const parsed = parseSkillFile(text)
+  let parsed: ReturnType<typeof parseSkillFile>
+  try {
+    parsed = parseSkillFile(text)
+  } catch (error) {
+    // The reader refuses what it cannot read; a throw it did not foresee is
+    // still this file's problem, never the whole scan's.
+    return { kind: 'skip', path: skill.path, reason: `unreadable front-matter (${describeFailure(error)})` }
+  }
   if (!parsed.ok) return { kind: 'skip', path: skill.path, reason: parsed.reason }
   const { frontmatter } = parsed
   const name =

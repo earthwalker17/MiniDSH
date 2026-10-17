@@ -26,7 +26,7 @@ import type { Context } from '../kernel/index.ts'
 import { FS } from '../core/fs/index.ts'
 import { sandboxPlugin } from '../core/sandbox/index.ts'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
-import { discoverSkills, oneLine, skillsPlugin, type SkillDiscovery, type SkillsConfig } from '../capabilities/skills/index.ts'
+import { discoverSkills, fitSkillList, oneLine, skillsPlugin, type SkillDiscovery, type SkillsConfig } from '../capabilities/skills/index.ts'
 import { compose, defaultDialect, type Row } from './compose.ts'
 import {
   agentPresetWorld,
@@ -939,7 +939,19 @@ async function skillsCommand(args: ParsedArgs): Promise<number> {
     root.plugin(sandboxPlugin, {})
     root.plugin(fsLocalPlugin)
     await root.settle()
-    const found = await discoverSkills(root.get(FS), cwd, config)
+    const scanned = await discoverSkills(root.get(FS), cwd, config)
+    // What a session is OFFERED is what fits the row's byte budget, so the
+    // tail the render drops is reported as not listed — the review found this
+    // command calling skills "offered" that no session would ever see.
+    const kept = new Set(fitSkillList(scanned.listed, config.maxBytes)?.kept ?? [])
+    const found: SkillDiscovery = {
+      ...scanned,
+      listed: scanned.listed.filter((entry) => kept.has(entry)),
+      skipped: [
+        ...scanned.skipped,
+        ...scanned.listed.filter((entry) => !kept.has(entry)).map((entry) => ({ path: entry.path, reason: `over the skills row's maxBytes (${config.maxBytes}): the list a session gets drops it` })),
+      ],
+    }
     if (json) process.stdout.write(`${JSON.stringify({ roots: found.roots, listed: found.listed, skipped: found.skipped, complete: found.complete })}\n`)
     else for (const line of skillLines(cwd, found)) process.stdout.write(`${line}\n`)
     if (!found.complete) process.stderr.write('warning: the scan is incomplete; a running session keeps the skill list it already has until a scan completes\n')

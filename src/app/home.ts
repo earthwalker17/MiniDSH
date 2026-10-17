@@ -1,6 +1,7 @@
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { canonicalPath } from '../core/sandbox/paths.ts'
 import type { SkillRoot } from '../capabilities/skills/index.ts'
 
 /** MiniDSH home: `$MINIDSH_HOME` or `~/.minidsh`. Holds all durable user data. */
@@ -68,12 +69,28 @@ export function credentialsPath(): string {
  *
  * A root the app passes on and a capability never derives: nothing below
  * `app/` may resolve the home for itself.
+ *
+ * Both are ABSOLUTE and CANONICAL. `MINIDSH_HOME=../home` is a relative home,
+ * and the row refuses a relative root, so `join` alone failed every boot (the
+ * review caught it on the CI tarball step's own command line). And the roots
+ * are in the composition a session records: spelled as launched, the same
+ * install hashed differently under another path casing and re-recorded a
+ * composition that had not changed.
  */
 export function skillRootsFor(home: string): SkillRoot[] {
   return [
-    { path: join(home, 'skills'), origin: 'user' },
-    { path: fileURLToPath(new URL('../../skills', import.meta.url)), origin: 'bundled' },
+    { path: canonical(resolve(home, 'skills')), origin: 'user' },
+    { path: canonical(fileURLToPath(new URL('../../skills', import.meta.url))), origin: 'bundled' },
   ]
+}
+
+/** The host's own spelling where it will give one; a path it will not resolve keeps the absolute spelling. */
+function canonical(path: string): string {
+  try {
+    return canonicalPath(path)
+  } catch {
+    return path
+  }
 }
 
 /** The whole layout as the boot options that carry it — one value, resolved once per command. */

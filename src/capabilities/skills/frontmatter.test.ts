@@ -74,6 +74,12 @@ describe('scalars', () => {
     expect(fm('---\ndescription:\n  Starts below\n  the key.\n---\n').description).toBe('Starts below the key.')
   })
 
+  it('refuses an escape past U+10FFFF or a lone surrogate instead of throwing', () => {
+    expect(parseSkillFile('---\ndescription: "\\U00110000"\n---\n')).toMatchObject({ ok: false })
+    expect(parseSkillFile('---\ndescription: "\\ud800"\n---\n')).toMatchObject({ ok: false })
+    expect(fm('---\ndescription: "\\U0001F600"\n---\n').description).toBe('\u{1F600}')
+  })
+
   it('refuses an unterminated quote rather than guessing where it ends', () => {
     expect(parseSkillFile('---\ndescription: "never closed\n---\n')).toMatchObject({ ok: false })
   })
