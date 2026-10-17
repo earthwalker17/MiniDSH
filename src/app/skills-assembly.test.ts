@@ -7,9 +7,10 @@
  * file tests (`bundled-skills.test.ts`), and the runtime must not depend on
  * what it holds. Every listed skill below is a fixture in a temp root.
  */
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
@@ -368,14 +369,26 @@ describe('minidsh skills', () => {
     expect(found.skipped.filter((skip) => skip.reason.startsWith(`over the skills row's maxBytes (${budget})`))).toHaveLength(1)
   })
 
-  it('works under a RELATIVE home, as check.yml runs the installed binary', async () => {
-    const { home, cwd, userSkill } = fixture()
-    const relativeHome = relative(process.cwd(), home)
-    // The test means something only where the temp dir shares the cwd's drive.
-    expect(isAbsolute(relativeHome), relativeHome).toBe(false)
-    const run = await cli(relativeHome, ['skills', '--json', '--cwd', cwd])
-    expect(run.code, run.err).toBe(0)
-    expect((JSON.parse(run.out) as SkillDiscovery).listed.find((skill) => skill.name === 'fixture-alpha')?.path).toBe(userSkill)
+  /**
+   * The real binary in its own process, run from a directory that holds a
+   * RELATIVE `MINIDSH_HOME`, exactly as check.yml's tarball step runs it. A
+   * path made relative to the test's own cwd is no test on a runner whose
+   * checkout and temp directory sit on different drives (windows-latest: D:
+   * and C:), where `relative()` answers an absolute path.
+   */
+  it('works under a RELATIVE home, as check.yml runs the installed binary', () => {
+    const parent = tempDir('minidsh-skills-relhome-')
+    const cwd = workspace()
+    const userSkill = writeSkill(join(parent, 'home', 'skills'), 'fixture-alpha', 'Use for alpha fixtures.')
+    const bin = fileURLToPath(new URL('../../bin/minidsh.js', import.meta.url))
+    const run = spawnSync(process.execPath, [bin, 'skills', '--json', '--cwd', cwd], {
+      cwd: parent,
+      env: { ...process.env, MINIDSH_HOME: 'home' },
+      encoding: 'utf8',
+      timeout: 60_000,
+    })
+    expect(run.status, run.stderr).toBe(0)
+    expect((JSON.parse(run.stdout) as SkillDiscovery).listed.find((skill) => skill.name === 'fixture-alpha')?.path).toBe(userSkill)
   })
 
   it('says so when the row is disabled, refuses a bad row config and an unknown flag, and is in the help', async () => {
