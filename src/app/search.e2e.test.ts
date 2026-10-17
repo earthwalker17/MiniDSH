@@ -31,6 +31,7 @@ import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
 import { bootComposition } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 
 const DEEPSEEK = process.env.DEEPSEEK_API_KEY
 const TAVILY = process.env.TAVILY_API_KEY
@@ -147,6 +148,8 @@ describe.skipIf(!DEEPSEEK || !TAVILY)('S18 live E2E: a network tool under per-qu
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     const root = await bootComposition({
       sessionsRoot: tempDir('minidsh-e2e18s-replay-'),
+      // What `serve` mounted: the recorded requests carry its skill list.
+      skillRoots: skillRootsFor(home),
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],
       configLayers: [{ name: 'home', patches: await toPatches(file, home) }],

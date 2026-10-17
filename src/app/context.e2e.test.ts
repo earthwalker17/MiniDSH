@@ -35,6 +35,7 @@ import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
 import { applyAuthority, bootComposition, type BootOptions } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -326,6 +327,8 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
       sandbox: 'danger-full-access',
       approve: true,
       sessionsRoot: tempDir('minidsh-e2e5-replay-'),
+      // What `serve` mounted: the recorded requests carry its skill list.
+      skillRoots: skillRootsFor(home),
       spillRoot: tempDir('minidsh-e2e5-replay-spill-'),
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],

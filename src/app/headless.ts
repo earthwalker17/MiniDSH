@@ -19,7 +19,8 @@ import type { JsonValue } from '../core/json.ts'
 import { foldLastAssistantText, foldLastTurnEnd, SESSION_EVENT, type SessionEventFrame } from '../core/session/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { compose, COMPOSITION, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
-import { applyLayers, type NamedLayer } from './config.ts'
+import { applyLayers, withSkillRoots, type NamedLayer } from './config.ts'
+import type { SkillRoot } from '../capabilities/skills/index.ts'
 import { agentSettingsSchema } from './settings.ts'
 import { compositionRecordPlugin } from '../capabilities/composition-record/index.ts'
 import type { ConfinementChoice, ShellDialect } from '../capabilities/shell-stdio/index.ts'
@@ -52,6 +53,14 @@ export interface BootOptions {
   readonly credentialsPath?: string
   /** The settings document the runtime store reads and writes; omitted mounts no settings service. */
   readonly settingsStorePath?: string
+  /**
+   * The deployment's skill roots (`skillRootsFor(home)`), filled into a
+   * `skills` row that names none, AFTER layering. Omitted, only the
+   * workspace's own skill dirs are read (hermetic tests). A replay of a log
+   * that `serve` recorded passes what `serve` mounted: the list is in the
+   * recorded requests, and a replay without it moves every later cut.
+   */
+  readonly skillRoots?: readonly SkillRoot[]
   readonly dialect?: ShellDialect
   /** Which confinement mechanism wraps the shell; `none` pins a test to a host with no backend. */
   readonly confinement?: ConfinementChoice
@@ -159,7 +168,10 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     ...(options.patches !== undefined && options.patches.length > 0 ? [{ name: 'app', patches: options.patches }] : []),
     ...(options.configLayers ?? []),
   ]
-  const effective = applyLayers(base, layers, (message) => options.logger?.warn(message))
+  const effective = withSkillRoots(
+    applyLayers(base, layers, (message) => options.logger?.warn(message)),
+    options.skillRoots,
+  )
   // The recorder sits OUTSIDE the layered composition: its config IS the
   // descriptor of the effective rows, and no layer can silently remove the
   // record of what the layers did.

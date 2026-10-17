@@ -24,6 +24,7 @@ import { killSpawnedWebHosts, WebHostProcess } from '../test-support/web-process
 import { AGENTS } from '../core/agent/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { bootComposition } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -226,6 +227,8 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     const root = await bootComposition({
       sessionsRoot: tempDir('minidsh-web-e2e-replay-home-'),
+      // What `serve` mounted: the recorded requests carry its skill list.
+      skillRoots: skillRootsFor(home),
       approve: true,
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],

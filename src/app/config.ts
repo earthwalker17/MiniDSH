@@ -14,7 +14,8 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../kernel/index.ts'
 import { snapshotJson } from '../core/json.ts'
 import type { CompositionApplied } from '../capabilities/composition-record/index.ts'
-import { applyPatches, builtinPlugins, type Patch, type Row } from './compose.ts'
+import type { SkillRoot } from '../capabilities/skills/index.ts'
+import { applyPatches, builtinPlugins, fillSkillRoots, type Patch, type Row } from './compose.ts'
 import { VERSION } from './version.ts'
 
 const diskRowSchema = z.strictObject({
@@ -188,6 +189,19 @@ export function applyLayers(base: readonly Row[], layers: readonly NamedLayer[],
     seen.add(row.id)
   }
   return { rows, provenance, descriptor: describeComposition(rows, [BASE_LAYER, ...layers.map((layer) => layer.name)]) }
+}
+
+/**
+ * A layered view with the deployment's skill roots filled in (`fillSkillRoots`),
+ * and its descriptor re-derived from the filled rows: the hash a session
+ * records, and the one `minidsh config` prints, then name the roots that
+ * session was actually offered skills from. Provenance is untouched — filling
+ * an omitted value is the deployment's default, not a layer's change.
+ */
+export function withSkillRoots(effective: EffectiveComposition, roots: readonly SkillRoot[] | undefined): EffectiveComposition {
+  if (roots === undefined) return effective
+  const rows = fillSkillRoots(effective.rows, roots)
+  return { rows, provenance: effective.provenance, descriptor: describeComposition(rows, effective.descriptor.layers) }
 }
 
 function sameConfig(a: unknown, b: unknown): boolean {

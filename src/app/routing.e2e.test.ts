@@ -38,6 +38,7 @@ import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
 import { bootComposition } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 
 const DEEPSEEK = process.env.DEEPSEEK_API_KEY
 const ANTHROPIC = process.env.ANTHROPIC_API_KEY
@@ -273,6 +274,8 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     let replayedEvents: EventEnvelope[] = []
     const root = await bootComposition({
       sessionsRoot: tempDir('minidsh-e2e6-replay-'),
+      // What `serve` mounted: the recorded requests carry its skill list.
+      skillRoots: skillRootsFor(home),
       approve: true,
       logger: silent,
       // No key for either provider: the log answers for both.
@@ -502,6 +505,8 @@ describe.skipIf(!DEEPSEEK || !OPENAI)('S18 live E2E: an OpenAI leg through the s
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     const root = await bootComposition({
       sessionsRoot: tempDir('minidsh-e2e18-replay-'),
+      // What `serve` mounted: the recorded requests carry its skill list.
+      skillRoots: skillRootsFor(home),
       attachmentsRoot: replayAttachments,
       approve: true,
       logger: silent,

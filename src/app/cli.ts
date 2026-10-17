@@ -23,8 +23,22 @@ import { dirname, resolve } from 'node:path'
 import { presetTable } from '../core/presets/index.ts'
 import type { AuthorityPresetsConfig } from '../capabilities/authority-presets/index.ts'
 import type { Context } from '../kernel/index.ts'
+import { FS } from '../core/fs/index.ts'
+import { sandboxPlugin } from '../core/sandbox/index.ts'
+import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
+import { discoverSkills, oneLine, skillsPlugin, type SkillDiscovery, type SkillsConfig } from '../capabilities/skills/index.ts'
 import { compose, defaultDialect, type Row } from './compose.ts'
-import { agentPresetWorld, applyLayers, loadCompositionFile, toPatches, toRow, type DiskRow, type EffectiveComposition, type NamedLayer } from './config.ts'
+import {
+  agentPresetWorld,
+  applyLayers,
+  loadCompositionFile,
+  toPatches,
+  toRow,
+  withSkillRoots,
+  type DiskRow,
+  type EffectiveComposition,
+  type NamedLayer,
+} from './config.ts'
 import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
@@ -86,6 +100,7 @@ const COMMANDS: Readonly<Record<string, { readonly positional: string; readonly 
   web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   config: { positional: '', flags: ['sandbox', 'ask', 'accept', 'json'] },
   sessions: { positional: 'list | show <id> | inspect <id> | verify <id>', flags: ['json', 'audit'] },
+  skills: { positional: '', flags: ['cwd', 'json'] },
 }
 
 /**
@@ -239,6 +254,7 @@ function bootFields(plan: BootPlan): {
   globalInstructionsPath: string
   credentialsPath: string
   settingsStorePath: string
+  skillRoots: HomeLayout['skillRoots']
   agentDefaults: ResolvedSettings['agent']
   agentSettingsBase: ResolvedSettings['agentBase']
   agentOverrides: ResolvedSettings['agentOverrides']
@@ -280,7 +296,13 @@ async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'r
   const warnings: string[] = []
   let effective: EffectiveComposition
   try {
-    effective = applyLayers(base, loaded.layers, (message) => void warnings.push(message))
+    // The skill roots filled exactly as `bootComposition` fills them, so
+    // `config` prints the hash a session records and `skills` reads the roots
+    // a session is offered from.
+    effective = withSkillRoots(
+      applyLayers(base, loaded.layers, (message) => void warnings.push(message)),
+      home.skillRoots,
+    )
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
@@ -878,6 +900,75 @@ async function coldReadCommand(args: ParsedArgs, plan: BootPlan, sub: 'inspect' 
   })
 }
 
+/**
+ * `minidsh skills` — what a NEW session in the cwd would be offered, what was
+ * not listed and why, and the roots read: the human view of adding, replacing,
+ * disabling and removing a skill, and of a repository skill that a user or
+ * bundled one shadows (which a session only ever warns the operator about).
+ *
+ * Read-only, and no boot: the EFFECTIVE `skills` row (layers and filled roots
+ * included, through the one preamble) over a throwaway root that mounts the
+ * sandbox and the local fs alone — no persistence, no model, no session. The
+ * scan is the capability's own `discoverSkills`, so this cannot disagree with
+ * what a session's pre-step would read.
+ */
+async function skillsCommand(args: ParsedArgs): Promise<number> {
+  // Settings choose a model, which this command never touches: a broken
+  // settings.json must not stand between a person and their skill list.
+  const plan = await prepareBoot(args, 'none', 'optional')
+  if (typeof plan === 'string') return usage(plan)
+  for (const warning of plan.warnings) stderrLogger.warn(warning)
+  const json = args.flags.get('json') === true
+  const row = plan.effective.rows.find((entry) => entry.plugin.name === skillsPlugin.name)
+  if (!row || row.disabled === true) {
+    const why = row ? `the composition disables row "${row.id}"` : 'the composition has no skills row'
+    if (json) process.stdout.write(`${JSON.stringify({ disabled: true, reason: why, roots: [], listed: [], skipped: [], complete: true })}\n`)
+    else process.stdout.write(`no skills are offered: ${why}\n`)
+    return 0
+  }
+  let config: SkillsConfig
+  try {
+    config = skillsPlugin.config!.parse(row.config)
+  } catch (error) {
+    process.stderr.write(`error: row "${row.id}" (${row.plugin.name}): invalid config: ${describeConfigError(error)}\n`)
+    return 1
+  }
+  const cwd = cwdFlag(args)
+  const root = createRoot({ logger: stderrLogger })
+  try {
+    root.plugin(sandboxPlugin, {})
+    root.plugin(fsLocalPlugin)
+    await root.settle()
+    const found = await discoverSkills(root.get(FS), cwd, config)
+    if (json) process.stdout.write(`${JSON.stringify({ roots: found.roots, listed: found.listed, skipped: found.skipped, complete: found.complete })}\n`)
+    else for (const line of skillLines(cwd, found)) process.stdout.write(`${line}\n`)
+    if (!found.complete) process.stderr.write('warning: the scan is incomplete; a running session keeps the skill list it already has until a scan completes\n')
+    return 0
+  } catch (error) {
+    return reportError(error)
+  } finally {
+    await root.dispose()
+  }
+}
+
+/** The human table: listed, then not listed with the reason, then the roots in precedence order. */
+function skillLines(cwd: string, found: SkillDiscovery): string[] {
+  const lines: string[] = []
+  const width = Math.max(4, ...found.listed.map((entry) => entry.name.length))
+  lines.push(found.listed.length === 0 ? `no skills are offered to a session in ${cwd}` : `skills offered to a session in ${cwd}:`)
+  for (const entry of found.listed) {
+    lines.push(`  ${entry.name.padEnd(width)}  ${entry.origin.padEnd(9)}  ${oneLine(entry.path, 400)}`)
+    lines.push(`  ${''.padEnd(width)}  ${oneLine(entry.description, 100)}`)
+  }
+  if (found.skipped.length > 0) {
+    lines.push('', 'not listed:')
+    for (const entry of found.skipped) lines.push(`  ${oneLine(entry.path, 400)}`, `    ${oneLine(entry.reason, 400)}`)
+  }
+  lines.push('', 'roots, in precedence order:')
+  for (const root of found.roots) lines.push(`  ${root.origin.padEnd(9)}  ${oneLine(root.path, 400)}${root.present ? '' : '  (absent)'}`)
+  return lines
+}
+
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
   // A reader of stored logs: a broken settings file is a warning here, because
@@ -1007,6 +1098,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       return configCommand(args)
     case 'sessions':
       return sessionsCommand(args)
+    case 'skills':
+      return skillsCommand(args)
     case 'version':
       process.stdout.write(`minidsh ${VERSION}\n`)
       return 0
@@ -1026,6 +1119,8 @@ export async function main(argv: readonly string[]): Promise<number> {
           'authority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)',
           '           --ask ask|never; --approve answers every request yes (headless runs; chat, serve and web then never ask)',
           '           --accept full|none: what a session accepts from a host that cannot confine the shell (default full)',
+          'skills:    ~/.minidsh/skills/<name>/SKILL.md, the bundled skills, and the repository\'s .agents/skills and .claude/skills;',
+          '           `minidsh skills` shows what a session in the cwd is offered, and what was not listed and why',
           '',
         ].join('\n'),
       )

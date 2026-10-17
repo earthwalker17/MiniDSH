@@ -1,5 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { SkillRoot } from '../capabilities/skills/index.ts'
 
 /** MiniDSH home: `$MINIDSH_HOME` or `~/.minidsh`. Holds all durable user data. */
 export function resolveHome(): string {
@@ -53,6 +55,27 @@ export function credentialsPath(): string {
   return join(resolveHome(), 'credentials.json')
 }
 
+/**
+ * The deployment's skill roots: the user's own under the home, then the
+ * package's bundled `skills/`. The workspace's `.agents/skills` and
+ * `.claude/skills` are not here — the capability derives those from each
+ * session's cwd — and neither are other tools' home folders, which a person
+ * adds through the `skills` row's `roots` when they want them.
+ *
+ * The bundled path is relative to THIS module, and `../../skills` names the
+ * package root's `skills/` from `src/app` and from the emitted `dist/app`
+ * alike, so a checkout and an installed tarball find the same directory.
+ *
+ * A root the app passes on and a capability never derives: nothing below
+ * `app/` may resolve the home for itself.
+ */
+export function skillRootsFor(home: string): SkillRoot[] {
+  return [
+    { path: join(home, 'skills'), origin: 'user' },
+    { path: fileURLToPath(new URL('../../skills', import.meta.url)), origin: 'bundled' },
+  ]
+}
+
 /** The whole layout as the boot options that carry it — one value, resolved once per command. */
 export interface HomeLayout {
   readonly sessionsRoot: string
@@ -66,6 +89,8 @@ export interface HomeLayout {
    * the app; nothing below `app` may resolve the home for itself.
    */
   readonly settingsStorePath: string
+  /** Filled into a `skills` row that names no roots of its own, after layering (`app/config.ts` `withSkillRoots`). */
+  readonly skillRoots: readonly SkillRoot[]
 }
 
 export function homeLayout(): HomeLayout {
@@ -76,5 +101,6 @@ export function homeLayout(): HomeLayout {
     globalInstructionsPath: globalInstructionsPath(),
     credentialsPath: credentialsPath(),
     settingsStorePath: settingsPath(),
+    skillRoots: skillRootsFor(resolveHome()),
   }
 }

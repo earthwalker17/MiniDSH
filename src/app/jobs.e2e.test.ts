@@ -26,6 +26,7 @@ import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -137,6 +138,8 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
         cwd: tempDir('minidsh-jobs-replay-ws-'),
         model: 'deepseek-v4-flash',
         sessionsRoot: tempDir('minidsh-jobs-replay-'),
+        // What `serve` mounted: the recorded requests carry its skill list.
+        skillRoots: skillRootsFor(home),
         logger: silent,
         accepts: 'none',
         patches: [{ id: 'llm-deepseek', disabled: true }],

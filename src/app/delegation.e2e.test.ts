@@ -31,6 +31,7 @@ import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { auditLines } from './present.ts'
 import { runTask } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -184,6 +185,8 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
         model: 'deepseek-v4-flash',
         approve: true,
         sessionsRoot: tempDir('minidsh-e2e6d-replay-'),
+        // What `serve` mounted: the recorded requests carry its skill list.
+        skillRoots: skillRootsFor(home),
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         prepare: (context) => {

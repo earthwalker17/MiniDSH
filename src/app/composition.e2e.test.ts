@@ -21,6 +21,7 @@ import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
 import { runTask } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -104,6 +105,8 @@ describe.skipIf(!KEY)('S4 live E2E: a from-disk composition drives the real runt
         cwd: workspace,
         model: 'deepseek-v4-flash',
         sessionsRoot: replaySessionsRoot,
+        // What `serve` mounted: the recorded requests carry its skill list.
+        skillRoots: skillRootsFor(home),
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         configLayers: [{ name: 'home', patches: await toPatches(file, home) }],

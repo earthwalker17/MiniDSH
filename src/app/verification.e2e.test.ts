@@ -40,6 +40,7 @@ import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
 import { runTask } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 import { transcriptLines } from './present.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
@@ -285,6 +286,8 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
         model: TEXT_ONLY_MODEL,
         approve: true,
         sessionsRoot: replaySessions,
+        // What `serve` mounted: the recorded requests carry its skill list.
+        skillRoots: skillRootsFor(home),
         attachmentsRoot: replayAttachments,
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],

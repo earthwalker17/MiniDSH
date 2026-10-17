@@ -37,6 +37,7 @@ import { attachmentsLocalPlugin } from '../capabilities/attachments-local/index.
 import { toolViewImagePlugin } from '../capabilities/tool-view-image/index.ts'
 import { spillLocalPlugin } from '../capabilities/spill-local/index.ts'
 import { workspaceInstructionsPlugin } from '../capabilities/workspace-instructions/index.ts'
+import { skillsPlugin, type SkillRoot } from '../capabilities/skills/index.ts'
 import { toolEditorPlugin } from '../capabilities/tool-editor/index.ts'
 import { toolShellPlugin } from '../capabilities/tool-shell/index.ts'
 import { toolJobsPlugin } from '../capabilities/tool-jobs/index.ts'
@@ -95,6 +96,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       toolViewImagePlugin,
       toolWebSearchPlugin,
       contextRuntimePlugin,
+      skillsPlugin,
       workspaceInstructionsPlugin,
       agentPlugin,
       agentInvariantPlugin,
@@ -270,6 +272,29 @@ export function mount(root: Context, rows: readonly Row[]): Composition {
   return new MountedComposition(root, rows)
 }
 
+/**
+ * Fills the deployment's skill roots into every `skills` row whose effective
+ * config names none — AFTER layering, which is the whole point. A patch
+ * replaces a row's WHOLE config (`applyPatches`), so roots baked into the base
+ * row would vanish under a patch that only meant to add `exclude`, and the
+ * model would quietly stop being offered every user and bundled skill. An
+ * explicit `roots` (`[]` included) is the layer's own choice and is kept.
+ *
+ * Matched by CAPABILITY, not row id, as `--preset` validation matches the
+ * presets row: a layer may insert the plugin under any id. `roots` omitted
+ * (hermetic tests) leaves every row as it is, so only workspace dirs are read.
+ */
+export function fillSkillRoots(rows: readonly Row[], roots: readonly SkillRoot[] | undefined): Row[] {
+  return rows.map((row) => {
+    if (roots === undefined || row.plugin.name !== skillsPlugin.name) return row
+    const config = row.config
+    // Not an object: the plugin's own schema refuses it at mount, in its own words.
+    if (config === null || typeof config !== 'object' || Array.isArray(config)) return row
+    if ((config as { roots?: unknown }).roots !== undefined) return row
+    return { ...row, config: { ...config, roots: roots.map((root) => ({ path: root.path, origin: root.origin })) } }
+  })
+}
+
 export interface ComposeOptions {
   readonly sessionsRoot: string
   /** Where oversized tool output is saved; omitted mounts no store, and tools then say what they dropped. */
@@ -384,6 +409,14 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('tool-jobs', toolJobsPlugin, {}))
   rows.push(defineRow('tool-subagent', toolSubagentPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))
+  // The skill list, with no roots: an omitted `roots` means the deployment's,
+  // filled AFTER layering (`fillSkillRoots`), so a patch that only sets
+  // `exclude` cannot silently drop them. Before `workspace-instructions`, and
+  // for the same reason that row sits before `compaction`: registered first,
+  // it is the OUTERMOST pre-step layer, so its check runs last — the batch
+  // reads [prompt, AGENTS.md, skill list], and it sees what a compaction below
+  // it just shadowed and re-enters the list in the same step.
+  rows.push(defineRow('skills', skillsPlugin, { maxBytes: 8_000 }))
   // `maxBytes` is the deployment's prompt-budget choice, made here rather than
   // defaulted inside the capability. Row order is load-bearing: registered
   // first, this row is the OUTER `agent/pre-step` layer, so its check (after

@@ -34,6 +34,7 @@ import { canonicalPath } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { runTask } from './headless.ts'
+import { skillRootsFor } from './home.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
@@ -466,6 +467,8 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
         cwd: replayCwd,
         model: 'deepseek-v4-flash',
         sessionsRoot: tempDir('minidsh-auth-replay-'),
+        // What `serve` mounted: the recorded requests carry its skill list.
+        skillRoots: skillRootsFor(home),
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         prepare: (root) => {
