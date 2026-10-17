@@ -263,6 +263,9 @@ export function buildDocx(spec) {
 // ---------------------------------------------------------------------------
 // xlsx
 
+/** Cell text as Excel stores it: a literal `_xHHHH_` would read back as one escaped character, so its underscore becomes `_x005F_`. */
+const xstring = (text) => esc(text).replace(/_(?=x[0-9A-Fa-f]{4}_)/g, '_x005F_')
+
 export function columnName(index) {
   let name = ''
   for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) name = String.fromCharCode(65 + ((n - 1) % 26)) + name
@@ -367,7 +370,7 @@ export function buildXlsx(spec) {
               const format = cell.format === undefined ? undefined : stringAt(cell.format, `${at}.format`)
               if (cell.value === undefined) return `<c r="${ref}"${s(format)}><f>${esc(formula)}</f></c>`
               if (typeof cell.value === 'number' && Number.isFinite(cell.value)) return `<c r="${ref}"${s(format)}><f>${esc(formula)}</f><v>${cell.value}</v></c>`
-              if (typeof cell.value === 'string') return `<c r="${ref}"${s(format)} t="str"><f>${esc(formula)}</f><v>${esc(cell.value)}</v></c>`
+              if (typeof cell.value === 'string') return `<c r="${ref}"${s(format)} t="str"><f>${esc(formula)}</f><v>${xstring(cell.value)}</v></c>`
               throw bad(`${at}.value`, 'a cached value is a number or a string')
             }
             if ('date' in cell) {
@@ -409,7 +412,7 @@ export function buildXlsx(spec) {
     .join('')
   // CT_Stylesheet order: numFmts, fonts, fills, borders, cellStyleXfs, cellXfs, cellStyles. Fills 0 and 1 are reserved by Excel.
   const styles = `${DECL}<styleSheet xmlns="${S}">${numFmts}<fonts count="2"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${xfs.length}">${cellXfs}</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
-  const sst = `${DECL}<sst xmlns="${S}" count="${stringRefs}" uniqueCount="${strings.size}">${[...strings.keys()].map((t) => `<si><t${/^\s|\s$/.test(t) ? ' xml:space="preserve"' : ''}>${esc(t)}</t></si>`).join('')}</sst>`
+  const sst = `${DECL}<sst xmlns="${S}" count="${stringRefs}" uniqueCount="${strings.size}">${[...strings.keys()].map((t) => `<si><t${/^\s|\s$/.test(t) ? ' xml:space="preserve"' : ''}>${xstring(t)}</t></si>`).join('')}</sst>`
   // fullCalcOnLoad: this helper does not calculate, so Excel recalculates every formula on open.
   const workbook = `${DECL}<workbook xmlns="${S}" xmlns:r="${R}"><bookViews><workbookView/></bookViews><sheets>${sheets.map((sh, i) => `<sheet name="${escAttr(sh.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets><calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`
   const workbookRels = sheets.map((_, i) => [`rId${i + 1}`, `${RT}/worksheet`, `worksheets/sheet${i + 1}.xml`])

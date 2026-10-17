@@ -30,6 +30,9 @@ function relsOf(load, part) {
   return map
 }
 
+/** The branch of an `mc:AlternateContent` a reader takes when it does not know the newer markup: the Fallback, else the first Choice. */
+const alternative = (el) => kid(el, 'Fallback') ?? kid(el, 'Choice')
+
 // ---------------------------------------------------------------------------
 // docx
 
@@ -63,9 +66,49 @@ const on = (rPr, local) => {
   return val === undefined || !['0', 'false', 'none', 'off'].includes(val)
 }
 
-/** Text pieces of a paragraph, descending through hyperlinks, fields, content controls and tracked changes. */
-function paragraphPieces(p, notes) {
+/** Children named `local`, looking through the wrappers Word puts around rows, cells and blocks: content controls and custom XML. */
+function through(el, local, out = []) {
+  for (const child of elements(el)) {
+    const name = localName(child.name)
+    if (name === local) out.push(child)
+    else if (name === 'sdt') through(kid(child, 'sdtContent'), local, out)
+    else if (name === 'customXml') through(child, local, out)
+  }
+  return out
+}
+
+/** The text boxes (`w:txbxContent`) in a drawing, one branch of each AlternateContent, a box inside a box once. */
+function textBoxes(el, out = []) {
+  for (const child of elements(el)) {
+    const name = localName(child.name)
+    if (name === 'txbxContent') out.push(child)
+    else if (name === 'AlternateContent') textBoxes(alternative(child), out)
+    else textBoxes(child, out)
+  }
+  return out
+}
+
+/**
+ * Text pieces of a paragraph, descending through hyperlinks, fields, content
+ * controls, tracked changes and AlternateContent. Moved-away text (moveFrom)
+ * reads as deleted, as Word shows it. Text boxes go to `boxes` for the caller.
+ */
+function paragraphPieces(p, notes, boxes = []) {
   const pieces = []
+  const runPart = (part, style, key) => {
+    const kind = localName(part.name)
+    if (kind === 't' || kind === 'delText') pieces.push({ ...style, key, text: textOf(part) })
+    else if (kind === 'tab') pieces.push({ ...style, key, text: '\t' })
+    else if (kind === 'br' || kind === 'cr') {
+      if (attr(part, 'type') === 'page') notes.add('page break')
+      else pieces.push({ ...style, key, text: '\n' })
+    } else if (kind === 'drawing' || kind === 'pict') {
+      const found = textBoxes(part)
+      if (found.length > 0) boxes.push(...found)
+      else pieces.push({ ...style, key: 'img', text: '[image]' })
+    } else if (kind === 'AlternateContent') for (const inner of elements(alternative(part))) runPart(inner, style, key)
+    else if (kind === 'footnoteReference' || kind === 'endnoteReference') pieces.push({ ...style, key, text: '[note]' })
+  }
   const walk = (el, deleted) => {
     for (const child of elements(el)) {
       const local = localName(child.name)
@@ -73,17 +116,9 @@ function paragraphPieces(p, notes) {
         const rPr = kid(child, 'rPr')
         const style = { bold: on(rPr, 'b'), italic: on(rPr, 'i'), underline: on(rPr, 'u'), deleted }
         const key = `${style.bold}${style.italic}${style.underline}${deleted}`
-        for (const part of elements(child)) {
-          const kind = localName(part.name)
-          if (kind === 't' || kind === 'delText') pieces.push({ ...style, key, text: textOf(part) })
-          else if (kind === 'tab') pieces.push({ ...style, key, text: '\t' })
-          else if (kind === 'br' || kind === 'cr') {
-            if (attr(part, 'type') === 'page') notes.add('page break')
-            else pieces.push({ ...style, key, text: '\n' })
-          } else if (kind === 'drawing' || kind === 'pict') pieces.push({ ...style, key: 'img', text: '[image]' })
-          else if (kind === 'footnoteReference' || kind === 'endnoteReference') pieces.push({ ...style, key, text: '[note]' })
-        }
-      } else if (local === 'del') walk(child, true)
+        for (const part of elements(child)) runPart(part, style, key)
+      } else if (local === 'del' || local === 'moveFrom') walk(child, true)
+      else if (local === 'AlternateContent') walk(alternative(child), deleted)
       else if (local !== 'pPr' && local !== 'rPr') walk(child, deleted)
     }
   }
@@ -101,29 +136,31 @@ function docxParagraph(p, styleNames) {
   const jc = attr(kid(pPr, 'jc'), 'val')
   if (jc && jc !== 'left' && jc !== 'start' && jc !== 'both') label.push(jc)
   const notes = new Set()
-  const text = marked(paragraphPieces(p, notes)).replace(/\n/g, '\n    ')
+  const boxes = []
+  const text = marked(paragraphPieces(p, notes, boxes)).replace(/\n/g, '\n    ')
   const lines = []
-  if (notes.has('page break') && text.length === 0) return ['[page break]']
-  lines.push(`[${label.join(', ')}] ${text}`.trimEnd())
+  if (!(notes.has('page break') && text.length === 0)) lines.push(`[${label.join(', ')}] ${text}`.trimEnd())
   if (notes.has('page break')) lines.push('[page break]')
+  // A text box's paragraphs follow the paragraph that anchors it.
+  for (const box of boxes) for (const inner of through(box, 'p')) lines.push(...docxParagraph(inner, styleNames).map((line) => `[text box] ${line}`))
   return lines
 }
 
 function docxTable(tbl, depth) {
-  const rows = kids(tbl, 'tr')
-  const width = Math.max(0, ...rows.map((tr) => kids(tr, 'tc').length))
+  const rows = through(tbl, 'tr')
+  const width = Math.max(0, ...rows.map((tr) => through(tr, 'tc').length))
   const out = [`${'  '.repeat(depth)}[table: ${rows.length} rows x ${width} columns]`]
   for (const tr of rows) {
-    const cells = kids(tr, 'tc').map((tc) =>
-      elements(tc)
-        .filter((c) => localName(c.name) === 'p')
+    const cells = through(tr, 'tc')
+    const texts = cells.map((tc) =>
+      through(tc, 'p')
         .map((p) => marked(paragraphPieces(p, new Set())))
         .join(' / ')
         .replace(/\|/g, '\\|')
         .replace(/\n/g, ' '),
     )
-    out.push(`${'  '.repeat(depth)}| ${cells.join(' | ')} |`)
-    for (const tc of kids(tr, 'tc')) for (const inner of kids(tc, 'tbl')) out.push(...docxTable(inner, depth + 1))
+    out.push(`${'  '.repeat(depth)}| ${texts.join(' | ')} |`)
+    for (const tc of cells) for (const inner of through(tc, 'tbl')) out.push(...docxTable(inner, depth + 1))
   }
   return out
 }
@@ -149,6 +186,7 @@ function readDocx(load, main) {
         tables++
         lines.push(...docxTable(child, 0))
       } else if (local === 'sdt') walk(kid(child, 'sdtContent'))
+      else if (local === 'customXml') walk(child)
     }
   }
   walk(body)
@@ -169,22 +207,29 @@ function isDateCode(code) {
   return /[dmyhs]/i.test(bare) && !/^[#0.,%E+-]+$/.test(bare)
 }
 
-function serialToDate(serial) {
-  const ms = Math.round((serial - 25569) * 86400000)
+/** A serial as a date; a 1904-system workbook counts 1462 days fewer for the same day. */
+function serialToDate(serial, date1904) {
+  const ms = Math.round((serial + (date1904 ? 1462 : 0) - 25569) * 86400000)
   const d = new Date(ms)
   if (Number.isNaN(d.getTime())) return undefined
   const iso = d.toISOString()
   return serial % 1 === 0 ? iso.slice(0, 10) : iso.slice(0, 19).replace('T', ' ')
 }
 
+/** Excel's `_xHHHH_` escapes in cell text: a character XML cannot carry, or `_x005F_` for a literal underscore. */
+const unescapeXstring = (text) => text.replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+
+/** A shared or inline string: one <t>, or rich-text runs; phonetic runs (rPh) are not part of the value. */
+const stringItem = (si) => unescapeXstring(kid(si, 't') ? textOf(kid(si, 't')) : kids(si, 'r').map((r) => textOf(kid(r, 't'))).join(''))
+
 function readXlsx(load, main, maxChars) {
   const workbook = load(main)
   const rels = relsOf(load, main)
   const find = (suffix) => [...rels.values()].find((r) => r.type.endsWith(suffix))?.part
+  const date1904 = ['1', 'true'].includes(attr(kid(workbook, 'workbookPr'), 'date1904'))
   const strings = []
   const sst = load(find('/sharedStrings'))
-  // A string item is one <t>, or rich-text runs; phonetic runs (rPh) are not part of the value.
-  if (sst) for (const si of kids(sst, 'si')) strings.push(kid(si, 't') ? textOf(kid(si, 't')) : kids(si, 'r').map((r) => textOf(kid(r, 't'))).join(''))
+  if (sst) for (const si of kids(sst, 'si')) strings.push(stringItem(si))
   const formats = []
   const styles = load(find('/styles'))
   if (styles) {
@@ -197,7 +242,7 @@ function readXlsx(load, main, maxChars) {
     }
   }
   const sheets = kids(kid(workbook, 'sheets'), 'sheet')
-  const out = [`xlsx: ${sheets.length} sheet(s); each cell: REF value | =formula [cached value] | =formula (no cached value)`]
+  const out = [`xlsx: ${sheets.length} sheet(s)${date1904 ? ', 1904 date system' : ''}; each cell: REF value | =formula [cached value] | =formula (no cached value)`]
   let used = out[0].length
   for (const [index, sheet] of sheets.entries()) {
     const id = [...sheet.attrs].find(([k]) => localName(k) === 'id' && k.includes(':'))?.[1]
@@ -227,13 +272,13 @@ function readXlsx(load, main, maxChars) {
         const style = formats[Number(attr(c, 's') ?? 0)]
         let value
         if (t === 's') value = v ? JSON.stringify(strings[Number(textOf(v))] ?? `?string ${textOf(v)}`) : undefined
-        else if (t === 'inlineStr') value = JSON.stringify(descendants(kid(c, 'is'), 't').map(textOf).join(''))
-        else if (t === 'str') value = v ? JSON.stringify(textOf(v)) : undefined
+        else if (t === 'inlineStr') value = JSON.stringify(stringItem(kid(c, 'is')))
+        else if (t === 'str') value = v ? JSON.stringify(unescapeXstring(textOf(v))) : undefined
         else if (t === 'b') value = v ? (textOf(v) === '1' ? 'TRUE' : 'FALSE') : undefined
         else if (t === 'e') value = v ? textOf(v) : undefined
         else if (v) {
           value = textOf(v)
-          if (style?.date && value !== '') value = `${value} (= ${serialToDate(Number(value)) ?? '?'})`
+          if (style?.date && value !== '') value = `${value} (= ${serialToDate(Number(value), date1904) ?? '?'})`
         }
         let formula
         if (f) {
@@ -295,6 +340,7 @@ function slideShapes(tree, out, depth = 0) {
       if (paragraphs.length === 0) continue
       out.push({ role, paragraphs })
     } else if (local === 'grpSp') slideShapes(el, out, depth + 1)
+    else if (local === 'AlternateContent') slideShapes(alternative(el), out, depth)
     else if (local === 'pic') out.push({ role: 'picture', paragraphs: [{ level: 0, text: attr(kid(kid(el, 'nvPicPr'), 'cNvPr'), 'descr') ?? attr(kid(kid(el, 'nvPicPr'), 'cNvPr'), 'name') ?? '' }] })
     else if (local === 'graphicFrame') {
       const rows = descendants(el, 'tr').map((tr) => `| ${kids(tr, 'tc').map((tc) => descendants(tc, 't').map(textOf).join(' ').replace(/\|/g, '\\|')).join(' | ')} |`)

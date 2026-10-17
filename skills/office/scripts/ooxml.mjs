@@ -38,6 +38,14 @@ const DOS_TIME = 0
 const DOS_DATE = (0 << 9) | (1 << 5) | 1
 /** A member larger than this inflates to an error rather than to all of memory. */
 const MAX_MEMBER_BYTES = 256 * 1024 * 1024
+/**
+ * What a package may declare in all, and how many members it may have. Each
+ * member inflates to at most its declared size, so the sum bounds what opening
+ * one costs; a ZIP whose directory points several names at one compressed body
+ * (65 KB inflating to N x 64 MiB) is refused before anything inflates.
+ */
+const MAX_PACKAGE_BYTES = 512 * 1024 * 1024
+const MAX_MEMBERS = 10000
 
 /**
  * Writes a new archive: deflated members, in the order given, each name once.
@@ -105,6 +113,10 @@ export function writeZip(entries) {
  */
 export function readZip(buffer, label = 'file') {
   const bad = (why) => fail(EXIT.invalid, `${label}: ${why}`)
+  // An OLE compound file: what Office writes for an encrypted file, and the pre-2007 binary formats.
+  if (buffer.length >= 8 && buffer.readUInt32BE(0) === 0xd0cf11e0 && buffer.readUInt32BE(4) === 0xa1b11ae1) {
+    throw fail(EXIT.unsupported, `${label}: password-protected or legacy binary (.doc/.xls/.ppt) Office file; this helper cannot open it`)
+  }
   let eocd = -1
   for (let i = buffer.length - 22; i >= Math.max(0, buffer.length - 65557); i--) {
     if (buffer.readUInt32LE(i) === 0x06054b50) {
@@ -118,7 +130,10 @@ export function readZip(buffer, label = 'file') {
   const cdOffset = buffer.readUInt32LE(eocd + 16)
   if (count === 0xffff || cdOffset === 0xffffffff) throw fail(EXIT.unsupported, `${label}: ZIP64 archives are not supported`)
   if (cdOffset + cdSize > eocd) throw bad('the central directory lies outside the file (truncated?)')
+  if (count > MAX_MEMBERS) throw bad(`${count} members; this helper opens packages of at most ${MAX_MEMBERS}`)
   const entries = []
+  const spans = []
+  let declared = 0
   let at = cdOffset
   for (let n = 0; n < count; n++) {
     if (at + 46 > buffer.length || buffer.readUInt32LE(at) !== 0x02014b50) throw bad(`central directory entry ${n + 1} is damaged`)
@@ -136,6 +151,9 @@ export function readZip(buffer, label = 'file') {
     if (localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== 0x04034b50) throw bad(`member ${name} has no local header`)
     const dataStart = localOffset + 30 + buffer.readUInt16LE(localOffset + 26) + buffer.readUInt16LE(localOffset + 28)
     if (dataStart + packedSize > buffer.length) throw bad(`member ${name} runs past the end of the file`)
+    if (size > MAX_MEMBER_BYTES) throw bad(`member ${name} declares ${size} bytes uncompressed; this helper opens members of at most ${MAX_MEMBER_BYTES}`)
+    declared += size
+    spans.push({ name, start: localOffset, end: dataStart + packedSize })
     entries.push({
       name,
       size,
@@ -146,8 +164,10 @@ export function readZip(buffer, label = 'file') {
         if (method === 0) data = Buffer.from(raw)
         else if (method === 8) {
           try {
-            data = inflateRawSync(raw, { maxOutputLength: MAX_MEMBER_BYTES })
+            // Never more than the member says it holds: the size check below would refuse it anyway.
+            data = inflateRawSync(raw, { maxOutputLength: Math.max(1, size) })
           } catch (error) {
+            if (error?.code === 'ERR_BUFFER_TOO_LARGE') throw bad(`member ${name} inflates past its declared size of ${size} bytes`)
             throw bad(`member ${name} does not inflate (${error.message})`)
           }
         } else throw fail(EXIT.unsupported, `${label}: member ${name} uses compression method ${method}`)
@@ -155,6 +175,11 @@ export function readZip(buffer, label = 'file') {
         return data
       },
     })
+  }
+  if (declared > MAX_PACKAGE_BYTES) throw bad(`the members declare ${declared} bytes uncompressed; this helper opens packages of at most ${MAX_PACKAGE_BYTES}`)
+  spans.sort((a, b) => a.start - b.start)
+  for (let k = 1; k < spans.length; k++) {
+    if (spans[k].start < spans[k - 1].end) throw bad(`members ${spans[k - 1].name} and ${spans[k].name} share bytes in the file (one compressed body read as several members); refusing the package`)
   }
   return entries
 }
@@ -254,7 +279,13 @@ function parse(text) {
   checkCharacters(text)
   const n = text.length
   const stack = []
-  const scopes = [new Map([['xml', 'http://www.w3.org/XML/1998/namespace']])]
+  // Prefix → the URIs bound to it, innermost last; an element unbinds what it
+  // declared when it closes. One map for the part, so a declaration costs once
+  // rather than once per element in its scope.
+  const bindings = new Map([['xml', ['http://www.w3.org/XML/1998/namespace']]])
+  const unbind = (prefixes) => {
+    for (const prefix of prefixes) bindings.get(prefix).pop()
+  }
   let root
   let i = 0
   const err = (message, at = i) => {
@@ -318,7 +349,7 @@ function parse(text) {
       const open = stack.pop()
       if (!open) err(`end tag </${m[0]}> has no open element`)
       if (open.el.name !== m[0]) err(`end tag </${m[0]}> does not match <${open.el.name}> opened at line ${locate(text, open.index).line}`)
-      scopes.pop()
+      unbind(open.declared)
       i = j + 1
       continue
     }
@@ -363,28 +394,30 @@ function parse(text) {
       el.attrs.set(name, decodeEntities(raw.replace(/[\t\n\r]/g, ' '), j + 1))
       j = close + 1
     }
-    const scope = new Map(scopes.at(-1))
+    const declared = []
     for (const [key, value] of el.attrs) {
-      if (key === 'xmlns') scope.set('', value)
+      let prefix
+      if (key === 'xmlns') prefix = ''
       else if (key.startsWith('xmlns:')) {
-        if (value === '') err(`prefix ${key.slice(6)} is bound to an empty namespace`, i)
-        scope.set(key.slice(6), value)
-      }
+        prefix = key.slice(6)
+        if (value === '') err(`prefix ${prefix} is bound to an empty namespace`, i)
+      } else continue
+      if (!bindings.has(prefix)) bindings.set(prefix, [])
+      bindings.get(prefix).push(value)
+      declared.push(prefix)
     }
     const bound = (qname, what) => {
       const colon = qname.indexOf(':')
       if (colon < 0) return
       const prefix = qname.slice(0, colon)
-      if (prefix !== 'xmlns' && !scope.has(prefix)) err(`unbound namespace prefix "${prefix}" on ${what} (declare xmlns:${prefix} on this element or an ancestor)`, i)
+      if (prefix !== 'xmlns' && !(bindings.get(prefix)?.length > 0)) err(`unbound namespace prefix "${prefix}" on ${what} (declare xmlns:${prefix} on this element or an ancestor)`, i)
     }
     bound(el.name, `<${el.name}>`)
     for (const key of el.attrs.keys()) if (key !== 'xmlns' && !key.startsWith('xmlns:')) bound(key, `attribute ${key} of <${el.name}>`)
     if (stack.length > 0) stack.at(-1).el.children.push(el)
     else root = el
-    if (!selfClosing) {
-      stack.push({ el, index: i })
-      scopes.push(scope)
-    }
+    if (selfClosing) unbind(declared)
+    else stack.push({ el, index: i, declared })
     i = j
   }
   if (stack.length > 0) err(`<${stack.at(-1).el.name}> is never closed`, stack.at(-1).index)
@@ -434,21 +467,22 @@ export const escAttr = (value, where) => esc(value, where).replace(/"/g, '&quot;
 /**
  * Re-indents a part for a file editor without changing what it means: a line
  * break goes only between two tags with nothing between them, and never into
- * an element that holds text, so `<w:t>` content and `xml:space="preserve"`
- * runs keep every byte. Office ignores whitespace between elements.
+ * an element that holds text, so `<w:t>` content, `xml:space="preserve"` runs
+ * and mixed content (text beside child elements, as in custom XML data parts)
+ * keep every byte. Office ignores whitespace between elements. Two passes,
+ * because whether an element holds text can show only after its first child.
  */
 export function indentXml(text) {
-  let out = ''
-  let depth = 0
+  const tokens = []
+  const open = []
   let i = 0
-  let previous = 'none'
   const n = text.length
   while (i < n) {
     if (text[i] !== '<') {
       const lt = text.indexOf('<', i)
       const end = lt < 0 ? n : lt
-      out += text.slice(i, end)
-      previous = 'text'
+      tokens.push({ kind: 'text', start: i, end })
+      if (open.length > 0 && /\S/.test(text.slice(i, end))) open.at(-1).holdsText = true
       i = end
       continue
     }
@@ -478,13 +512,28 @@ export function indentXml(text) {
       kind = text[i + 1] === '/' ? 'close' : text[j - 1] === '/' ? 'empty' : 'open'
     }
     if (end <= i) return text
+    // A break before a start tag lands in the open element; before an end tag, in the element it closes.
+    const token = { kind, start: i, end, holdsText: false, container: kind === 'close' ? open.pop() : open.at(-1) }
+    if (kind === 'cdata' && end - i > 12 && open.length > 0) open.at(-1).holdsText = true
+    tokens.push(token)
+    if (kind === 'open') open.push(token)
+    i = end
+  }
+  let out = ''
+  let depth = 0
+  let previous = 'none'
+  for (const { kind, start, end, container } of tokens) {
+    if (kind === 'text') {
+      out += text.slice(start, end)
+      previous = 'text'
+      continue
+    }
     if (kind === 'close') depth--
-    const breakBefore = (kind === 'open' || kind === 'empty') ? previous !== 'text' && previous !== 'none' && previous !== 'cdata' : kind === 'close' && (previous === 'close' || previous === 'empty')
-    if (breakBefore) out += '\n' + '  '.repeat(Math.max(0, depth))
-    out += text.slice(i, end)
+    const between = (kind === 'open' || kind === 'empty') ? previous !== 'text' && previous !== 'none' && previous !== 'cdata' : kind === 'close' && (previous === 'close' || previous === 'empty')
+    if (between && container?.holdsText !== true) out += '\n' + '  '.repeat(Math.max(0, depth))
+    out += text.slice(start, end)
     if (kind === 'open') depth++
     previous = kind === 'other' ? (previous === 'none' ? 'none-other' : 'other') : kind
-    i = end
   }
   return out
 }
@@ -494,6 +543,8 @@ export function indentXml(text) {
 
 export const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 export const PKG_REL = 'http://schemas.openxmlformats.org/package/2006/relationships'
+/** The namespace of `r:id`, `r:embed`, `r:link`, `r:pict` and the rest, Transitional and Strict: every attribute in it names a relationship. */
+const REL_ATTRIBUTE_NAMESPACES = new Set([REL, 'http://purl.oclc.org/ooxml/officeDocument/relationships'])
 const OFFICE_DOCUMENT_TYPES = new Set([`${REL}/officeDocument`, 'http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument'])
 
 /** The exact content type a main part must have, by file extension. */
@@ -577,6 +628,35 @@ export function relationships(root) {
 }
 
 /**
+ * Every relationship id a part names (`<sheet r:id>`, `<a:blip r:embed>`, …),
+ * found by namespace, not by prefix. An empty value is not a reference:
+ * PowerPoint writes `r:id=""` on actions that jump within the deck.
+ */
+function relationshipRefs(root) {
+  const refs = []
+  const bindings = new Map()
+  const walk = (el) => {
+    const declared = []
+    for (const [key, value] of el.attrs) {
+      if (!key.startsWith('xmlns:')) continue
+      const prefix = key.slice(6)
+      if (!bindings.has(prefix)) bindings.set(prefix, [])
+      bindings.get(prefix).push(value)
+      declared.push(prefix)
+    }
+    for (const [key, value] of el.attrs) {
+      const colon = key.indexOf(':')
+      if (colon < 0 || key.startsWith('xmlns:') || value === '') continue
+      if (REL_ATTRIBUTE_NAMESPACES.has(bindings.get(key.slice(0, colon))?.at(-1))) refs.push({ attr: key, id: value })
+    }
+    for (const child of el.children) if (typeof child !== 'string') walk(child)
+    for (const prefix of declared) bindings.get(prefix).pop()
+  }
+  walk(root)
+  return refs
+}
+
+/**
  * Every structural problem `pack` refuses, as `part: problem` lines. `members`
  * maps package names to bytes; `ext` is the output's extension. Parsed parts
  * come back so a caller can use them.
@@ -591,10 +671,11 @@ export function checkPackage(members, ext) {
     byLower.set(lower, name)
   }
   const exists = (part) => byLower.has(part.toLowerCase())
-  for (const [name, bytes] of members) {
+  // Only XML parts are opened: a lazily inflated package never inflates its media here.
+  for (const name of members.keys()) {
     if (!isXmlPart(name)) continue
     try {
-      parsed.set(name, parseXml(bytes, name))
+      parsed.set(name, parseXml(members.get(name), name))
     } catch (error) {
       if (error instanceof CliError) problems.push(error.message)
       else throw error
@@ -627,11 +708,13 @@ export function checkPackage(members, ext) {
       if (!exists(part)) problems.push(`[Content_Types].xml: Override for ${partName} names a part that does not exist (remove it)`)
     }
   }
+  const idsByRels = new Map()
   for (const [name, root] of parsed) {
     const source = sourceOfRels(name)
     if (source === undefined) continue
     if (source !== '' && !exists(source)) problems.push(`${name}: its source part ${source} does not exist`)
     const ids = new Set()
+    idsByRels.set(name.toLowerCase(), ids)
     for (const rel of relationships(root)) {
       if (!rel.id) problems.push(`${name}: a Relationship without an Id`)
       else if (ids.has(rel.id)) problems.push(`${name}: duplicate relationship Id ${rel.id}`)
@@ -642,7 +725,43 @@ export function checkPackage(members, ext) {
       else if (!exists(target)) problems.push(`${name}: ${rel.id} target ${rel.target} (${target}) does not exist`)
     }
   }
+  // Ids inside the parts must name a relationship of that part: Excel and PowerPoint refuse a file whose do not.
+  for (const [name, root] of parsed) {
+    if (name === '[Content_Types].xml' || sourceOfRels(name) !== undefined) continue
+    const ids = idsByRels.get(relsFor(name).toLowerCase())
+    const missing = new Set()
+    for (const ref of relationshipRefs(root)) if (!ids?.has(ref.id)) missing.add(`${ref.attr} ${ref.id}`)
+    for (const ref of [...missing].slice(0, 5)) problems.push(`${name}: ${ref} has no relationship in ${relsFor(name)}`)
+    if (missing.size > 5) problems.push(`${name}: ${missing.size - 5} more ids with no relationship`)
+  }
   return { problems, parsed, main, types }
+}
+
+/**
+ * The members of an opened package, each inflated on its first `get`: `read`
+ * never inflates the media it does not show. Iteration yields bytes, so it
+ * stands wherever a Map of name to bytes does.
+ */
+export class PackageMembers extends Map {
+  get(name) {
+    const value = super.get(name)
+    if (value === undefined || Buffer.isBuffer(value)) return value
+    const data = value.read()
+    super.set(name, data)
+    return data
+  }
+
+  *entries() {
+    for (const name of this.keys()) yield [name, this.get(name)]
+  }
+
+  *values() {
+    for (const name of this.keys()) yield this.get(name)
+  }
+
+  [Symbol.iterator]() {
+    return this.entries()
+  }
 }
 
 /** Unsafe ZIP member names: what `unpack` refuses before it writes a single file. */
@@ -651,7 +770,11 @@ export function unsafeMemberName(name) {
   if (name.includes('\\')) return 'a backslash in the name'
   if (name.startsWith('/')) return 'an absolute path'
   if (/^[A-Za-z]:/.test(name)) return 'a drive letter'
-  if (name.includes('\0')) return 'a NUL character'
+  // C0 and C1 controls: Windows refuses them in a file name, so the write would fail halfway through.
+  for (let k = 0; k < name.length; k++) {
+    const c = name.charCodeAt(k)
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) return 'a control character'
+  }
   const segments = name.replace(/\/$/, '').split('/')
   if (segments.some((s) => s === '..')) return "a '..' segment"
   if (segments.some((s) => s === '' || s === '.')) return 'an empty or "." segment'

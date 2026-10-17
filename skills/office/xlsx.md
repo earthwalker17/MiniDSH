@@ -69,8 +69,8 @@ Cells in `sheetData`:
 - Add text as `t="inlineStr"`: no shared-string bookkeeping.
 - Rows go in ascending `r`, cells within a row in column order, and each cell's `r` matches its row.
 - After changing a value that formulas use, delete the `<v>` of the formula cells that depend on it, or they show stale results in programs that do not calculate.
-- Worksheet children keep this order: `sheetPr`, `dimension`, `sheetViews`, `sheetFormatPr`, `cols`, `sheetData`, `mergeCells`, `conditionalFormatting`, `dataValidations`, `hyperlinks`, `pageMargins`, `pageSetup`.
-- Merge cells with `<mergeCells count="1"><mergeCell ref="A1:C1"/></mergeCells>` right after `sheetData`.
+- Worksheet children keep this order, absent ones skipped: `sheetPr`, `dimension`, `sheetViews`, `sheetFormatPr`, `cols`, `sheetData`, `sheetCalcPr`, `sheetProtection`, `protectedRanges`, `scenarios`, `autoFilter`, `sortState`, `dataConsolidate`, `customSheetViews`, `mergeCells`, `phoneticPr`, `conditionalFormatting`, `dataValidations`, `hyperlinks`, `printOptions`, `pageMargins`, `pageSetup`, `headerFooter`.
+- Merge cells with `<mergeCells count="1"><mergeCell ref="A1:C1"/></mergeCells>`, placed by that order: after `sheetData` and any `sheetProtection` or `autoFilter`, before `conditionalFormatting` and `pageMargins`.
 - `s="N"` on a cell is an index into `cellXfs`. For a new format, add `<numFmt numFmtId="165" formatCode="0.0%"/>` (ids from 164), an `<xf>` that uses it, and update both `count` attributes.
 - In `styles.xml` the first two fills (`none`, then `gray125`) are reserved by Excel: keep them.
 - A new sheet needs its part, a `<sheet>` in workbook.xml with a new `sheetId` and `r:id`, the relationship, and an `Override` in `[Content_Types].xml`. Pack checks that they agree.

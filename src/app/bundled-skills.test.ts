@@ -19,10 +19,10 @@
  * `MINIDSH_EXPECT_PYTHON=1` turns its absence into a failure.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { crc32, deflateSync, inflateRawSync } from 'node:zlib'
+import { dirname, join, relative, resolve, sep } from 'node:path'
+import { crc32, deflateRawSync, deflateSync, inflateRawSync } from 'node:zlib'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { isSkillName, parseSkillFile } from '../capabilities/skills/frontmatter.ts'
 
@@ -45,8 +45,9 @@ interface Run {
   readonly stderr: string
 }
 
-function run(script: string, args: readonly string[], cwd: string): Run {
-  const result = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: 60_000 })
+/** A helper run as a model runs it; `timeout` kills it, leaving `status` null, which is how a hang fails a test. */
+function run(script: string, args: readonly string[], cwd: string, timeout = 60_000): Run {
+  const result = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout })
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
 }
 
@@ -62,7 +63,10 @@ const json = (result: Run): Record<string, unknown> => JSON.parse(ok(result)) as
 
 interface Member {
   readonly name: string
+  /** Its local header. */
   readonly offset: number
+  /** Its central-directory record. */
+  readonly central: number
 }
 
 function zipMembers(bytes: Buffer): Member[] {
@@ -74,10 +78,24 @@ function zipMembers(bytes: Buffer): Member[] {
   for (let i = 0; i < count; i++) {
     const nameLength = bytes.readUInt16LE(at + 28)
     const skip = nameLength + bytes.readUInt16LE(at + 30) + bytes.readUInt16LE(at + 32)
-    out.push({ name: bytes.subarray(at + 46, at + 46 + nameLength).toString('utf8'), offset: bytes.readUInt32LE(at + 42) })
+    out.push({ name: bytes.subarray(at + 46, at + 46 + nameLength).toString('utf8'), offset: bytes.readUInt32LE(at + 42), central: at })
     at += 46 + skip
   }
   return out
+}
+
+/** 1980-01-01 in DOS date form, the date office.mjs stamps on every member; its time is 00:00, zero. */
+const DOS_1980_01_01 = (1 << 5) | 1
+
+/**
+ * Two builds a moment apart can match byte for byte and still carry the clock
+ * (a DOS time ticks every two seconds), so the stamps themselves are read:
+ * time and date of every local header (offsets 10, 12) and central record (12, 14).
+ */
+function expectFixedStamps(bytes: Buffer): void {
+  for (const m of zipMembers(bytes)) {
+    expect([bytes.readUInt16LE(m.offset + 10), bytes.readUInt16LE(m.offset + 12), bytes.readUInt16LE(m.central + 12), bytes.readUInt16LE(m.central + 14)], m.name).toEqual([0, DOS_1980_01_01, 0, DOS_1980_01_01])
+  }
 }
 
 function zipMember(bytes: Buffer, name: string): string {
@@ -91,21 +109,28 @@ function zipMember(bytes: Buffer, name: string): string {
   return (method === 8 ? inflateRawSync(raw) : raw).toString('utf8')
 }
 
-/** A stored (uncompressed) ZIP with exactly the names given — including names no writer should produce. */
-function storedZip(entries: ReadonlyArray<readonly [string, string]>): Buffer {
+/** What a stored member may lie about: its CRC, or the size it declares. */
+interface Lie {
+  readonly crc?: number
+  readonly size?: number
+}
+
+/** A stored (uncompressed) ZIP with exactly the names given — including names no writer should produce, and members that lie. */
+function storedZip(entries: ReadonlyArray<readonly [string, string | Buffer, Lie?]>): Buffer {
   const locals: Buffer[] = []
   const centrals: Buffer[] = []
   let offset = 0
-  for (const [name, text] of entries) {
-    const data = Buffer.from(text, 'utf8')
+  for (const [name, text, lie] of entries) {
+    const data = typeof text === 'string' ? Buffer.from(text, 'utf8') : text
     const nameBytes = Buffer.from(name, 'utf8')
-    const crc = crc32(data) >>> 0
+    const crc = lie?.crc ?? crc32(data) >>> 0
+    const size = lie?.size ?? data.length
     const local = Buffer.alloc(30)
     local.writeUInt32LE(0x04034b50, 0)
     local.writeUInt16LE(20, 4)
     local.writeUInt32LE(crc, 14)
     local.writeUInt32LE(data.length, 18)
-    local.writeUInt32LE(data.length, 22)
+    local.writeUInt32LE(size, 22)
     local.writeUInt16LE(nameBytes.length, 26)
     const central = Buffer.alloc(46)
     central.writeUInt32LE(0x02014b50, 0)
@@ -113,21 +138,88 @@ function storedZip(entries: ReadonlyArray<readonly [string, string]>): Buffer {
     central.writeUInt16LE(20, 6)
     central.writeUInt32LE(crc, 16)
     central.writeUInt32LE(data.length, 20)
-    central.writeUInt32LE(data.length, 24)
+    central.writeUInt32LE(size, 24)
     central.writeUInt16LE(nameBytes.length, 28)
     central.writeUInt32LE(offset, 42)
     locals.push(local, nameBytes, data)
     centrals.push(central, nameBytes)
     offset += 30 + nameBytes.length + data.length
   }
+  return Buffer.concat([...locals, ...endOfZip(centrals, entries.length, offset)])
+}
+
+function endOfZip(centrals: readonly Buffer[], count: number, offset: number): Buffer[] {
   const directory = Buffer.concat(centrals)
   const end = Buffer.alloc(22)
   end.writeUInt32LE(0x06054b50, 0)
-  end.writeUInt16LE(entries.length, 8)
-  end.writeUInt16LE(entries.length, 10)
+  end.writeUInt16LE(count, 8)
+  end.writeUInt16LE(count, 10)
   end.writeUInt32LE(directory.length, 12)
   end.writeUInt32LE(offset, 16)
-  return Buffer.concat([...locals, directory, end])
+  return [directory, end]
+}
+
+/** The ZIP bomb shape: `count` directory entries that all point at one deflated body of `size` zero bytes. */
+function sharedBodyZip(count: number, size: number): Buffer {
+  const data = Buffer.alloc(size)
+  const packed = deflateRawSync(data)
+  const crc = crc32(data) >>> 0
+  const first = Buffer.from('part0.xml')
+  const local = Buffer.alloc(30)
+  local.writeUInt32LE(0x04034b50, 0)
+  local.writeUInt16LE(20, 4)
+  local.writeUInt16LE(8, 8)
+  local.writeUInt32LE(crc, 14)
+  local.writeUInt32LE(packed.length, 18)
+  local.writeUInt32LE(size, 22)
+  local.writeUInt16LE(first.length, 26)
+  const centrals: Buffer[] = []
+  for (let i = 0; i < count; i++) {
+    const name = Buffer.from(`part${i}.xml`)
+    const central = Buffer.alloc(46)
+    central.writeUInt32LE(0x02014b50, 0)
+    central.writeUInt16LE(20, 4)
+    central.writeUInt16LE(20, 6)
+    central.writeUInt16LE(8, 10)
+    central.writeUInt32LE(crc, 16)
+    central.writeUInt32LE(packed.length, 20)
+    central.writeUInt32LE(size, 24)
+    central.writeUInt16LE(name.length, 28)
+    centrals.push(central, name)
+  }
+  const offset = 30 + first.length + packed.length
+  return Buffer.concat([local, first, packed, ...endOfZip(centrals, count, offset)])
+}
+
+/** The files of an unpacked package as ZIP entries, `[Content_Types].xml` first. */
+function directoryEntries(dir: string): Array<[string, Buffer]> {
+  const files: Array<[string, Buffer]> = []
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else files.push([relative(dir, full).split(sep).join('/'), readFileSync(full)])
+    }
+  }
+  walk(dir)
+  return files.toSorted(([a], [b]) => (a === '[Content_Types].xml' ? -1 : b === '[Content_Types].xml' ? 1 : a.localeCompare(b)))
+}
+
+/** A directory as another tool would zip it, unchecked: what `pack` refuses can still reach `read`. */
+const zipDirectory = (dir: string): Buffer => storedZip(directoryEntries(dir))
+
+/**
+ * A link at `path` to `target`, which does not exist. Windows without the
+ * symlink privilege refuses a symbolic link; a junction is the link it allows,
+ * and the helpers followed it just the same.
+ */
+function danglingLink(target: string, path: string, kind: 'file' | 'dir'): void {
+  try {
+    symlinkSync(target, path, kind)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+    symlinkSync(target, path, 'junction')
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +443,7 @@ describe('office.mjs', () => {
       ok(run(OFFICE, ['build', spec(name, value), `twice-a.${ext}`], work))
       ok(run(OFFICE, ['build', spec(name, value), `twice-b.${ext}`], work))
       expect(readFileSync(join(work, `twice-a.${ext}`)).equals(readFileSync(join(work, `twice-b.${ext}`))), ext).toBe(true)
+      expectFixedStamps(readFileSync(join(work, `twice-a.${ext}`)))
     }
   })
 
@@ -378,6 +471,7 @@ describe('office.mjs', () => {
     expect(names[0]).toBe('[Content_Types].xml')
     expect(new Set(names).size).toBe(names.length)
     expect(names.toSorted()).toEqual(zipMembers(readFileSync(join(work, 'doc.docx'))).map((m) => m.name).toSorted())
+    expectFixedStamps(edited)
     expect(ok(run(OFFICE, ['read', 'edited.docx'], work))).toContain('[ListParagraph, list 1 level 0] alpha edited')
     independentCheck(join(work, 'edited.docx'), 'docx')
 
@@ -407,13 +501,20 @@ describe('office.mjs', () => {
 
   it('refuses zip-slip members and duplicate members before writing anything', () => {
     const types = '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'
-    for (const name of ['../escaped.xml', '/absolute.xml', 'C:/drive.xml', 'word\\backslash.xml', 'word/../../up.xml']) {
-      writeFileSync(join(work, 'slip.docx'), storedZip([['[Content_Types].xml', types], [name, '<x/>']]))
+    // A control character is no path escape, but Windows refuses it in a file name: unpack used to fail halfway.
+    for (const name of ['../escaped.xml', '/absolute.xml', 'C:/drive.xml', 'word\\backslash.xml', 'word/../../up.xml', 'word/b\u{1}c.xml', 'word/b\u{85}c.xml']) {
+      writeFileSync(join(work, 'slip.docx'), storedZip([['[Content_Types].xml', types], ['a.xml', '<a/>'], [name, '<x/>']]))
       const result = run(OFFICE, ['unpack', 'slip.docx', 'slip-out'], work)
-      expect(result.status, name).toBe(4)
+      expect(result.status, JSON.stringify(name)).toBe(4)
       expect(result.stderr).toContain('refusing member')
       expect(existsSync(join(work, 'slip-out'))).toBe(false)
     }
+    // A member named like another's directory cannot be written beside it.
+    writeFileSync(join(work, 'clash.docx'), storedZip([['[Content_Types].xml', types], ['word', 'x'], ['word/a.xml', '<a/>']]))
+    const clash = run(OFFICE, ['unpack', 'clash.docx', 'clash-out'], work)
+    expect(clash.status).toBe(4)
+    expect(clash.stderr).toContain('is also the directory of')
+    expect(existsSync(join(work, 'clash-out'))).toBe(false)
     expect(existsSync(join(dirname(work), 'escaped.xml'))).toBe(false)
     writeFileSync(join(work, 'dup.docx'), storedZip([['[Content_Types].xml', types], ['a.xml', '<a/>'], ['a.xml', '<b/>']]))
     const duplicate = run(OFFICE, ['unpack', 'dup.docx', 'dup-out'], work)
@@ -451,6 +552,166 @@ describe('office.mjs', () => {
     const badSpec = run(OFFICE, ['build', 'bad-spec.json', 'bad.docx'], work)
     expect(badSpec.status).toBe(4)
     expect(badSpec.stderr).toContain('spec.body[0].table.rows[0][0]')
+  })
+
+  const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+  const MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+
+  it('refuses a ZIP whose members share one compressed body, declare too much, or are too many, before inflating any', () => {
+    writeFileSync(join(work, 'shared.docx'), sharedBodyZip(40, 8 * 1024 * 1024))
+    const shared = run(OFFICE, ['read', 'shared.docx'], work)
+    expect(shared.status).toBe(4)
+    expect(shared.stderr).toContain('share bytes in the file')
+    const huge = 200 * 1024 * 1024
+    writeFileSync(join(work, 'declared.docx'), storedZip([['a.xml', 'a', { size: huge }], ['b.xml', 'b', { size: huge }], ['c.xml', 'c', { size: huge }]]))
+    const declared = run(OFFICE, ['read', 'declared.docx'], work)
+    expect(declared.status).toBe(4)
+    expect(declared.stderr).toContain(`the members declare ${3 * huge} bytes uncompressed`)
+    writeFileSync(join(work, 'many.docx'), storedZip(Array.from({ length: 10001 }, (_, i) => [`p${i}.xml`, '<p/>'] as const)))
+    const many = run(OFFICE, ['read', 'many.docx'], work)
+    expect(many.status).toBe(4)
+    expect(many.stderr).toContain('10001 members; this helper opens packages of at most 10000')
+  })
+
+  it('inflates only what read shows: a damaged media member does not stop read, and unpack still refuses it', () => {
+    ok(run(OFFICE, ['unpack', 'doc.docx', 'lazy'], work))
+    writeFileSync(join(work, 'lazy.docx'), storedZip([...directoryEntries(join(work, 'lazy')), ['word/media/broken.png', Buffer.from('not a png'), { crc: 1 }]]))
+    expect(ok(run(OFFICE, ['read', 'lazy.docx'], work))).toContain('[Heading1] Summary')
+    const unpacked = run(OFFICE, ['unpack', 'lazy.docx', 'lazy-out'], work)
+    expect(unpacked.status).toBe(4)
+    expect(unpacked.stderr).toContain('word/media/broken.png fails its CRC or size check')
+  })
+
+  it('says an OLE file is password-protected or legacy binary, with the unsupported exit', () => {
+    writeFileSync(join(work, 'protected.docx'), Buffer.concat([Buffer.from('d0cf11e0a1b11ae1', 'hex'), Buffer.alloc(504)]))
+    const result = run(OFFICE, ['read', 'protected.docx'], work)
+    expect(result.status).toBe(6)
+    expect(result.stderr).toContain('password-protected or legacy binary (.doc/.xls/.ppt) Office file')
+  })
+
+  it('reads a part with thousands of namespace declarations in time linear in its size', () => {
+    ok(run(OFFICE, ['unpack', 'doc.docx', 'ns-doc'], work))
+    const declarations = Array.from({ length: 5000 }, (_, i) => ` xmlns:p${i}="urn:minidsh:${i}"`).join('')
+    writeFileSync(join(work, 'ns-doc', 'word', 'document.xml'), `<w:document xmlns:w="${W}"${declarations}><w:body>${'<w:p/>'.repeat(30000)}</w:body></w:document>`)
+    writeFileSync(join(work, 'ns-doc.docx'), zipDirectory(join(work, 'ns-doc')))
+    // Every element used to copy its parent's 5,000 bindings: about a minute here, where linear work takes well under a second.
+    const result = run(OFFICE, ['read', 'ns-doc.docx'], work, 20_000)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('docx: 30000 paragraphs')
+  })
+
+  it('refuses ids inside a part that name no relationship, and read lists them as package problems', () => {
+    ok(run(OFFICE, ['unpack', 'book.xlsx', 'rid-book'], work))
+    const workbook = join(work, 'rid-book', 'xl', 'workbook.xml')
+    writeFileSync(workbook, readFileSync(workbook, 'utf8').replace('r:id="rId1"', 'r:id="rId99"'))
+    const book = run(OFFICE, ['pack', 'rid-book', 'rid-book.xlsx'], work)
+    expect(book.status).toBe(4)
+    expect(book.stderr).toContain('xl/workbook.xml: r:id rId99 has no relationship in xl/_rels/workbook.xml.rels')
+    expect(existsSync(join(work, 'rid-book.xlsx'))).toBe(false)
+    writeFileSync(join(work, 'rid-book-zipped.xlsx'), zipDirectory(join(work, 'rid-book')))
+    const read = ok(run(OFFICE, ['read', 'rid-book-zipped.xlsx'], work))
+    expect(read).toMatch(/package problems[^]*r:id rId99 has no relationship/)
+    // A slide whose relationship is gone: PowerPoint refuses the file, so pack does.
+    ok(run(OFFICE, ['unpack', 'deck.pptx', 'rid-deck'], work))
+    const slideId = /<p:sldId id="256" r:id="(rId\d+)"/.exec(readFileSync(join(work, 'rid-deck', 'ppt', 'presentation.xml'), 'utf8'))?.[1]
+    expect(slideId).toBeDefined()
+    const rels = join(work, 'rid-deck', 'ppt', '_rels', 'presentation.xml.rels')
+    writeFileSync(rels, readFileSync(rels, 'utf8').replace(new RegExp(`<Relationship Id="${slideId}"[^>]*/>`), ''))
+    const deck = run(OFFICE, ['pack', 'rid-deck', 'rid-deck.pptx'], work)
+    expect(deck.status).toBe(4)
+    expect(deck.stderr).toContain(`ppt/presentation.xml: r:id ${slideId} has no relationship`)
+  })
+
+  it('reads tables through content controls, a text box once, and moved-away text as deleted', () => {
+    ok(run(OFFICE, ['unpack', 'doc.docx', 'wrapped'], work))
+    const run1 = (text: string): string => `<w:r><w:t>${text}</w:t></w:r>`
+    const box = `<w:txbxContent><w:p>${run1('BOX-TEXT')}</w:p></w:txbxContent>`
+    const body = [
+      '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>',
+      `<w:tr><w:tc><w:p>${run1('A1')}</w:p></w:tc><w:tc><w:sdt><w:sdtPr/><w:sdtContent><w:p>${run1('SDT-PARA')}</w:p></w:sdtContent></w:sdt></w:tc></w:tr>`,
+      `<w:sdt><w:sdtPr/><w:sdtContent><w:tr><w:tc><w:p>${run1('SDT-ROW')}</w:p></w:tc><w:customXml w:element="cell"><w:tc><w:p>${run1('CX-CELL')}</w:p></w:tc></w:customXml></w:tr></w:sdtContent></w:sdt>`,
+      '</w:tbl>',
+      // Word writes a text box twice: DrawingML in the Choice, VML in the Fallback.
+      `<w:p>${run1('Anchor')}<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wps:wsp><wps:txbx>${box}</wps:txbx></wps:wsp></w:drawing></mc:Choice>`,
+      `<mc:Fallback><w:pict><v:shape><v:textbox>${box}</v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>`,
+      `<w:p><w:moveFrom w:id="1" w:author="a">${run1('MOVED-AWAY')}</w:moveFrom><w:moveTo w:id="2" w:author="a">${run1('MOVED-HERE')}</w:moveTo></w:p>`,
+    ].join('')
+    const wps = 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape'
+    writeFileSync(join(work, 'wrapped', 'word', 'document.xml'), `<w:document xmlns:w="${W}" xmlns:mc="${MC}" xmlns:wps="${wps}" xmlns:v="urn:schemas-microsoft-com:vml" mc:Ignorable="wps"><w:body>${body}<w:sectPr/></w:body></w:document>`)
+    ok(run(OFFICE, ['pack', 'wrapped', 'wrapped.docx'], work))
+    const text = ok(run(OFFICE, ['read', 'wrapped.docx'], work))
+    for (const line of ['[table: 2 rows x 2 columns]', '| A1 | SDT-PARA |', '| SDT-ROW | CX-CELL |', '[Normal] Anchor\n[text box] [Normal] BOX-TEXT', '[Normal] ~~MOVED-AWAY~~MOVED-HERE']) expect(text).toContain(line)
+    expect(text.split('BOX-TEXT')).toHaveLength(2)
+  })
+
+  it('reads a slide shape wrapped in AlternateContent once', () => {
+    ok(run(OFFICE, ['unpack', 'deck.pptx', 'alt-deck'], work))
+    const slide = join(work, 'alt-deck', 'ppt', 'slides', 'slide1.xml')
+    const xml = readFileSync(slide, 'utf8')
+    const shape = xml.match(/<p:sp>[^]*?<\/p:sp>/g)?.find((sp) => sp.includes('a point'))
+    expect(shape).toBeDefined()
+    const p14 = 'http://schemas.microsoft.com/office/powerpoint/2010/main'
+    writeFileSync(slide, xml.replace(shape!, `<mc:AlternateContent xmlns:mc="${MC}"><mc:Choice xmlns:p14="${p14}" Requires="p14">${shape}</mc:Choice><mc:Fallback>${shape}</mc:Fallback></mc:AlternateContent>`))
+    ok(run(OFFICE, ['pack', 'alt-deck', 'alt-deck.pptx'], work))
+    expect(ok(run(OFFICE, ['read', 'alt-deck.pptx'], work)).split('\u{2022} a point')).toHaveLength(2)
+  })
+
+  it('reads 1904 dates, _xHHHH_ escapes and phonetic runs as Excel shows them, and escapes a literal _xHHHH_ it writes', () => {
+    writeFileSync(join(work, 'escape.json'), JSON.stringify({ sheets: [{ name: 'S', rows: [['A_x0042_B', { formula: '"x"', value: 'C_x0044_D' }]] }] }))
+    ok(run(OFFICE, ['build', 'escape.json', 'escape.xlsx'], work))
+    const built = readFileSync(join(work, 'escape.xlsx'))
+    expect(zipMember(built, 'xl/sharedStrings.xml')).toContain('>A_x005F_x0042_B<')
+    expect(zipMember(built, 'xl/worksheets/sheet1.xml')).toContain('<v>C_x005F_x0044_D</v>')
+    const back = ok(run(OFFICE, ['read', 'escape.xlsx'], work))
+    expect(back).toContain('A1 "A_x0042_B"')
+    expect(back).toContain('B1 ="x" [cached "C_x0044_D"]')
+
+    ok(run(OFFICE, ['unpack', 'book.xlsx', 'excel-book'], work))
+    const workbook = join(work, 'excel-book', 'xl', 'workbook.xml')
+    writeFileSync(workbook, readFileSync(workbook, 'utf8').replace('<bookViews>', '<workbookPr date1904="1"/><bookViews>'))
+    const notes = join(work, 'excel-book', 'xl', 'worksheets', 'sheet2.xml')
+    const cells = '<c r="B1" t="inlineStr"><is><t>TAB_x0009_HERE</t></is></c><c r="C1" t="inlineStr"><is><r><t>BASE</t></r><rPh sb="0" eb="4"><t>RUBY</t></rPh></is></c>'
+    writeFileSync(notes, readFileSync(notes, 'utf8').replace('</row>', `${cells}</row>`))
+    ok(run(OFFICE, ['pack', 'excel-book', 'excel-book.xlsx'], work))
+    const read = ok(run(OFFICE, ['read', 'excel-book.xlsx'], work))
+    for (const line of ['1904 date system', 'C2 46313 (= 2030-10-19)', 'B1 "TAB\\tHERE"', 'C1 "BASE"']) expect(read).toContain(line)
+    expect(read).not.toContain('RUBY')
+  })
+
+  it('re-indents a part without touching mixed content', () => {
+    ok(run(OFFICE, ['unpack', 'doc.docx', 'mixed'], work))
+    const mixed = '<root><a>keep<b/><c/>tail</a><d><e/><f/>x</d></root>'
+    mkdirSync(join(work, 'mixed', 'customXml'))
+    writeFileSync(join(work, 'mixed', 'customXml', 'item1.xml'), mixed)
+    ok(run(OFFICE, ['pack', 'mixed', 'mixed.docx'], work))
+    ok(run(OFFICE, ['unpack', 'mixed.docx', 'mixed-again'], work))
+    const again = readFileSync(join(work, 'mixed-again', 'customXml', 'item1.xml'), 'utf8')
+    expect(again).toBe('<root>\n  <a>keep<b/><c/>tail</a>\n  <d><e/><f/>x</d>\n</root>')
+  })
+
+  it('refuses a link at the output path, dangling into the skill, with and without --force', () => {
+    ok(run(OFFICE, ['build', 'doc.json', 'linked-source.docx'], work))
+    ok(run(OFFICE, ['unpack', 'linked-source.docx', 'linked-parts'], work))
+    const cases = [
+      { link: 'linked-build.docx', kind: 'file', args: (out: string) => ['build', 'doc.json', out] },
+      { link: 'linked-pack.docx', kind: 'file', args: (out: string) => ['pack', 'linked-parts', out] },
+      { link: 'linked-unpack', kind: 'dir', args: (out: string) => ['unpack', 'linked-source.docx', out] },
+    ] as const
+    for (const { link, kind, args } of cases) {
+      for (const force of [[], ['--force']]) {
+        const target = join(officeDir, `planted-${link}`)
+        const path = join(work, link)
+        danglingLink(target, path, kind)
+        try {
+          const result = run(OFFICE, [...args(link), ...force], work)
+          expect({ status: result.status, link: result.stderr.includes('symbolic link') }, `${link} ${force.join('')}`).toEqual({ status: 5, link: true })
+          expect(existsSync(target), target).toBe(false)
+        } finally {
+          rmSync(target, { recursive: true, force: true })
+          if (lstatSync(path, { throwIfNoEntry: false })) unlinkSync(path)
+        }
+      }
+    }
   })
 })
 
@@ -522,6 +783,8 @@ describe('pdf.mjs', () => {
     expect(json(run(PDF, ['info', 'out.pdf'], work))).toMatchObject({ title, producer: 'MiniDSH pdf.mjs' })
     ok(run(PDF, ['build', 'spec.json', 'again.pdf'], work))
     expect(readFileSync(join(work, 'again.pdf')).equals(readFileSync(join(work, 'out.pdf')))).toBe(true)
+    // Equal bytes from two builds a moment apart would not show a clock reading; its absence does.
+    expect(readFileSync(join(work, 'out.pdf')).toString('latin1')).not.toMatch(/\/(CreationDate|ModDate)\b/)
   })
 
   it('reads a Markdown spec with a BOM, and refuses text outside WinAnsi with the browser route named', () => {
@@ -651,5 +914,120 @@ describe('pdf.mjs', () => {
     writeFileSync(join(work, 'spaces.pdf'), pdf, 'latin1')
     const page = readPages('spaces.pdf', work).text[0]
     expect(page?.note).toBe('only blank characters on this page')
+  })
+
+  const pdfStream = (dict: string, data: string): string => `<< ${dict} /Length ${data.length} >>\nstream\n${data}\nendstream`
+  const CATALOG = '<< /Type /Catalog /Pages 2 0 R >>'
+  const pageObject = (resources: string): string => `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources ${resources} /Contents 4 0 R >>`
+  const HELVETICA_FONT = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'
+
+  /** A classic-xref PDF from object bodies, numbered from 1 in order. */
+  function simplePdf(objects: readonly string[]): Buffer {
+    let pdf = '%PDF-1.4\n'
+    const offsets: number[] = []
+    objects.forEach((body, i) => {
+      offsets.push(pdf.length)
+      pdf += `${i + 1} 0 obj\n${body}\nendobj\n`
+    })
+    const xref = pdf.length
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+    return Buffer.from(pdf, 'latin1')
+  }
+
+  /** One page: catalog 1, pages 2, page 3, its content 4, then `rest` from 5. */
+  const onePage = (resources: string, content: string, ...rest: string[]): Buffer => simplePdf([CATALOG, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', pageObject(resources), pdfStream('', content), ...rest])
+
+  /**
+   * Arrays recurse through `valueFrom`, and the depth check sat one level up
+   * in `parseValue`: about 12,000 nested `[` overflowed the stack into a crash
+   * (exit 1, a stack trace) instead of the invalid-input refusal (review, S19).
+   */
+  it('treats objects nested too deeply as unreadable instead of overflowing the stack', () => {
+    const deep = `${'['.repeat(20_000)}${']'.repeat(20_000)}`
+    writeFileSync(join(work, 'deep.pdf'), simplePdf([CATALOG, `<< /Type /Pages /Kids [3 0 R] /Count 1 /Deep ${deep} >>`, pageObject('<< >>'), pdfStream('', 'BT ET')]))
+    const info = run(PDF, ['info', 'deep.pdf'], work)
+    expect(info.stderr).not.toMatch(/RangeError|Maximum call stack|at valueFrom/)
+    // The pages object is refused as nested too deeply, so the reader's own
+    // recovery treats it as unreadable: a document with no readable pages.
+    expect(info.status, info.stderr).toBe(0)
+    expect(JSON.parse(info.stdout)).toMatchObject({ pages: 0 })
+  })
+
+  it('lays words out by position: a form matrix with a tiny term, Times without widths, and pdfTeX-tight spaces', () => {
+    const resources = '<< /Font << /F1 5 0 R /F2 6 0 R >> /XObject << /X 7 0 R >> >>'
+    // Times widths: The = 18.66 pt at 12 pt, minimum = 46.68 pt; each word then a 3 pt (0.25 em) space.
+    const times = 'BT /F2 12 Tf 1 0 0 1 72 600 Tm (The) Tj 1 0 0 1 93.66 600 Tm (minimum) Tj 1 0 0 1 143.34 600 Tm (illumination) Tj ET'
+    const tight = 'BT /F1 12 Tf 72 560 Td [(The) -190 (quick) -333 (brown) -190 (fox)] TJ ET'
+    // 1e-11 printed by JavaScript is "1e-11", which a content stream cannot say.
+    const form = pdfStream(`/Type /XObject /Subtype /Form /BBox [0 0 612 792] /Matrix [1 0.00000000001 0 1 0 0] /Resources ${resources}`, 'BT /F1 12 Tf 72 700 Td (LINE-ONE) Tj 0 -20 Td (LINE-TWO) Tj ET')
+    writeFileSync(join(work, 'layout.pdf'), onePage(resources, `${times}\n${tight}\n/X Do`, HELVETICA_FONT, '<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>', form))
+    const text = readPages('layout.pdf', work).text[0]?.text ?? ''
+    expect(text, 'Times without /Widths').toContain('The minimum illumination')
+    expect(text, 'glue shrunk to 0.19 em').toContain('The quick brown fox')
+    expect(text, 'the form matrix').toContain('LINE-ONE\nLINE-TWO')
+  })
+
+  it('stops a page whose forms draw themselves or each other without end, and says so', () => {
+    // 643 bytes: a form drawing itself four times reached 4^12 drawings before the depth limit.
+    writeFileSync(join(work, 'self-form.pdf'), onePage('<< /XObject << /X 5 0 R >> >>', '/X Do', pdfStream('/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /X 5 0 R >> >>', '/X Do /X Do /X Do /X Do')))
+    const self = run(PDF, ['read', 'self-form.pdf', '--json'], work, 12_000)
+    expect(self.status).toBe(0)
+    expect((JSON.parse(self.stdout) as { text: PageText[] }).text[0]?.note).toContain('a form XObject draws itself')
+    // Eight distinct forms, each drawing the next ten times: 10^8 drawings, none of a form inside itself.
+    const forms = Array.from({ length: 8 }, (_, k) => pdfStream(`/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /N ${6 + k} 0 R >> /Font << /F1 13 0 R >> >>`, k < 7 ? '/N Do '.repeat(10) : 'BT /F1 1 Tf (x) Tj ET'))
+    writeFileSync(join(work, 'form-chain.pdf'), onePage('<< /XObject << /N 5 0 R >> >>', '/N Do', ...forms, HELVETICA_FONT))
+    const chain = run(PDF, ['read', 'form-chain.pdf', '--json'], work, 12_000)
+    expect(chain.status).toBe(0)
+    expect((JSON.parse(chain.stdout) as { text: PageText[] }).text[0]?.note).toContain('drawing stopped after')
+  })
+
+  it('skips a stream that decodes past 64 MiB, and stops decoding at the document budget, with notes', () => {
+    const font = '<< /Font << /F1 5 0 R >> >>'
+    const bomb = deflateSync(Buffer.concat([Buffer.from('BT /F1 12 Tf 72 700 Td (BOMB) Tj ET\n'), Buffer.alloc(70 * 1024 * 1024, 0x20)]))
+    writeFileSync(join(work, 'bomb.pdf'), simplePdf([CATALOG, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', pageObject(font), pdfStream('/Filter /FlateDecode', bomb.toString('latin1')), HELVETICA_FONT]))
+    expect(readPages('bomb.pdf', work).text[0]?.note).toBe('a stream decodes to more than 64 MiB; it was skipped')
+    // Five pages share one 60 MiB stream; contents are decoded per page, so the fifth finds the 256 MiB spent.
+    const big = deflateSync(Buffer.concat([Buffer.from('BT /F1 12 Tf 72 700 Td (BIG) Tj ET\n'), Buffer.alloc(60 * 1024 * 1024, 0x20)]))
+    const pages = [3, 6, 7, 8, 9]
+    writeFileSync(join(work, 'budget.pdf'), simplePdf([CATALOG, `<< /Type /Pages /Kids [${pages.map((n) => `${n} 0 R`).join(' ')}] /Count 5 >>`, pageObject(font), pdfStream('/Filter /FlateDecode', big.toString('latin1')), HELVETICA_FONT, ...pages.slice(1).map(() => pageObject(font))]))
+    const read = readPages('budget.pdf', work)
+    expect(read.text.slice(0, 4).map((p) => p.text)).toEqual(['BIG', 'BIG', 'BIG', 'BIG'])
+    expect(read.text[4]?.note).toBe("the document's 256 MiB decoding budget is spent; a stream was skipped")
+  })
+
+  it('repairs a file of thousands of streams with wrong lengths in time linear in its size', () => {
+    let pdf = `%PDF-1.4\n1 0 obj ${CATALOG} endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj ${pageObject('<< /Font << /F1 5 0 R >> >>')} endobj\n`
+    pdf += `4 0 obj << /Length 999 >> stream\nBT /F1 12 Tf 72 700 Td (SCAN-OK) Tj ET\nendstream endobj\n5 0 obj ${HELVETICA_FONT} endobj\n`
+    // No xref, and 40,000 streams whose /Length is wrong and whose endstream never comes: each used to search to the end, twice.
+    for (let i = 6; i < 40000; i++) pdf += `${i} 0 obj << /Length 0 >> stream\n${'x'.repeat(60)}\n`
+    writeFileSync(join(work, 'no-endstream.pdf'), pdf, 'latin1')
+    const result = run(PDF, ['read', 'no-endstream.pdf', '--json'], work, 15_000)
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ repaired: true, text: [{ page: 1, text: 'SCAN-OK' }] })
+  })
+
+  it('builds numbered Markdown items with their numbers, drops emphasis markers, and prints a link as text (url)', () => {
+    writeFileSync(join(work, 'steps.md'), 'Steps to take:\n1. Open *the* file\n2. Press **Save**\n\nSee [the guide](https://example.com/guide) and _notes_ in snake_case_name.\n\n3) Third, after a gap\n')
+    ok(run(PDF, ['build', 'steps.md', 'steps.pdf'], work))
+    const text = readPages('steps.pdf', work).text[0]?.text ?? ''
+    expect(text).toContain('Steps to take:\n1. Open the file\n2. Press Save')
+    expect(text).toContain('See the guide (https://example.com/guide) and notes in snake_case_name.')
+    expect(text).toContain('3. Third, after a gap')
+  })
+
+  it('refuses a link at the output path, dangling into the skill, with and without --force', () => {
+    for (const force of [[], ['--force']]) {
+      const target = join(pdfDir, 'planted.pdf')
+      const path = join(work, 'linked.pdf')
+      danglingLink(target, path, 'file')
+      try {
+        const result = run(PDF, ['build', 'spec.json', 'linked.pdf', ...force], work)
+        expect({ status: result.status, link: result.stderr.includes('symbolic link') }, force.join('')).toEqual({ status: 5, link: true })
+        expect(existsSync(target)).toBe(false)
+      } finally {
+        rmSync(target, { recursive: true, force: true })
+        if (lstatSync(path, { throwIfNoEntry: false })) unlinkSync(path)
+      }
+    }
   })
 })

@@ -14,7 +14,7 @@
  * never inside its own skill directory, never over a file without --force;
  * no prompts, no processes, no network, no temp directory.
  */
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, delimiter, dirname, extname, join, resolve, sep } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -31,12 +31,14 @@ const HELP = `pdf.mjs: read PDFs and write simple ones with Node alone.
   info <file.pdf>                       JSON: pages, version, encryption, title, producer
   read <file.pdf> [--pages 1-3,5] [--max-chars N] [--json]
                                         the text of each page, in reading order; says when a page has no text
-  build <spec.json|spec.md> <out.pdf>   a plain document in Helvetica: headings, paragraphs, bullets, page numbers.
+  build <spec.json|spec.md> <out.pdf>   a plain document in Helvetica: headings, paragraphs, lists, page numbers.
                                         Latin text only (WinAnsi); anything else: write HTML and print it with a
                                         probed Chrome/Edge (see the skill)
 
-  spec.json: {"title"?, "pageSize"?: "A4"|"Letter", "blocks": [{"heading": "..", "level"?: 1|2} | {"paragraph": ".."} | {"bullets": [".."]}]}
-  spec.md:   # heading, ## heading, paragraphs separated by blank lines, "- " bullets
+  spec.json: {"title"?, "pageSize"?: "A4"|"Letter", "blocks": [{"heading": "..", "level"?: 1|2} | {"paragraph": ".."} |
+             {"bullets": [".."]} | {"numbered": [".."], "start"?: 1}]}
+  spec.md:   # heading, ## heading, paragraphs separated by blank lines, "- " bullets, "1. " numbered items;
+             *emphasis* markers are dropped, [text](url) prints as "text (url)"
 
   --force       overwrite an existing <out>
   --max-chars   read: maximum characters printed (default ${DEFAULT_MAX_CHARS}); the output says when it was cut
@@ -101,6 +103,18 @@ function realish(path) {
   }
 }
 
+/** The entry at a path itself, a link included; undefined when nothing is there. */
+function entryAt(path) {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+    throw error
+  }
+}
+
+const linkRefusal = (out) => fail(EXIT.refused, `${out} is a symbolic link; refusing to write through it (name a new path)`)
+
 function guardOutput(out, force) {
   const abs = resolve(out)
   const skill = [SKILL_DIR, realish(SKILL_DIR)]
@@ -108,11 +122,33 @@ function guardOutput(out, force) {
     if (skill.some((dir) => inside(candidate, dir))) throw fail(EXIT.refused, `refusing to write ${out}: it is inside this skill's directory ${SKILL_DIR}; write outputs in your workspace`)
   }
   if (!existsSync(dirname(abs))) throw fail(EXIT.refused, `the directory ${dirname(abs)} does not exist; create it first`)
-  if (existsSync(abs)) {
-    if (statSync(abs).isDirectory()) throw fail(EXIT.refused, `${out} is a directory`)
+  // A link is refused whatever it points at: writing through a dangling one creates its target, wherever that is.
+  const existing = entryAt(abs)
+  if (existing?.isSymbolicLink()) throw linkRefusal(out)
+  if (existing) {
+    if (existing.isDirectory()) throw fail(EXIT.refused, `${out} is a directory`)
     if (!force) throw fail(EXIT.refused, `${out} already exists; pass --force to overwrite it`)
   }
   return abs
+}
+
+/**
+ * Creates the output, never opening an existing path: --force removes the old
+ * file first, and 'wx' then refuses anything that appeared in between, a link
+ * included, instead of following it.
+ */
+function write(abs, out, bytes, force) {
+  try {
+    if (force) {
+      const existing = entryAt(abs)
+      if (existing?.isSymbolicLink()) throw linkRefusal(out)
+      if (existing?.isFile()) unlinkSync(abs)
+    }
+    writeFileSync(abs, bytes, { flag: 'wx' })
+  } catch (error) {
+    if (error?.code === 'EEXIST') throw fail(EXIT.refused, `${out} already exists; pass --force to overwrite it`)
+    throw error
+  }
 }
 
 function readInput(path, what) {
@@ -232,15 +268,18 @@ function read(file, { pages: pagesFlag, maxChars, json }) {
       truncated = true
       break
     }
-    const { text, glyphs, unmapped } = pageText(doc, all[number - 1])
+    const { text, glyphs, unmapped, notes: skipped } = pageText(doc, all[number - 1])
     let note
-    if (glyphs === 0) note = 'no extractable text on this page (it may be a scanned image or drawn shapes)'
+    // What the reader skipped explains an empty page better than a guess at scanning does.
+    if (glyphs === 0 && skipped.length > 0) note = undefined
+    else if (glyphs === 0) note = 'no extractable text on this page (it may be a scanned image or drawn shapes)'
     else if (unmapped === glyphs) note = 'text is drawn with a font that has no Unicode map; it cannot be extracted (OCR would be needed)'
     // A page that draws only blank glyphs — Word puts a space on the empty page
     // after a page break — has nothing to extract; saying "OCR would be needed"
     // there would send a reader looking for text that does not exist.
     else if (text.replace(/[\s\u{FFFD}]/gu, '').length === 0) note = unmapped > 0 ? `only blank characters on this page, and ${unmapped} glyphs with no Unicode map` : 'only blank characters on this page'
     else if (unmapped > 0) note = `${unmapped} of ${glyphs} glyphs have no Unicode map (shown as \u{FFFD})`
+    if (skipped.length > 0) note = [note, ...skipped].filter(Boolean).join('; ')
     let shown = text
     if (used + shown.length > maxChars) {
       shown = shown.slice(0, maxChars - used)
@@ -326,37 +365,58 @@ function wrap(bytes, size, bold, width) {
   return lines
 }
 
+/**
+ * Inline Markdown as one font can print it: emphasis markers dropped rather
+ * than printed, a link as "text (url)", code spans kept literally.
+ */
+function plainInline(text) {
+  return text
+    .split(/(`[^`]+`)/)
+    .map((piece, i) => {
+      if (i % 2 === 1) return piece.slice(1, -1)
+      return piece
+        .replace(/!?\[([^\]]*)\]\(\s*<?([^)\s>]*)>?(?:\s+"[^"]*")?\s*\)/g, (_, label, url) => (label && label !== url ? `${label} (${url})` : url || label))
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/__(.+?)__/g, '$1')
+        .replace(/\*(?=\S)([^*]*?\S)\*/g, '$1')
+        .replace(/(^|\W)_(?=\S)([^_]*?\S)_(?!\w)/g, '$1$2')
+    })
+    .join('')
+}
+
 function parseMarkdown(text) {
   const blocks = []
   let paragraph = []
-  let bullets = []
+  let list
   const flush = () => {
     if (paragraph.length) blocks.push({ paragraph: paragraph.join(' ') })
-    if (bullets.length) blocks.push({ bullets })
+    if (list) blocks.push(list.numbered ? { numbered: list.items, start: list.start } : { bullets: list.items })
     paragraph = []
-    bullets = []
+    list = undefined
   }
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim()
     const heading = /^(#{1,6})\s+(.*)$/.exec(line)
     const bullet = /^[-*]\s+(.*)$/.exec(line)
+    let number = /^(\d{1,9})[.)]\s+(.*)$/.exec(line)
+    // As in CommonMark, only "1." starts a list inside a paragraph; "2024. was a year" continues it.
+    if (number && paragraph.length > 0 && Number(number[1]) !== 1) number = null
     if (line.length === 0) flush()
     else if (heading) {
       flush()
       blocks.push({ heading: heading[2].replace(/\s+#+$/, ''), level: heading[1].length === 1 ? 1 : 2 })
-    } else if (bullet) {
-      if (paragraph.length) flush()
-      bullets.push(bullet[1])
-    } else if (bullets.length && /^\s/.test(raw)) bullets[bullets.length - 1] += ` ${line}`
+    } else if (bullet || number) {
+      if (paragraph.length || (list && list.numbered !== Boolean(number))) flush()
+      list ??= { numbered: Boolean(number), start: number ? Number(number[1]) : undefined, items: [] }
+      list.items.push(number ? number[2] : bullet[1])
+    } else if (list && /^\s/.test(raw)) list.items[list.items.length - 1] += ` ${line}`
     else {
-      if (bullets.length) flush()
+      if (list) flush()
       paragraph.push(line)
     }
   }
   flush()
-  // Inline emphasis cannot be shown in one font per line; drop the markers rather than print them.
-  const plain = (s) => s.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1').replace(/`([^`]+)`/g, '$1')
-  return blocks.map((b) => (b.paragraph ? { paragraph: plain(b.paragraph) } : b.bullets ? { bullets: b.bullets.map(plain) } : { ...b, heading: plain(b.heading) }))
+  return blocks.map((b) => (b.paragraph ? { paragraph: plainInline(b.paragraph) } : b.bullets ? { bullets: b.bullets.map(plainInline) } : b.numbered ? { ...b, numbered: b.numbered.map(plainInline) } : { ...b, heading: plainInline(b.heading) }))
 }
 
 function loadSpec(path) {
@@ -403,13 +463,16 @@ function build(specPath, out, force) {
       if (block.level !== undefined && block.level !== 1 && block.level !== 2) throw fail(EXIT.invalid, `${at}.level: expected 1 or 2`)
       items.push({ style: block.level === 2 ? STYLE.h2 : STYLE.h1, text: winAnsi(block.heading, `${at}.heading`) })
     } else if (typeof block.paragraph === 'string') items.push({ style: STYLE.p, text: winAnsi(block.paragraph, `${at}.paragraph`) })
-    else if (Array.isArray(block.bullets)) {
-      block.bullets.forEach((b, k) => {
-        if (typeof b !== 'string') throw fail(EXIT.invalid, `${at}.bullets[${k}]: expected a string`)
-        items.push({ style: STYLE.li, text: winAnsi(b, `${at}.bullets[${k}]`), bullet: true })
+    else if (Array.isArray(block.bullets) || Array.isArray(block.numbered)) {
+      const key = Array.isArray(block.bullets) ? 'bullets' : 'numbered'
+      const start = block.start ?? 1
+      if (key === 'numbered' && !(Number.isInteger(start) && start >= 0)) throw fail(EXIT.invalid, `${at}.start: expected a whole number`)
+      block[key].forEach((b, k) => {
+        if (typeof b !== 'string') throw fail(EXIT.invalid, `${at}.${key}[${k}]: expected a string`)
+        items.push({ style: STYLE.li, text: winAnsi(b, `${at}.${key}[${k}]`), marker: key === 'bullets' ? '\x95' : `${start + k}.` })
       })
-      items.at(-1).style = { ...STYLE.li, after: 8 }
-    } else throw fail(EXIT.invalid, `${at}: a block is {"heading"}, {"paragraph"} or {"bullets"}`)
+      if (block[key].length > 0) items.at(-1).style = { ...STYLE.li, after: 8 }
+    } else throw fail(EXIT.invalid, `${at}: a block is {"heading"}, {"paragraph"}, {"bullets"} or {"numbered"}`)
   })
   const abs = guardOutput(out, force)
   const pages = [[]]
@@ -417,11 +480,11 @@ function build(specPath, out, force) {
   const bottom = MARGIN + 24
   for (const item of items) {
     const { size, bold, before, after } = item.style
-    const indent = item.bullet ? 18 : 0
+    const indent = item.marker ? 18 : 0
     const lines = wrap(item.text, size, bold, width - indent)
     const leading = size * 1.35
     // A heading keeps at least two following lines with it.
-    const need = before + leading * Math.min(lines.length, item.style === STYLE.p || item.bullet ? 2 : 1) + (bold ? 2 * 11 * 1.35 : 0)
+    const need = before + leading * Math.min(lines.length, item.style === STYLE.p || item.marker ? 2 : 1) + (bold ? 2 * 11 * 1.35 : 0)
     if (y - need < bottom && pages.at(-1).length > 0) {
       pages.push([])
       y = pageH - MARGIN
@@ -432,7 +495,8 @@ function build(specPath, out, force) {
         y = pageH - MARGIN
       }
       y -= leading
-      if (item.bullet && k === 0) pages.at(-1).push({ x: MARGIN + 4, y, size, bold, text: '\x95' })
+      // A bullet sits at the left; a number ends just before the text, whatever its width.
+      if (item.marker && k === 0) pages.at(-1).push({ x: item.marker === '\x95' ? MARGIN + 4 : MARGIN + indent - 4 - textWidth(item.marker, size, bold), y, size, bold, text: item.marker })
       pages.at(-1).push({ x: MARGIN + indent, y, size, bold, text: line })
     })
     y -= after
@@ -467,7 +531,7 @@ function build(specPath, out, force) {
   pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`
   pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R /Info 5 0 R >>\nstartxref\n${xref}\n%%EOF\n`
   const bytes = Buffer.from(pdf, 'latin1')
-  writeFileSync(abs, bytes, { flag: force ? 'w' : 'wx' })
+  write(abs, out, bytes, force)
   print({ wrote: abs, pages: pages.length, bytes: bytes.length, next: `node "${SCRIPT}" read "${out}"` })
 }
 

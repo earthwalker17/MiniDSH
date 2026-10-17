@@ -13,12 +13,12 @@
  * Commands live here; the ZIP/XML/package layer is `ooxml.mjs`, the builders
  * `build.mjs`, the readers `read.mjs`.
  */
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, delimiter, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { buildDocx, buildPptx, buildXlsx, GENERATOR } from './build.mjs'
-import { checkPackage, CliError, EXIT, fail, familyOf, indentXml, MAIN_TYPES, parseXml, readZip, unsafeMemberName, writeZip } from './ooxml.mjs'
+import { checkPackage, CliError, EXIT, fail, familyOf, indentXml, MAIN_TYPES, PackageMembers, parseXml, readZip, unsafeMemberName, writeZip } from './ooxml.mjs'
 import { readPackage } from './read.mjs'
 
 const SCRIPT = fileURLToPath(import.meta.url)
@@ -112,6 +112,18 @@ function realish(path) {
   }
 }
 
+/** The entry at a path itself, a link included; undefined when nothing is there. */
+function entryAt(path) {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+    throw error
+  }
+}
+
+const linkRefusal = (out) => fail(EXIT.refused, `${out} is a symbolic link; refusing to write through it (name a new path)`)
+
 function guardOutput(out, { force, directory = false }) {
   const abs = resolve(out)
   const skill = [SKILL_DIR, realish(SKILL_DIR)]
@@ -119,12 +131,15 @@ function guardOutput(out, { force, directory = false }) {
     if (skill.some((dir) => inside(candidate, dir) || inside(dir, candidate))) throw fail(EXIT.refused, `refusing to write ${out}: it is inside (or contains) this skill's directory ${SKILL_DIR}; write outputs in your workspace`)
   }
   if (!existsSync(dirname(abs))) throw fail(EXIT.refused, `the directory ${dirname(abs)} does not exist; create it first`)
+  // A link is refused whatever it points at: writing through a dangling one creates its target, wherever that is.
+  const existing = entryAt(abs)
+  if (existing?.isSymbolicLink()) throw linkRefusal(out)
   if (directory) {
-    if (existsSync(abs) && (!statSync(abs).isDirectory() || readdirSync(abs).length > 0)) throw fail(EXIT.refused, `${out} exists and is not an empty directory; unpack into a new directory`)
+    if (existing && (!existing.isDirectory() || readdirSync(abs).length > 0)) throw fail(EXIT.refused, `${out} exists and is not an empty directory; unpack into a new directory`)
     return abs
   }
-  if (existsSync(abs)) {
-    if (statSync(abs).isDirectory()) throw fail(EXIT.refused, `${out} is a directory`)
+  if (existing) {
+    if (existing.isDirectory()) throw fail(EXIT.refused, `${out} is a directory`)
     if (!force) throw fail(EXIT.refused, `${out} already exists; pass --force to overwrite it`)
   }
   return abs
@@ -140,8 +155,23 @@ function readInput(path, what) {
 
 const extOf = (path) => extname(path).slice(1).toLowerCase()
 
-function write(abs, bytes, force) {
-  writeFileSync(abs, bytes, { flag: force ? 'w' : 'wx' })
+/**
+ * Creates the output, never opening an existing path: --force removes the old
+ * file first, and 'wx' then refuses anything that appeared in between, a link
+ * included, instead of following it.
+ */
+function write(abs, out, bytes, force) {
+  try {
+    if (force) {
+      const existing = entryAt(abs)
+      if (existing?.isSymbolicLink()) throw linkRefusal(out)
+      if (existing?.isFile()) unlinkSync(abs)
+    }
+    writeFileSync(abs, bytes, { flag: 'wx' })
+  } catch (error) {
+    if (error?.code === 'EEXIST') throw fail(EXIT.refused, `${out} already exists; pass --force to overwrite it`)
+    throw error
+  }
 }
 
 const print = (value) => process.stdout.write(`${typeof value === 'string' ? value : JSON.stringify(value, null, 2)}\n`)
@@ -215,18 +245,18 @@ function build(specPath, out, force) {
   const { problems } = checkPackage(new Map(entries.map((e) => [e.name, e.data])), ext)
   if (problems.length > 0) throw fail(EXIT.internal, `internal error: the built package fails its own checks:\n${problems.join('\n')}`)
   const bytes = writeZip(entries)
-  write(abs, bytes, force)
+  write(abs, out, bytes, force)
   print({ wrote: abs, format: ext, parts: entries.length, bytes: bytes.length, generator: GENERATOR, warnings: entries.warnings ?? [], next: `${SELF} read "${out}"` })
 }
 
 function openPackage(file) {
   const entries = readZip(readInput(file, 'file'), file)
-  const members = new Map()
+  const members = new PackageMembers()
   const duplicates = []
   for (const entry of entries) {
     if (entry.name.endsWith('/')) continue
     if (members.has(entry.name)) duplicates.push(entry.name)
-    members.set(entry.name, entry.read())
+    members.set(entry.name, entry)
   }
   return { members, duplicates }
 }
@@ -255,6 +285,13 @@ function unpack(file, dir, raw) {
     const lower = name.toLowerCase()
     if (seen.has(lower)) throw fail(EXIT.invalid, `${file}: members "${seen.get(lower)}" and "${name}" differ only in case`)
     seen.set(lower, name)
+  }
+  // A member named like another's directory ("a" beside "a/b") cannot be written beside it.
+  for (const lower of seen.keys()) {
+    for (let slash = lower.indexOf('/'); slash >= 0; slash = lower.indexOf('/', slash + 1)) {
+      const parent = seen.get(lower.slice(0, slash))
+      if (parent !== undefined) throw fail(EXIT.invalid, `${file}: member "${parent}" is also the directory of "${seen.get(lower)}"`)
+    }
   }
   const abs = guardOutput(dir, { force: false, directory: true })
   mkdirSync(abs, { recursive: true })
@@ -308,7 +345,7 @@ function pack(dir, out, force) {
   // [Content_Types].xml first, then every other member once, sorted.
   const names = ['[Content_Types].xml', ...[...members.keys()].filter((n) => n !== '[Content_Types].xml').toSorted()]
   const bytes = writeZip(names.map((name) => ({ name, data: members.get(name) })))
-  write(abs, bytes, force)
+  write(abs, out, bytes, force)
   print({ wrote: abs, format: ext, parts: names.length, bytes: bytes.length, next: `${SELF} read "${out}"` })
 }
 

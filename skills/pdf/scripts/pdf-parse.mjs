@@ -182,12 +182,15 @@ class Lexer {
 
 /** One value from the lexer; `N G R` becomes a Ref. */
 function parseValue(lx, depth = 0) {
-  if (depth > 200) throw fail(EXIT.invalid, 'objects nested too deeply')
   const tok = lx.next()
   return valueFrom(lx, tok, depth)
 }
 
 function valueFrom(lx, tok, depth) {
+  // Here, not in parseValue: arrays and dictionaries recurse through THIS
+  // function, so a check one level up let ~12,000 nested `[` overflow the
+  // stack into a crash instead of a refusal.
+  if (depth > 200) throw fail(EXIT.invalid, 'objects nested too deeply')
   switch (tok.t) {
     case 'num': {
       if (Number.isInteger(tok.v) && tok.v >= 0) {
@@ -240,17 +243,57 @@ function valueFrom(lx, tok, depth) {
 }
 
 // ---------------------------------------------------------------------------
-// Filters
+// Filters. Every decoder stops at a limit: a 200 KB file can inflate to
+// gigabytes, so one stream may decode to at most MAX_STREAM_BYTES and a whole
+// document to MAX_DOCUMENT_BYTES (`PdfDoc.decode` keeps the account).
 
-function inflate(data) {
+const MAX_STREAM_BYTES = 64 * 1024 * 1024
+const MAX_DOCUMENT_BYTES = 256 * 1024 * 1024
+const MIB = 1024 * 1024
+
+/** The error zlib throws past `maxOutputLength`; the hand-written decoders throw the same. */
+const tooLarge = () => Object.assign(new RangeError('decoded data past the limit'), { code: 'ERR_BUFFER_TOO_LARGE' })
+
+/** Output of the byte-at-a-time decoders: Buffer chunks, refused past the limit instead of growing an array to all of memory. */
+class Bytes {
+  constructor(limit) {
+    this.limit = limit
+    this.chunks = []
+    this.chunk = Buffer.allocUnsafe(4096)
+    this.at = 0
+    this.length = 0
+  }
+
+  push(byte) {
+    if (this.length >= this.limit) throw tooLarge()
+    if (this.at === this.chunk.length) {
+      this.chunks.push(this.chunk)
+      this.chunk = Buffer.allocUnsafe(Math.min(this.chunk.length * 2, MIB))
+      this.at = 0
+    }
+    this.chunk[this.at++] = byte
+    this.length++
+  }
+
+  result() {
+    return Buffer.concat([...this.chunks, this.chunk.subarray(0, this.at)])
+  }
+}
+
+function inflate(data, limit) {
+  const rethrowSize = (error) => {
+    if (error?.code === 'ERR_BUFFER_TOO_LARGE') throw error
+  }
   try {
-    return inflateSync(data)
-  } catch {
+    return inflateSync(data, { maxOutputLength: limit })
+  } catch (error) {
+    rethrowSize(error)
     try {
       // A truncated stream still yields what it has.
-      return inflateSync(data, { finishFlush: zlibConstants.Z_SYNC_FLUSH })
-    } catch {
-      return inflateRawSync(data, { finishFlush: zlibConstants.Z_SYNC_FLUSH })
+      return inflateSync(data, { finishFlush: zlibConstants.Z_SYNC_FLUSH, maxOutputLength: limit })
+    } catch (again) {
+      rethrowSize(again)
+      return inflateRawSync(data, { finishFlush: zlibConstants.Z_SYNC_FLUSH, maxOutputLength: limit })
     }
   }
 }
@@ -308,11 +351,11 @@ function asciiHex(data) {
   return Buffer.from(hex, 'hex')
 }
 
-function ascii85(data) {
+function ascii85(data, limit) {
   const text = data.toString('latin1').replace(/\s/g, '').replace(/^<~/, '')
   const end = text.indexOf('~>')
   const body = end >= 0 ? text.slice(0, end) : text
-  const out = []
+  const out = new Bytes(limit)
   let group = []
   const flush = (count) => {
     let value = 0
@@ -321,7 +364,7 @@ function ascii85(data) {
   }
   for (const ch of body) {
     if (ch === 'z' && group.length === 0) {
-      out.push(0, 0, 0, 0)
+      for (let k = 0; k < 4; k++) out.push(0)
       continue
     }
     group.push(ch.charCodeAt(0) - 33)
@@ -331,22 +374,32 @@ function ascii85(data) {
     }
   }
   if (group.length > 0) flush(group.length)
-  return Buffer.from(out)
+  return out.result()
 }
 
-function lzw(data, earlyChange = 1) {
-  const out = []
-  let table = []
-  const reset = () => {
-    table = []
-    for (let i = 0; i < 256; i++) table.push([i])
-    table.push(null, null)
+/** LZW with the table as prefix links, so an entry costs two numbers, not a copy of every byte it spells. */
+function lzw(data, earlyChange, limit) {
+  const out = new Bytes(limit)
+  const prefix = new Int16Array(4096)
+  const suffix = new Uint8Array(4096)
+  const length = new Uint16Array(4096)
+  const first = new Uint8Array(4096)
+  for (let c = 0; c < 256; c++) {
+    prefix[c] = -1
+    suffix[c] = c
+    length[c] = 1
+    first[c] = c
   }
-  reset()
+  const spelled = new Uint8Array(4096)
+  const emit = (code) => {
+    for (let c = code, k = length[code] - 1; k >= 0; k--, c = prefix[c]) spelled[k] = suffix[c]
+    for (let k = 0; k < length[code]; k++) out.push(spelled[k])
+  }
+  let next = 258
   let width = 9
   let bits = 0
   let buffer = 0
-  let previous = null
+  let previous = -1
   for (let i = 0; i < data.length; i++) {
     buffer = (buffer << 8) | data[i]
     bits += 8
@@ -354,27 +407,38 @@ function lzw(data, earlyChange = 1) {
       const code = (buffer >>> (bits - width)) & ((1 << width) - 1)
       bits -= width
       if (code === 256) {
-        reset()
+        next = 258
         width = 9
-        previous = null
+        previous = -1
         continue
       }
-      if (code === 257) return Buffer.from(out)
-      let entry
-      if (code < table.length && table[code]) entry = table[code]
-      else if (previous) entry = [...previous, previous[0]]
-      else return Buffer.from(out)
-      out.push(...entry)
-      if (previous) table.push([...previous, entry[0]])
-      previous = entry
-      if (table.length + earlyChange >= 1 << width && width < 12) width++
+      if (code === 257) return out.result()
+      let head
+      if (code < next) {
+        emit(code)
+        head = first[code]
+      } else if (code === next && previous >= 0) {
+        // The code being defined right now: the previous string and its own first byte.
+        head = first[previous]
+        emit(previous)
+        out.push(head)
+      } else return out.result()
+      if (previous >= 0 && next < 4096) {
+        prefix[next] = previous
+        suffix[next] = head
+        length[next] = length[previous] + 1
+        first[next] = first[previous]
+        next++
+      }
+      previous = code
+      if (next + earlyChange >= 1 << width && width < 12) width++
     }
   }
-  return Buffer.from(out)
+  return out.result()
 }
 
-function runLength(data) {
-  const out = []
+function runLength(data, limit) {
+  const out = new Bytes(limit)
   for (let i = 0; i < data.length; ) {
     const n = data[i++]
     if (n === 128) break
@@ -385,7 +449,7 @@ function runLength(data) {
       for (let k = 0; k < 257 - n; k++) out.push(byte)
     }
   }
-  return Buffer.from(out)
+  return out.result()
 }
 
 // ---------------------------------------------------------------------------
@@ -401,8 +465,13 @@ export class PdfDoc {
     this.decoded = new WeakMap()
     this.objectStreams = new Map()
     this.scanned = undefined
+    this.endstreams = undefined
     this.xrefKind = 'none'
     this.repaired = false
+    /** Decoded bytes this document may still produce; see MAX_DOCUMENT_BYTES. */
+    this.budget = MAX_DOCUMENT_BYTES
+    /** What was skipped and why, in order; `pageText` reports the ones its page raised. */
+    this.notes = []
     const header = /%PDF-(\d\.\d)/.exec(this.s.slice(0, 1024))
     if (!header) throw fail(EXIT.invalid, 'not a PDF (no %PDF- header in the first 1024 bytes)')
     this.version = header[1]
@@ -572,12 +641,32 @@ export class PdfDoc {
     let end = typeof declared === 'number' ? start + declared : -1
     if (end < start || end > this.s.length || !/^\s*endstream/.test(this.s.slice(end, end + 30))) {
       // A wrong /Length is common; the keyword is the truth.
-      const found = this.s.indexOf('endstream', start)
+      const found = this.endstreamFrom(start)
       end = found < 0 ? this.s.length : found
       if (this.s[end - 1] === '\n') end--
       if (this.s[end - 1] === '\r') end--
     }
     return new Stream(value, this.buf.subarray(start, end))
+  }
+
+  /**
+   * The first `endstream` at or after an offset. Every offset is found once and
+   * searched by halving: a damaged file with thousands of wrong /Lengths would
+   * otherwise search to its end once per stream, and the repair reads each twice.
+   */
+  endstreamFrom(start) {
+    if (!this.endstreams) {
+      this.endstreams = []
+      for (let at = this.s.indexOf('endstream'); at >= 0; at = this.s.indexOf('endstream', at + 9)) this.endstreams.push(at)
+    }
+    let lo = 0
+    let hi = this.endstreams.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (this.endstreams[mid] < start) lo = mid + 1
+      else hi = mid
+    }
+    return lo < this.endstreams.length ? this.endstreams[lo] : -1
   }
 
   objectStream(num, stream) {
@@ -637,31 +726,44 @@ export class PdfDoc {
     return v instanceof Ref ? null : v
   }
 
-  /** Decoded stream bytes, or undefined for an image codec this reader has no use for. */
-  decode(stream) {
+  /**
+   * Decoded stream bytes, or undefined for an image codec this reader has no
+   * use for and for a stream past the limits (with a note saying so). `keep`
+   * caches the result: page contents are decoded once and let go, so a long
+   * document does not hold every page it has read.
+   */
+  decode(stream, keep = true) {
     if (this.decoded.has(stream)) return this.decoded.get(stream)
     let filters = this.resolve(stream.dict.get('Filter'))
     let parms = this.resolve(stream.dict.get('DecodeParms') ?? stream.dict.get('DP'))
     filters = Array.isArray(filters) ? filters.map((f) => this.resolve(f)) : filters ? [filters] : []
     parms = Array.isArray(parms) ? parms.map((p) => this.resolve(p)) : [parms]
+    // An unfiltered stream is a view of the file and costs nothing to "decode"; only filters spend the budget.
+    const limit = Math.min(MAX_STREAM_BYTES, this.budget)
     let data = stream.raw
     try {
+      if (filters.length > 0 && limit <= 0) throw tooLarge()
       for (const [i, filter] of filters.entries()) {
         const parm = parms[i] instanceof Map ? parms[i] : undefined
-        if (filter === 'FlateDecode' || filter === 'Fl') data = unpredict(inflate(data), parm)
-        else if (filter === 'LZWDecode' || filter === 'LZW') data = unpredict(lzw(data, Number(parm?.get('EarlyChange') ?? 1)), parm)
+        if (filter === 'FlateDecode' || filter === 'Fl') data = unpredict(inflate(data, limit), parm)
+        else if (filter === 'LZWDecode' || filter === 'LZW') data = unpredict(lzw(data, Number(parm?.get('EarlyChange') ?? 1), limit), parm)
         else if (filter === 'ASCIIHexDecode' || filter === 'AHx') data = asciiHex(data)
-        else if (filter === 'ASCII85Decode' || filter === 'A85') data = ascii85(data)
-        else if (filter === 'RunLengthDecode' || filter === 'RL') data = runLength(data)
+        else if (filter === 'ASCII85Decode' || filter === 'A85') data = ascii85(data, limit)
+        else if (filter === 'RunLengthDecode' || filter === 'RL') data = runLength(data, limit)
         else {
           data = undefined
           break
         }
       }
-    } catch {
+      if (filters.length > 0 && data && data.length > limit) throw tooLarge()
+    } catch (error) {
+      if (error?.code === 'ERR_BUFFER_TOO_LARGE') {
+        this.notes.push(limit < MAX_STREAM_BYTES ? `the document's ${MAX_DOCUMENT_BYTES / MIB} MiB decoding budget is spent; a stream was skipped` : `a stream decodes to more than ${MAX_STREAM_BYTES / MIB} MiB; it was skipped`)
+      }
       data = undefined
     }
-    this.decoded.set(stream, data)
+    if (data && filters.length > 0) this.budget -= data.length
+    if (keep) this.decoded.set(stream, data)
     return data
   }
 
@@ -806,6 +908,32 @@ export const HELVETICA = {
     278, 333, 556, 556, 556, 556, 280, 556, 333, 737, 370, 556, 584, 333, 737, 333, 400, 584, 333, 333, 333, 611, 556, 278, 333, 333, 365, 556, 834, 834, 834, 611,
     722, 722, 722, 722, 722, 722, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278, 722, 722, 778, 778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611,
     556, 556, 556, 556, 556, 556, 889, 556, 556, 556, 556, 556, 278, 278, 278, 278, 611, 611, 611, 611, 611, 611, 611, 584, 611, 611, 611, 611, 611, 556, 611, 556,
+  ],
+}
+
+/**
+ * Times-Roman and Times-Bold widths, same layout, measured from Times New
+ * Roman (drawn to Times's metrics). Times is narrower than Helvetica: words a
+ * writer places one by one in Times run together when measured as Helvetica.
+ */
+const TIMES = {
+  regular: [
+    250, 333, 408, 500, 500, 833, 778, 180, 333, 333, 500, 564, 250, 333, 250, 278, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 278, 278, 564, 564, 564, 444,
+    921, 722, 667, 667, 722, 611, 556, 722, 722, 333, 389, 722, 611, 889, 722, 722, 556, 722, 667, 556, 611, 722, 722, 944, 722, 722, 611, 333, 278, 333, 469, 500,
+    333, 444, 500, 444, 500, 444, 333, 500, 500, 278, 278, 500, 278, 778, 500, 500, 500, 500, 333, 389, 278, 500, 500, 722, 500, 500, 444, 480, 200, 480, 541, 350,
+    500, 350, 333, 500, 444, 1000, 500, 500, 333, 1000, 556, 333, 889, 350, 611, 350, 350, 333, 333, 444, 444, 350, 500, 1000, 333, 980, 389, 333, 722, 350, 444, 722,
+    250, 333, 500, 500, 500, 500, 200, 500, 333, 760, 276, 500, 564, 333, 760, 500, 400, 549, 300, 300, 333, 576, 453, 333, 333, 300, 310, 500, 750, 750, 750, 444,
+    722, 722, 722, 722, 722, 722, 889, 667, 611, 611, 611, 611, 333, 333, 333, 333, 722, 722, 722, 722, 722, 722, 722, 564, 722, 722, 722, 722, 722, 722, 556, 500,
+    444, 444, 444, 444, 444, 444, 667, 444, 444, 444, 444, 444, 278, 278, 278, 278, 500, 500, 500, 500, 500, 500, 500, 549, 500, 500, 500, 500, 500, 500, 500, 500,
+  ],
+  bold: [
+    250, 333, 555, 500, 500, 1000, 833, 278, 333, 333, 500, 570, 250, 333, 250, 278, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 333, 333, 570, 570, 570, 500,
+    930, 722, 667, 722, 722, 667, 611, 778, 778, 389, 500, 778, 667, 944, 722, 778, 611, 778, 722, 556, 667, 722, 722, 1000, 722, 722, 667, 333, 278, 333, 581, 500,
+    333, 500, 556, 444, 556, 444, 333, 500, 556, 278, 333, 556, 278, 833, 556, 500, 556, 556, 444, 389, 333, 556, 500, 722, 500, 500, 444, 394, 220, 394, 520, 350,
+    500, 350, 333, 500, 500, 1000, 500, 500, 333, 1000, 556, 333, 1000, 350, 667, 350, 350, 333, 333, 500, 500, 350, 500, 1000, 333, 1000, 389, 333, 722, 350, 444, 722,
+    250, 333, 500, 500, 500, 500, 220, 500, 333, 747, 300, 500, 570, 333, 747, 500, 400, 549, 300, 300, 333, 576, 540, 333, 333, 300, 330, 500, 750, 750, 750, 500,
+    722, 722, 722, 722, 722, 722, 1000, 722, 667, 667, 667, 667, 389, 389, 389, 389, 722, 722, 778, 778, 778, 778, 778, 570, 778, 722, 722, 722, 722, 722, 611, 556,
+    500, 500, 500, 500, 500, 500, 722, 444, 444, 444, 444, 444, 278, 278, 278, 278, 500, 556, 500, 500, 500, 500, 500, 549, 500, 556, 556, 556, 556, 500, 556, 500,
   ],
 }
 
@@ -968,12 +1096,13 @@ class Font {
       widths.forEach((value, k) => this.widths.set(first + k, Number(r(value)) * scale))
       this.defaultWidth = missing * scale
     } else {
+      // No /Widths: a standard font, whose metrics a reader is expected to know.
       const name = this.baseFont.replace(/^[A-Z]{6}\+/, '')
+      const family = /Helvetica|Arial/i.test(name) ? HELVETICA : /Times/i.test(name) ? TIMES : undefined
       if (/Courier/i.test(name)) this.defaultWidth = 0.6
-      else {
-        const table = /Bold/i.test(name) ? HELVETICA.bold : HELVETICA.regular
-        table.forEach((value, k) => this.widths.set(32 + k, value / 1000))
-      }
+      else if (family) (/Bold/i.test(name) ? family.bold : family.regular).forEach((value, k) => this.widths.set(32 + k, value / 1000))
+      // Symbol, ZapfDingbats, or a font that should have carried widths: an average glyph.
+      else this.defaultWidth = 0.45
     }
     const encoding = r(dict.get('Encoding'))
     const flags = descriptor instanceof Map ? Number(r(descriptor.get('Flags')) ?? 0) : 0
@@ -1056,8 +1185,9 @@ class TextSink {
         this.out = this.out.trimEnd()
         this.out += lineGap > height * 2.2 ? '\n\n' : '\n'
       } else {
+        // 0.12 em: pdfTeX shrinks inter-word glue to about 0.19 em on a tight line, and a kern that widens a pair rarely reaches 0.1.
         const gap = along(start) - last.along
-        if ((gap > height * 0.2 || gap < -height * 1.5) && !/\s$/.test(this.out) && !/^\s/.test(text)) this.out += ' '
+        if ((gap > height * 0.12 || gap < -height * 1.5) && !/\s$/.test(this.out) && !/^\s/.test(text)) this.out += ' '
       }
     }
     this.out += text
@@ -1065,12 +1195,28 @@ class TextSink {
   }
 }
 
-function contentText(doc, data, resources, sink, depth, fontCache) {
+/**
+ * What one page may cost. A form XObject that draws another several times,
+ * twelve levels deep, turns a few hundred bytes into billions of operators, so
+ * a page stops at these counts (a form's bytes counted each time it is drawn)
+ * with a note, and a form never draws itself while it is being drawn.
+ */
+const MAX_PAGE_OPERATORS = 10_000_000
+const MAX_PAGE_FORMS = 100_000
+const MAX_PAGE_BYTES = 256 * MIB
+
+/** Runs a content stream; `ctm` is where it starts (a form's matrix times its caller's). */
+function contentText(doc, data, resources, sink, depth, fontCache, work, initialCtm = IDENTITY) {
+  work.bytes += data.length
+  if (work.bytes > MAX_PAGE_BYTES) {
+    work.stopped = `this page's content and forms exceed ${MAX_PAGE_BYTES / MIB} MiB; the rest was not read`
+    return
+  }
   const s = data.toString('latin1')
   const lx = new Lexer(s, 0)
   const operands = []
   const stack = []
-  let ctm = IDENTITY
+  let ctm = initialCtm
   let state = { font: undefined, size: 0, charSpace: 0, wordSpace: 0, scale: 1, leading: 0, rise: 0 }
   let tm = IDENTITY
   let tlm = IDENTITY
@@ -1108,12 +1254,16 @@ function contentText(doc, data, resources, sink, depth, fontCache) {
     tlm = multiply([1, 0, 0, 1, 0, -state.leading], tlm)
     tm = tlm
   }
-  for (;;) {
+  while (work.stopped === undefined) {
     const tok = lx.next()
     if (tok.t === 'eof') break
     if (tok.t !== 'op') {
       operands.push(valueFrom(lx, tok, 0))
       continue
+    }
+    if (++work.operators > MAX_PAGE_OPERATORS) {
+      work.stopped = `drawing stopped after ${MAX_PAGE_OPERATORS.toLocaleString('en-US')} operators (forms that repeat each other?); the rest of this page was not read`
+      break
     }
     const op = tok.v
     const num = (i) => Number(operands[i] ?? 0)
@@ -1187,10 +1337,22 @@ function contentText(doc, data, resources, sink, depth, fontCache) {
       case 'Do': {
         const xobject = xobjects instanceof Map ? doc.resolve(xobjects.get(operands[0])) : undefined
         if (xobject instanceof Stream && xobject.dict.get('Subtype') === 'Form' && depth < 12) {
+          if (work.drawing.has(xobject)) {
+            work.notes.add('a form XObject draws itself; the repeat was skipped')
+            break
+          }
+          if (++work.forms > MAX_PAGE_FORMS) {
+            work.stopped = `drawing stopped after ${MAX_PAGE_FORMS.toLocaleString('en-US')} form XObjects (forms that repeat each other?); the rest of this page was not read`
+            break
+          }
           const formData = doc.decode(xobject)
           const matrix = doc.resolve(xobject.dict.get('Matrix'))
           const formCtm = Array.isArray(matrix) && matrix.length === 6 ? multiply(matrix.map(Number), ctm) : ctm
-          if (formData) contentTextWith(doc, formData, doc.resolve(xobject.dict.get('Resources')) ?? resources, sink, depth + 1, fontCache, formCtm)
+          if (formData) {
+            work.drawing.add(xobject)
+            contentText(doc, formData, doc.resolve(xobject.dict.get('Resources')) ?? resources, sink, depth + 1, fontCache, work, formCtm)
+            work.drawing.delete(xobject)
+          }
         }
         break
       }
@@ -1208,21 +1370,17 @@ function contentText(doc, data, resources, sink, depth, fontCache) {
   }
 }
 
-/** A form XObject runs with its own matrix; everything else about the page's state carries in. */
-function contentTextWith(doc, data, resources, sink, depth, fontCache, ctm) {
-  const prefixed = Buffer.concat([Buffer.from(`${ctm.join(' ')} cm\n`, 'latin1'), data])
-  contentText(doc, prefixed, resources, sink, depth, fontCache)
-}
-
-/** The text of one page, plus how many glyphs had no Unicode mapping. */
+/** The text of one page, how many glyphs had no Unicode mapping, and notes on what was skipped. */
 export function pageText(doc, page) {
+  const raised = doc.notes.length
+  const work = { operators: 0, forms: 0, bytes: 0, drawing: new Set(), notes: new Set(), stopped: undefined }
   const contents = doc.resolve(page.dict.get('Contents'))
   const parts = (Array.isArray(contents) ? contents : [contents]).map((c) => doc.resolve(c)).filter((c) => c instanceof Stream)
-  const chunks = parts.map((part) => doc.decode(part)).filter(Boolean)
+  const chunks = parts.map((part) => doc.decode(part, false)).filter(Boolean)
   const sink = new TextSink()
   if (chunks.length > 0) {
     const data = Buffer.concat(chunks.flatMap((chunk) => [chunk, Buffer.from('\n')]))
-    contentText(doc, data, page.resources instanceof Map ? page.resources : undefined, sink, 0, new Map())
+    contentText(doc, data, page.resources instanceof Map ? page.resources : undefined, sink, 0, new Map(), work)
   }
   const text = sink.out
     .split('\n')
@@ -1230,5 +1388,6 @@ export function pageText(doc, page) {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
-  return { text, glyphs: sink.glyphs, unmapped: sink.unmapped }
+  const notes = [...new Set([...doc.notes.slice(raised), ...work.notes, ...(work.stopped ? [work.stopped] : [])])]
+  return { text, glyphs: sink.glyphs, unmapped: sink.unmapped, notes }
 }

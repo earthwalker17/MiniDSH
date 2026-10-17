@@ -24,7 +24,7 @@ node "<this skill's directory>/scripts/pdf.mjs" <command> ...
 | `probe` | JSON: which of Chrome, Edge, Chromium, soffice and pdftotext exist here, with ready command lines |
 | `info <file>` | JSON: page count, version, encryption, title, producer |
 | `read <file> [--pages 2-4] [--max-chars N] [--json]` | the text of each page in reading order; says when a page has no extractable text |
-| `build <spec.json or spec.md> <out.pdf>` | a plain document: title, headings, paragraphs, bullets, word wrap, page numbers |
+| `build <spec.json or spec.md> <out.pdf>` | a plain document: title, headings, paragraphs, bulleted and numbered lists, word wrap, page numbers |
 
 The helper refuses to overwrite an existing output unless you pass `--force`. Exit codes: 2 usage, 3 missing input, 4 invalid input, 5 refused output, 6 unsupported (an encrypted PDF).
 
@@ -39,7 +39,7 @@ The helper refuses to overwrite an existing output unless you pass `--force`. Ex
 
 Run `probe` first and never use a tool it did not find. Take the first route that fits:
 
-1. **`build`**, for plain documents in Latin script. The spec is JSON, `{"title": "...", "pageSize": "A4", "blocks": [{"heading": "...", "level": 1}, {"paragraph": "..."}, {"bullets": ["..."]}]}`, or Markdown: `#` and `##` headings, paragraphs separated by blank lines, `- ` bullets. Curly quotes, dashes, bullets, the ellipsis and the euro sign work; any other character outside Latin-1 is refused with a message. Helvetica only, no tables or images.
+1. **`build`**, for plain documents in Latin script. The spec is JSON, `{"title": "...", "pageSize": "A4", "blocks": [{"heading": "...", "level": 1}, {"paragraph": "..."}, {"bullets": ["..."]}, {"numbered": ["..."]}]}`, or Markdown: `#` and `##` headings, paragraphs separated by blank lines, `- ` bullets, `1. ` numbered items; emphasis markers are dropped and a link prints as its text with the URL in parentheses. Curly quotes, dashes, bullets, the ellipsis and the euro sign work; any other character outside Latin-1 is refused with a message. Helvetica only, no tables or images.
 2. **HTML printed by Chrome or Edge**, when probe found one: tables, images, colours, CSS layout, any script. Write `report.html` in the workspace (UTF-8, `<meta charset="utf-8">`, `@page { size: A4; margin: 2cm }` for print), then:
 
    ```

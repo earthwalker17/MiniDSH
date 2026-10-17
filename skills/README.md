@@ -27,7 +27,7 @@ Run `minidsh skills` to see what a new session in the current directory would be
 - **Add** a skill: create `~/.minidsh/skills/<name>/SKILL.md`. It is listed from the next prompt on.
 - **Replace** a bundled skill: put a user skill with the same name in your home `skills/` directory.
 - **Hide** some skills: `{"patches": [{"id": "skills", "config": {"maxBytes": 8000, "exclude": ["pdf"]}}]}` in `~/.minidsh/composition.json` or a `--patch` file. A patch replaces the row's whole config, so restate `maxBytes`; leaving `roots` out keeps the default roots, while `"roots": []` removes them.
-- **Turn skills off** entirely: `{"patches": [{"id": "skills", "disabled": true}]}`.
+- **Turn skills off** entirely: `{"patches": [{"id": "skills", "disabled": true}]}`. That applies to sessions started after it; a resumed session keeps the list it already has. To retire the list in running and resumed sessions too, keep the row and empty it: `{"id": "skills", "config": {"maxBytes": 8000, "roots": [], "workspaceDirs": []}}`.
 - **Keep one of your skills unlisted**: set `disable-model-invocation: true` in its front-matter.
 - **Remove** a skill: delete its directory.
 
