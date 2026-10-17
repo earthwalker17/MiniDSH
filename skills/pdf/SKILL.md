@@ -4,7 +4,7 @@ description: Read and create PDF files with a bundled Node helper. Use it when a
 license: MIT
 metadata:
   minidsh-reviewed: "2026-10-18"
-  minidsh-verified-with: "pending live arc"
+  minidsh-verified-with: "deepseek-flash, skills arc (Windows; WSL bwrap)"
 ---
 
 # PDF

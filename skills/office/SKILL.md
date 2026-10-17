@@ -4,7 +4,7 @@ description: Create, read and edit Word (.docx), Excel (.xlsx) and PowerPoint (.
 license: MIT
 metadata:
   minidsh-reviewed: "2026-10-18"
-  minidsh-verified-with: "pending live arc"
+  minidsh-verified-with: "deepseek-flash, skills arc (Windows; WSL bwrap)"
 ---
 
 # Office files: .docx, .xlsx, .pptx
