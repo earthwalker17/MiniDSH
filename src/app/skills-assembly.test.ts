@@ -121,10 +121,10 @@ describe('the row', () => {
    * every boot failed: `config`, `run`, `serve`, `skills` (review, S19).
    */
   it('makes a relative home absolute, because the skills row refuses a relative root', () => {
-    const roots = skillRootsFor(join('..', 'a-relative-home'))
-    for (const root of roots) expect(isAbsolute(root.path), root.path).toBe(true)
-    expect(roots[0]!.path.endsWith(join('a-relative-home', 'skills'))).toBe(true)
-    expect(() => skillsPlugin.config!.parse({ maxBytes: 8_000, roots })).not.toThrow()
+    const relativeRoots = skillRootsFor(join('..', 'a-relative-home'))
+    for (const root of relativeRoots) expect(isAbsolute(root.path), root.path).toBe(true)
+    expect(relativeRoots[0]!.path.endsWith(join('a-relative-home', 'skills'))).toBe(true)
+    expect(() => skillsPlugin.config!.parse({ maxBytes: 8_000, roots: relativeRoots })).not.toThrow()
   })
 })
 
