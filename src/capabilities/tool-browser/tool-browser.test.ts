@@ -368,6 +368,37 @@ describe.runIf(testBrowser !== undefined)('the browser tools in a real compositi
     expect(existsSync(join(w.profileRoot, profile!)), 'the dead browser’s profile was left behind').toBe(false)
   })
 
+  it('replaces a page that stopped answering, says so once, and keeps one that was only slow', LONG, async () => {
+    const site = await pages()
+    const w = await world({ vision: false })
+    const handle = await w.create()
+    const out = await turn(
+      w,
+      handle,
+      assistantToolCall('c1', 'browser_navigate', { url: `${site.origin}/counter` }),
+      // Only slow: a promise that settles after the call's own bound. The page answers the probe and stays.
+      assistantToolCall('c2', 'browser_evaluate', { expression: 'new Promise((done) => setTimeout(done, 3000))', timeout_ms: 500 }),
+      assistantToolCall('c3', 'browser_evaluate', { expression: 'document.title' }),
+      // Stuck: its own script holds the main thread from now on.
+      assistantToolCall('c4', 'browser_evaluate', { expression: "setTimeout(() => { for (;;) {} }, 50); 'armed'" }),
+      // Whether this starts before the loop or after it, its timer never fires: the loop holds the thread.
+      assistantToolCall('c5', 'browser_evaluate', { expression: 'new Promise((done) => setTimeout(() => done(2), 300))', timeout_ms: 1500 }),
+      assistantToolCall('c6', 'browser_navigate', { url: `${site.origin}/counter` }),
+      assistantToolCall('c7', 'browser_snapshot', {}),
+    )
+    const [, slow, kept, armed, stuck, replaced, after] = out.slice(-7)
+    expect(slow?.code).toBe('BROWSER_TIMEOUT')
+    expect(kept?.code, 'a merely slow page was replaced').toBeUndefined()
+    expect(kept?.text).not.toContain('stopped answering')
+    expect(kept?.text).toContain('Counter')
+    expect(armed?.text).toContain('armed')
+    expect(stuck?.code).toBe('BROWSER_TIMEOUT')
+    expect(replaced?.code, 'a stuck page wedged the next call').toBeUndefined()
+    expect(replaced?.text).toContain('The page stopped answering')
+    expect(replaced?.text).toContain('button "Add one"')
+    expect(after?.text).not.toContain('stopped answering')
+  })
+
   it('remembers a fact about the host, not a moment: a fence it cannot prove is refused fast and said so, a start that died is tried again', LONG, async () => {
     const harness = await coreHarness()
     harnesses.push(harness)

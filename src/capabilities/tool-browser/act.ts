@@ -477,8 +477,9 @@ const MAC_COMMANDS: Readonly<Record<string, string>> = {
   Backspace: 'deleteBackward',
   Delete: 'deleteForward',
   Enter: 'insertNewline',
-  Tab: 'insertTab',
-  'Shift+Tab': 'insertBacktab',
+  // No Tab or Shift+Tab: moving focus is Blink's own default action on the
+  // key, and naming `insertTab` as the command replaced it — on macos-latest
+  // (2026-10-19) Tab left focus where it was.
   Escape: 'cancelOperation',
   ArrowUp: 'moveUp',
   ArrowDown: 'moveDown',

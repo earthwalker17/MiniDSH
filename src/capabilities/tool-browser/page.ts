@@ -379,7 +379,9 @@ class Page implements BrowserPage, PageSession {
         answer = await this.send('Runtime.evaluate', { expression, objectGroup: OBJECT_GROUP, awaitPromise: true, userGesture: true, timeout: terminateAfter }, options)
       } catch (error) {
         if (!(error instanceof BrowserError)) throw error
-        if (error.code === 'BROWSER_TIMEOUT') throw new BrowserError('BROWSER_TIMEOUT', "the expression had not settled by the call's deadline")
+        // A promise still pending and a page that never ran the expression look
+        // alike from here; the mark lets the next call tell them apart.
+        if (error.code === 'BROWSER_TIMEOUT') throw new BrowserError('BROWSER_TIMEOUT', "the expression had not settled by the call's deadline", { unanswered: error.unanswered })
         if (error.code !== 'BROWSER_PROTOCOL') throw error
         if (Date.now() >= terminatesAt) throw new BrowserError('BROWSER_TIMEOUT', "the expression was still running at the call's deadline and was stopped")
         // "Cannot find context" (the page was between documents), an answer past the size cap: it ran, or not, but no value came back.
@@ -455,6 +457,19 @@ class Page implements BrowserPage, PageSession {
     return report
   }
 
+  async responsive(timeoutMs: number): Promise<boolean> {
+    if (this.closedReason !== undefined) return false
+    try {
+      // The renderer's main thread answers this only when it is free: a page
+      // script stuck in a loop, or a renderer its host is still tearing down,
+      // leaves it unanswered.
+      await this.cdp.send('Runtime.evaluate', { expression: '1', returnByValue: true }, { sessionId: this.sessionId, timeoutMs })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   close(): Promise<void> {
     this.closing ??= (async () => {
       this.closedReason ??= 'the page was closed'
@@ -477,7 +492,9 @@ class Page implements BrowserPage, PageSession {
     try {
       return await this.cdp.send<T>(method, params, { sessionId: this.sessionId, timeoutMs: remaining, signal: budget.signal })
     } catch (error) {
-      if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') throw new BrowserError('BROWSER_TIMEOUT', `the call's deadline passed while the page was answering ${method}`)
+      if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') {
+        throw new BrowserError('BROWSER_TIMEOUT', `the call's deadline passed while the page was answering ${method}`, { unanswered: true })
+      }
       throw error
     }
   }

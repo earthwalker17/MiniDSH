@@ -85,6 +85,8 @@ const MAX_CHANGE_CHARS = 6_000
 const MAX_EVALUATE_CHARS = 8_000
 /** A cold launch, including the fence's proof. Measured 0.7–1.7 s idle; generous for a loaded host. */
 const LAUNCH_MS = 45_000
+/** How long a page that left a command unanswered gets to answer a trivial one before it is replaced. */
+const PROBE_MS = 3_000
 
 interface Deps {
   readonly ctx: Context
@@ -118,6 +120,8 @@ class AgentBrowser {
   private relaunched: string | undefined
   private queue: Promise<unknown> = Promise.resolve()
   private disposed = false
+  /** Set when the page left a command unanswered; the next call checks it before trusting it. */
+  private suspect = false
 
   constructor(agent: Agent, deps: Deps) {
     this.agent = agent
@@ -144,7 +148,23 @@ class AgentBrowser {
   /** The live page, launching or relaunching the browser when there is none. */
   async ensurePage(budget: CallBudget): Promise<BrowserPage> {
     if (this.disposed) throw new BrowserError('BROWSER_CLOSED', 'this agent is shutting down; its browser is gone')
-    if (this.page !== undefined && !this.page.gone && this.launched !== undefined && this.launched.cdp.closed === undefined) return this.page
+    if (this.page !== undefined && !this.page.gone && this.launched !== undefined && this.launched.cdp.closed === undefined) {
+      if (!this.suspect) return this.page
+      this.suspect = false
+      // The last call found the page not answering. A pending promise or a
+      // slow tree also look like that, so ask once more, briefly; a page that
+      // still does not answer is stuck (a script in a loop, a renderer its
+      // host is slow to reap — seen on CI) and would wedge every later call.
+      // The browser lives on: only the page is replaced.
+      if (await this.page.responsive(PROBE_MS)) return this.page
+      const stuck = this.page
+      this.page = undefined
+      await stuck.close()
+      this.generation++
+      this.page = await openPage({ cdp: this.launched.cdp, generation: this.generation, workspaceRoot: canonicalPath(this.agent.session.header.cwd), viewport: this.deps.viewport, refs: this.refs })
+      this.relaunched = 'The page stopped answering (a script in it may be stuck in a loop) and was replaced by a fresh one; navigate again. Refs from before are no longer valid.'
+      return this.page
+    }
     if (this.launched !== undefined) {
       // The browser or its page went away under us (a crash, a person closing
       // its window): clean up what is left, and say so in the next result.
@@ -204,6 +224,11 @@ class AgentBrowser {
       throw error
     }
     return this.page
+  }
+
+  /** A command this call sent went unanswered: check the page before the next call trusts it. */
+  markSuspect(): void {
+    this.suspect = true
   }
 
   /** The note a relaunch left, once. */
@@ -332,6 +357,7 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
         // A wait cancelled with the turn rejects with the turn's own cancel
         // cause, which is not an error a result can name; this one says what
         // the model needs to know.
+        if (error instanceof BrowserError && error.unanswered) session.markSuspect()
         if (exec.signal.aborted) throw Object.assign(new Error('the turn was cancelled while the browser was working; the page may be part-way through what was asked'), { code: 'ABORTED' })
         throw error
       }

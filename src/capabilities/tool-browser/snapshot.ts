@@ -217,7 +217,8 @@ export async function waitForText(session: PageSession, wanted: string, until: n
       const main = await readTree(session, budget)
       if (main?.root !== undefined && textOf(main).includes(needle)) return main
     } catch (error) {
-      if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') throw missing()
+      // A page that stopped answering is not text that did not appear: keep its mark.
+      if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') throw error.unanswered ? error : missing()
       if (!isProtocolError(error)) throw error
     }
     const now = Date.now()

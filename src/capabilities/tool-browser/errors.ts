@@ -34,10 +34,18 @@ export class BrowserError extends Error {
    * MOMENT, and is never remembered (`index.ts`).
    */
   readonly hostFault: boolean
-  constructor(code: BrowserErrorCode, message: string, options: { readonly hostFault?: boolean } = {}) {
+  /**
+   * True when the PAGE did not answer a command before the deadline — not a
+   * wait that ran out, a renderer that may be stuck (a script in a loop, a
+   * crash its host is slow to report). The tool layer probes such a page on
+   * the next call and replaces it if it still does not answer (`index.ts`).
+   */
+  readonly unanswered: boolean
+  constructor(code: BrowserErrorCode, message: string, options: { readonly hostFault?: boolean; readonly unanswered?: boolean } = {}) {
     super(message)
     this.name = 'BrowserError'
     this.code = code
     this.hostFault = options.hostFault === true
+    this.unanswered = options.unanswered === true
   }
 }

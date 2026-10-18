@@ -133,6 +133,12 @@ export interface BrowserPage {
   setViewport(viewport: Viewport): Promise<void>
   /** Drains what happened since the previous report. */
   report(): Promise<PageReport>
+  /**
+   * Whether the page answers a trivial evaluation within `timeoutMs`: the
+   * check the tool layer makes after a command went unanswered, before it
+   * decides the page is stuck and replaces it. Never rejects.
+   */
+  responsive(timeoutMs: number): Promise<boolean>
   /** Closes the page's target; idempotent. */
   close(): Promise<void>
   /**

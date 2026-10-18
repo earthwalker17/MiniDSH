@@ -602,20 +602,47 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
     })
 
     it('survives a renderer crash: reported, other calls refused, a navigation loads it again', LONG, async () => {
-      await go('/counter')
-      const { targetInfos } = await browser.cdp.send<{ targetInfos: { targetId: string; type: string }[] }>('Target.getTargets')
-      const ours = targetInfos.find((target) => target.type === 'page')!
-      const { sessionId } = await browser.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: ours.targetId, flatten: true })
+      // Its own browser: on ubuntu-latest a crashed renderer's host was slow to
+      // reap it, and the shared page this file uses stopped answering with it.
+      const own = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: tempDir('minidsh-profiles-'), headless: true, allowHosts: [], declared: [], window: { width: 1280, height: 800 } })
+      const crashing = await openPage({ cdp: own.cdp, generation: 1, workspaceRoot: workspace, viewport: VIEWPORT, refs: { next: 1 } })
       try {
-        // Page.crash never answers: the renderer it would answer from is gone.
-        void browser.cdp.send('Page.crash', {}, { sessionId, timeoutMs: 2_000 }).catch(() => undefined)
-        expect(await until(async () => (await page.report()).crashed, 10_000)).toBe(true)
-        await expect(page.snapshot(budget())).rejects.toMatchObject({ code: 'BROWSER_CLOSED', message: expect.stringContaining('crashed') })
-        expect(await page.navigate(`${fixture.origin}/counter`, { ...budget(), waitMs: 0 })).toEqual({ loaded: true })
-        expect((await page.report()).crashed).toBe(false)
-        expect(await page.snapshot(budget())).toContain('button "Add one"')
+        await crashing.navigate(`${fixture.origin}/counter`, { ...budget(), waitMs: 0 })
+        // The way an out-of-memory kill crashes a renderer: SIGKILL, which
+        // leaves no core dump for a host's crash handler to hold it on
+        // (`Page.crash` does, and CI's handler held the renderer past the wait).
+        const { processInfo } = await own.cdp.send<{ processInfo: { type: string; id: number }[] }>('SystemInfo.getProcessInfo')
+        const renderers = processInfo.filter((process) => process.type === 'renderer')
+        expect(renderers.length, 'the browser reported no renderer to crash').toBeGreaterThan(0)
+        for (const renderer of renderers) process.kill(renderer.id, 'SIGKILL')
+        expect(await until(async () => (await crashing.report()).crashed, 15_000)).toBe(true)
+        await expect(crashing.snapshot(budget())).rejects.toMatchObject({ code: 'BROWSER_CLOSED', message: expect.stringContaining('crashed') })
+        expect(await crashing.navigate(`${fixture.origin}/counter`, { ...budget(), waitMs: 0 })).toEqual({ loaded: true })
+        expect((await crashing.report()).crashed).toBe(false)
+        expect(await crashing.snapshot(budget())).toContain('button "Add one"')
       } finally {
-        await browser.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => undefined)
+        await crashing.close()
+        await own.close()
+      }
+    })
+
+    it('answers whether it is responsive: yes while idle, no while a script holds its main thread', LONG, async () => {
+      fixture.route('/freeze', `<title>Freeze</title><button onclick="for (;;) {}">Freeze</button>`)
+      await go('/freeze')
+      expect(await page.responsive(3_000)).toBe(true)
+      // A page in this state answers nothing, so this file's shared page is not used for it.
+      const own = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: tempDir('minidsh-profiles-'), headless: true, allowHosts: [], declared: [], window: { width: 1280, height: 800 } })
+      const frozen = await openPage({ cdp: own.cdp, generation: 1, workspaceRoot: workspace, viewport: VIEWPORT, refs: { next: 1 } })
+      try {
+        await frozen.navigate(`${fixture.origin}/freeze`, { ...budget(), waitMs: 0 })
+        await frozen.evaluate("setTimeout(() => { for (;;) {} }, 50); 'armed'", budget())
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        const started = Date.now()
+        expect(await frozen.responsive(1_000)).toBe(false)
+        expect(Date.now() - started, 'the probe outlived its own bound').toBeLessThan(2_500)
+      } finally {
+        await frozen.close()
+        await own.close()
       }
     })
   })
