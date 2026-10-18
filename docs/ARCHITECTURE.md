@@ -265,6 +265,7 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | a network tool | a `tool-<x>` tagged `NETWORK_TOOL` (§7) |
 | an image producer | `core/llm/admission.ts`, then `attachments.saveImage` (§5) |
 | a process the harness spawns | `core/process.ts`: the environment rule, the tree kill |
+| a second browser provider | a `core/browser` Definition first; until then `tool-browser` holds both roles |
 | a verifier | a `tool-subagent` row + `model-roles` entry |
 | a model role | a `model-roles` entry; never the base route (§4) |
 | an out-of-loop model call | `resolveCallConfig` + `runAuxCall`, never bare `llm.stream` |

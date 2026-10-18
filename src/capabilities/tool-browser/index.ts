@@ -3,7 +3,7 @@
  * like and does — the build → launch → inspect → interact → verify → iterate
  * loop on a frontend, where code-level success is not evidence.
  *
- * Provider and consumer in one capability (BLUEPRINT §2: no `core/browser`
+ * Provider and consumer in one capability (ARCHITECTURE §11: no `core/browser`
  * Definition before a second provider). It owns:
  *
  *   - **one browser per AGENT**, launched on the first browser call and owned
