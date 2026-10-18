@@ -104,7 +104,13 @@ const SWITCHES = [
   '--lang=en-US',
 ]
 
-const START_TIMEOUT_MS = 30_000
+/**
+ * Bounds a browser that never answers (a session bus that accepts and never
+ * replies wedges any Chromium's start, measured), not a slow one: Edge's cold
+ * first start on a fresh ubuntu-latest VM took 19–32 s, working throughout
+ * (its verbose log has no silence over 2.5 s; 2026-10-19). 30 s cut it off.
+ */
+const START_TIMEOUT_MS = 60_000
 const CANARY_TIMEOUT_MS = 10_000
 
 export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBrowser> {
@@ -271,8 +277,10 @@ async function proveFence(cdp: CdpConnection, fence: Fence): Promise<void> {
 }
 
 /** What a failed start's stderr says, turned into the remedy a person can act on, and whether it is the host's. */
-function remedy(stderr: string): { readonly text: string; readonly hostFault: boolean } {
-  if (/no usable sandbox/i.test(stderr)) {
+export function remedy(stderr: string): { readonly text: string; readonly hostFault: boolean } {
+  // The second form is Edge on a stock Ubuntu 24.04 (ubuntu-latest, measured
+  // 2026-10-19): user namespaces restricted, and its setuid helper not setuid.
+  if (/no usable sandbox|SUID sandbox helper binary was found, but is not configured correctly/i.test(stderr)) {
     return { text: `. Chrome's sandbox could not start on this host (unprivileged user namespaces are restricted); fix the host, never run it with --no-sandbox`, hostFault: true }
   }
   if (/running as root without --no-sandbox/i.test(stderr)) return { text: '. Chrome refuses to run as root with its sandbox on; run MiniDSH as an ordinary user', hostFault: true }

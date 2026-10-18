@@ -83,8 +83,8 @@ const DEFAULT_MAX_SNAPSHOT_CHARS = 16_000
 /** What an action's change report may take inline before it spills. */
 const MAX_CHANGE_CHARS = 6_000
 const MAX_EVALUATE_CHARS = 8_000
-/** A cold launch, including the fence's proof. Measured 0.7–1.7 s idle; generous for a loaded host. */
-const LAUNCH_MS = 45_000
+/** A launch, including the fence's proof: 0.7–1.7 s warm, but a cold first start ran to ~32 s on a fresh CI VM (`launch.ts`). */
+const LAUNCH_MS = 60_000
 /** How long a page that left a command unanswered gets to answer a trivial one before it is replaced. */
 const PROBE_MS = 3_000
 

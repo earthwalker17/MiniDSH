@@ -15,7 +15,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { browsersUsing, everyTestBrowser, expectBrowserSuite, fixtureServer, testBrowser, type FixtureServer } from '../../test-support/browser-fixture.ts'
 import type { CdpConnection } from './cdp.ts'
 import { CANARY_HOST, FENCE_HEADER } from './fence.ts'
-import { launchBrowser, sweepProfiles, type LaunchedBrowser } from './launch.ts'
+import { launchBrowser, remedy, sweepProfiles, type LaunchedBrowser } from './launch.ts'
 import { candidates, locateBrowser } from './locate.ts'
 
 expectBrowserSuite('tool-browser launch')
@@ -107,6 +107,15 @@ describe('locating a browser', () => {
     expect(locateBrowser('/nowhere/chrome', { exists: () => false })).toBeUndefined()
     expect(locateBrowser('/opt/x/msedge', { exists: () => true })).toEqual({ path: '/opt/x/msedge', kind: 'edge' })
   })
+
+  it('names a sandbox the host cannot give as the host’s fault, in both of the forms Chromium says it', () => {
+    // As ubuntu-latest's Edge said it, with namespaces restricted and its helper not setuid.
+    const suid = "[2211:2211:1018/191257.510711:FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:172] The SUID sandbox helper binary was found, but is not configured correctly. Rather than run without sandboxing I'm aborting now."
+    for (const stderr of [suid, '[1:1:FATAL:zygote_host_impl_linux.cc(127)] No usable sandbox! Update your kernel']) {
+      expect(remedy(stderr)).toEqual({ text: expect.stringContaining('never run it with --no-sandbox'), hostFault: true })
+    }
+    expect(remedy('[1:1:ERROR:bus.cc] Failed to connect to the bus')).toMatchObject({ hostFault: false })
+  })
 })
 
 describe.runIf(testBrowser !== undefined)('a launched browser', () => {
@@ -157,7 +166,17 @@ describe.runIf(testBrowser !== undefined)('a launched browser', () => {
     const browser = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: tempDir('minidsh-profiles-'), headless: true, allowHosts: [], declared: [], window: { width: 800, height: 600 }, netLogPath })
     try {
       await browser.cdp.send('Target.createTarget', { url: `${site.origin}/` })
-      await new Promise((resolve) => setTimeout(resolve, 4_000))
+      // Until the attempt is in the log (a fixed 4 s missed it under a full
+      // suite's load), then long enough for a resolver to have followed it.
+      const tried = (): boolean => {
+        try {
+          return readFileSync(netLogPath, 'utf8').includes(tag)
+        } catch {
+          return false
+        }
+      }
+      await until(tried, 20_000)
+      await new Promise((resolve) => setTimeout(resolve, 2_000))
     } finally {
       await browser.close()
       await site.close()
