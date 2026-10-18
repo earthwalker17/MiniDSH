@@ -7,6 +7,7 @@
  * `MINIDSH_EXPECT_BROWSER=1` (CI on every runner, and the WSL leg) that skip is
  * a failure instead — `expectBrowserSuite` says so in the suite that skips.
  */
+import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { describe, expect, it } from 'vitest'
@@ -46,6 +47,27 @@ export function expectBrowserSuite(name: string): void {
       expect(testBrowser, `MINIDSH_EXPECT_BROWSER=1 but no Chrome, Edge or Chromium was found on ${process.platform}`).toBeDefined()
     })
   })
+}
+
+/**
+ * The pids of every browser process whose command line names `dir` — a
+ * launch's profile is on every one of them (`--user-data-dir=`) — for the
+ * checks that a closed or refused browser really left nothing running.
+ */
+export function browsersUsing(dir: string): number[] {
+  try {
+    if (process.platform === 'win32') {
+      const needle = dir.replaceAll("'", "''")
+      // Not this query's own process, whose command line names the directory too.
+      const out = execFileSync('pwsh', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*${needle}*' } | ForEach-Object { $_.ProcessId }`], { encoding: 'utf8' })
+      return out.split(/\s+/).filter((pid) => pid !== '').map(Number)
+    }
+    const out = execFileSync('pgrep', ['-f', dir], { encoding: 'utf8' })
+    return out.split(/\s+/).filter((pid) => pid !== '').map(Number).filter((pid) => pid !== process.pid)
+  } catch {
+    // pgrep exits 1 when nothing matches.
+    return []
+  }
 }
 
 export type Route = string | { readonly status?: number; readonly type?: string; readonly body: string | Buffer; readonly headers?: Record<string, string> }

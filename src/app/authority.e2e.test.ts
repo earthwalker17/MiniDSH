@@ -469,6 +469,7 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
         sessionsRoot: tempDir('minidsh-auth-replay-'),
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),
+        browserProfileRoot: join(home, 'browser-replay'),
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         prepare: (root) => {

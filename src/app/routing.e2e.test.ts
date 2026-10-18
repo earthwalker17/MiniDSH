@@ -276,6 +276,7 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
       sessionsRoot: tempDir('minidsh-e2e6-replay-'),
       // What `serve` mounted: the recorded requests carry its skill list.
       skillRoots: skillRootsFor(home),
+      browserProfileRoot: join(home, 'browser-replay'),
       approve: true,
       logger: silent,
       // No key for either provider: the log answers for both.
@@ -507,6 +508,7 @@ describe.skipIf(!DEEPSEEK || !OPENAI)('S18 live E2E: an OpenAI leg through the s
       sessionsRoot: tempDir('minidsh-e2e18-replay-'),
       // What `serve` mounted: the recorded requests carry its skill list.
       skillRoots: skillRootsFor(home),
+      browserProfileRoot: join(home, 'browser-replay'),
       attachmentsRoot: replayAttachments,
       approve: true,
       logger: silent,

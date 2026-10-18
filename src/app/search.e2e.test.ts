@@ -150,6 +150,7 @@ describe.skipIf(!DEEPSEEK || !TAVILY)('S18 live E2E: a network tool under per-qu
       sessionsRoot: tempDir('minidsh-e2e18s-replay-'),
       // What `serve` mounted: the recorded requests carry its skill list.
       skillRoots: skillRootsFor(home),
+      browserProfileRoot: join(home, 'browser-replay'),
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],
       configLayers: [{ name: 'home', patches: await toPatches(file, home) }],

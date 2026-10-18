@@ -35,7 +35,7 @@ import type { Readable, Writable } from 'node:stream'
 import { childEnvironment, killAndWait } from '../../core/process.ts'
 import { CdpConnection } from './cdp.ts'
 import { BrowserError } from './errors.ts'
-import { bypassList, CANARY_HOST, Fence } from './fence.ts'
+import { bypassList, CANARY_HOST, CANARY_TLS_HOST, Fence, hostResolverRules } from './fence.ts'
 
 export interface LaunchOptions {
   readonly executablePath: string
@@ -48,6 +48,12 @@ export interface LaunchOptions {
   readonly window: { readonly width: number; readonly height: number }
   /** How long the browser may take to answer its first command. Default 30 s. */
   readonly startTimeoutMs?: number
+  /**
+   * A diagnostic for TESTS: Chrome's own network log, which is how a DNS lookup
+   * can be seen at all. Never reachable from row config (`index.ts` does not
+   * pass it), and it adds a file, not a reach.
+   */
+  readonly netLogPath?: string
 }
 
 export interface LaunchedBrowser {
@@ -104,29 +110,38 @@ const CANARY_TIMEOUT_MS = 10_000
 export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBrowser> {
   mkdirSync(options.profileRoot, { recursive: true })
   await sweepProfiles(options.profileRoot)
-  const profileDir = mkdtempSync(join(options.profileRoot, 'p-'))
-  writeFileSync(join(profileDir, 'owner.json'), JSON.stringify({ pid: process.pid, host: hostname(), started: new Date().toISOString() }))
-  // The WebRTC rule lives in the profile because Chrome reads it only there:
-  // the matching command-line switch was measured to change nothing.
-  mkdirSync(join(profileDir, 'Default'), { recursive: true })
-  writeFileSync(join(profileDir, 'Default', 'Preferences'), JSON.stringify({ webrtc: { ip_handling_policy: 'disable_non_proxied_udp' } }))
+  let profileDir: string | undefined
+  try {
+    profileDir = mkdtempSync(join(options.profileRoot, 'p-'))
+    writeFileSync(join(profileDir, 'owner.json'), JSON.stringify({ pid: process.pid, host: hostname(), started: new Date().toISOString() }))
+    // The WebRTC rule lives in the profile because Chrome reads it only there:
+    // the matching command-line switch was measured to change nothing.
+    mkdirSync(join(profileDir, 'Default'), { recursive: true })
+    writeFileSync(join(profileDir, 'Default', 'Preferences'), JSON.stringify({ webrtc: { ip_handling_policy: 'disable_non_proxied_udp' } }))
+  } catch (error) {
+    if (profileDir !== undefined) await removeProfile(profileDir)
+    throw new BrowserError('BROWSER_UNAVAILABLE', `the browser's profile could not be made under ${options.profileRoot}: ${messageOf(error)}`)
+  }
+  const profile = profileDir
 
   let fence: Fence
   try {
     fence = await Fence.start()
   } catch (error) {
-    await removeProfile(profileDir)
-    throw new BrowserError('BROWSER_UNAVAILABLE', `the browser's network fence could not listen: ${error instanceof Error ? error.message : String(error)}`)
+    await removeProfile(profile)
+    throw new BrowserError('BROWSER_UNAVAILABLE', `the browser's network fence could not listen: ${messageOf(error)}`)
   }
 
   const args = [
     '--remote-debugging-pipe',
-    `--user-data-dir=${profileDir}`,
+    `--user-data-dir=${profile}`,
     `--proxy-server=http://127.0.0.1:${fence.port}`,
     `--proxy-bypass-list=${bypassList(options.allowHosts)}`,
+    `--host-resolver-rules=${hostResolverRules(options.allowHosts)}`,
     `--window-size=${options.window.width},${options.window.height}`,
     ...SWITCHES,
     ...(options.headless ? ['--headless', '--hide-scrollbars'] : []),
+    ...(options.netLogPath === undefined ? [] : [`--log-net-log=${options.netLogPath}`, '--net-log-capture-mode=Everything']),
     'about:blank',
   ]
   let child: ChildProcess
@@ -142,8 +157,24 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     })
   } catch (error) {
     await fence.close()
-    await removeProfile(profileDir)
-    throw new BrowserError('BROWSER_UNAVAILABLE', `could not start ${options.executablePath}: ${error instanceof Error ? error.message : String(error)}`)
+    await removeProfile(profile)
+    throw new BrowserError('BROWSER_UNAVAILABLE', `could not start ${options.executablePath}: ${messageOf(error)}`, { hostFault: isMissing(error) })
+  }
+  // FIRST, before anything reads the child: a spawn the OS refused (ENOENT,
+  // EACCES, and EMFILE when this process is out of descriptors) returns a child
+  // with no pipes and emits 'error' on the next tick, and an unheard 'error'
+  // takes the whole host down (measured under `ulimit -n`, the review).
+  let spawnError: Error | undefined
+  child.on('error', (error) => {
+    spawnError ??= error
+  })
+  const toBrowser = child.stdio[3]
+  const fromBrowser = child.stdio[4]
+  if (toBrowser === null || toBrowser === undefined || fromBrowser === null || fromBrowser === undefined) {
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    await fence.close()
+    await removeProfile(profile)
+    throw new BrowserError('BROWSER_UNAVAILABLE', `could not start ${options.executablePath}: ${spawnError?.message ?? 'the process has no pipes'}`, { hostFault: isMissing(spawnError) })
   }
 
   let stderr = ''
@@ -151,7 +182,7 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     stderr = (stderr + chunk.toString('utf8')).slice(-16_384)
   })
   child.stderr?.on('error', () => {})
-  const cdp = new CdpConnection(child.stdio[3] as Writable, child.stdio[4] as Readable)
+  const cdp = new CdpConnection(toBrowser as Writable, fromBrowser as Readable)
   let exited = false
   const gone = new Promise<void>((resolve) => {
     const done = (reason: string): void => {
@@ -173,15 +204,17 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
       // A browser that would not close politely: the tree kill, bounded
       // (`core/process.ts`), then the exit itself, bounded again — on a loaded
       // Windows host the process record can trail the kill by seconds, and the
-      // profile cannot go while the browser still holds it. Worst case ~20 s;
-      // an ordinary close is a few hundred milliseconds.
+      // profile cannot go while the browser still holds it. Worst case ~25 s
+      // (the removal retries included); an ordinary close is a few hundred
+      // milliseconds. The waits never hold the event loop open: a `minidsh
+      // run` that is done exits without waiting out a timer.
       if (!exited) {
         await killAndWait(child)
         await Promise.race([gone, sleep(5_000)])
       }
       cdp.close('closed by its owner')
       await fence.close()
-      await removeProfile(profileDir)
+      await removeProfile(profile)
     })()
     return closing
   }
@@ -193,7 +226,7 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     return {
       cdp,
       pid: child.pid,
-      profileDir,
+      profileDir: profile,
       fence,
       product: version.product,
       get exited() {
@@ -205,35 +238,56 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     const tail = stderr
     await close()
     if (error instanceof BrowserError && error.code === 'BROWSER_FENCE_UNAVAILABLE') throw error
-    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${error instanceof Error ? error.message : String(error)}${remedy(tail)}`)
+    const known = remedy(tail)
+    // On Windows a missing executable still gets its pipes, and the spawn's
+    // 'error' arrives while the first command waits: that error is the cause.
+    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${spawnError?.message ?? messageOf(error)}${known.text}`, {
+      hostFault: known.hostFault || isMissing(spawnError),
+    })
   }
 }
 
 /**
- * The canary: a page asked to load a `.invalid` host must reach THIS process's
- * listener. If it does not, something replaced the proxy (an enterprise
- * policy) or the browser went direct, and the fence is not in force.
+ * The canary: pages asked to load two `.invalid` hosts — one over plain HTTP,
+ * one over TLS, the two paths a proxy setting can treat differently — must
+ * both reach THIS process's listener. If either does not, something replaced
+ * the proxy (an enterprise policy, a PAC script) or the browser went direct,
+ * and the fence is not in force. A fact about the host, so remembered.
  */
 async function proveFence(cdp: CdpConnection, fence: Fence): Promise<void> {
-  const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', { url: `http://${CANARY_HOST}/` })
-  const held = await fence.waitFor(CANARY_HOST, CANARY_TIMEOUT_MS)
-  await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined)
+  const targets: string[] = []
+  for (const url of [`http://${CANARY_HOST}/`, `https://${CANARY_TLS_HOST}/`]) {
+    targets.push((await cdp.send<{ targetId: string }>('Target.createTarget', { url })).targetId)
+  }
+  const held = (await Promise.all([fence.waitFor(CANARY_HOST, CANARY_TIMEOUT_MS), fence.waitFor(CANARY_TLS_HOST, CANARY_TIMEOUT_MS)])).every(Boolean)
+  for (const targetId of targets) await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined)
   if (!held) {
     throw new BrowserError(
       'BROWSER_FENCE_UNAVAILABLE',
       `this browser's traffic does not go through MiniDSH's network fence (a proxy policy on this machine may override it), so it is not used`,
+      { hostFault: true },
     )
   }
 }
 
-/** What a failed start's stderr says, turned into the remedy a person can act on. */
-function remedy(stderr: string): string {
+/** What a failed start's stderr says, turned into the remedy a person can act on, and whether it is the host's. */
+function remedy(stderr: string): { readonly text: string; readonly hostFault: boolean } {
   if (/no usable sandbox/i.test(stderr)) {
-    return `. Chrome's sandbox could not start on this host (unprivileged user namespaces are restricted); fix the host, never run it with --no-sandbox`
+    return { text: `. Chrome's sandbox could not start on this host (unprivileged user namespaces are restricted); fix the host, never run it with --no-sandbox`, hostFault: true }
   }
-  if (/running as root without --no-sandbox/i.test(stderr)) return '. Chrome refuses to run as root with its sandbox on; run MiniDSH as an ordinary user'
+  if (/running as root without --no-sandbox/i.test(stderr)) return { text: '. Chrome refuses to run as root with its sandbox on; run MiniDSH as an ordinary user', hostFault: true }
   const lines = stderr.split(/\r?\n/).filter((line) => line.trim() !== '')
-  return lines.length === 0 ? '' : `. Its last words: ${lines.slice(-3).join(' | ').slice(0, 600)}`
+  return { text: lines.length === 0 ? '' : `. Its last words: ${lines.slice(-3).join(' | ').slice(0, 600)}`, hostFault: false }
+}
+
+/** A spawn refused because the executable is not there or not runnable: the host's, every time. */
+function isMissing(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'ENOENT' || code === 'EACCES' || code === 'ENOEXEC' || code === 'EPERM'
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**
@@ -285,4 +339,5 @@ async function removeProfile(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => undefined)
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+/** A wait that never keeps the process alive by itself (`close` races these against the exit). */
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms).unref())

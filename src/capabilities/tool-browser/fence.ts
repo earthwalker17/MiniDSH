@@ -29,9 +29,15 @@
  * navigation may name (`reachable`), so the URL check and the fence cannot
  * disagree.
  *
- * Not covered, and said so in ARCHITECTURE §13: whether Chrome resolves a
- * fenced host name through the OS before proxying it (a DNS lookup carries the
- * name; unmeasured — the probe could not observe one either way).
+ * And the NAMES: `--host-resolver-rules` (`hostResolverRules`) leaves the
+ * browser nothing to look up but loopback and the allowed hosts, because a
+ * lookup is itself a message off the machine (measured: a page's WebRTC TURN
+ * host reached the OS resolver without it).
+ *
+ * What the fence does not cover, and ARCHITECTURE §13 says: a loopback
+ * service the browser reaches may itself relay to the network (a dev server's
+ * proxy), and every loopback service on the host is reachable, not only the
+ * session's own.
  */
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
@@ -40,8 +46,9 @@ import { canonicalPath, isInside } from '../../core/sandbox/index.ts'
 /** The marker header the fence's 403 carries, so a page's failed request can be told apart from a server's own 403. */
 export const FENCE_HEADER = 'x-minidsh-fence'
 
-/** The host a launch sends through the fence to prove it holds. `.invalid` never resolves, so a direct attempt fails rather than leaks. */
+/** The hosts a launch sends through the fence, over HTTP and over TLS, to prove it holds. `.invalid` never resolves, so a direct attempt fails rather than leaks. */
 export const CANARY_HOST = 'minidsh-fence-canary.invalid'
+export const CANARY_TLS_HOST = 'minidsh-fence-canary-tls.invalid'
 
 /**
  * An operator `allowHosts` entry: a host name or IPv4 literal, optionally
@@ -53,6 +60,25 @@ export const ALLOW_HOST_PATTERN = /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*$/
 /** The `--proxy-bypass-list` value: implicit rules removed, loopback restated, then the operator's hosts. */
 export function bypassList(allowHosts: readonly string[]): string {
   return ['<-loopback>', 'localhost', '*.localhost', '127.0.0.1/8', '[::1]', ...allowHosts].join(';')
+}
+
+/**
+ * The `--host-resolver-rules` value: every name the browser itself would look
+ * up resolves to NOTFOUND, except loopback (the proxy is `127.0.0.1`, and IP
+ * literals pass through these rules too, so each loopback spelling is
+ * excluded) and the operator's hosts, which go direct and need a real answer.
+ *
+ * Why it exists: the proxy carries every request, but not every NAME. A page
+ * can hand WebRTC a TURN server by host name, and Chrome resolves it through
+ * the OS resolver before any connection — a lookup that carries the name, and
+ * so whatever a page encoded into it, to an attacker's nameserver. Measured on
+ * Chrome 155 and Edge 155 (Windows), 2026-10-19, in Chrome's own network log:
+ * without these rules the TURN host reached a DNS transaction; with them,
+ * none did, while every loopback spelling, the proxy, the canaries and an
+ * allowed host still behaved as before (`launch.test.ts` pins both halves).
+ */
+export function hostResolverRules(allowHosts: readonly string[]): string {
+  return ['MAP * ~NOTFOUND', 'EXCLUDE localhost', 'EXCLUDE *.localhost', 'EXCLUDE 127.0.0.1', 'EXCLUDE 127.*', 'EXCLUDE ::1', 'EXCLUDE [::1]', ...allowHosts.map((host) => `EXCLUDE ${host}`)].join(', ')
 }
 
 /** True for a loopback host as a URL spells it (`URL.hostname`, lower-cased, IPv6 in brackets). */

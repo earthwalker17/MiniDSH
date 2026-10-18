@@ -90,6 +90,13 @@ jobs:
           # Python's own zip and XML parsers. Every runner image ships Python;
           # one that stopped would turn that check into a silent skip.
           MINIDSH_EXPECT_PYTHON: '1'
+          # The real-browser suites self-skip where no Chrome, Edge or Chromium
+          # is installed. Every runner image ships Chrome (ubuntu and windows
+          # 155, macOS 152 on 2026-10-18), whose own sandbox needs nothing of
+          # the bubblewrap step above (the Chrome .deb brings its AppArmor
+          # profile and a setuid helper); an image that dropped Chrome would
+          # turn the browser suites green by not running them.
+          MINIDSH_EXPECT_BROWSER: '1'
 
       # The install path, on every platform: pack the tarball `prepack` builds,
       # install it into an empty directory OUTSIDE the checkout, and start the
@@ -119,6 +126,8 @@ jobs:
           # proves the whole plugin graph assembled, and the listing proves it
           # answered the empty case rather than failing silently into no output.
           MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'core-agent-loop'
+          # The browser is a default row: the installed package must carry it.
+          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'tool-browser'
           MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list 2>&1 | grep -q 'no stored sessions'
           # The bundled skills are data beside the code (`files` whitelists
           # `skills`), and the INSTALLED binary must find them: listed, origin

@@ -288,6 +288,7 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
         sessionsRoot: replaySessions,
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),
+        browserProfileRoot: join(home, 'browser-replay'),
         attachmentsRoot: replayAttachments,
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],

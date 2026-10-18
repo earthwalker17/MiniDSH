@@ -7,12 +7,12 @@
  * `MINIDSH_EXPECT_BROWSER=1` that is a failure (`expectBrowserSuite`).
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { everyTestBrowser, expectBrowserSuite, fixtureServer, testBrowser, type FixtureServer } from '../../test-support/browser-fixture.ts'
+import { browsersUsing, everyTestBrowser, expectBrowserSuite, fixtureServer, testBrowser, type FixtureServer } from '../../test-support/browser-fixture.ts'
 import type { CdpConnection } from './cdp.ts'
 import { CANARY_HOST, FENCE_HEADER } from './fence.ts'
 import { launchBrowser, sweepProfiles, type LaunchedBrowser } from './launch.ts'
@@ -132,8 +132,45 @@ describe.runIf(testBrowser !== undefined)('a launched browser', () => {
     const error = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: root, headless: true, allowHosts: [CANARY_HOST], declared: [], window: { width: 800, height: 600 } }).catch(
       (caught: unknown) => caught,
     )
-    expect(error).toMatchObject({ code: 'BROWSER_FENCE_UNAVAILABLE' })
+    expect(error).toMatchObject({ code: 'BROWSER_FENCE_UNAVAILABLE', hostFault: true })
     expect(readdirSync(root)).toEqual([])
+    // "Nothing running": no process anywhere still uses a profile under this root.
+    expect(await until(() => browsersUsing(root).length === 0, 10_000), `a refused launch left ${browsersUsing(root).join(', ')} running`).toBe(true)
+  })
+
+  it('tells a host fault from a moment: no executable is the host, a start that died is not', LONG, async () => {
+    const options = { profileRoot: tempDir('minidsh-profiles-'), headless: true, allowHosts: [], declared: [], window: { width: 800, height: 600 } }
+    const missing = await launchBrowser({ ...options, executablePath: join(tempDir('minidsh-nobrowser-'), 'chrome') }).catch((caught: unknown) => caught)
+    expect(missing).toMatchObject({ code: 'BROWSER_UNAVAILABLE', hostFault: true })
+    // Node is not a browser: it refuses the switches and exits while "starting".
+    const died = await launchBrowser({ ...options, executablePath: process.execPath, startTimeoutMs: 15_000 }).catch((caught: unknown) => caught)
+    expect(died).toMatchObject({ code: 'BROWSER_UNAVAILABLE', hostFault: false })
+    expect(readdirSync(options.profileRoot)).toEqual([])
+  })
+
+  it('resolves no name a page hands it: a WebRTC TURN host meets the fence, never a DNS server', LONG, async () => {
+    const tag = `turnt-${process.pid}-${Date.now() % 100_000}.example.com`
+    const site = await fixtureServer({
+      '/': `<title>turn</title><script>(async()=>{const pc=new RTCPeerConnection({iceServers:[{urls:'turn:${tag}:3478?transport=tcp',username:'u',credential:'c'}]});pc.createDataChannel('x');await pc.setLocalDescription(await pc.createOffer())})()</script>`,
+    })
+    const netLogPath = join(tempDir('minidsh-netlog-'), 'net.json')
+    const browser = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: tempDir('minidsh-profiles-'), headless: true, allowHosts: [], declared: [], window: { width: 800, height: 600 }, netLogPath })
+    try {
+      await browser.cdp.send('Target.createTarget', { url: `${site.origin}/` })
+      await new Promise((resolve) => setTimeout(resolve, 4_000))
+    } finally {
+      await browser.close()
+      await site.close()
+    }
+    const raw = readFileSync(netLogPath, 'utf8')
+    const log = JSON.parse(raw.trimEnd().endsWith('}') ? raw : raw.replace(/,?\s*$/, ']}')) as { constants: { logEventTypes: Record<string, number> }; events: { type: number; params?: unknown }[] }
+    const names = new Map(Object.entries(log.constants.logEventTypes).map(([name, id]) => [id, name]))
+    const naming = log.events.filter((event) => JSON.stringify(event.params ?? {}).includes(tag)).map((event) => names.get(event.type) ?? '')
+    // The test means something only if the page really tried to reach the host…
+    expect(naming.length, 'the page never tried its TURN host, so this proves nothing').toBeGreaterThan(0)
+    // …and the attempt met the proxy, never a resolver (measured: without
+    // --host-resolver-rules a DNS transaction carries this name off the machine).
+    expect(naming.filter((name) => /DNS|HOST_RESOLVER_.*TASK/.test(name)), `the TURN host reached a resolver: ${[...new Set(naming)].join(', ')}`).toEqual([])
   })
 
   it('rejects a pending call when the browser is killed out of band, and the host lives on', LONG, async () => {

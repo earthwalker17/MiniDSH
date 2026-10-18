@@ -21,9 +21,11 @@
  * What it reaches is decided by the fence (`fence.ts`, ARCHITECTURE §7):
  * loopback, the workspace's own `file:` pages and the operator's `allowHosts`,
  * enforced inside the browser and proved at each launch. It asks no consent
- * and is deliberately NOT a `NETWORK_TOOL`: nothing it can reach leaves the
- * machine unless the operator named the host, so a delegated verifier child
- * may use it.
+ * and is deliberately NOT a `NETWORK_TOOL`: the browser itself opens no
+ * connection and resolves no name off the machine unless the operator named
+ * the host, so a delegated verifier child may use it. What it does reach is
+ * every loopback service on the host — any of which may act, or relay to the
+ * network, on its own authority — which ARCHITECTURE §13 says.
  *
  * Registered only where a browser was found (`locate.ts`); whether it can
  * start is learnt at the first launch and a host failure is remembered for the
@@ -39,6 +41,7 @@ import { assertImageFits, assertImageRoom, assertRouteTakesImages } from '../../
 import { imageDescriptor } from '../../core/llm/content.ts'
 import { LLM, type Llm } from '../../core/llm/index.ts'
 import { canonicalPath } from '../../core/sandbox/index.ts'
+import { matches, TOOL_RESULT } from '../../core/session/index.ts'
 import { excerptWithoutSpill, excerptWithSpill, SPILL } from '../../core/spill/index.ts'
 import { printableText } from '../../core/text.ts'
 import { defineTool, TOOLS, type ToolContext } from '../../core/tools/index.ts'
@@ -119,6 +122,16 @@ class AgentBrowser {
   constructor(agent: Agent, deps: Deps) {
     this.agent = agent
     this.deps = deps
+    // A resume or a fork is a new agent over an old history, and that history
+    // holds refs its browser minted. Numbering past the highest one it shows
+    // keeps "a ref never aliases" true across the lifecycle boundary too (the
+    // review reproduced an old e3 clicking a fork's new e3); and the model is
+    // told, once, that the browser behind those refs is gone.
+    const seen = highestRef(agent)
+    if (seen > 0) {
+      this.refs.next = seen + 1
+      this.relaunched = "This session's earlier browser was not carried over (a resume or a fork starts a new one); refs from before are no longer valid."
+    }
   }
 
   /** Serialized per agent: an operation starts only once the previous one has ended. */
@@ -141,9 +154,20 @@ class AgentBrowser {
       this.relaunched = 'The browser had exited and was started again; refs from before are no longer valid.'
       await old.close()
     }
-    if (this.deps.unavailable !== undefined) throw this.deps.unavailable
-    this.starting ??= this.start(budget).finally(() => (this.starting = undefined))
-    return this.starting
+    const known = this.deps.unavailable
+    if (known !== undefined) {
+      throw new BrowserError(known.code, `${known.message} (remembered from an earlier attempt in this process: fix the host, then restart MiniDSH)`, { hostFault: true })
+    }
+    if (this.starting === undefined) {
+      this.starting = this.start(budget).finally(() => (this.starting = undefined))
+      // A start the caller stopped waiting for still ends somewhere; its
+      // failure is the next caller's to see, never an unhandled rejection.
+      this.starting.catch(() => undefined)
+    }
+    // A cancelled call does not wait out a launch (seconds, or a wedged
+    // browser's timeouts): it returns at once, and the launch lands for the
+    // next call — or, if the agent is gone by then, closes itself.
+    return untilAborted(this.starting, budget.signal)
   }
 
   private async start(budget: CallBudget): Promise<BrowserPage> {
@@ -160,7 +184,9 @@ class AgentBrowser {
         startTimeoutMs: Math.max(1_000, Math.min(LAUNCH_MS, budget.deadline - Date.now())),
       })
     } catch (error) {
-      if (error instanceof BrowserError && remembered(error)) this.deps.unavailable = error
+      // Only a fact about the host is remembered; a moment's failure (a browser
+      // that died while starting, a timeout) is tried again next call.
+      if (error instanceof BrowserError && error.hostFault) this.deps.unavailable = error
       throw error
     }
     if (this.disposed) {
@@ -198,10 +224,39 @@ class AgentBrowser {
   }
 }
 
-/** A refusal that says something about this HOST, not this moment: worth remembering. A timeout is a moment. */
-function remembered(error: BrowserError): boolean {
-  if (error.code === 'BROWSER_FENCE_UNAVAILABLE') return true
-  return error.code === 'BROWSER_UNAVAILABLE' && !/did not answer/.test(error.message)
+/** The highest `[ref=eN]` any tool result in this agent's history shows, 0 for none. */
+function highestRef(agent: Agent): number {
+  let highest = 0
+  for (const event of agent.session.facts) {
+    if (!matches(event, TOOL_RESULT)) continue
+    for (const block of event.data.message.content) {
+      if (block.type !== 'tool-result') continue
+      for (const part of block.content) {
+        if (part.type !== 'text') continue
+        for (const found of part.text.matchAll(/\[ref=e(\d+)\]/g)) highest = Math.max(highest, Number(found[1]))
+      }
+    }
+  }
+  return highest
+}
+
+/** `work`, or the signal's reason as soon as the signal aborts, whichever is first. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 export const toolBrowserPlugin: Plugin<ToolBrowserConfig> = {
@@ -303,11 +358,20 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
       return operate(exec, LAUNCH_MS + waitMs + 40_000, async (session, page, budget) => {
         if (args.viewport !== undefined) await page.setViewport(args.viewport)
         const { loaded } = await page.navigate(url.href, { ...budget, waitMs })
-        const snapshot = await page.snapshot(budget)
-        session.lastSnapshot = snapshot
+        // The page loaded; a snapshot it cannot give (a tree past the message
+        // cap, the deadline) must not turn that into a failed navigation.
+        let body: string
+        try {
+          const snapshot = await page.snapshot(budget)
+          session.lastSnapshot = snapshot
+          body = bound(deps, exec, snapshot, deps.maxSnapshotChars, 'snapshot')
+        } catch (error) {
+          if (!(error instanceof BrowserError) || error.code === 'BROWSER_CLOSED') throw error
+          body = `(The page loaded, but its accessibility tree could not be read: ${clamp(error.message, 300)}. Read part of it with browser_snapshot and a ref, or ask about it with browser_evaluate.)`
+        }
         const report = await page.report()
         const note = loaded ? '' : '\n(The page had not finished loading when the wait ran out; what it shows may still change.)'
-        return { text: `${header(report, session.takeRelaunchNote())}${note}\n\n${bound(deps, exec, snapshot, deps.maxSnapshotChars, 'snapshot')}` }
+        return { text: `${header(report, session.takeRelaunchNote())}${note}\n\n${body}` }
       })
     },
   })
@@ -328,8 +392,12 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
     render: renderText,
     execute: (args, exec) =>
       operate(exec, 30_000 + (args.timeout_ms ?? 10_000), async (session, page, budget) => {
-        const waitBudget = args.wait_for_text === undefined ? budget : { ...budget, deadline: Math.min(budget.deadline, Date.now() + (args.timeout_ms ?? 10_000)) }
-        const text = await page.snapshot({ ...waitBudget, ...(args.ref === undefined ? {} : { ref: args.ref }), ...(args.wait_for_text === undefined ? {} : { waitForText: args.wait_for_text }) })
+        // timeout_ms bounds the WAIT only; the snapshot after it has the whole budget.
+        const text = await page.snapshot({
+          ...budget,
+          ...(args.ref === undefined ? {} : { ref: args.ref }),
+          ...(args.wait_for_text === undefined ? {} : { waitForText: args.wait_for_text, waitUntil: Date.now() + (args.timeout_ms ?? 10_000) }),
+        })
         if (args.ref === undefined) session.lastSnapshot = text
         const report = await page.report()
         return { text: `${header(report, session.takeRelaunchNote())}\n\n${bound(deps, exec, text, deps.maxSnapshotChars, 'snapshot')}` }
@@ -341,7 +409,7 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
     description: `Act on the page the way a person would, then report what changed.
 * click / hover: an element by ref. type: replace a field's text with text (submit: true presses Enter after). press: a key such as Enter, Tab, Escape, ArrowDown or Control+A, on ref or on the focused element. select: choose option (a value or visible label) in a <select>.
 * ref comes from the latest snapshot; a ref from a page that has changed since fails with "take a new snapshot".
-* An element that is hidden, disabled or covered by another is refused, naming what covers it.
+* click and hover refuse an element that is hidden or covered by another (naming what covers it), and click one that is disabled; type and select refuse one that is hidden, disabled or read-only.
 * A dialog the action raises (alert, confirm, prompt) is dismissed unless dialog is "accept".
 * ${HEADER_NOTE}`,
     input: z
@@ -454,7 +522,14 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
       operate(exec, 5_000 + (args.timeout_ms ?? 10_000), async (session, page, budget) => {
         const result = await page.evaluate(args.expression, { ...budget, deadline: Math.min(budget.deadline, Date.now() + (args.timeout_ms ?? 10_000)) })
         const report = await page.report()
-        const body = result.exception !== undefined ? `It threw: ${clamp(result.exception, 2_000)}` : result.value === undefined ? 'It returned undefined.' : stringify(result.value)
+        const body =
+          result.exception !== undefined
+            ? `It threw: ${clamp(result.exception, 2_000)}`
+            : result.unreturnable !== undefined
+              ? `It returned nothing that can come back as JSON (${clamp(result.unreturnable, 400)}). Return a property instead: a textContent, a getBoundingClientRect(), a computed style.`
+              : result.value === undefined
+                ? 'It returned undefined.'
+                : stringify(result.value)
         return { text: `${header(report, session.takeRelaunchNote())}\n\n${bound(deps, exec, body, MAX_EVALUATE_CHARS, 'evaluate')}` }
       }),
   })
@@ -498,6 +573,14 @@ function toAction(args: { action: 'click' | 'hover' | 'type' | 'press' | 'select
 }
 
 /**
+ * How much of a result the header's event list may take. The page decides how
+ * much it logs, so without a bound one noisy page would cost every result tens
+ * of thousands of characters (the review measured a 49 KB header) and crowd out
+ * the snapshot the call was for.
+ */
+const MAX_EVENT_CHARS = 4_000
+
+/**
  * The page header: one line for where the page is, then only what happened.
  * Every string from the page is made printable and clamped: it is the page's
  * text, not ours, and it lands in the log.
@@ -507,7 +590,9 @@ export function header(report: PageReport, relaunch: string | undefined): string
   if (relaunch !== undefined) lines.push(relaunch)
   if (report.crashed) lines.push('The page crashed. Navigate to load it again.')
   const status = report.status === undefined ? '' : ` (HTTP ${report.status})`
-  lines.push(`Page: ${report.title === '' ? '(untitled)' : `"${clamp(report.title, 120)}"`} at ${clamp(report.url, 300)}${status}${report.navigated ? ' — navigated' : ''}`)
+  // Chrome titles a page with no <title> by its address (scheme dropped): that is not a title.
+  const untitled = report.title === '' || report.title === report.url || report.title === report.url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+  lines.push(`Page: ${untitled ? '(untitled)' : `"${clamp(report.title, 120)}"`} at ${clamp(report.url, 300)}${status}${report.navigated ? ' — navigated' : ''}`)
   const errors = report.console.filter((entry) => entry.level === 'error').length
   const warnings = report.console.length - errors
   const events: string[] = []
@@ -515,15 +600,27 @@ export function header(report: PageReport, relaunch: string | undefined): string
   for (const exception of report.exceptions) events.push(`uncaught: ${clamp(exception, 400)}`)
   for (const failed of report.failedRequests) events.push(`${failed.fenced ? 'blocked by the browser fence' : 'request failed'}: ${clamp(failed.url, 200)} (${clamp(failed.reason, 80)})`)
   for (const dialog of report.dialogs) events.push(`${dialog.type} dialog "${clamp(dialog.message, 200)}" was ${dialog.answer}`)
-  for (const name of report.downloads) events.push(`download refused: ${clamp(name, 120)}`)
+  for (const download of report.downloads) {
+    const name = clamp(download.name, 120)
+    events.push(download.outcome === 'refused' ? `download refused: ${name}` : download.outcome === 'started' ? `download started, not yet settled: ${name}` : `download SAVED despite this browser's deny policy: ${name}`)
+  }
   for (const url of report.blockedFiles) events.push(`file outside the workspace refused: ${clamp(url, 200)}`)
   for (const url of report.popups) events.push(`new window closed unopened: ${clamp(url, 200)}`)
   if (events.length === 0 && report.omitted === 0) {
     lines.push('Since the last browser result: no console errors or warnings, exceptions, failed requests or dialogs.')
   } else {
     lines.push(`Since the last browser result (${errors} console error(s), ${warnings} warning(s), ${report.exceptions.length} exception(s), ${report.failedRequests.length} failed request(s)):`)
-    for (const event of events) lines.push(`  - ${event}`)
-    if (report.omitted > 0) lines.push(`  - …and ${report.omitted} older event(s) not shown`)
+    // In order, so the FIRST error — usually the cause — always shows.
+    let used = 0
+    let shown = 0
+    for (const event of events) {
+      if (used + event.length > MAX_EVENT_CHARS && shown > 0) break
+      lines.push(`  - ${event}`)
+      used += event.length
+      shown++
+    }
+    const unshown = events.length - shown + report.omitted
+    if (unshown > 0) lines.push(`  - …and ${unshown} more event(s) not shown`)
   }
   return lines.join('\n')
 }

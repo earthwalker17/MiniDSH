@@ -9,18 +9,24 @@
  * moves: the element is scrolled into view, it has a box inside the viewport,
  * the box holds still across two animation frames, a click target is not
  * disabled, and the hit test at the point lands on the element itself or
- * something inside it — or the refusal names what is on top.
+ * something inside it — or, once the element has been scrolled to the middle
+ * of the viewport and tried again, the refusal names what is on top.
  *
  * Typing is real input too (`Input.insertText` after selecting the old
  * content), so a framework that tracks a field's value through its setter
- * sees a change; an assigned `.value` it would not.
+ * sees a change; an assigned `.value` it would not. The exceptions are the
+ * fields with a picker instead of text (date, time, colour, range), which
+ * take their value as Playwright's `fill` gives it: see `SET_VALUE`. Typing
+ * and selecting need a visible element, as a click does, but no hit test —
+ * Playwright's `fill` and `selectOption` do not hit-test either.
  *
- * Coordinates are CSS pixels in the main frame's viewport. Measured on Chrome
- * 155: `DOM.getContentQuads` of a node inside a same-process iframe already
- * answers in those coordinates (the frame's offset applied), and
- * `DOM.getNodeForLocation` at that point answers the node inside the frame
- * with that frame's id — so one point serves both, and the hit test climbs
- * from the hit frame to the target's through `DOM.getFrameOwner`.
+ * Coordinates are CSS pixels in the main frame's viewport, except for the hit
+ * test (`hitTest`). Measured on Chrome 155: `DOM.getContentQuads` of a node
+ * inside a same-process iframe already answers in those coordinates (the
+ * frame's offset applied), and `DOM.getNodeForLocation` at that point (moved
+ * into document coordinates) answers the node inside the frame with that
+ * frame's id — so one point serves both, and the hit test climbs from the hit
+ * frame to the target's through `DOM.getFrameOwner`.
  */
 import { BrowserError } from './errors.ts'
 import { callFunction, describeRef, isProtocolError, list, numberOf, record, resolveNode, resolveRef, text, type PageSession, type RefEntry } from './snapshot.ts'
@@ -55,10 +61,20 @@ const notActionable = (message: string): BrowserError => new BrowserError('BROWS
 async function pointer(session: PageSession, ref: string, click: boolean, budget: CallBudget): Promise<string> {
   const { entry, objectId } = await resolveRef(session, ref, budget)
   const label = describeRef(entry)
-  const point = await stablePoint(session, entry, label, budget)
+  let point = await stablePoint(session, entry, label, budget)
   // Hover is allowed on a disabled element (its tooltip is a thing to check); a click is not.
   if (click && (await callFunction(session, objectId, IS_DISABLED, [], budget)) === true) throw notActionable(`${label} is disabled`)
-  await expectHit(session, entry, objectId, point, label, budget)
+  let refusal = await hitTest(session, entry, objectId, point, label, budget)
+  if (refusal !== undefined) {
+    // `scrollIntoViewIfNeeded` leaves an element that is already in view where
+    // it is — under a fixed header, say, which then takes the click. In the
+    // middle of the viewport only a cover over the whole page still covers it
+    // (Playwright likewise retries at other scroll positions before giving up).
+    await callFunction(session, objectId, SCROLL_TO_CENTRE, [], budget)
+    point = await stablePoint(session, entry, label, budget)
+    refusal = await hitTest(session, entry, objectId, point, label, budget)
+    if (refusal !== undefined) throw notActionable(refusal)
+  }
   await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none', buttons: 0 }, budget)
   if (!click) return `hovered ${label}`
   await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', buttons: 1, clickCount: 1 }, budget)
@@ -72,18 +88,33 @@ const IS_DISABLED = `function () {
   return element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true'
 }`
 
-/** Scrolls the element into view and returns its centre once it holds still: measured, two animation frames, measured again, up to three times. */
-async function stablePoint(session: PageSession, entry: RefEntry, label: string, budget: CallBudget): Promise<Point> {
-  const hidden = (): BrowserError => notActionable(`${label} is not visible (no box on screen to act on)`)
+const SCROLL_TO_CENTRE = `function () {
+  const element = this.nodeType === 1 ? this : this.parentElement
+  if (element) element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
+}`
+
+/**
+ * The visibility rule every action on an element shares: scrolled into view,
+ * it has a box with an area inside the viewport. Returns that box's centre.
+ */
+async function visiblePoint(session: PageSession, entry: RefEntry, label: string, budget: CallBudget): Promise<Point> {
+  const hidden = notActionable(`${label} is not visible (no box on screen to act on)`)
   try {
     await session.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: entry.backendNodeId }, budget)
   } catch (error) {
     // "Node does not have a layout object": display:none, or detached.
-    if (isProtocolError(error)) throw hidden()
+    if (isProtocolError(error)) throw hidden
     throw error
   }
-  let point = await centre(session, entry.backendNodeId, budget)
-  if (point === undefined) throw hidden()
+  const point = await centre(session, entry.backendNodeId, budget)
+  if (point === undefined) throw hidden
+  return point
+}
+
+/** Scrolls the element into view and returns its centre once it holds still: measured, two animation frames, measured again, up to three times. */
+async function stablePoint(session: PageSession, entry: RefEntry, label: string, budget: CallBudget): Promise<Point> {
+  const hidden = (): BrowserError => notActionable(`${label} is not visible (no box on screen to act on)`)
+  let point = await visiblePoint(session, entry, label, budget)
   for (let attempt = 1; ; attempt++) {
     await animationFrames(session, budget)
     const again = await centre(session, entry.backendNodeId, budget)
@@ -177,19 +208,38 @@ async function animationFrames(session: PageSession, budget: CallBudget): Promis
  * The hit test: what the pointer would land on must be the element or inside
  * it (through shadow roots, and from a label to the control it labels, as a
  * click on a label reaches its control). A hit in a child frame is climbed to
- * the target's frame through each frame's owner element first.
+ * the target's frame through each frame's owner element first. Answers the
+ * refusal, or `undefined` when the pointer would land.
+ *
+ * `DOM.getNodeForLocation` takes DOCUMENT coordinates, unlike the quads and
+ * the mouse events: measured, with the page scrolled 1200 px a button's
+ * viewport centre answers "No node found" and the same point plus the scroll
+ * answers the button. The offset is the layout viewport's, the frame's own
+ * scroll; the visual viewport differs from it only under a pinch zoom, which
+ * this browser's desktop-mode page cannot get (measured: a pinch gesture and a
+ * page scale of 2 both left the two offsets equal).
+ *
+ * The hit test honours `pointer-events: none` (the protocol's default), as a
+ * real click does: measured, a full-page click-through overlay (a toast
+ * container) is what the hit test answers with the flag set, while the click
+ * itself goes through it to the button.
  */
-async function expectHit(session: PageSession, entry: RefEntry, objectId: string, point: Point, label: string, budget: CallBudget): Promise<void> {
+async function hitTest(session: PageSession, entry: RefEntry, objectId: string, point: Point, label: string, budget: CallBudget): Promise<string | undefined> {
+  const metrics = await session.send<{ cssLayoutViewport?: unknown }>('Page.getLayoutMetrics', {}, budget)
+  const layout = record(metrics.cssLayoutViewport)
+  const x = Math.floor(point.x + (numberOf(layout?.pageX) ?? 0))
+  const y = Math.floor(point.y + (numberOf(layout?.pageY) ?? 0))
+  const nothing = `${label} cannot be reached: nothing in the page is at its centre (${point.x}, ${point.y} in the viewport)`
   let hit: { backendNodeId?: unknown; frameId?: unknown }
   try {
-    hit = await session.send('DOM.getNodeForLocation', { x: point.x, y: point.y, includeUserAgentShadowDOM: true, ignorePointerEventsNone: true }, budget)
+    hit = await session.send('DOM.getNodeForLocation', { x, y, includeUserAgentShadowDOM: true }, budget)
   } catch (error) {
-    if (isProtocolError(error)) throw notActionable(`${label} cannot be reached: nothing in the page is at its centre (${point.x}, ${point.y})`)
+    if (isProtocolError(error)) return nothing
     throw error
   }
   const hitNode = numberOf(hit.backendNodeId)
-  if (hitNode === undefined) throw notActionable(`${label} cannot be reached: nothing in the page is at its centre`)
-  if (hitNode === entry.backendNodeId) return
+  if (hitNode === undefined) return nothing
+  if (hitNode === entry.backendNodeId) return undefined
 
   let node: number | undefined = hitNode
   let frame = text(hit.frameId) ?? entry.frameId
@@ -207,14 +257,14 @@ async function expectHit(session: PageSession, entry: RefEntry, objectId: string
     }
     frame = parent
   }
-  if (node === entry.backendNodeId) return
+  if (node === entry.backendNodeId) return undefined
   if (node !== undefined) {
     const inside = await resolveNode(session, node, budget)
-    if (inside !== undefined && (await callFunction(session, objectId, CONTAINS, [{ objectId: inside }], budget)) === true) return
+    if (inside !== undefined && (await callFunction(session, objectId, CONTAINS, [{ objectId: inside }], budget)) === true) return undefined
   }
   const covering = await resolveNode(session, hitNode, budget)
   const what = covering === undefined ? 'another element' : await callFunction(session, covering, DESCRIBE, [], budget)
-  throw notActionable(`${label} is covered by ${typeof what === 'string' ? what : 'another element'}, which would take the click instead; close or move it first`)
+  return `${label} is covered by ${typeof what === 'string' ? what : 'another element'}, which would take the click instead; close or move it first`
 }
 
 const CONTAINS = `function (hit) {
@@ -225,7 +275,8 @@ const CONTAINS = `function (hit) {
   return false
 }`
 
-const DESCRIBE = `function () {
+/** An element as a person would point at it: `<div id="x" class="a b"> "its first words"`; a text node by its parent. */
+export const DESCRIBE = `function () {
   const element = this.nodeType === 1 ? this : this.parentElement
   if (!element) return 'another node'
   let out = '<' + element.localName
@@ -246,29 +297,91 @@ async function typeText(session: PageSession, ref: string, value: string, submit
   const kind = await callFunction(session, objectId, FIELD_KIND, [], budget)
   if (kind === 'disabled') throw notActionable(`${label} is disabled`)
   if (kind === 'readonly') throw notActionable(`${label} is read-only`)
-  if (kind !== 'field' && kind !== 'editable') throw notActionable(`${label} does not take text: type into an input, a textarea or an editable element`)
+  if (kind !== 'field' && kind !== 'editable' && kind !== 'value') throw notActionable(`${label} does not take text: type into an input, a textarea or an editable element`)
+  await visiblePoint(session, entry, label, budget)
   await focus(session, entry, label, budget)
-  await callFunction(session, objectId, SELECT_CONTENT, [], budget)
-  // Measured: an empty insertText deletes the selection and fires `input`,
-  // on every platform alike — a Delete key would need macOS's editing commands.
-  await session.send('Input.insertText', { text: value }, budget)
-  const count = Array.from(value).length
-  const done = value === '' ? `cleared ${label}` : `typed ${count} character${count === 1 ? '' : 's'} into ${label}`
+  let done: string
+  if (kind === 'value') {
+    const outcome = record(await callFunction(session, objectId, SET_VALUE, [{ value }], budget))
+    if (outcome?.taken !== true) throw notActionable(`${label} did not take ${JSON.stringify(value)}: it expects ${expectedFormat(outcome)}`)
+    done = value.trim() === '' ? `cleared ${label}` : `set ${label} to ${JSON.stringify(text(outcome.value) ?? value)}`
+  } else {
+    await callFunction(session, objectId, SELECT_CONTENT, [], budget)
+    // Measured: an empty insertText deletes the selection and fires `input`,
+    // on every platform alike — a Delete key would need macOS's editing commands.
+    await session.send('Input.insertText', { text: value }, budget)
+    const count = Array.from(value).length
+    done = value === '' ? `cleared ${label}` : `typed ${count} character${count === 1 ? '' : 's'} into ${label}`
+  }
   if (!submit) return done
   await dispatchKey(session, { modifiers: [], key: NAMED_KEYS.Enter! }, budget)
   return `${done} and pressed Enter`
 }
 
+/** `value`: a field with a picker rather than text, set whole (`SET_VALUE`). */
 const FIELD_KIND = `function () {
   const tag = this.localName
   if (tag === 'input' || tag === 'textarea') {
-    if (tag === 'input' && ['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'range', 'color', 'hidden'].includes(this.type)) return 'other'
+    if (tag === 'input' && ['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'hidden'].includes(this.type)) return 'other'
     if (this.disabled) return 'disabled'
     if (this.readOnly) return 'readonly'
-    return 'field'
+    return tag === 'input' && ['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range'].includes(this.type) ? 'value' : 'field'
   }
   return this.isContentEditable ? 'editable' : 'other'
 }`
+
+/**
+ * Playwright's `fill` for the picker fields: measured, `Input.insertText`
+ * into a date or time input changes nothing (its text is a row of spin
+ * fields, not an editor). So the value is set whole, through the PROTOTYPE's
+ * setter — a framework that tracks the value through an instance setter (as
+ * React does) must not record it as its own, or the input event that follows
+ * reads as no change — then `input` and `change` fire as a person's choice
+ * fires them. A value the field sanitises away did not take: the old value is
+ * put back without events and the refusal names the format. Measured on
+ * Chrome 155, each kind sanitises its own way, so each is checked its own way:
+ * a date, time, month or week it cannot parse becomes empty (and a
+ * datetime-local it can parse is rewritten to its normal form, `2024-01-15
+ * 13:45` to `2024-01-15T13:45`); a range value is clamped into min..max
+ * (`50` in 0..10 becomes `10`, `5.0` becomes `5`); a colour is any CSS colour
+ * (`red` becomes `#ff0000`) and anything else `#000000`.
+ */
+const SET_VALUE = `function (wanted) {
+  const value = wanted.trim()
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+  const before = this.value
+  setter.call(this, value)
+  const taken =
+    this.type === 'range' ? value !== '' && Number(this.value) === Number(value)
+    : this.type === 'color' ? value !== '' && CSS.supports('color', value)
+    : (this.value === '') === (value === '')
+  if (!taken) {
+    setter.call(this, before)
+    return { taken: false, type: this.type, min: this.min, max: this.max, step: this.step }
+  }
+  this.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
+  this.dispatchEvent(new Event('change', { bubbles: true }))
+  return { taken: true, value: this.value }
+}`
+
+/** What a picker field takes, for the refusal of a value it did not. */
+function expectedFormat(outcome: Record<string, unknown> | undefined): string {
+  const type = text(outcome?.type) ?? ''
+  if (type === 'range') {
+    const [min, max, step] = [text(outcome?.min) || '0', text(outcome?.max) || '100', text(outcome?.step)]
+    return `a number from ${min} to ${max}${step !== undefined && step !== '' && step !== 'any' && step !== '1' ? ` in steps of ${step}` : ''}`
+  }
+  return VALUE_FORMATS[type] ?? 'a value in its own format'
+}
+
+const VALUE_FORMATS: Readonly<Record<string, string>> = {
+  date: 'a date as YYYY-MM-DD, such as 2024-01-15',
+  time: 'a time as HH:MM or HH:MM:SS on a 24-hour clock, such as 13:45',
+  'datetime-local': 'a date and time as YYYY-MM-DDTHH:MM, such as 2024-01-15T13:45',
+  month: 'a month as YYYY-MM, such as 2024-01',
+  week: 'a week as YYYY-Www, such as 2024-W03',
+  color: 'a colour as #rrggbb (such as #ff0000) or by CSS name',
+}
 
 const SELECT_CONTENT = `function () {
   if (this.localName === 'input' || this.localName === 'textarea') {
@@ -471,6 +584,7 @@ const MAX_LISTED_OPTIONS = 20
 async function select(session: PageSession, ref: string, values: readonly string[], budget: CallBudget): Promise<string> {
   const { entry, objectId } = await resolveRef(session, ref, budget)
   const label = describeRef(entry)
+  await visiblePoint(session, entry, label, budget)
   const outcome = record(await callFunction(session, objectId, SELECT_OPTIONS, [{ value: values }, { value: MAX_LISTED_OPTIONS }], budget))
   const error = text(outcome?.error)
   if (error === 'kind') throw notActionable(`${label} is not a <select>; click it, then click the option`)
@@ -483,11 +597,20 @@ async function select(session: PageSession, ref: string, values: readonly string
     const more = count > options.length ? `, … (${count} in all)` : ''
     throw notActionable(`${label} has no option ${JSON.stringify(text(outcome?.want) ?? '')}; its options are: ${options.join(', ')}${more}`)
   }
-  const chosen = list(outcome?.selected).filter((option): option is string => typeof option === 'string')
-  return chosen.length === 0 ? `cleared the selection of ${label}` : `selected ${chosen.map((option) => JSON.stringify(option)).join(', ')} in ${label}`
+  const labels = (raw: unknown): string => list(raw).flatMap((option) => (typeof option === 'string' ? [JSON.stringify(option)] : [])).join(', ')
+  const chosen = labels(outcome?.chosen)
+  const selection = labels(outcome?.selected)
+  // HTML's selectedness rule gives a single select with nothing chosen its first option back.
+  if (chosen === '') return selection === '' ? `cleared the selection of ${label}` : `cleared the selection of ${label}; it now shows ${selection}`
+  return outcome?.multiple === true ? `selected ${chosen} in ${label}; its selection is now ${selection}` : `selected ${chosen} in ${label}`
 }
 
-/** Matches by value first, then by visible label, as Playwright does; sets `selected`, then fires what a person's choice fires. */
+/**
+ * Matches by value first, then by visible label, as Playwright does; sets
+ * `selected`, then fires what a person's choice fires. In a multiple select
+ * the options are ADDED to what is selected, as a person's ctrl-click adds
+ * them, and the account names the whole selection after; no options clears it.
+ */
 const SELECT_OPTIONS = `function (wanted, listed) {
   if (this.localName !== 'select') return { error: 'kind' }
   if (this.disabled) return { error: 'disabled' }
@@ -507,8 +630,9 @@ const SELECT_OPTIONS = `function (wanted, listed) {
     chosen.push(option)
   }
   if (!this.multiple && chosen.length > 1) return { error: 'single' }
-  for (const option of options) option.selected = chosen.includes(option)
+  if (this.multiple && chosen.length > 0) for (const option of chosen) option.selected = true
+  else for (const option of options) option.selected = chosen.includes(option)
   this.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
   this.dispatchEvent(new Event('change', { bubbles: true }))
-  return { selected: chosen.map((option) => option.label) }
+  return { chosen: chosen.map((option) => option.label), selected: Array.from(this.selectedOptions, (option) => option.label), multiple: this.multiple }
 }`

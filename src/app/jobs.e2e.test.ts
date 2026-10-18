@@ -140,6 +140,7 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
         sessionsRoot: tempDir('minidsh-jobs-replay-'),
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),
+        browserProfileRoot: join(home, 'browser-replay'),
         logger: silent,
         accepts: 'none',
         patches: [{ id: 'llm-deepseek', disabled: true }],

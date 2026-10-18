@@ -33,7 +33,7 @@ describe('core/process', () => {
     }
   })
 
-  it('kills a child AND the process it started, and waits for both', { timeout: 60_000 }, async () => {
+  it('kills a child AND the process it started, waiting for the root and its killer', { timeout: 60_000 }, async () => {
     // The root prints its grandchild's pid, then idles. On POSIX it leads its
     // own group (`detached`), which is what lets one signal reach the tree.
     const script = `const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(c.pid); setInterval(() => {}, 1000)`

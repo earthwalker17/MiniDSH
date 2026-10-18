@@ -1,4 +1,5 @@
-# The eight live arcs against the real providers.
+# The live arcs against the real providers (those that need no secret this
+# repository does not hold: the OpenAI leg, search and its drift probe are local).
 #
 # `workflow_dispatch` only, deliberately. These spend a real account, so no
 # push starts them and a fork's pull request cannot reach the secrets at all —
@@ -16,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       filter:
-        description: 'vitest filename filter (blank runs all eight arcs)'
+        description: 'vitest filename filter (blank runs every arc)'
         required: false
         default: ''
 
@@ -48,9 +49,9 @@ jobs:
             exit 1
           fi
           # The routing arc needs both, and self-skips on either — so checking
-          # only the first would let seven arcs stand in for eight.
+          # only the first would let the rest stand in for all of them.
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "ANTHROPIC_API_KEY is unset: the routing arc would self-skip and this job would report eight arcs having run seven."
+            echo "ANTHROPIC_API_KEY is unset: the routing arc would self-skip and this job would report a suite that did not run in full."
             exit 1
           fi
 
@@ -94,6 +95,9 @@ jobs:
         env:
           FILTER: ${{ inputs.filter }}
           MINIDSH_EXPECT_CONFINEMENT: '1'
+          # The browser arc self-skips without a browser; both runner images
+          # ship Chrome, so a skip here would be a green run that proved nothing.
+          MINIDSH_EXPECT_BROWSER: '1'
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 

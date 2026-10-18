@@ -97,6 +97,26 @@ const ROUTES: Record<string, Route> = {
     a.addEventListener('input', () => { mirror.textContent = 'value:' + a.value })
   </script>`,
   '/chooser': `<input type="file" aria-label="Upload">`,
+  '/fold': `<body style="margin:0"><div style="height:1500px">top</div><button onclick="out.textContent = 'below clicked'">Below</button><p id="out">idle</p><div style="height:1500px"></div></body>`,
+  // The react-hot-toast pattern: an always-mounted, full-screen, click-through container.
+  '/toaster': `<button onclick="out.textContent = 'clicked'">Save</button><p id="out">idle</p>
+    <div id="toaster" style="position:fixed;inset:0;z-index:9999;pointer-events:none"></div>`,
+  '/sticky': `<body style="margin:0"><header style="position:fixed;top:0;left:0;right:0;height:60px;background:#eee;z-index:5">Header</header>
+    <div style="height:2000px;padding-top:80px"><button onclick="out.textContent = 'clicked'" style="height:80px">Target</button><p id="out">idle</p></div></body>`,
+  '/dates': `<label>When <input type="date" id="d" value="2024-01-15"></label><label>At <input type="time" id="t"></label><p id="out"></p>
+    <script>for (const field of [d, t]) field.addEventListener('change', () => out.textContent += field.id + '=' + field.value + ';')</script>`,
+  '/hideable': `<label>Name <input id="n"></label><label>Size <select id="s"><option>S</option><option>M</option></select></label>`,
+  '/multi': `<label>Tags <select id="m" multiple><option>a</option><option selected>b</option><option>c</option></select></label>`,
+  '/debounce': `<button onclick="setTimeout(() => out.textContent = 'updated', 300)">Go</button><p id="out">idle</p>`,
+  '/debounce-fetch': `<button onclick="setTimeout(() => fetch('/api').then((r) => r.text()).then((t) => out.textContent = t), 250)">Search</button><p id="out">idle</p>`,
+  '/api': { type: 'text/plain', body: 'results arrived' },
+  '/late-nav': `<button onclick="setTimeout(() => location.href = '/next', 400)">Later</button>`,
+  '/next': '<p>next page</p>',
+  '/shadow-late': `<open-el></open-el><closed-el></closed-el><script>
+    const open = document.querySelector('open-el').attachShadow({ mode: 'open' })
+    const closed = document.querySelector('closed-el').attachShadow({ mode: 'closed' })
+    setTimeout(() => { open.innerHTML = '<p>Open shadow text</p>'; closed.innerHTML = '<p>Saved in shadow</p>' }, 300)
+  </script>`,
   '/medium': `<title>Medium</title><nav><a href="/">Home</a> <a href="/docs">Docs</a> <a href="/blog">Blog</a> <a href="/about">About</a></nav>
     <main><h1>Orders</h1><form><label>Name <input name="n"></label><label>Email <input type="email" name="e"></label>
     <label>Plan <select name="p"><option>Free</option><option>Pro</option></select></label><label><input type="checkbox" name="t"> Terms</label>
@@ -227,6 +247,27 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
       expect(Date.now() - started).toBeLessThan(2_500)
     })
 
+    it('waits for text inside open and closed shadow roots, and honours waitUntil for the wait alone', LONG, async () => {
+      await go('/shadow-late')
+      for (const wanted of ['Saved in shadow', 'Open shadow text']) {
+        expect(await page.snapshot({ ...budget(), waitForText: wanted, waitUntil: Date.now() + 5_000 })).toContain(wanted)
+      }
+      // Already there: a wait that is over at once still answers with the snapshot.
+      expect(await page.snapshot({ ...budget(), waitForText: 'Saved in shadow', waitUntil: Date.now() + 1 })).toContain('Saved in shadow')
+      // Not there: the wait ends at waitUntil, not at the call's deadline.
+      const started = Date.now()
+      await expect(page.snapshot({ ...budget(), waitForText: 'never here', waitUntil: Date.now() + 500 })).rejects.toMatchObject({ code: 'BROWSER_TIMEOUT', message: expect.stringContaining('never here') })
+      expect(Date.now() - started).toBeLessThan(2_500)
+    })
+
+    it('renders date and time inputs as textboxes showing their value, without their internal fields', LONG, async () => {
+      const snapshot = await go('/dates')
+      expect(snapshot).toMatch(/^ *- textbox "When" \[ref=e\d+\]: 2024-01-15$/m)
+      expect(snapshot).toMatch(/^ *- textbox "At" \[ref=e\d+\]$/m)
+      expect(snapshot).not.toContain('spinbutton')
+      expect(snapshot).not.toContain('picker')
+    })
+
     it('nests a same-origin frame under its iframe', LONG, async () => {
       const snapshot = await go('/frame-host')
       // Deeper than the iframe's own line: Chrome exposes this frame's body as a `generic` between them.
@@ -354,6 +395,84 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
       await expect(page.act({ kind: 'press', key: 'Hyper+Q' }, acting())).rejects.toMatchObject({ code: 'BROWSER_NOT_ACTIONABLE', message: expect.stringContaining('Enter, Tab') })
     })
 
+    it('clicks a button below the fold, which the hit test finds in document coordinates', LONG, async () => {
+      await page.act({ kind: 'click', ref: refOf(await go('/fold'), 'button "Below"') }, acting())
+      expect(await evaluate('out.textContent')).toBe('below clicked')
+      expect(await evaluate('scrollY')).toBeGreaterThan(0)
+    })
+
+    it('clicks through a pointer-events:none overlay, as a person’s click goes through it', LONG, async () => {
+      await page.act({ kind: 'click', ref: refOf(await go('/toaster'), 'button "Save"') }, acting())
+      expect(await evaluate('out.textContent')).toBe('clicked')
+    })
+
+    it('clicks a button whose centre is under a fixed header by scrolling it to the middle first', LONG, async () => {
+      await go('/sticky')
+      // The button now spans 10..90 and the header 0..60: its centre is covered, its lower part is not.
+      await evaluate('window.scrollTo(0, 70)')
+      await page.act({ kind: 'click', ref: refOf(await page.snapshot(budget()), 'button "Target"') }, acting())
+      expect(await evaluate('out.textContent')).toBe('clicked')
+    })
+
+    it('types into date and time fields by value, and refuses a value in the wrong format, naming the right one', LONG, async () => {
+      const snapshot = await go('/dates')
+      const field = (name: string): string => new RegExp(`- \\w+ "${name}"[^\\n]*\\[ref=(e\\d+)\\]`).exec(snapshot)![1]!
+      await page.act({ kind: 'type', ref: field('When'), text: '2025-03-04', submit: false }, acting())
+      await page.act({ kind: 'type', ref: field('At'), text: '13:45', submit: false }, acting())
+      expect(await evaluate('[d.value, t.value, out.textContent]')).toEqual(['2025-03-04', '13:45', 'd=2025-03-04;t=13:45;'])
+      await expect(page.act({ kind: 'type', ref: field('When'), text: 'March 4th', submit: false }, acting())).rejects.toMatchObject({
+        code: 'BROWSER_NOT_ACTIONABLE',
+        message: expect.stringContaining('YYYY-MM-DD'),
+      })
+      expect(await evaluate('d.value')).toBe('2025-03-04')
+    })
+
+    it('refuses to type into or select in an element that is not visible', LONG, async () => {
+      const snapshot = await go('/hideable')
+      const name = refOf(snapshot, 'textbox "Name"')
+      const size = refOf(snapshot, 'combobox "Size"')
+      await evaluate('n.style.display = "none"; s.style.display = "none"')
+      await expect(page.act({ kind: 'type', ref: name, text: 'x', submit: false }, acting())).rejects.toMatchObject({ code: 'BROWSER_NOT_ACTIONABLE', message: expect.stringContaining('not visible') })
+      await expect(page.act({ kind: 'select', ref: size, values: ['M'] }, acting())).rejects.toMatchObject({ code: 'BROWSER_NOT_ACTIONABLE', message: expect.stringContaining('not visible') })
+      expect(await evaluate('[n.value, s.value]')).toEqual(['', 'S'])
+    })
+
+    it('adds to a multiple select’s selection and names the whole of it; a single select replaces', LONG, async () => {
+      const tags = refOf(await go('/multi'), 'listbox "Tags"')
+      expect(await page.act({ kind: 'select', ref: tags, values: ['c'] }, acting())).toBe(`selected "c" in listbox "Tags" [ref=${tags}]; its selection is now "b", "c"`)
+      expect(await evaluate('Array.from(m.selectedOptions, (option) => option.value)')).toEqual(['b', 'c'])
+      const colour = refOf(await go('/select'), 'combobox "Colour"')
+      await page.act({ kind: 'select', ref: colour, values: ['b'] }, acting())
+      expect(await page.act({ kind: 'select', ref: colour, values: ['g'] }, acting())).toBe(`selected "Green" in combobox "Colour" [ref=${colour}]`)
+      expect(await evaluate('Array.from(s.selectedOptions, (option) => option.value)')).toEqual(['g'])
+    })
+
+    it('settles after the action: an update 300 ms later and a fetch 250 ms later are both in the next snapshot', LONG, async () => {
+      await page.act({ kind: 'click', ref: refOf(await go('/debounce'), 'button "Go"') }, acting())
+      expect(await page.snapshot(budget())).toMatch(/^- paragraph \[ref=e\d+\]: updated$/m)
+      await page.act({ kind: 'click', ref: refOf(await go('/debounce-fetch'), 'button "Search"') }, acting())
+      expect(await page.snapshot(budget())).toMatch(/^- paragraph \[ref=e\d+\]: results arrived$/m)
+    })
+
+    it('reports a navigation the action started 400 ms after its input', LONG, async () => {
+      const done = await page.act({ kind: 'click', ref: refOf(await go('/late-nav'), 'button "Later"') }, acting())
+      expect(done).toContain(`the page navigated to ${fixture.origin}/next`)
+      expect(await page.snapshot(budget())).toContain('next page')
+    })
+
+    it('does not wait on an out-of-process frame’s document, whose end never reaches this page', LONG, async () => {
+      // 127.0.0.1 framing localhost: another site, so another renderer.
+      fixture.route('/oopif', `<p>host</p><iframe src="http://localhost:${fixture.port}/frame-inner"></iframe><button onclick="out.textContent = 'x'">Btn</button><p id="out">idle</p>`)
+      let started = Date.now()
+      await page.navigate(`${fixture.origin}/oopif`, { ...budget(), waitMs: 0 })
+      expect(Date.now() - started).toBeLessThan(3_000)
+      const button = refOf(await page.snapshot(budget()), 'button "Btn"')
+      started = Date.now()
+      await page.act({ kind: 'click', ref: button }, acting())
+      expect(Date.now() - started).toBeLessThan(3_000)
+      expect(await evaluate('out.textContent')).toBe('x')
+    })
+
     it('refuses a ref whose node a re-render replaced', LONG, async () => {
       const old = refOf(await go('/rerender'), 'button "Rerender"')
       await page.act({ kind: 'click', ref: old }, acting())
@@ -413,11 +532,14 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
 
     it('reports a download the browser refused, and nothing lands in Downloads or the profile', LONG, async () => {
       await page.act({ kind: 'click', ref: refOf(await go('/download'), 'link "Get file"') }, acting())
-      expect((await page.report()).downloads).toEqual([DOWNLOAD_NAME])
-      for (const name of [DOWNLOAD_NAME, `${DOWNLOAD_NAME}.crdownload`]) expect(existsSync(join(homedir(), 'Downloads', name))).toBe(false)
+      // `refused` is the browser's own word (its progress ended `canceled`):
+      // were downloads allowed, this entry would say `saved` and the file would land.
+      expect((await page.report()).downloads).toEqual([{ name: DOWNLOAD_NAME, outcome: 'refused' }])
+      const landed = (): boolean => [DOWNLOAD_NAME, `${DOWNLOAD_NAME}.crdownload`].some((name) => existsSync(join(homedir(), 'Downloads', name)))
+      expect(await until(landed, 5_000)).toBe(false)
       // Navigating to it is refused the same way, and says why.
       await expect(page.navigate(`${fixture.origin}/file.bin`, { ...budget(), waitMs: 0 })).rejects.toMatchObject({ code: 'BROWSER_NAVIGATION_FAILED', message: expect.stringContaining(`is a download (${DOWNLOAD_NAME})`) })
-      expect((await page.report()).downloads).toEqual([DOWNLOAD_NAME])
+      expect((await page.report()).downloads).toEqual([{ name: DOWNLOAD_NAME, outcome: 'refused' }])
       const profileFiles = readdirSync(browser.profileDir, { recursive: true }).map(String)
       expect(profileFiles.filter((file) => file.includes(DOWNLOAD_NAME))).toEqual([])
     })
@@ -538,6 +660,18 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
       expect(await page.evaluate('undefined', budget())).toEqual({})
       const thrown = await page.evaluate('throw new Error("nope")', budget())
       expect(thrown).toEqual({ exception: expect.stringContaining('Error: nope') })
+    })
+
+    it('says what a value that cannot come back as JSON was, rather than answering {}', LONG, async () => {
+      await go('/format')
+      expect(await page.evaluate('({})', budget())).toEqual({ value: {} })
+      expect(await page.evaluate('Object.assign(document.createElement("p"), { id: "x", className: "y" })', budget())).toEqual({ unreturnable: 'a DOM node: <p id="x" class="y">' })
+      expect(await page.evaluate('Symbol("s")', budget())).toEqual({ unreturnable: expect.stringMatching(/^a Symbol/) })
+      expect(await page.evaluate('() => 1', budget())).toEqual({ unreturnable: expect.stringMatching(/^a function/) })
+      expect(await page.evaluate('new Map([[1, 2]])', budget())).toEqual({ unreturnable: expect.stringMatching(/^a Map/) })
+      // `window` refers to itself: the browser cannot serialise it, and that is said, not thrown.
+      expect(await page.evaluate('window', budget())).toEqual({ unreturnable: expect.any(String) })
+      expect(await page.evaluate('Promise.reject(new Error("still thrown"))', budget())).toEqual({ exception: expect.stringContaining('Error: still thrown') })
     })
 
     it('ends a never-settling promise and a busy loop at the deadline, and the page answers after', LONG, async () => {

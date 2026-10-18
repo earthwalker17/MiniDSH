@@ -329,6 +329,7 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
       sessionsRoot: tempDir('minidsh-e2e5-replay-'),
       // What `serve` mounted: the recorded requests carry its skill list.
       skillRoots: skillRootsFor(home),
+      browserProfileRoot: join(home, 'browser-replay'),
       spillRoot: tempDir('minidsh-e2e5-replay-spill-'),
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],

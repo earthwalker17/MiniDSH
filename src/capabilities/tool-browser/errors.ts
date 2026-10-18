@@ -26,9 +26,18 @@ export type BrowserErrorCode =
 
 export class BrowserError extends Error {
   readonly code: BrowserErrorCode
-  constructor(code: BrowserErrorCode, message: string) {
+  /**
+   * True when the refusal is a fact about this HOST that the next attempt
+   * would meet again — no such executable, a sandbox the host cannot give, a
+   * proxy policy over the fence — and so worth remembering for the process.
+   * A browser that died while starting, a timeout or a busy host is a
+   * MOMENT, and is never remembered (`index.ts`).
+   */
+  readonly hostFault: boolean
+  constructor(code: BrowserErrorCode, message: string, options: { readonly hostFault?: boolean } = {}) {
     super(message)
     this.name = 'BrowserError'
     this.code = code
+    this.hostFault = options.hostFault === true
   }
 }

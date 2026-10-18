@@ -167,12 +167,13 @@ export async function callFunction(session: PageSession, objectId: string, decla
 /**
  * The snapshot. With `ref`, only the subtree that element roots; a ref the
  * page has changed under is `BROWSER_STALE_REF`, and an element that is in the
- * page but not in the accessibility tree (hidden) renders as nothing.
+ * page but not in the accessibility tree (hidden) renders as nothing. `read`
+ * is a tree already read (`waitForText` hands over the one it found the text
+ * in), so a large page is not read twice.
  */
-export async function renderSnapshot(session: PageSession, budget: CallBudget, ref?: string): Promise<string> {
+export async function renderSnapshot(session: PageSession, budget: CallBudget, ref?: string, read?: FrameAX): Promise<string> {
   const target = ref === undefined ? undefined : (await resolveRef(session, ref, budget)).entry
-  const answer = await session.send<{ frameTree?: unknown }>('Page.getFrameTree', {}, budget)
-  const main = await readFrame(session, answer.frameTree, budget)
+  const main = read ?? (await readTree(session, budget))
   if (main?.root === undefined) return ''
   const renderer = new Renderer(session.refs)
   if (target === undefined) {
@@ -187,25 +188,66 @@ export async function renderSnapshot(session: PageSession, budget: CallBudget, r
   return renderer.lines.join('\n')
 }
 
+/** One read of the page's accessibility tree: the main frame's, with every same-process frame's below it. */
+export async function readTree(session: PageSession, budget: CallBudget): Promise<FrameAX | undefined> {
+  const answer = await session.send<{ frameTree?: unknown }>('Page.getFrameTree', {}, budget)
+  return readFrame(session, answer.frameTree, budget)
+}
+
+/** Reads no more often than this, and no more often than one read takes: a large page's tree costs as much as a snapshot. */
+const WAIT_POLL_MS = 200
+
 /**
- * Polls the main document's text every 200 ms until it contains `wanted`, or
- * rejects `BROWSER_TIMEOUT` naming it. A poll that lands between documents
- * (no context to evaluate in) counts as "not yet".
+ * Reads the tree until the text the snapshot would show contains `wanted`,
+ * and hands back that read for the snapshot to render. The snapshot's own
+ * text, not `innerText`: measured, `document.body.innerText` never shows a
+ * shadow root's text (closed or open), which the accessibility tree does,
+ * along with same-process frames. The first read always happens, so text that
+ * is already there is found however short the wait; after that, past `until`,
+ * rejects `BROWSER_TIMEOUT` naming the text. Each read runs under the whole
+ * budget, so a read begun before `until` may end after it. A read that lands
+ * between documents counts as "not yet".
  */
-export async function waitForText(session: PageSession, wanted: string, budget: CallBudget): Promise<void> {
-  const missing = (): BrowserError => new BrowserError('BROWSER_TIMEOUT', `the text ${JSON.stringify(wanted)} did not appear on the page before the call's deadline`)
+export async function waitForText(session: PageSession, wanted: string, until: number, budget: CallBudget): Promise<FrameAX> {
+  const missing = (): BrowserError => new BrowserError('BROWSER_TIMEOUT', `the text ${JSON.stringify(wanted)} did not appear on the page before the wait ended`)
+  const needle = collapse(wanted)
   for (;;) {
+    const started = Date.now()
     try {
-      const answer = await session.send<{ result?: unknown }>('Runtime.evaluate', { expression: "document.body ? document.body.innerText : ''", returnByValue: true }, budget)
-      const value = record(answer.result)?.value
-      if (typeof value === 'string' && value.includes(wanted)) return
+      const main = await readTree(session, budget)
+      if (main?.root !== undefined && textOf(main).includes(needle)) return main
     } catch (error) {
       if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') throw missing()
       if (!isProtocolError(error)) throw error
     }
-    if (Date.now() + 200 >= budget.deadline) throw missing()
-    await session.sleep(200, budget)
+    const now = Date.now()
+    if (now >= until) throw missing()
+    await session.sleep(Math.min(Math.max(WAIT_POLL_MS, now - started), until - now), budget)
   }
+}
+
+/** The words the snapshot shows — text, names and values, one line each — for `waitForText` to search. */
+function textOf(main: FrameAX): string {
+  const out: string[] = []
+  const walk = (frame: FrameAX, node: AXNode): void => {
+    for (const item of contentOf(frame, node)) {
+      if ('text' in item) {
+        out.push(item.text)
+        continue
+      }
+      const child = item.node
+      if (child.name !== '') out.push(collapse(child.name))
+      if (child.value !== undefined) out.push(collapse(child.value))
+      if (child.role !== 'Iframe') {
+        walk(item.frame, child)
+        continue
+      }
+      const inner = child.backendNodeId === undefined ? undefined : item.frame.children.get(child.backendNodeId)
+      if (inner?.root !== undefined) walk(inner, inner.root)
+    }
+  }
+  if (main.root !== undefined) walk(main, main.root)
+  return out.join('\n')
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +264,8 @@ interface AXNode {
   readonly backendNodeId: number | undefined
 }
 
-interface FrameAX {
+/** One frame's accessibility tree as read (`readTree`); opaque outside this module. */
+export interface FrameAX {
   readonly frameId: string
   readonly loaderId: string
   readonly nodes: ReadonlyMap<string, AXNode>
@@ -233,8 +276,28 @@ interface FrameAX {
 
 type Item = { readonly text: string } | { readonly node: AXNode; readonly frame: FrameAX }
 
-/** Chrome's internal role names, as the ARIA vocabulary a Playwright snapshot uses (a `<summary>` is Chrome's DisclosureTriangle). */
-const ROLE_NAMES: Readonly<Record<string, string>> = { Iframe: 'iframe', image: 'img', LabelText: 'generic', MenuListOption: 'option', DisclosureTriangle: 'button' }
+/**
+ * Chrome's internal role names, as the ARIA vocabulary a Playwright snapshot
+ * uses (a `<summary>` is Chrome's DisclosureTriangle). The picker inputs are
+ * textboxes there, as Playwright names every input type without a role of
+ * its own; measured on Chrome 155: date is `Date`, time `InputTime`,
+ * datetime-local, month and week `DateTime`, colour `ColorWell`, each with its
+ * value as the field holds it (2024-01-15, 13:45) — and as textboxes they show
+ * that value, not the spin fields and picker button Chrome puts inside them.
+ * An `<svg>` already reads `image` there; `SvgRoot` is its role where it does not.
+ */
+const ROLE_NAMES: Readonly<Record<string, string>> = {
+  Iframe: 'iframe',
+  image: 'img',
+  SvgRoot: 'img',
+  LabelText: 'generic',
+  MenuListOption: 'option',
+  DisclosureTriangle: 'button',
+  Date: 'textbox',
+  DateTime: 'textbox',
+  InputTime: 'textbox',
+  ColorWell: 'textbox',
+}
 /** Wrappers whose children stand in their place: `<select>`'s popup and explicit `role=none`. */
 const TRANSPARENT = new Set(['none', 'presentation', 'MenuListPopup', 'RootWebArea'])
 /** Layout detail with no meaning of its own: line boxes, and list bullets (which a Playwright snapshot omits). */

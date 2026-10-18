@@ -12,11 +12,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import type { AgentHandle } from '../../core/agent/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import type { LlmRequest } from '../../core/llm/types.ts'
 import { matches, TOOL_RESULT } from '../../core/session/index.ts'
-import { TOOLS } from '../../core/tools/index.ts'
+import { defineTool, TOOLS } from '../../core/tools/index.ts'
 import { expectBrowserSuite, fixtureServer, testBrowser, type FixtureServer } from '../../test-support/browser-fixture.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { assistantText, assistantToolCall } from '../../test-support/scripted-adapter.ts'
@@ -153,8 +154,38 @@ describe('the header and the change report', () => {
     expect(busy).not.toContain('\u001b')
     expect(busy).toContain('blocked by the browser fence: http://denied.invalid/p.png')
     expect(busy).toContain('confirm dialog "sure?" was dismissed')
-    expect(busy).toContain('2 older event(s) not shown')
+    expect(busy).toContain('2 more event(s) not shown')
     expect(busy.split('\n')[0]).toBe('relaunched')
+  })
+
+  it('names a page without a title as untitled, and every download by what became of it', () => {
+    const base = { url: 'http://127.0.0.1:5/missing', status: 404, console: [], exceptions: [], failedRequests: [], dialogs: [], blockedFiles: [], popups: [], omitted: 0, navigated: false, crashed: false }
+    // Chrome titles a page with no <title> by its address, scheme dropped.
+    const untitled = header({ ...base, title: '127.0.0.1:5/missing', downloads: [] }, undefined)
+    expect(untitled.split('\n')[0]).toBe('Page: (untitled) at http://127.0.0.1:5/missing (HTTP 404)')
+    const downloads = header(
+      {
+        ...base,
+        title: 'T',
+        downloads: [
+          { name: 'a.bin', outcome: 'refused' },
+          { name: 'b.bin', outcome: 'started' },
+          { name: 'c.bin', outcome: 'saved' },
+        ],
+      },
+      undefined,
+    )
+    expect(downloads).toContain('download refused: a.bin')
+    expect(downloads).toContain('download started, not yet settled: b.bin')
+    expect(downloads).toContain("download SAVED despite this browser's deny policy: c.bin")
+  })
+
+  it('bounds the events a noisy page reports, keeping the first one', () => {
+    const entries = Array.from({ length: 50 }, (_, index) => ({ level: 'error' as const, text: `${index === 0 ? 'THE FIRST' : 'noise'} ${'x'.repeat(280)}` }))
+    const text = header({ url: 'http://localhost:1/', title: 'Noisy', console: entries, exceptions: [], failedRequests: [], dialogs: [], downloads: [], blockedFiles: [], popups: [], omitted: 30, navigated: false, crashed: false }, undefined)
+    expect(text.length, 'the header grew past its bound').toBeLessThan(5_000)
+    expect(text).toContain('THE FIRST')
+    expect(text).toMatch(/…and \d+ more event\(s\) not shown/)
   })
 
   it('reports an action as the lines that changed, or the page when that is shorter', () => {
@@ -315,14 +346,69 @@ describe.runIf(testBrowser !== undefined)('the browser tools in a real compositi
     const owner = JSON.parse(String(await import('node:fs').then((fs) => fs.readFileSync(join(w.profileRoot, profile!, 'owner.json'))))) as { pid: number }
     expect(owner.pid).toBe(process.pid)
     await killBrowserOf(join(w.profileRoot, profile!))
-    const out = await turn(w, handle, assistantToolCall('c2', 'browser_act', { action: 'click', ref }), assistantToolCall('c3', 'browser_navigate', { url: `${site.origin}/counter` }))
-    // The first call after the death either finds the browser gone (relaunched:
-    // the ref is from the old one) or, on a loaded host, races the dying pipe
-    // and is told the browser went away. Either way it does not act.
-    expect(['BROWSER_STALE_REF', 'BROWSER_CLOSED']).toContain(out.at(-2)?.code)
-    expect(out.at(-1)?.code).toBeUndefined()
-    expect(out.at(-1)?.text).toContain('The browser had exited and was started again')
+    // Navigate first, so the NEW browser mints refs before the old one is
+    // tried: a ref counter that restarted at e1 would hand the old ref to the
+    // new page's button, and the click would land. (On a loaded host the first
+    // navigate can race the dying pipe and be told the browser went away; the
+    // second then starts it again.)
+    const out = await turn(
+      w,
+      handle,
+      assistantToolCall('c2', 'browser_navigate', { url: `${site.origin}/counter` }),
+      assistantToolCall('c3', 'browser_navigate', { url: `${site.origin}/counter` }),
+      assistantToolCall('c4', 'browser_act', { action: 'click', ref }),
+      assistantToolCall('c5', 'browser_snapshot', {}),
+    )
+    const [first, second, act, after] = out.slice(-4)
+    expect([first, second].filter((result) => result?.text.includes('The browser had exited and was started again')), 'the relaunch is said exactly once').toHaveLength(1)
+    expect(second?.code).toBeUndefined()
+    expect(act?.code, 'an old ref must not name a node in the new browser').toBe('BROWSER_STALE_REF')
+    expect(after?.text, 'the old ref clicked something after all').toMatch(/paragraph \[ref=e\d+\]: 0/)
+    expect(after?.text).not.toContain('started again')
     expect(existsSync(join(w.profileRoot, profile!)), 'the dead browser’s profile was left behind').toBe(false)
+  })
+
+  it('remembers a fact about the host, not a moment: a fence it cannot prove is refused fast and said so, a start that died is tried again', LONG, async () => {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const profileRoot = tempDir('minidsh-tb-memo-')
+    // The canary host on the allow list goes direct, so the fence cannot be proved: a host fact.
+    harness.root.plugin(toolBrowserPlugin, { profileRoot, executablePath: testBrowser!.path, allowHosts: ['minidsh-fence-canary.invalid'] })
+    expect((await harness.root.settle()).failed).toEqual([])
+    const w: World = { harness, cwd: tempDir('minidsh-tb-memo-cwd-'), profileRoot, store: '', create: () => harness.create({ cwd: tempDir('minidsh-tb-memo-cwd-') }) }
+    const handle = await w.create()
+    const out = await turn(w, handle, assistantToolCall('c1', 'browser_evaluate', { expression: '1' }), assistantToolCall('c2', 'browser_evaluate', { expression: '1' }))
+    expect(out.map((result) => result.code)).toEqual(['BROWSER_FENCE_UNAVAILABLE', 'BROWSER_FENCE_UNAVAILABLE'])
+    expect(out[0]!.text).not.toContain('remembered')
+    expect(out[1]!.text).toContain('remembered from an earlier attempt')
+
+    // A start that dies (here: an executable that is not a browser) is a moment.
+    const other = await coreHarness()
+    harnesses.push(other)
+    other.root.plugin(toolBrowserPlugin, { profileRoot: tempDir('minidsh-tb-memo2-'), executablePath: process.execPath })
+    expect((await other.root.settle()).failed).toEqual([])
+    const w2: World = { harness: other, cwd: '', profileRoot: '', store: '', create: () => other.create({ cwd: tempDir('minidsh-tb-memo2-cwd-') }) }
+    const tried = await turn(w2, await w2.create(), assistantToolCall('c1', 'browser_evaluate', { expression: '1' }), assistantToolCall('c2', 'browser_evaluate', { expression: '1' }))
+    expect(tried.map((result) => result.code)).toEqual(['BROWSER_UNAVAILABLE', 'BROWSER_UNAVAILABLE'])
+    expect(tried[1]!.text, 'a moment was remembered as a host fact').not.toContain('remembered')
+  })
+
+  it('numbers refs past every ref the history holds, and says the earlier browser is gone', LONG, async () => {
+    const site = await pages()
+    const w = await world({ vision: false })
+    // A history that already shows a ref (as a resumed or forked session's
+    // would): a tool result carrying one, before this agent's first browser call.
+    w.harness.root.get(TOOLS).register(
+      w.harness.root,
+      defineTool({ name: 'old_snapshot', description: 'test', input: z.object({}), output: z.object({ text: z.string() }), render: (_args, value) => [{ type: 'text', text: value.text }], execute: () => ({ text: '- button "Old" [ref=e41]' }) }),
+    )
+    const handle = await w.create()
+    const out = await turn(w, handle, assistantToolCall('c1', 'old_snapshot', {}), assistantToolCall('c2', 'browser_navigate', { url: `${site.origin}/counter` }))
+    const navigated = out.at(-1)!
+    expect(navigated.text).toContain("earlier browser was not carried over")
+    const refs = Array.from(navigated.text.matchAll(/\[ref=e(\d+)\]/g), (match) => Number(match[1]))
+    expect(refs.length).toBeGreaterThan(0)
+    expect(Math.min(...refs), 'a new ref reused a number the history already shows').toBeGreaterThan(41)
   })
 })
 

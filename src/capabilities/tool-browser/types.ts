@@ -39,6 +39,11 @@ export interface FailedRequest {
   readonly fenced: boolean
 }
 
+export interface DownloadEntry {
+  readonly name: string
+  readonly outcome: 'refused' | 'started' | 'saved'
+}
+
 export interface DialogEntry {
   readonly type: 'alert' | 'confirm' | 'prompt' | 'beforeunload'
   readonly message: string
@@ -60,8 +65,12 @@ export interface PageReport {
   readonly exceptions: readonly string[]
   readonly failedRequests: readonly FailedRequest[]
   readonly dialogs: readonly DialogEntry[]
-  /** Downloads the browser refused (it denies them all). */
-  readonly downloads: readonly string[]
+  /**
+   * Downloads the page started, by what became of each: the browser denies
+   * them all, so `refused` is the expected outcome, `started` one not settled
+   * yet, and `saved` a deny that did not hold — said as such, never as refused.
+   */
+  readonly downloads: readonly DownloadEntry[]
   /** `file:` loads refused because they name a file outside the workspace. */
   readonly blockedFiles: readonly string[]
   /** New windows the page tried to open, closed unseen. */
@@ -103,16 +112,24 @@ export interface BrowserPage {
    * The accessibility tree as text, Playwright AI-snapshot style, every
    * non-ignored element carrying a ref (text lines carry none, as there):
    * `- button "Add" [ref=e4]`. `ref` roots it
-   * at that element; `waitForText` first waits (until the deadline) for the
-   * page's text to contain it. Unbounded here: the tool bounds and spills.
+   * at that element; `waitForText` first waits — until `waitUntil` (epoch ms),
+   * else the deadline — for the text the snapshot itself would show (shadow
+   * roots and same-origin frames included) to contain it; the snapshot after
+   * the wait runs under the whole budget. Unbounded here: the tool bounds and
+   * spills.
    */
-  snapshot(options: CallBudget & { readonly ref?: string; readonly waitForText?: string }): Promise<string>
+  snapshot(options: CallBudget & { readonly ref?: string; readonly waitForText?: string; readonly waitUntil?: number }): Promise<string>
   /** One action with Playwright's actionability, then the settle. Resolves with a one-line account of what it did. */
   act(action: Action, options: CallBudget & { readonly dialog: 'accept' | 'dismiss' }): Promise<string>
   /** Viewport (default), the whole page cut to `maxDimension`, or one element. JPEG when PNG would exceed `maxBytes`. */
   screenshot(options: CallBudget & { readonly fullPage: boolean; readonly ref?: string; readonly maxDimension: number; readonly maxBytes: number }): Promise<Screenshot>
-  /** `Runtime.evaluate` by value, awaiting a promise. An exception is a value here, not a rejection. */
-  evaluate(expression: string, options: CallBudget): Promise<{ readonly value?: JsonValue; readonly exception?: string }>
+  /**
+   * `Runtime.evaluate` by value, awaiting a promise. An exception the page
+   * threw is `exception`; a value that ran fine but cannot come back as JSON
+   * (a DOM node, a function, a Symbol, an answer past the size cap) is
+   * `unreturnable`, describing what it was. Neither is a rejection.
+   */
+  evaluate(expression: string, options: CallBudget): Promise<{ readonly value?: JsonValue; readonly exception?: string; readonly unreturnable?: string }>
   setViewport(viewport: Viewport): Promise<void>
   /** Drains what happened since the previous report. */
   report(): Promise<PageReport>

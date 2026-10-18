@@ -28,11 +28,12 @@
  * time left as its timeout. Nothing here waits unbounded.
  */
 import { snapshotJson, type JsonValue } from '../../core/json.ts'
-import { performAction, quadsOf, bounds } from './act.ts'
+import { DESCRIBE, performAction, quadsOf, bounds } from './act.ts'
 import type { CdpConnection, CdpEvent } from './cdp.ts'
 import { BrowserError } from './errors.ts'
 import { FENCE_HEADER, fileInsideWorkspace, isLoopbackHost } from './fence.ts'
 import {
+  callFunction,
   describeRef,
   exceptionText,
   list,
@@ -46,7 +47,7 @@ import {
   waitForText,
   type PageSession,
 } from './snapshot.ts'
-import type { Action, BrowserPage, CallBudget, ConsoleEntry, DialogEntry, FailedRequest, PageOptions, PageReport, Screenshot, Viewport } from './types.ts'
+import type { Action, BrowserPage, CallBudget, ConsoleEntry, DialogEntry, DownloadEntry, FailedRequest, PageOptions, PageReport, Screenshot, Viewport } from './types.ts'
 
 /** Each report list keeps the newest this many; the rest are counted in `omitted`. */
 const BUFFER_LIMIT = 50
@@ -60,6 +61,10 @@ const LOAD_CAP_MS = 30_000
 /** After an action: how long a navigation it caused may take to load, and how soon it must have started. */
 const ACTION_LOAD_CAP_MS = 10_000
 const ACTION_GRACE_MS = 150
+/** How many navigations in a row (a redirect by script, then another) one action waits through. */
+const ACTION_NAVIGATION_ROUNDS = 3
+/** Downloads remembered by id until their outcome is reported. */
+const DOWNLOAD_MEMORY = 64
 /** How long a navigation that turned out to be a download waits for the browser to name the file. */
 const DOWNLOAD_ANNOUNCE_MS = 2_000
 /** A loopback server still starting is asked again this often. */
@@ -102,6 +107,11 @@ interface RequestState {
   readonly loaderId: string
 }
 
+interface DownloadState {
+  readonly name: string
+  outcome: DownloadEntry['outcome']
+}
+
 class Page implements BrowserPage, PageSession {
   readonly refs: RefTable
   private readonly cdp: CdpConnection
@@ -138,7 +148,8 @@ class Page implements BrowserPage, PageSession {
   // The network, for the settle rule and the report.
   private readonly requests = new Map<string, RequestState>()
   private readonly inflight = new Set<string>()
-  private networkChangedAt = 0
+  /** The last time a request started or ended, or an action dispatched its input: what the settle's quiet is measured from. */
+  private activityAt = 0
   /** Requests whose failure is reported elsewhere: refused by the file fence, or a navigation attempt `navigate` itself reports. */
   private readonly quietFailures = new Set<string>()
 
@@ -147,11 +158,15 @@ class Page implements BrowserPage, PageSession {
   private exceptions: string[] = []
   private failedRequests: (FailedRequest & { readonly requestId: string })[] = []
   private dialogs: DialogEntry[] = []
+  /** Ids of the downloads the next report names; each one's outcome is in `downloadStates`. */
   private downloads: string[] = []
+  /** Every download not yet reported with its final outcome, by the browser's id (its `guid`). */
+  private readonly downloadStates = new Map<string, DownloadState>()
   private blockedFiles: string[] = []
   private popups: string[] = []
   private omitted = 0
   private downloadsSeen = 0
+  private lastDownload: string | undefined
   /** `Page.windowOpen` events not yet matched by the target they create, so one popup is named once. */
   private windowOpens = 0
   private readonly closedAtOpen = new Set<string>()
@@ -232,11 +247,14 @@ class Page implements BrowserPage, PageSession {
       if (errorText === undefined || errorText === '') break
       if (answer.isDownload === true) {
         // Measured: a download answers net::ERR_ABORTED BEFORE the browser
-        // announces the download, so the wait lets the report (and this
-        // refusal) name the file.
-        const announced = await this.waitUntil(() => this.downloadsSeen !== downloadsBefore, Math.min(Date.now() + DOWNLOAD_ANNOUNCE_MS, options.deadline), options)
-        const name = announced ? ` (${this.downloads.at(-1) ?? 'a file'})` : ''
-        throw new BrowserError('BROWSER_NAVIGATION_FAILED', `${url} is a download${name}, and this browser refuses downloads`)
+        // announces the download, and its `canceled` follows the announcement
+        // by milliseconds, so the wait lets the report (and this refusal) name
+        // the file and say how it ended.
+        const latest = (): DownloadState | undefined => (this.downloadsSeen === downloadsBefore || this.lastDownload === undefined ? undefined : this.downloadStates.get(this.lastDownload))
+        await this.waitUntil(() => (latest()?.outcome ?? 'started') !== 'started', Math.min(Date.now() + DOWNLOAD_ANNOUNCE_MS, options.deadline), options)
+        const download = latest()
+        if (download?.outcome === 'saved') throw new BrowserError('BROWSER_NAVIGATION_FAILED', `${url} is a download (${download.name}), which the browser saved although it should have refused it`)
+        throw new BrowserError('BROWSER_NAVIGATION_FAILED', `${url} is a download${download === undefined ? '' : ` (${download.name})`}, and this browser refuses downloads`)
       }
       // The failure is this call's answer; the report need not say it again.
       if (loaderId !== undefined) this.quiet(loaderId)
@@ -258,11 +276,13 @@ class Page implements BrowserPage, PageSession {
     return { loaded }
   }
 
-  async snapshot(options: CallBudget & { readonly ref?: string; readonly waitForText?: string }): Promise<string> {
+  async snapshot(options: CallBudget & { readonly ref?: string; readonly waitForText?: string; readonly waitUntil?: number }): Promise<string> {
     this.usable()
     try {
-      if (options.waitForText !== undefined) await waitForText(this, options.waitForText, options)
-      return await renderSnapshot(this, options, options.ref)
+      // The wait ends at `waitUntil`; the read it found the text in is rendered under the whole budget.
+      const until = Math.min(options.waitUntil ?? options.deadline, options.deadline)
+      const read = options.waitForText === undefined ? undefined : await waitForText(this, options.waitForText, until, options)
+      return await renderSnapshot(this, options, options.ref, read)
     } finally {
       this.release()
     }
@@ -335,34 +355,61 @@ class Page implements BrowserPage, PageSession {
     }
   }
 
-  async evaluate(expression: string, options: CallBudget): Promise<{ readonly value?: JsonValue; readonly exception?: string }> {
+  /**
+   * In two steps, because a by-value answer cannot say what it was: measured,
+   * `returnByValue` answers a DOM node, a Map, a Date and a function all as
+   * `{type: 'object' | 'function', value: {}}` with no subtype — the same as
+   * an empty object — and a Symbol as a protocol error. So the expression's
+   * result comes back as a remote object first, whose type, subtype and class
+   * say whether JSON can carry it; only a plain object or an array is then
+   * fetched by value.
+   */
+  async evaluate(expression: string, options: CallBudget): Promise<{ readonly value?: JsonValue; readonly exception?: string; readonly unreturnable?: string }> {
     this.usable()
-    // V8 terminates a script still running at `timeout`: measured, a
-    // `while (true) {}` ends with a protocol error at that moment and the page
-    // answers again — without it a runaway expression would wedge the
-    // renderer for every later call. It fires just before the deadline, so the
-    // termination, not the transport's timer, is what ends a busy expression.
-    const terminateAfter = Math.max(1, options.deadline - Date.now() - 100)
-    const terminatesAt = Date.now() + terminateAfter
-    let answer: { result?: unknown; exceptionDetails?: unknown }
     try {
-      answer = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture: true, timeout: terminateAfter }, options)
-    } catch (error) {
-      if (!(error instanceof BrowserError)) throw error
-      if (error.code === 'BROWSER_TIMEOUT') throw new BrowserError('BROWSER_TIMEOUT', "the expression had not settled by the call's deadline")
-      if (error.code !== 'BROWSER_PROTOCOL') throw error
-      if (Date.now() >= terminatesAt) throw new BrowserError('BROWSER_TIMEOUT', "the expression was still running at the call's deadline and was stopped")
-      // "Cannot find context", "Object couldn't be returned by value": the expression produced no value, and this says why.
-      return { exception: error.message }
+      // V8 terminates a script still running at `timeout`: measured, a
+      // `while (true) {}` ends with a protocol error at that moment and the page
+      // answers again — without it a runaway expression would wedge the
+      // renderer for every later call. It fires just before the deadline, so the
+      // termination, not the transport's timer, is what ends a busy expression.
+      const terminateAfter = Math.max(1, options.deadline - Date.now() - 100)
+      const terminatesAt = Date.now() + terminateAfter
+      let answer: { result?: unknown; exceptionDetails?: unknown }
+      try {
+        answer = await this.send('Runtime.evaluate', { expression, objectGroup: OBJECT_GROUP, awaitPromise: true, userGesture: true, timeout: terminateAfter }, options)
+      } catch (error) {
+        if (!(error instanceof BrowserError)) throw error
+        if (error.code === 'BROWSER_TIMEOUT') throw new BrowserError('BROWSER_TIMEOUT', "the expression had not settled by the call's deadline")
+        if (error.code !== 'BROWSER_PROTOCOL') throw error
+        if (Date.now() >= terminatesAt) throw new BrowserError('BROWSER_TIMEOUT', "the expression was still running at the call's deadline and was stopped")
+        // "Cannot find context" (the page was between documents), an answer past the size cap: it ran, or not, but no value came back.
+        return { unreturnable: `no value came back: ${protocolReason(error)}` }
+      }
+      const details = record(answer.exceptionDetails)
+      if (details !== undefined) return { exception: clamp(exceptionText(details)) }
+      const result = record(answer.result)
+      if (result === undefined || result.type === 'undefined') return {}
+      const unserializable = text(result.unserializableValue)
+      if (unserializable !== undefined) return { value: unserializable }
+      const objectId = text(result.objectId)
+      // Primitives and null arrive inline, with no object behind them.
+      if (objectId === undefined) return isJson(result.value) ? { value: snapshotJson(result.value) } : {}
+      const what = await this.unreturnable(result, objectId, options)
+      if (what !== undefined) return { unreturnable: what }
+      let byValue: { result?: unknown }
+      try {
+        byValue = await this.send('Runtime.callFunctionOn', { objectId, functionDeclaration: 'function () { return this }', returnByValue: true }, options)
+      } catch (error) {
+        if (!(error instanceof BrowserError) || error.code !== 'BROWSER_PROTOCOL') throw error
+        // "Object reference chain is too long" (`window`), an answer past the size cap.
+        return { unreturnable: `${described(result)}, which the browser could not return as JSON: ${protocolReason(error)}` }
+      }
+      // A by-value result arrived as JSON, so this holds by construction; the check keeps the type honest.
+      const value = record(byValue.result)?.value
+      return isJson(value) ? { value: snapshotJson(value) } : { unreturnable: described(result) }
+    } finally {
+      this.release()
     }
-    const details = record(answer.exceptionDetails)
-    if (details !== undefined) return { exception: clamp(exceptionText(details)) }
-    const result = record(answer.result)
-    if (result === undefined || result.type === 'undefined') return {}
-    const unserializable = text(result.unserializableValue)
-    if (unserializable !== undefined) return { value: unserializable }
-    // A by-value result arrived as JSON, so this holds by construction; the check keeps the type honest.
-    return isJson(result.value) ? { value: snapshotJson(result.value) } : {}
   }
 
   async setViewport(viewport: Viewport): Promise<void> {
@@ -389,7 +436,7 @@ class Page implements BrowserPage, PageSession {
       exceptions: this.exceptions,
       failedRequests: this.failedRequests.map(({ url, reason, fenced }) => ({ url, reason, fenced })),
       dialogs: this.dialogs,
-      downloads: this.downloads,
+      downloads: this.drainDownloads(),
       blockedFiles: this.blockedFiles,
       popups: this.popups,
       omitted: this.omitted,
@@ -400,7 +447,6 @@ class Page implements BrowserPage, PageSession {
     this.exceptions = []
     this.failedRequests = []
     this.dialogs = []
-    this.downloads = []
     this.blockedFiles = []
     this.popups = []
     this.omitted = 0
@@ -489,13 +535,13 @@ class Page implements BrowserPage, PageSession {
     for (const check of Array.from(this.waiters)) check()
   }
 
-  /** No request in flight for `QUIET_MS`, waiting at most `SETTLE_CAP_MS` and never past the deadline. Ending early is not an error. */
+  /** No request in flight and nothing started or ended (`activityAt`) for `QUIET_MS`, waiting at most `SETTLE_CAP_MS` and never past the deadline. Ending early is not an error. */
   private async settle(budget: CallBudget): Promise<void> {
     const until = Math.min(Date.now() + SETTLE_CAP_MS, budget.deadline)
     for (;;) {
       const now = Date.now()
       if (now >= until) return
-      const quietFor = now - this.networkChangedAt
+      const quietFor = now - this.activityAt
       if (this.inflight.size === 0 && quietFor >= QUIET_MS) return
       await this.sleep(Math.min(this.inflight.size === 0 ? QUIET_MS - quietFor : 100, until - now), budget)
     }
@@ -505,15 +551,30 @@ class Page implements BrowserPage, PageSession {
    * After an action: a moment for what it started, then — if it started a
    * main-frame navigation — that navigation's load, then the settle. A
    * navigation that ends without a document (a 204, a download) ends the wait.
+   *
+   * The quiet is counted from the action's input, not from the page's last
+   * request: a handler that renders after a 300 ms timer, or fetches after a
+   * 250 ms debounce, has acted by the time 500 ms of quiet have passed, while
+   * a page whose last request ended long ago would let the settle end at once,
+   * before any of it. A navigation the page starts during the settle (a
+   * `location.href` set on a timer) is waited for and settled after in turn,
+   * up to `ACTION_NAVIGATION_ROUNDS` of them, so the account can say where the
+   * page went.
    */
   private async afterAction(documentRequestsBefore: number, budget: CallBudget): Promise<void> {
+    this.activityAt = Date.now()
     await this.sleep(ACTION_GRACE_MS, budget)
-    const document = this.latestDocument
-    if (this.documentRequests !== documentRequestsBefore && document !== undefined) {
-      const crashes = this.crashes
-      await this.waitUntil(() => this.documentDone(document, crashes), Math.min(Date.now() + ACTION_LOAD_CAP_MS, budget.deadline), budget)
+    let seen = documentRequestsBefore
+    for (let round = 1; ; round++) {
+      const document = this.latestDocument
+      if (this.documentRequests !== seen && document !== undefined) {
+        seen = this.documentRequests
+        const crashes = this.crashes
+        await this.waitUntil(() => this.documentDone(document, crashes), Math.min(Date.now() + ACTION_LOAD_CAP_MS, budget.deadline), budget)
+      }
+      await this.settle(budget)
+      if (this.documentRequests === seen || round === ACTION_NAVIGATION_ROUNDS || Date.now() >= budget.deadline) return
     }
-    await this.settle(budget)
   }
 
   /**
@@ -562,9 +623,26 @@ class Page implements BrowserPage, PageSession {
       case 'Browser.downloadWillBegin': {
         // Browser-wide (no session): ours when it starts in one of our frames.
         const frameId = text(params.frameId)
-        if (frameId === undefined || !this.frames.has(frameId)) return
+        const guid = text(params.guid)
+        if (frameId === undefined || guid === undefined || !this.frames.has(frameId)) return
         this.downloadsSeen++
-        this.push(this.downloads, text(params.suggestedFilename) || text(params.url) || 'a download')
+        this.lastDownload = guid
+        this.downloadStates.set(guid, { name: text(params.suggestedFilename) || text(params.url) || 'a download', outcome: 'started' })
+        if (this.downloadStates.size > DOWNLOAD_MEMORY) this.downloadStates.delete(this.downloadStates.keys().next().value!)
+        this.push(this.downloads, guid)
+        return
+      }
+      case 'Browser.downloadProgress': {
+        // The outcome is the browser's word, not this page's assumption: measured,
+        // the launch's deny answers `inProgress` then `canceled` within
+        // milliseconds of `downloadWillBegin`; `completed` would mean the deny did not hold.
+        const state = params.state === 'canceled' ? 'refused' : params.state === 'completed' ? 'saved' : undefined
+        const guid = text(params.guid)
+        const download = guid === undefined ? undefined : this.downloadStates.get(guid)
+        if (state === undefined || guid === undefined || download === undefined) return
+        download.outcome = state
+        // Already reported as `started`: the next report says how it ended.
+        if (!this.downloads.includes(guid)) this.push(this.downloads, guid)
         return
       }
     }
@@ -714,10 +792,16 @@ class Page implements BrowserPage, PageSession {
     // Long-lived by design, so they never end a settle; a data: URL never touches the network.
     if (type === 'WebSocket' || type === 'EventSource' || url.startsWith('data:')) return
     this.inflight.add(requestId)
-    this.networkChangedAt = Date.now()
+    this.activityAt = Date.now()
   }
 
   private onResponse(params: Record<string, unknown>): void {
+    // A frame's document is as far as this page waits for it: measured, a
+    // cross-site iframe's request and response reach this session but its
+    // `loadingFinished` goes to the frame's own process, which this page never
+    // attaches to — so it would hold every settle to the cap (5 s per call).
+    const requestId = text(params.requestId)
+    if (params.type === 'Document' && params.frameId !== this.mainFrameId && requestId !== undefined && this.inflight.delete(requestId)) this.activityAt = Date.now()
     const response = record(params.response)
     const status = numberOf(response?.status)
     const url = text(response?.url) ?? ''
@@ -728,14 +812,13 @@ class Page implements BrowserPage, PageSession {
       if (this.statusByDocument.size > 32) this.statusByDocument.delete(this.statusByDocument.keys().next().value!)
     }
     if (status < 400) return
-    const requestId = text(params.requestId) ?? ''
-    this.push(this.failedRequests, { requestId, url, reason: String(status), fenced: header(record(response?.headers), FENCE_HEADER) === 'denied' })
+    this.push(this.failedRequests, { requestId: requestId ?? '', url, reason: String(status), fenced: header(record(response?.headers), FENCE_HEADER) === 'denied' })
   }
 
   private onRequestEnd(requestId: string | undefined, errorText: string | undefined): void {
     if (requestId === undefined) return
     this.inflight.delete(requestId)
-    this.networkChangedAt = Date.now()
+    this.activityAt = Date.now()
     const request = this.requests.get(requestId)
     if (request?.type === 'Document') remember(this.endedDocuments, requestId, 64)
     // A request the page itself abandoned (a navigation away, an aborted fetch) did not fail.
@@ -806,6 +889,35 @@ class Page implements BrowserPage, PageSession {
     return new Uint8Array(Buffer.from(data, 'base64'))
   }
 
+  /** What an evaluated object that JSON cannot carry was; `undefined` for a plain object or an array, which it can. */
+  private async unreturnable(result: Record<string, unknown>, objectId: string, budget: CallBudget): Promise<string | undefined> {
+    const subtype = text(result.subtype)
+    if (result.type === 'object' && (subtype === undefined || subtype === 'array')) return undefined
+    const description = text(result.description) ?? ''
+    // An element as the cover refusal names one; any other node by its name (#text, #document).
+    if (subtype !== 'node' || description.startsWith('#')) return described(result)
+    try {
+      const element = await callFunction(this, objectId, DESCRIBE, [], budget)
+      return typeof element === 'string' ? `a DOM node: ${element}` : described(result)
+    } catch (error) {
+      if (error instanceof BrowserError && error.code === 'BROWSER_PROTOCOL') return described(result)
+      throw error
+    }
+  }
+
+  /** The report's downloads, each with its outcome now; one still running is kept, and named again once it ends. */
+  private drainDownloads(): DownloadEntry[] {
+    const entries: DownloadEntry[] = []
+    for (const guid of this.downloads) {
+      const state = this.downloadStates.get(guid)
+      if (state === undefined) continue
+      entries.push({ name: state.name, outcome: state.outcome })
+      if (state.outcome !== 'started') this.downloadStates.delete(guid)
+    }
+    this.downloads = []
+    return entries
+  }
+
   private async scrollOffset(budget: CallBudget): Promise<{ readonly pageX: number; readonly pageY: number }> {
     const metrics = await this.send<{ cssVisualViewport?: unknown }>('Page.getLayoutMetrics', {}, budget)
     const visual = record(metrics.cssVisualViewport)
@@ -821,6 +933,19 @@ function remember(set: Set<string>, value: string | undefined, limit: number): v
 
 function clamp(value: string): string {
   return value.length > TEXT_LIMIT ? `${value.slice(0, TEXT_LIMIT)}…` : value
+}
+
+/** A remote object as an article, its kind and its first line: `a function: () => 1`, `a Map: Map(1)`, `a Symbol: Symbol(s)`, `an Error: Error: no`. */
+function described(result: Record<string, unknown>): string {
+  const kind = result.type === 'function' ? 'function' : result.type === 'symbol' ? 'Symbol' : result.subtype === 'node' ? 'DOM node' : (text(result.className) ?? text(result.subtype) ?? String(result.type))
+  const line = (text(result.description) ?? '').split('\n')[0]!.trim()
+  const shown = line.length > 120 ? `${line.slice(0, 120)}…` : line
+  return `${/^[aeiou]/i.test(kind) ? 'an' : 'a'} ${kind}${shown === '' || shown === kind ? '' : `: ${shown}`}`
+}
+
+/** A protocol error's reason without the method it answered (`Runtime.evaluate: …`). */
+function protocolReason(error: BrowserError): string {
+  return error.message.replace(/^[A-Za-z]+\.[A-Za-z]+: /, '')
 }
 
 /** `url:line` (1-based) from the first stack frame, else from the fallback location; nothing for code with no URL (an `evaluate`). */
