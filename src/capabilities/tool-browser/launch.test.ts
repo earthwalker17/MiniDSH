@@ -138,12 +138,34 @@ describe.runIf(testBrowser !== undefined)('a launched browser', () => {
     // The canary host on the allow list goes DIRECT, so it never reaches the
     // fence: exactly what a proxy policy or a fence that is not in force looks like.
     const root = tempDir('minidsh-profiles-')
-    const error = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: root, headless: true, allowHosts: [CANARY_HOST], declared: [], window: { width: 800, height: 600 } }).catch(
-      (caught: unknown) => caught,
-    )
+    const started = Date.now()
+    const error = await launchBrowser({
+      executablePath: testBrowser!.path,
+      profileRoot: root,
+      headless: true,
+      allowHosts: [CANARY_HOST],
+      declared: [],
+      window: { width: 800, height: 600 },
+      canaryTimeoutMs: 60_000,
+    }).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'BROWSER_FENCE_UNAVAILABLE', hostFault: true })
+    // Known from where the canary went, not from waiting out the bound.
+    expect(Date.now() - started, 'the refusal waited for the canary bound').toBeLessThan(30_000)
     expect(readdirSync(root)).toEqual([])
     // "Nothing running": no process anywhere still uses a profile under this root.
+    expect(await until(() => browsersUsing(root).length === 0, 10_000), `a refused launch left ${browsersUsing(root).join(', ')} running`).toBe(true)
+  })
+
+  it('refuses a fence still unproved at the bound as a moment, never as a fact about the host', LONG, async () => {
+    // A canary that has not finished proves nothing either way: windows-latest
+    // once took over 10 s mid-suite, and remembering that would have switched
+    // the browser off for the life of the process.
+    const root = tempDir('minidsh-profiles-')
+    const error = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: root, headless: true, allowHosts: [], declared: [], window: { width: 800, height: 600 }, canaryTimeoutMs: 1 }).catch(
+      (caught: unknown) => caught,
+    )
+    expect(error).toMatchObject({ code: 'BROWSER_FENCE_UNAVAILABLE', hostFault: false, message: expect.stringContaining('the next call tries again') })
+    expect(readdirSync(root)).toEqual([])
     expect(await until(() => browsersUsing(root).length === 0, 10_000), `a refused launch left ${browsersUsing(root).join(', ')} running`).toBe(true)
   })
 

@@ -46,8 +46,10 @@ export interface LaunchOptions {
   /** The credential names to withhold from the browser's environment (`ctx.credentials`). */
   readonly declared: readonly string[]
   readonly window: { readonly width: number; readonly height: number }
-  /** How long the browser may take to answer its first command. Default 30 s. */
+  /** How long the browser may take to answer its first command. Default 60 s. */
   readonly startTimeoutMs?: number
+  /** How long each fence canary may take to finish its navigation. Default 20 s. */
+  readonly canaryTimeoutMs?: number
   /**
    * A diagnostic for TESTS: Chrome's own network log, which is how a DNS lookup
    * can be seen at all. Never reachable from row config (`index.ts` does not
@@ -111,7 +113,7 @@ const SWITCHES = [
  * (its verbose log has no silence over 2.5 s; 2026-10-19). 30 s cut it off.
  */
 const START_TIMEOUT_MS = 60_000
-const CANARY_TIMEOUT_MS = 10_000
+const CANARY_TIMEOUT_MS = 20_000
 
 export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBrowser> {
   mkdirSync(options.profileRoot, { recursive: true })
@@ -228,7 +230,7 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
   try {
     const version = await cdp.send<{ product: string }>('Browser.getVersion', {}, { timeoutMs: options.startTimeoutMs ?? START_TIMEOUT_MS })
     await cdp.send('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: true })
-    await proveFence(cdp, fence)
+    await proveFence(cdp, fence, options.canaryTimeoutMs ?? CANARY_TIMEOUT_MS)
     return {
       cdp,
       pid: child.pid,
@@ -258,20 +260,49 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
  * one over TLS, the two paths a proxy setting can treat differently — must
  * both reach THIS process's listener. If either does not, something replaced
  * the proxy (an enterprise policy, a PAC script) or the browser went direct,
- * and the fence is not in force. A fact about the host, so remembered.
+ * and the fence is not in force.
+ *
+ * Judged by evidence, because only a fact about the host may be remembered
+ * (`index.ts`). A canary whose navigation FINISHED without the fence seeing it
+ * went somewhere else: the host's, remembered, and said at once rather than
+ * after the bound. One still unfinished at the bound proves nothing either
+ * way (a busy host; windows-latest once took over 10 s mid-suite): refused,
+ * as any unproved fence is, but tried again next call. The fence records a
+ * host before it answers, so a finished navigation never outruns its record.
  */
-async function proveFence(cdp: CdpConnection, fence: Fence): Promise<void> {
-  const targets: string[] = []
-  for (const url of [`http://${CANARY_HOST}/`, `https://${CANARY_TLS_HOST}/`]) {
-    targets.push((await cdp.send<{ targetId: string }>('Target.createTarget', { url })).targetId)
-  }
-  const held = (await Promise.all([fence.waitFor(CANARY_HOST, CANARY_TIMEOUT_MS), fence.waitFor(CANARY_TLS_HOST, CANARY_TIMEOUT_MS)])).every(Boolean)
-  for (const targetId of targets) await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined)
-  if (!held) {
+async function proveFence(cdp: CdpConnection, fence: Fence, timeoutMs: number): Promise<void> {
+  const canaries = [
+    { host: CANARY_HOST, url: `http://${CANARY_HOST}/` },
+    { host: CANARY_TLS_HOST, url: `https://${CANARY_TLS_HOST}/` },
+  ]
+  const outcomes = await Promise.all(
+    canaries.map(async ({ host, url }) => {
+      const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' })
+      try {
+        const { sessionId } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true })
+        try {
+          await cdp.send('Page.navigate', { url }, { sessionId, timeoutMs })
+        } catch (error) {
+          if (!(error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT')) throw error
+          return fence.saw(host) ? 'proved' : 'unfinished'
+        }
+        return fence.saw(host) ? 'proved' : 'elsewhere'
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined)
+      }
+    }),
+  )
+  if (outcomes.includes('elsewhere')) {
     throw new BrowserError(
       'BROWSER_FENCE_UNAVAILABLE',
       `this browser's traffic does not go through MiniDSH's network fence (a proxy policy on this machine may override it), so it is not used`,
       { hostFault: true },
+    )
+  }
+  if (outcomes.includes('unfinished')) {
+    throw new BrowserError(
+      'BROWSER_FENCE_UNAVAILABLE',
+      `this browser had not shown its traffic going through MiniDSH's network fence within ${Math.round(timeoutMs / 1000)} s, so it is not used; the next call tries again`,
     )
   }
 }

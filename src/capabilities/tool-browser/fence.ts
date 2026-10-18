@@ -134,7 +134,6 @@ export class Fence {
   private readonly sockets = new Set<Socket>()
   /** Hosts seen, in arrival order, bounded: a diagnostic, never an authority. */
   private readonly hosts: string[] = []
-  private readonly waiters = new Set<{ host: string; resolve: () => void }>()
 
   private constructor(server: Server, port: number) {
     this.server = server
@@ -161,26 +160,6 @@ export class Fence {
   /** True once a request for `host` reached the fence. */
   saw(host: string): boolean {
     return this.hosts.includes(host)
-  }
-
-  /** Resolves true when `host` reaches the fence, false after `timeoutMs`. */
-  waitFor(host: string, timeoutMs: number): Promise<boolean> {
-    if (this.saw(host)) return Promise.resolve(true)
-    return new Promise((resolve) => {
-      const waiter = {
-        host,
-        resolve: () => {
-          clearTimeout(timer)
-          this.waiters.delete(waiter)
-          resolve(true)
-        },
-      }
-      const timer = setTimeout(() => {
-        this.waiters.delete(waiter)
-        resolve(false)
-      }, timeoutMs)
-      this.waiters.add(waiter)
-    })
   }
 
   async close(): Promise<void> {
@@ -212,7 +191,6 @@ export class Fence {
     if (host === undefined) return
     if (this.hosts.length >= 512) this.hosts.shift()
     this.hosts.push(host)
-    for (const waiter of Array.from(this.waiters)) if (waiter.host === host) waiter.resolve()
   }
 }
 
