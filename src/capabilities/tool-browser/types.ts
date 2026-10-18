@@ -69,7 +69,7 @@ export interface PageReport {
   readonly omitted: number
   /** True when the main frame navigated since the previous report. */
   readonly navigated: boolean
-  /** True when the page's renderer crashed; the next navigation starts it again. */
+  /** True while the page's renderer is crashed (now, not "since the last report"); the next navigation starts it again. */
   readonly crashed: boolean
 }
 
@@ -83,11 +83,10 @@ export type Action =
   /** Options matched by value, then by visible label. */
   | { readonly kind: 'select'; readonly ref: string; readonly values: readonly string[] }
 
+/** The capture. Its dimensions are the attachment store's to read (`saveImage` probes the bytes), not this layer's to restate. */
 export interface Screenshot {
   readonly data: Uint8Array
   readonly mediaType: 'image/png' | 'image/jpeg'
-  readonly width: number
-  readonly height: number
   /** Set when a full page was taller than the deployment admits and was cut. */
   readonly clipped?: string
 }
@@ -102,7 +101,8 @@ export interface BrowserPage {
   navigate(url: string, options: CallBudget & { readonly waitMs: number }): Promise<{ readonly loaded: boolean }>
   /**
    * The accessibility tree as text, Playwright AI-snapshot style, every
-   * non-ignored node carrying a ref: `- button "Add" [ref=e4]`. `ref` roots it
+   * non-ignored element carrying a ref (text lines carry none, as there):
+   * `- button "Add" [ref=e4]`. `ref` roots it
    * at that element; `waitForText` first waits (until the deadline) for the
    * page's text to contain it. Unbounded here: the tool bounds and spills.
    */
@@ -118,6 +118,11 @@ export interface BrowserPage {
   report(): Promise<PageReport>
   /** Closes the page's target; idempotent. */
   close(): Promise<void>
+  /**
+   * True once the page is unusable for good: closed, detached, or its browser
+   * gone. A CRASHED page is not gone — navigating starts its renderer again.
+   */
+  readonly gone: boolean
 }
 
 /**

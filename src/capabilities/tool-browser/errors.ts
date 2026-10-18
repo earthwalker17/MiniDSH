@@ -15,6 +15,8 @@ export type BrowserErrorCode =
   | 'BROWSER_TIMEOUT'
   /** The URL is outside what this browser may reach (§7: loopback, the workspace's files, `allowHosts`). */
   | 'BROWSER_URL_REFUSED'
+  /** The navigation itself failed (`net::ERR_*`): a server not running, a name that does not resolve. */
+  | 'BROWSER_NAVIGATION_FAILED'
   /** A ref from an older snapshot, document or browser: snapshot again. */
   | 'BROWSER_STALE_REF'
   /** The element cannot take the action: hidden, disabled, covered, or not the right kind. */
