@@ -110,7 +110,7 @@ const ROUTES: Record<string, Route> = {
   '/debounce': `<button onclick="setTimeout(() => out.textContent = 'updated', 300)">Go</button><p id="out">idle</p>`,
   '/debounce-fetch': `<button onclick="setTimeout(() => fetch('/api').then((r) => r.text()).then((t) => out.textContent = t), 250)">Search</button><p id="out">idle</p>`,
   '/api': { type: 'text/plain', body: 'results arrived' },
-  '/late-nav': `<button onclick="setTimeout(() => location.href = '/next', 400)">Later</button>`,
+  '/late-nav': `<button onclick="setTimeout(() => location.href = '/next', 250)">Later</button>`,
   '/next': '<p>next page</p>',
   '/shadow-late': `<open-el></open-el><closed-el></closed-el><script>
     const open = document.querySelector('open-el').attachShadow({ mode: 'open' })
@@ -454,7 +454,10 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
       expect(await page.snapshot(budget())).toMatch(/^- paragraph \[ref=e\d+\]: results arrived$/m)
     })
 
-    it('reports a navigation the action started 400 ms after its input', LONG, async () => {
+    it('reports a navigation the action started 250 ms after its input', LONG, async () => {
+      // The settle's claim (page.ts `afterAction`): what a handler starts within
+      // the 500 ms quiet is caught. 400 ms left 100 ms for a late timer and the
+      // event's delivery, which a loaded macos-latest overran once (2026-10-19).
       const done = await page.act({ kind: 'click', ref: refOf(await go('/late-nav'), 'button "Later"') }, acting())
       expect(done).toContain(`the page navigated to ${fixture.origin}/next`)
       expect(await page.snapshot(budget())).toContain('next page')
