@@ -35,7 +35,7 @@ A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 52 grou
 ## Open for the route
 
 - **S18, the default route.** `agent-default-model` is a host row apart from the adapters; a saved selection overrides it at creation. `packages/bundle/base/cordis.patch.yml`
-- **S20, a held process.** fs and subprocess providers share one execution world: one swap moves Bash, PTY and LSP together, and the subprocess seam owns the process range. `packages/subprocess/subprocess/src/index.ts`
+- **S20, a held process.** fs and subprocess providers share one execution world and the subprocess seam owns the process range; both browser spawn paths bypass it (rechecked at `687f282e`). `packages/subprocess/subprocess/src/index.ts`
 - **S20, browser providers.** Playwright MCP, DevTools MCP and Cua stay explicit compositions, never optional bundles. `.agents/notes/implemented/architecture/2026-09-21-experimental-capabilities-as-optional-bundles.md`
 - **S22, one launcher.** `scripts/verify-application-entrypoints.ts` rejects a bin bypassing `dsh`; Desktop boots through `@deepseek-ai/dsh/profile-boot`. `apps/desktop-host/src/index.ts`
 

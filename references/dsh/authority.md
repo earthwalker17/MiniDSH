@@ -25,7 +25,7 @@
 
 - **S18, web search.** No backend confines the network (bwrap unshares pid only, Seatbelt allows default), so gating `web_fetch` is a `tools/pre-execute` listener, the shape hooks and auto-review already use. `packages/sandbox/sandbox-local/src/profiles.ts`
 - **S20, a job that asks.** A background command asks only to escalate, before its background branch, so an approved one-shot grant covers the job's whole life, its mode fixed at spawn (MiniDSH never escalates a job; 2026-10-15 at `57190202`). `packages/shell/tool-bash/src/index.ts`
-- **S20, the browser process.** Ten spawners outside `ctx.subprocess` import `scrubbedParentEnv()`; the Stagehand Chrome launch is the browser precedent. `packages/experimental/browser-use-stagehand-native/src/launch.ts`
+- **S20, the browser process.** Ten spawners outside `ctx.subprocess` import `scrubbedParentEnv()`; the Stagehand Chrome launch is the browser precedent, and the MCP browser servers get the same scrub through `StdioClientTransport` (rechecked at `687f282e`). `packages/experimental/browser-use-stagehand-native/src/launch.ts`
 - **S21, actors.** Delegation also seeds `permission/preset` for `auto`/`danger-full-access` in the child's creation window; the ceiling itself is the ledger's delegation row. `packages/subagent/subagent/src/child-agent.ts`
 - **S22, tool display facts.** `ToolCallView = Generic | Terminal | Diff` from a pure `presentCall(args)`, which the approval panel does not use (the ledger's consent row). `packages/core/tools/src/presentation.ts`
 
