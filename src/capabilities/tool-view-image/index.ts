@@ -1,8 +1,8 @@
 /**
  * `view_image`: read an image from the workspace so the model can see it.
  *
- * The producer half of the attachment plane, and DSH's `read_image` shape. Its
- * order is the one thing that matters:
+ * A producer on the attachment plane, and DSH's `read_image` shape. Its order
+ * is the one thing that matters, and it is `core/llm/admission.ts`'s:
  *
  *   1. refuse if the STEP's route cannot take images, before any I/O;
  *   2. refuse if this request already carries as many images as it may;
@@ -11,29 +11,16 @@
  *   5. only then return, so the reference in the `tool/result` names an object
  *      that already exists.
  *
- * Step 1 is what makes delegation the model's own answer rather than a rule it
- * has to be told. The shipped route cannot see images, so a parent asking to
- * view one is refused with a message naming the move; a verifier child routed to
- * a vision model is not. Nothing enters history the current route cannot take,
- * which is the admission half of the pair — the projection half (history the
- * CURRENT route cannot take is still readable) lives in the adapters.
- *
- * The route it reads is the folded `request/context`, which the driver writes
- * before the step opens. Not `agent.options`, which is the BASE route an
- * `agent/request` listener may have moved; and not a fresh `resolveCallConfig`,
- * which would re-run a waterfall the driver deliberately consults once per step,
- * without the step's own position. No agent means no route, and no route means
- * refuse.
+ * No agent means no route, and no route means refuse.
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { asAttachmentId, ATTACHMENTS, isImageAdmissionError, type Attachments, type ImageMediaType } from '../../core/attachments/index.ts'
 import { FS, FsError, type Fs, type FsActor } from '../../core/fs/index.ts'
 import { imageDescriptor } from '../../core/llm/content.ts'
-import { LLM, type ContentBlock, type Llm } from '../../core/llm/index.ts'
-import { foldRequestContext } from '../../core/session/index.ts'
+import { assertImageFits, assertImageRoom, assertRouteTakesImages } from '../../core/llm/admission.ts'
+import { LLM, type Llm } from '../../core/llm/index.ts'
 import { defineTool, TOOLS, type ToolContext } from '../../core/tools/index.ts'
-import type { Agent } from '../../core/agent/types.ts'
 
 const DESCRIPTION = `Look at an image file in the workspace.
 
@@ -69,100 +56,23 @@ interface Deps {
   readonly attachments: () => Attachments | undefined
 }
 
-/** What the step this call belongs to can take as input. Absent modalities mean text only. */
-function routeTakesImages(llm: Llm, agent: Agent): { ok: boolean; route: string } {
-  const context = foldRequestContext(agent.session.facts)
-  if (!context) return { ok: false, route: 'an unrecorded route' }
-  const route = `${context.provider}/${context.model}`
-  // The record is the authority — a replay has no live adapter — and the
-  // adapter is consulted only for a log written before the field existed.
-  const modalities = context.inputModalities ?? tryLive(llm, context.provider, context.model)
-  return { ok: modalities?.includes('image') === true, route }
-}
-
-function tryLive(llm: Llm, provider: string, model: string): readonly string[] | undefined {
-  try {
-    return llm.resolveModel(provider, model).inputModalities
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Images already on the live surface, counted so a request cannot grow past
- * what a provider will serve.
- *
- * Per REQUEST, not per message: this tool returns one image per result, so a
- * per-message count could never bind, while both providers tighten their own
- * per-image limits as a request accumulates images and Anthropic caps a whole
- * request at 32 MB. Without a cumulative bound, a handful of ordinary calls
- * produce a request refused with a code nothing retries and nothing compacts,
- * and every later request in the session fails identically.
- *
- * It counts OCCURRENCES, not distinct attachments, and that distinction is the
- * whole bound. `collectImageRefs` dedupes by id — correctly, because the
- * adapter reads each object's bytes once — but the serializers emit one wire
- * image per BLOCK. Since the store is content-addressed, viewing the same file
- * five times yields five blocks carrying one id, so a deduped count sees a
- * single image while the request carries five full copies. Reproduced before
- * this was written: the bound said 1, the wire carried 5.
- */
-function imagesOnSurface(agent: Agent): { count: number; bytes: number } {
-  let count = 0
-  let bytes = 0
-  const walk = (blocks: readonly ContentBlock[]): void => {
-    for (const block of blocks) {
-      if (block.type === 'image') {
-        count++
-        bytes += block.attachment.bytes
-      } else if (block.type === 'tool-result') {
-        walk(block.content)
-      }
-    }
-  }
-  for (const message of agent.session.deriveMessages()) walk(message.content)
-  return { count, bytes }
-}
-
 async function view(args: Input, exec: ToolContext, deps: Deps): Promise<z.infer<typeof OutputSchema>> {
   const agent = exec.agent
   if (!agent) throw Object.assign(new Error('view_image requires an owning agent'), { code: 'UNSUPPORTED_CONTENT' })
 
-  const { ok, route } = routeTakesImages(deps.llm, agent)
-  if (!ok) {
-    throw Object.assign(
-      new Error(
-        `${route} cannot accept images, so reading one here would put content in this conversation that the model cannot see. ` +
-          `Delegate the look to a subagent whose route is vision-capable, and ask it to report what it saw.`,
-      ),
-      { code: 'UNSUPPORTED_CONTENT' },
-    )
-  }
+  assertRouteTakesImages(deps.llm, agent)
 
   const attachments = deps.attachments()
   if (!attachments) throw Object.assign(new Error('this deployment stores no attachments, so an image cannot be read'), { code: 'UNSUPPORTED_CONTENT' })
   const limits = attachments.imageLimits
 
-  const already = imagesOnSurface(agent)
-  if (already.count >= limits.maxImagesPerRequest) {
-    throw Object.assign(
-      new Error(`this conversation already carries ${already.count} image(s), which is all one request may hold; summarise what you have seen instead of adding another`),
-      { code: 'TOO_MANY_IMAGES' },
-    )
-  }
+  assertImageRoom(agent.session, limits)
 
   const target = deps.fs.resolve(args.path, agent.session.header.cwd)
   const info = await deps.fs.stat(target)
   if (!info || info.type !== 'file') throw new FsError('FS_NOT_FOUND', `cannot read "${args.path}" as an image`)
   // Refuse on size before reading: the cheap bound comes first.
-  if (info.size > limits.maxImageBytes) {
-    throw Object.assign(new Error(`"${args.path}" is ${info.size} bytes; this deployment accepts images up to ${limits.maxImageBytes}`), { code: 'IMAGE_TOO_LARGE' })
-  }
-  if (already.bytes + info.size > limits.maxRequestImageBytes) {
-    throw Object.assign(new Error(`adding "${args.path}" would put ${already.bytes + info.size} bytes of image in one request, over this deployment's ${limits.maxRequestImageBytes}`), {
-      code: 'IMAGE_TOO_LARGE',
-    })
-  }
+  assertImageFits(agent.session, limits, info.size, `"${args.path}"`)
 
   const actor: FsActor = exec.agent ? { agent: exec.agent } : {}
   const { bytes } = await deps.fs.readBytes(target, actor)

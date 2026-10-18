@@ -8,15 +8,16 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgentHandle } from '../../core/agent/index.ts'
 import { ATTACHMENTS } from '../../core/attachments/index.ts'
+import { FS } from '../../core/fs/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { matches, TOOL_RESULT } from '../../core/session/index.ts'
 import { quadPng } from '../../test-support/images.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { assistantText, assistantToolCall } from '../../test-support/scripted-adapter.ts'
-import { attachmentsLocalPlugin } from '../attachments-local/index.ts'
+import { attachmentsLocalPlugin, DEFAULT_MAX_IMAGE_BYTES } from '../attachments-local/index.ts'
 import { fsLocalPlugin } from '../fs-local/index.ts'
 import { fsObservationPolicyPlugin } from '../fs-observation-policy/index.ts'
 import { toolEditorPlugin } from '../tool-editor/index.ts'
@@ -130,6 +131,22 @@ describe('view_image', () => {
     const handle = await create()
     await runViewImage(handle, harness, 'quad.png')
     expect(resultOf(handle).error?.code).toBe('UNSUPPORTED_CONTENT')
+  })
+
+  /**
+   * The cheap bound comes first: an oversized file is refused from its `stat`,
+   * so a gigabyte is never read into memory to learn it was too big. The size
+   * check lives in `core/llm/admission.ts` now, and moving it is exactly the
+   * change that could have slipped it after the read without any code changing.
+   */
+  it('refuses an oversized file from its size, without reading a byte of it', async () => {
+    const { harness, cwd, create } = await world()
+    writeFileSync(join(cwd, 'huge.png'), Buffer.alloc(DEFAULT_MAX_IMAGE_BYTES + 1))
+    const handle = await create()
+    const readBytes = vi.spyOn(harness.root.get(FS), 'readBytes')
+    await runViewImage(handle, harness, 'huge.png')
+    expect(resultOf(handle).error?.code).toBe('IMAGE_TOO_LARGE')
+    expect(readBytes).not.toHaveBeenCalled()
   })
 
   it('reports a file that is not an image as an admission error the caller can act on', async () => {

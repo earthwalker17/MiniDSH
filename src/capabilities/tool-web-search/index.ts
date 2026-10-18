@@ -41,7 +41,7 @@
  * reads outcome-unknown like any other dispatched call.
  *
  * The key is a declared credential: while this row is mounted, no shell child
- * inherits `TAVILY_API_KEY` (`shell-stdio`'s `childEnvironment`). It is
+ * inherits `TAVILY_API_KEY` (`core/process.ts`' `childEnvironment`). It is
  * resolved per call and a missing one is a coded error, so the row mounts
  * keyless and a keyless replay can compose it.
  */
