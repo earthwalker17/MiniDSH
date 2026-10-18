@@ -90,7 +90,7 @@ The log is the single source of truth: `{type, seq, time, data}`, `seq === log.l
 - **Refuse before I/O, never degrade.** An option or modality the provider cannot honour fails `UNSUPPORTED_OPTION`, `UNSUPPORTED_REASONING_EFFORT` or `UNSUPPORTED_CONTENT`, never dropped, aliased or clamped: the logged request is the served one.
 - **Replay state.** A signing provider's opaque `ReplayEnvelope` rides `finish` onto the assistant source; the `llm/stream` terminal continuation strips it for any other provider, AFTER the reconstruction observer.
 - **Retry is a capability** (`llm-retry`, on `agent/request-error`), so failed attempts stay durable. A call that is not a turn is `runAuxCall`: one log-only `llm/aux-call` (§4).
-- **Images: a reference plus a STORED descriptor** (`core/llm/content.ts`), committed before its event. **Refuse at admission** (when the STEP's route lacks `image`), **substitute at projection** (a text-only route gets `block.text`); lost bytes fail `ATTACHMENT_UNREADABLE` (§13).
+- **Images: a reference plus a STORED descriptor** (`core/llm/content.ts`), committed before its event. **Refuse at admission** (`core/llm/admission.ts`, every producer: the STEP's route, then the surface's count and bytes), **substitute at projection** (a text-only route gets `block.text`); lost bytes fail `ATTACHMENT_UNREADABLE` (§13).
 - **A catalog is a dated source snapshot, never fetched** (`resolveModel` is synchronous), held to the provider by a live drift probe (`catalog.e2e.test.ts`: DeepSeek, OpenAI). `contextWindow` is what compaction budgets against (`core/llm/types.ts`); an unknown id gets conservative facts, except in `llm-anthropic` (§13).
 - **Encrypted reasoning replays only to the model that wrote it** (`llm-openai/serialize.ts`), a pure function of the logged `source.model`; foreign reasoning is dropped, never forged.
 
@@ -141,6 +141,7 @@ The model proposes, policy decides, the effect boundary enforces; every decision
 - **Every decision is durable.** The setter IS the event (`sandbox/mode`, `approval/policy`, acceptance, grants): `initial` before publication (§4), `change` only on change, sandbox `resume` when a resumed host enforces differently; `context-runtime`, never the service, tells the model. Precedence: approved one-shot escalation > recorded fold > composition default. `approval-headless` fails closed (`unavailable`) except under `--approve` or an exact `allow` entry.
 - **A delegated child opens under a ceiling.** `tool-subagent` captures the parent's authority and stamps it in `setup`, `reason:'delegation'`: the mode as a CEILING, approvals pinned `never`, acceptance `strictest(parent, row)` as a PIN. Widening is refused (`SANDBOX_CEILING`, `APPROVAL_PINNED`) and so is `setAcceptance` on any delegated session; narrowing is legal. A continuation keeps them: `fork` refuses a boundary below the opening stamps (§13).
 - **A network tool asks per call and never reaches a child.** No backend confines the network, so a `NETWORK_TOOL`-tagged tool asks consent in its body before any byte leaves, every call, with exact grants (`tool-web-search`); `tool-subagent` hides every such tool from a child at delegation, whose `never` pin refuses it anyway (`core/tools/types.ts`; §13).
+- **The browser is fenced, not consented** (`tool-browser`, deliberately not `NETWORK_TOOL`, so a child may use it). A harness process over a CDP pipe, never a port; a fresh profile; downloads denied. Inside Chrome, a proxy this process owns refuses all but loopback and row-config `allowHosts`, resolver rules leave it no other name, and `file:` loads pass only inside the workspace; a canary proves the fence per launch (`fence.ts`).
 - **A job runs under the stamp its start resolved, never an escalation**, and a `change` of `sandbox/mode` or `sandbox/acceptance` ends its owner's jobs, a start in flight included (`core/jobs/index.ts`).
 - **Presets select, the knobs decide.** `authority/preset` is a log-only intent written before `setMode`/`setPolicy`; the current preset is DERIVED (`core/presets`).
 - **Consent-by-composition.** `approval/request` dispatches in the asking agent's scope, so a preset-mounted (§9) answerer can auto-approve for its own agent: code-equivalent trust, every pair audited. It cannot widen enforcement (the fence and shell resolve the global `SANDBOX`) nor reach a deployment-global registry.
@@ -186,14 +187,14 @@ Notifications: `session.event`, `session.status`, `session.view`, `settings.chan
 
 MiniDSH IS data: composition rows plus disk layers (`app/compose.ts`, `app/config.ts`). Settings (`core/settings`) and credentials (`core/credentials`) are separate planes; **authority is never configuration**: a recorded event beats any composition default by fold precedence (§7).
 
-- **Home.** `MINIDSH_HOME` (default `~/.minidsh`): `sessions/`, `spill/`, `attachments/v1/`, `composition.json`, `settings.json` (the only configuration file MiniDSH writes), `credentials.json`, `AGENTS.md`, `skills/`. Only `app/home.ts` resolves paths; plugins get them as config.
+- **Home.** `MINIDSH_HOME` (default `~/.minidsh`): `sessions/`, `spill/`, `attachments/v1/`, `composition.json`, `settings.json` (the only configuration file MiniDSH writes), `credentials.json`, `AGENTS.md`, `skills/`, `browser/`. Only `app/home.ts` resolves paths; plugins get them as config.
 - **Layers.** built-ins (`compose()`) → app → home `composition.json` → `--patch` files; a patch replaces a row's WHOLE config. A disk `plugin` is a builtin name or a module path whose own imports are its problem (§13).
 - **Trust.** `composition.json` is code-equivalent trust, never a persistence target. No workspace layer: a repository may say how it likes its code, never what the harness may do. `minidsh config` flags authority-sensitive rows a layer changed; an explicit authority flag is a durable per-session switch (`applyAuthority`), on resume too.
 - **Skills are data** (`capabilities/skills`): `SKILL.md` directories under, in precedence, `$MINIDSH_HOME/skills` (user), the package's `skills/` (bundled) and a repository's `.agents/skills`/`.claude/skills`, which never replaces another (the operator is warned, the model never told). The app fills the first two into a `skills` row naming none, AFTER layering (`withSkillRoots`). A skill registers nothing; its scripts are shell commands under the session's authority.
 - **Recomposition.** The spine `{session, llm, tools, prompt, agent, loop, persistence}` refuses removal or reconfiguration while agents are live (`app/compose.ts`).
 - **Agent presets.** `agentPresets` in `composition.json` mount per-agent worlds on the agent scope, named in the session header so a resume or delegated child composes the same world (§7 for what they cannot reach).
 - **Settings.** `agent` defaults: flags → `MINIDSH_MODEL` → `settings.json` → built-ins, read live per new session by a wire host (§8); on resume the log's route wins, and an explicit flag overrides it as `agent/options{resume}` (`core/agent/index.ts`).
-- **Defaults.** Authority `workspace-write` + `ask`; `shell-stdio` `confinement: auto`. A shell child's environment is built, not inherited: the credential refs the mounted rows declared and `MINIDSH_*` removed, nothing for a name's shape (`shell-stdio/process.ts`; §13).
+- **Defaults.** Authority `workspace-write` + `ask`; `shell-stdio` `confinement: auto`. A shell child's environment is built, not inherited: the credential refs the mounted rows declared and `MINIDSH_*` removed, nothing for a name's shape (`core/process.ts`, every harness spawner; §13). `tool-browser` is a default row that registers its tools only where Chrome, Edge or Chromium is found.
 - **Packaging.** npm ships the `scripts/build.ts` emit as a binary, with no `main` or `exports` (BLUEPRINT §3).
 
 **Retention: content is never swept; an affordance may expire.** Spill is the one affordance: its excerpt is already what the model saw. `spill-local` sweeps it once at load, never on disposal (a fork inherits its parent's locators).
@@ -203,13 +204,14 @@ MiniDSH IS data: composition rows plus disk layers (`app/compose.ts`, `app/confi
 | `sessions/` (children too) | content, replay oracle | never removed by the harness |
 | `attachments/v1/objects/` | content, shared by address | never removed |
 | `spill/<session>/` (a job's output too) | affordance | age-swept at load, `cleanupPeriodDays` (default 30) |
+| `browser/p-*` (a launch's profile) | affordance | removed at close; a dead owner's swept at the next launch on this host |
 
 ## 10. Verification
 
 Tests mount real compositions; only the model is scripted or replayed (`test-support/llm-replay.ts`). E2E asserts the world, never the agent's report.
 
 - **Runtime invariants run in every test and live.** Cross-capability claims are tested on the full composition (`app.test.ts`, `bootComposition`).
-- **Gates.** `pnpm check` plus a packed-tarball install smoke on Ubuntu, macOS and Windows (`check.yml`). A leg may not pass having proved nothing: `MINIDSH_EXPECT_CONFINEMENT`, `_SHELL` and `_PYTHON` fail a skipped confinement, dialect or Python test.
+- **Gates.** `pnpm check` plus a packed-tarball install smoke on Ubuntu, macOS and Windows (`check.yml`). A leg may not pass having proved nothing: `MINIDSH_EXPECT_CONFINEMENT`, `_SHELL`, `_PYTHON` and `_BROWSER` fail a skipped confinement, dialect, Python or browser test.
 - **Fixtures.** Real 1.0.0 and S16 logs (`test-support/fixtures/`) are verified, repaired, salvaged and replayed.
 - **Live arcs** (`pnpm test:e2e`) run over `minidsh serve` stdio, `web` over `minidsh web`; the OpenAI leg, `search` and the OpenAI drift probe are LOCAL (no secret in `live.yml`).
 
@@ -226,6 +228,7 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | `web` | cookie sign-in; two clients on one host; a wire consent; paging to seq 0; a socket killed mid-turn |
 | `jobs` | a job's own end wakes an idle agent; a host killed mid-job: cold `verify` predicts `lost`, the resumed model is told |
 | `skills` | a PDF and a CSV become `report.docx` via the listed office skill, read with ordinary tools first; helper stamp, outside reader, no consent, byte-identical replay |
+| `browser` | a runtime-only bug SEEN in the browser before the edit, fixed, re-verified, checked by the test's own CDP; a text-only parent's verifier child screenshots test-drawn pixels |
 
 **A live arc's premise is an assumption about the model, and it decays silently**: with ONE separating assertion, ask what a model knowing nothing would answer.
 
@@ -260,7 +263,8 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | oversized tool output | `core/spill`, via the producing tool (§6) |
 | an attachment kind | raster: an `attachments-local` header probe; else a vocabulary change (`AttachmentRef`, `ModelModality`, `ContentBlock`, each serializer, the meter) |
 | a network tool | a `tool-<x>` tagged `NETWORK_TOOL` (§7) |
-| a non-text producer | as `tool-view-image` (§5) |
+| an image producer | `core/llm/admission.ts`, then `attachments.saveImage` (§5) |
+| a process the harness spawns | `core/process.ts`: the environment rule, the tree kill |
 | a verifier | a `tool-subagent` row + `model-roles` entry |
 | a model role | a `model-roles` entry; never the base route (§4) |
 | an out-of-loop model call | `resolveCallConfig` + `runAuxCall`, never bare `llm.stream` |
@@ -294,6 +298,7 @@ MiniDSH's decision and reason; upstream's mechanism and its verdict at the pin: 
 - **Surfaces.** A terminal ships as a protocol client over an in-process carrier (DSH deleted its own).
 - **Providers.** Three direct adapters, each a source catalog, two held by a drift probe; an unknown DeepSeek id gets conservative facts (DSH: text-only at the full 1M).
 - **Web.** One opt-in search tool, consent per query, structured sources only, no fetch (DSH: both default-mounted, unconsented, prose results).
+- **Browser.** Default where one is found, a pipe, fenced to loopback and the workspace inside Chrome, proved per launch (DSH: experimental explicit compositions; Stagehand's debug port open to any local process; no fence).
 - **Skills.** Name, description and absolute path, read with ordinary tools, worded optional (DSH: a mandatory `skill` tool); a repository skill never shadows (DSH: workspace first, ungated); documents on Node alone (DSH: Python and LibreOffice, no PDF).
 - **Not built**, and why: `BLUEPRINT.md` §2 (refused) and §3 (open).
 
@@ -316,8 +321,9 @@ Know these before changing the code near them. One line each; the owning code sa
 - The `shell` row is outside the spine (`app/compose.ts`): after a live `reconfigure`, `enforcementFor` and a stamp answer for a world no command runs in.
 - A shell child's environment withholds variables, not credentials (§9): every undeclared secret passes whatever its name, `SSH_AUTH_SOCK` and the proxy variables stay, `credentials.json` is readable, and the network is open.
 - A delegation or network tool an agent preset registers lives in the child's scope, which `restrict` cannot hide and the depth cap does not count: a cost bound, not a fence.
-- A network request is consented, never confined or recorded; headless, only `--approve` allows one. An opt-in row's key is withheld from a shell child only while that row is mounted.
+- A network tool's request is consented, never confined or recorded; headless, only `--approve` allows one. An opt-in row's key is withheld from a shell child only while that row is mounted.
 - A module-loaded plugin is arbitrary code; `minidsh config`'s warnings are advisory.
+- `tool-browser` reaches EVERY loopback service, under every mode and in a delegated child, unconsented and unrecorded; one may act or relay on its own authority. The shell backend does not confine the browser (Chrome's sandbox confines its pages).
 
 **Context**
 
@@ -333,7 +339,8 @@ Know these before changing the code near them. One line each; the owning code sa
 
 - The in-memory log keeps trace: a 400-turn session is tens of MB of heap.
 - Spill is swept only at load (§9): a long-running host waits for a restart; a repeated `callId` overwrites.
-- A lost attachment is turn-fatal (`ATTACHMENT_UNREADABLE`); image validation is header-only; one image producer, no client upload.
+- A lost attachment is turn-fatal (`ATTACHMENT_UNREADABLE`); image validation is header-only; no client upload. The image bound is the whole surface's, until a compaction shadows it.
+- `tool-browser` shows no cross-origin frame's content and uploads no file; a browser is found at mount and proved at its first launch.
 - No session deletion, search, rename or model-written title: each needs a projection past `persistence.list()`'s bounded prefix.
 - **Crash repair is as sharp as the lifecycle (§4).** Without `synced`, a never-logged call reads not started, sound only for a process crash; a crash inside a tool's own consent reads unknown. A repaired `subagent/end` has no cost, salvage closers are placeholders, and salvage damage between turns leaves the model no sign (the CLI warns).
 - Effect records cover only `ctx.fs` and `ctx.shell` (not a command's own writes, spill or attachments), may over-report a shell that died between commands, and may follow an abandoned body's result (§6).
@@ -367,7 +374,7 @@ Know these before changing the code near them. One line each; the owning code sa
 ```
 key files; .ts omitted
 src/kernel/  tokens · bus · context · errors
-src/core/    scope · json · ids · text; a package per §3 row, plus effects/ (no service) and metering/
+src/core/    scope · json · ids · text · process; a package per §3 row, plus effects/ (no service) and metering/
   session/   store · session · surface · page · title · format · repair · invariant
   agent/     index (resolveCallConfig) · repair · invariant
   loop/      driver · factory · marker · invariant
@@ -375,7 +382,7 @@ src/core/    scope · json · ids · text; a package per §3 row, plus effects/ 
   sandbox/   events · index (writableRoots) · paths (canonicalPath) · invariant
 src/capabilities/
   llm-deepseek/ · llm-anthropic/ · llm-openai/ · llm-retry/ · model-roles/ · tool-subagent/ · tool-history/
-  fs-local/ · fs-observation-policy/ · tool-editor/ · attachments-local/ · tool-view-image/ · tool-jobs/ · tool-web-search/
+  fs-local/ · fs-observation-policy/ · tool-editor/ · attachments-local/ · tool-view-image/ · tool-jobs/ · tool-web-search/ · tool-browser/
   shell-stdio/ (confine/) · tool-shell/ · approval-headless/ · authority-presets/
   persistence-jsonl/ · credentials-local/ · settings-local/ · spill-local/ · composition-record/
   context-runtime/ · workspace-instructions/ · skills/ · compaction-basic/ · session-title/

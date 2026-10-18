@@ -18,7 +18,7 @@ It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (
 Three things:
 
 1. **Useful software.** A coding agent that edits files and runs commands under an authority you set — which files it may write, and which actions need your approval — and can audit afterwards; that survives its process being killed and can be resumed or forked from its log; that manages its own context; that can hand a bounded task to a child or a visual check to a model that can see. Three providers ship (DeepSeek, Anthropic and OpenAI), and a session can switch models mid-conversation.
-2. **A reference architecture.** About twenty-six thousand lines of TypeScript in one package with one runtime dependency: four layers with a dependency rule enforced by a script in `pnpm check`, eighteen service contracts in core plus one in the application, thirty-four durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
+2. **A reference architecture.** About thirty-three thousand lines of TypeScript in one package with one runtime dependency: four layers with a dependency rule enforced by a script in `pnpm check`, eighteen service contracts in core plus one in the application, thirty-four durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
 3. **A systems-engineering experiment.** Whether a project built almost entirely by coding-agent sessions can keep a global architecture intact across months, by making it explicit, inspectable and continuously falsified rather than letting sessions gradually invent it.
 
 The thesis is **fewer concepts and stronger invariants**, not fewer lines or more features.
@@ -64,29 +64,27 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 ## What you get
 
-**Authority you set, and a record you can read back.** A run defaults to `workspace-write` with approvals `ask`: file writes are restricted to the working directory, reads are unrestricted, and shell commands are confined by the operating system where it can (bubblewrap on Linux, Seatbelt on macOS, each probed before it is claimed).
+**Authority you set, and a record you can read back.** A run defaults to `workspace-write` with approvals `ask`: file writes are restricted to the working directory, reads are unrestricted, and shell commands are confined by the operating system where it can (bubblewrap on Linux, Seatbelt on macOS). An approval shows what the runtime says the call will do — the command itself and the authority it would run under — with the model's reason beside it rather than instead of it. Every session records the authority it starts under and every later switch, request and decision; `sessions show --audit` prints that history back.
 
-**An approval shows what the runtime says the call will do** — the command itself and the authority it would run under — with the model's reason beside it rather than instead of it. Every session records the authority it starts under and every later switch, request and decision; `sessions show --audit` prints that history back.
+**Sessions that survive their process.** Everything the model was shown and did is one append-only JSONL log. Kill the process mid-turn and the next `resume` repairs the tail and continues under the authority the log recorded. A second process cannot resume a session another one holds.
 
-**Sessions that survive their process.** Everything the model was shown and did is one append-only JSONL log, synced to disk at every checkpoint. Kill the process mid-turn and the next `resume` repairs the tail and continues under the authority the log recorded; `fork <id> --at <seq>` branches a session at any turn boundary. A second process cannot resume a session another one holds: a lease refuses it before a byte is appended.
+**Context that manages itself.** Near the model's window, or when the provider refuses a request as too large, the oldest history is replaced by a summary (*compaction*); the summarized events stay in the log, and the model can read them back with `history_read`. An `AGENTS.md` (or `CLAUDE.md`) in the workspace enters as instructions to the model, never permissions for the harness.
 
-**Context that manages itself.** A meter over the log tracks pressure. Near the model's window, or when the provider refuses a request as too large, the oldest history is replaced by a summary (*compaction*); the summarized events stay in the log, and the model can read them back with `history_read`. Oversized tool output is spilled to disk with an excerpt. An `AGENTS.md` (or `CLAUDE.md`) in the workspace enters as instructions to the model, never permissions for the harness.
-
-**Switch models mid-conversation.** The route — provider, model, reasoning effort — is a durable fact a session can change at any point (`--provider`/`--model`, `/model anthropic/claude-sonnet-5`, or `session/model` over the protocol), and the log records it. A `model-roles` entry in `composition.json` maps a *purpose* — the compaction summary, a delegated child — to a different route. An option a provider cannot honour is refused, never silently dropped.
-
-The DeepSeek adapter ships `deepseek-flash` (the default, which reads images; the retired `deepseek-v4-flash` names are served as it) and the text-only `deepseek-v4-pro`; the Anthropic adapter the Claude 5 and 4 families; the OpenAI adapter the GPT-6 and GPT-5 families on the Responses API. Every effort set was measured against the live API (and every DeepSeek window and cap), and a drift probe re-measures DeepSeek's and OpenAI's.
+**Switch models mid-conversation.** The route — provider, model, reasoning effort — is a durable fact a session can change at any point. A `model-roles` entry in `composition.json` maps a *purpose* — the compaction summary, a delegated child — to a different route. An option a provider cannot honour is refused, never silently dropped. The DeepSeek adapter ships `deepseek-flash` (the default, which reads images; the retired `deepseek-v4-flash` names are served as it) and the text-only `deepseek-v4-pro`; the Anthropic adapter the Claude 5 and 4 families; the OpenAI adapter the GPT-6 and GPT-5 families on the Responses API.
 
 **Delegation with a ceiling.** The model can hand one bounded task to a `subagent`: a child with its own session and log whose authority is fixed at its parent's or narrower and cannot be widened from inside; approvals are off, so an action needing one is refused. A verifier that can *see* is a second `subagent` entry pointed at a vision model, using the `view_image` tool, a built-in row that is off by default.
 
-**Background jobs that report back.** The model can start a long command — a dev server, a slow test run — with `job_start`, keep working, read its output with `job_output` and stop it with `job_cancel`. When a job ends on its own, its notice arrives in the session and wakes an idle agent, a bounded number of times before a person says something; a stop someone asked for never wakes it. A job runs under the session's own authority and ends with its session; if the process running the session dies, the next resume tells the model which jobs were lost.
+**Background jobs that report back.** The model can start a long command — a dev server, a slow test run — with `job_start`, keep working, read its output with `job_output` and stop it with `job_cancel`. When a job ends on its own, its notice arrives in the session and wakes an idle agent, a bounded number of times. A job runs under the session's own authority and ends with its session.
+
+**A real browser to check a frontend.** Where Chrome, Edge or Chromium is installed, the model can open a page (a dev server it started as a job, or a workspace file), read it as an accessibility tree, click, type, take a screenshot and run JavaScript; each result says what the page logged or failed. It reaches only localhost and the workspace's own files, enforced inside the browser.
 
 **Web search, when you mount it.** One `composition.json` row adds `web_search` (Tavily). Every query asks first, naming the exact text that would leave the machine, where it goes and under which credential; results are titles, URLs and snippets behind a fixed untrusted-content notice. A delegated child is not offered it.
 
 **Skills: know-how as data.** A skill is a folder holding a `SKILL.md` (the open [agentskills.io](https://agentskills.io) format) in `~/.minidsh/skills/` or a repository's `.agents/skills/` or `.claude/skills/`. A session is shown a short list of them, and the model reads one with its ordinary file tools when a task fits: advice, never a permission. Two ship, both on Node alone: `office` (create, read and edit .docx, .xlsx, .pptx) and `pdf`. A repository's skill never replaces yours.
 
-**Composition from disk.** The default composition is a list of forty plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` shows the result and flags any authority-sensitive row a file changed.
+**Composition from disk.** The default composition is a list of forty-one plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` flags any authority-sensitive row a file changed.
 
-**One runtime, three ways in.** The headless CLI, the terminal and the browser are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). They display the session log a page at a time and keep no state of their own; several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record.
+**One runtime, three ways in.** The headless CLI, the terminal and the web UI are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record.
 
 ## Status and limitations
 
@@ -96,9 +94,9 @@ The DeepSeek adapter ships `deepseek-flash` (the default, which reads images; th
 - Confinement governs file effects only. A confined command still reaches the network. Its environment is scrubbed of this deployment's declared provider keys and of `MINIDSH_*`, and of nothing else: a credential-shaped variable you set is yours and reaches the shell. That scrub is defence in depth, not a boundary: reads are unfenced, so a credentials file stays readable to a command that looks.
 - The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. A confined shell writes through such a link too, because the OS confines paths; neither backend lets it create one across the workspace boundary (measured under bubblewrap and Seatbelt).
 - Tool execution is sequential and a delegated child is foreground. A background job's process can outlive a MiniDSH process that is killed (on Windows, on macOS, and unconfined on Linux): the resume reports it lost and does not stop it. On Windows a job runs only in a session that accepts an unconfined shell (`--accept none`).
-- Nothing confines the network: web search is consent per query, and there is no `web_fetch`. No session deletion, search or rename; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
+- Nothing confines the network: web search is consent per query, and there is no `web_fetch`. The browser is fenced from the internet, not from localhost: it reaches every local service, from any sandbox mode and a delegated child. No session deletion, search or rename; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
 
-What comes next is browser verification, then more than one actor ([BLUEPRINT §2](docs/BLUEPRINT.md)).
+What comes next is a hardening checkpoint (the 1.2 release candidate), then more than one actor ([BLUEPRINT §2](docs/BLUEPRINT.md)).
 
 ## The question it investigates
 
@@ -112,45 +110,45 @@ DSH's answer to that pressure is explicit: an *everything-is-a-plugin* harness b
 
 ## Architecture
 
-This is a reading guide; [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the contract, and code comments cite its section numbers. One word to hold while reading: a **fold** is a pure derivation over the session log (the model's history, the current authority and the context pressure are all folds).
+This is a reading guide; [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the contract. One word to hold while reading: a **fold** is a pure derivation over the session log (the model's history, the current authority and the context pressure are all folds).
 
 ### Layers and the dependency rule
 
 ```
-src/app/            application assembly and user interfaces: composition, disk config, CLI, terminal, browser, stdio host
+src/app/            application assembly and user interfaces: composition, disk config, CLI, terminal, web UI, stdio host
 src/capabilities/   providers and consumers over core seams — never import each other, never app
 src/core/           the spine: the service contracts (Service Definitions) and their default drivers as plugins
 src/kernel/         composition substrate: Context, plugin lifecycle, services, effects, events
 src/test-support/   scripted adapter, replay-from-log adapter, composition harness
 ```
 
-A script in `pnpm check` enforces the dependency direction (ARCHITECTURE §1), that an event payload is read through `matches(event, KIND)` and never cast, and that `core` is acyclic at file level. The four layers are the whole topology; a capability is a directory, not a package.
+A script in `pnpm check` enforces the dependency direction (ARCHITECTURE §1) and that `core` is acyclic at file level. The four layers are the whole topology.
 
 ### The subsystems and what each owns
 
-**The kernel** (`src/kernel`, about nine hundred lines) is the two Cordis properties in the fewest mechanisms: a context tree where *registration context = visibility = lifetime*, typed service tokens, plugins with a declared dependency lifecycle, disposers run in reverse order, and typed events with an `observe` hook on which runtime invariants are checked.
+**The kernel** (`src/kernel`) is the two Cordis properties in the fewest mechanisms: a context tree where *registration context = visibility = lifetime*, typed service tokens, plugins with a declared dependency lifecycle, disposers run in reverse order, and typed events with an `observe` hook.
 
-**Core** (`src/core`) is eighteen service contracts (*keys*), each a Definition with one provider — a core default driver or a capability — and consumers over it; the nineteenth, the composition handle, is the application's.
+**Core** (`src/core`) is eighteen service contracts (*keys*), each a Definition with one provider — a core default driver or a capability — and consumers over it.
 
 | Concern | Keys | Owns |
 |---|---|---|
 | Facts | `sessions`, `persistence` | the append-only session log and everything derived from it; the read contract for stored logs |
 | Cognition | `llm`, `prompt`, `agents` (+ the `loop` driver, a plugin) | the provider-neutral model stream and adapters; stable prompt sections; the agent registry; the turn/step driver |
-| Effects | `tools`, `fs`, `shell` | the guarded tool pipeline; the filesystem contract, with the write fence inside its provider; the policy-bound shell |
-| Authority | `sandbox`, `approval`, `presets`, `credentials` | the current policy record and how it changes; approvals and their audit; named bundles of both; credentials by *name* only |
+| Effects | `tools`, `fs`, `shell`, `jobs` | the guarded tool pipeline; the filesystem contract, with the write fence inside its provider; the policy-bound shell; owner-scoped background jobs |
+| Authority | `sandbox`, `approval`, `authority-presets`, `credentials` | the current policy record and how it changes; approvals and their audit; named bundles of both; credentials by *name* only |
 | Context | `compaction`, `spill`, `attachments` (+ metering, a pure fold with no key) | summarizing old history; oversized output; images; the one context-pressure number |
 | Assembly | `settings`, `invariants` | user defaults a client may change; validation of every event before it enters the log |
 
 ARCHITECTURE §3 also states what each key must *not* own — `sandbox` never owns an enforcement backend or a word of what the model is told, `tools` never owns policy — and those negative clauses are where most of the design lives.
 
-**Capabilities** (`src/capabilities`, twenty-nine directories) are providers and consumers over those seams: three model adapters, JSONL persistence, the filesystem with its fence, the shell with its confinement backends, the model-facing tools, compaction, spill, and the client protocol. **The application** (`src/app`) is assembly and user interfaces, as the layers block says.
+**Capabilities** (`src/capabilities`) are providers and consumers over those seams: three model adapters, JSONL persistence, the filesystem with its fence, the shell with its confinement backends, the model-facing tools, compaction, spill, and the client protocol.
 
 ### The invariants that hold
 
 - **The log is the only truth.** The model's history is a fold over three *model-visible* event kinds; everything else is a log-only fact or trace. New durable state is added as a new log-only event kind, never as a field a user interface holds.
 - **Model-visible ⟺ logged.** Every model request is exactly what the log derives — the message history plus the request settings — and a runtime check verifies that before every call.
-- **Durable before every action.** A flush precedes every paid model call and every tool effect.
-- **The model proposes, policy decides, the effect boundary enforces, the log records.** Enforcement lives at the effect, never at the tool gate; what a host can enforce is probed and recorded when the session opens.
+- **Durable before every action.** A sync to disk precedes every paid model call and every tool effect.
+- **The model proposes, policy decides, the effect boundary enforces, the log records.** Enforcement lives at the effect, never at the tool gate.
 - **A delegated child opens under a ceiling it cannot widen**; **the route is a fact**; **user interfaces render the log by the page and own only live, non-durable state** such as the current input and connection.
 - **A repository may say how it likes its code and may not say what the harness is allowed to do.** There is deliberately no per-workspace configuration layer; composition and settings live only under `~/.minidsh`.
 
@@ -160,18 +158,17 @@ ARCHITECTURE §11 is a table from *new thing* to *home*: a model provider is an 
 
 ## What MiniDSH learned from DeepSeek Harness
 
-MiniDSH reproduced DSH's principles, not its implementation. [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) is a large, fast-moving system (336 packages by its [module graph](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md) on 2026-10-14) with an unusually good written architecture; [`references/`](references/README.md) is this project's pinned map of it, and ARCHITECTURE §12 the reason for each difference below. Links checked 2026-09-26.
+DSH is a large, fast-moving system (336 packages by its [module graph](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md) on 2026-10-14); [`references/`](references/README.md) is this project's pinned map of it, and ARCHITECTURE §12 the reason for each difference below.
 
 ### Ideas taken
 
-- **Capabilities have lifecycle and dependency semantics.** Plugins depend on Service Definitions, never concrete providers ([packages/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md)): here, a Definition in core, a Provider and a Consumer in capabilities.
+- **Capabilities have lifecycle and dependency semantics.** Plugins depend on Service Definitions, never concrete providers ([packages/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md)).
 - **Each agent gets its own registration scope**, disposed when the agent ends ([note of 2026-07-08](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md)).
-- **A tiny model-facing tool surface is enough.** DSH's `minimal` preset ([minimal.patch.yml](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml)) is a persona and one persistent shell (since 2026-10-12 plus image reading and compaction); MiniDSH's default is `bash`/`pwsh`, `str_replace_editor` and `subagent`, plus three job tools.
+- **A tiny model-facing tool surface is enough.** DSH's `minimal` preset ([minimal.patch.yml](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml)) is a persona and one persistent shell (since 2026-10-12 plus image reading and compaction); MiniDSH's default is `bash`/`pwsh`, `str_replace_editor` and `subagent`, plus three job tools and, where a browser is installed, five browser tools.
 - **The session log is the record; the model-visible history is derived from it** ([session](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/session.md), [compaction](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/compaction.md)).
 - **Bytes beside the log, references in it** ([attachment seam](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/attachment.md)).
 - **Confinement is a spawn wrapper inside the shell provider** ([sandbox](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/sandbox.md), [sandbox-local](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/sandbox-local/README.md)), its bubblewrap profile adopted flag for flag.
 - **The wire is newline-delimited JSON-RPC, and the browser is a client, not a second agent** ([SDK](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/README.md), [web client note](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md)).
-- **Write down why.** DSH's `.agents/notes` are the practice behind [`BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
 ### Deliberately simplified
 
@@ -179,7 +176,7 @@ MiniDSH reproduced DSH's principles, not its implementation. [DeepSeek Harness](
 - **One package with a dependency gate instead of hundreds.**
 - **Sequential, foreground, one child at a time:** no parallel tool calls, continuable children or agent teams; a background job belongs to its session, is closed `lost` if the process dies, and wakes it a bounded number of times (DSH: a lost job stays open, wakes unbounded).
 - **One protocol over three transports** (stdio, in-process, WebSocket), not several composition profiles.
-- **Two confinement backends, not four:** no Landlock (a native addon) and no Windows backend (DSH's reports only partial enforcement).
+- **Two confinement backends, not four:** no Landlock (a native launcher) and no Windows backend (DSH's reports only partial enforcement).
 - **A terminal client ships** (DSH removed its TUI in a note of 2026-08-04).
 - **History recall appears only when needed:** `history_read` is hidden until the first compaction; DSH's `session-query` tools are opt-in for the schemas they add to every request.
 
@@ -191,7 +188,7 @@ MiniDSH reproduced DSH's principles, not its implementation. [DeepSeek Harness](
 
 ### Not built
 
-PTC (DSH's programmatic tool calling), model-written dynamic packages, an MCP client, session deletion, a session search index and per-user identity: BLUEPRINT §2 gives each reason, and puts a browser tool and a desktop launcher on the route.
+PTC (DSH's programmatic tool calling), model-written dynamic packages, an MCP client, session deletion and per-user identity: BLUEPRINT §2 lists them, and puts a desktop launcher on the route.
 
 ## The architecture-first experiment
 
