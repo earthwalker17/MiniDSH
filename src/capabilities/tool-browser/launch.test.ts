@@ -117,7 +117,7 @@ describe.runIf(testBrowser !== undefined)('a launched browser', () => {
     expect(existsSync(join(browser.profileDir, 'owner.json'))).toBe(true)
     const pid = browser.pid!
     await browser.close()
-    expect(browser.exited).toBe(true)
+    expect(await until(() => browser.exited, 10_000), 'close returned with the browser still running').toBe(true)
     expect(await until(() => !alive(pid), 10_000), `browser ${pid} outlived its close`).toBe(true)
     expect(existsSync(browser.profileDir)).toBe(false)
     // Idempotent, and quiet after the fact.

@@ -167,12 +167,18 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
   const close = (): Promise<void> => {
     closing ??= (async () => {
       if (!exited) {
-        await cdp.send('Browser.close', {}, { timeoutMs: 3_000 }).catch(() => undefined)
+        await cdp.send('Browser.close', {}, { timeoutMs: 2_000 }).catch(() => undefined)
+        await Promise.race([gone, sleep(3_000)])
+      }
+      // A browser that would not close politely: the tree kill, bounded
+      // (`core/process.ts`), then the exit itself, bounded again — on a loaded
+      // Windows host the process record can trail the kill by seconds, and the
+      // profile cannot go while the browser still holds it. Worst case ~20 s;
+      // an ordinary close is a few hundred milliseconds.
+      if (!exited) {
+        await killAndWait(child)
         await Promise.race([gone, sleep(5_000)])
       }
-      // A browser that would not close politely, or whose root is gone with
-      // children left: the tree kill, bounded (`core/process.ts`).
-      if (!exited) await killAndWait(child)
       cdp.close('closed by its owner')
       await fence.close()
       await removeProfile(profileDir)

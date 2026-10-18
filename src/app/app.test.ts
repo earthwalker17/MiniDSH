@@ -297,18 +297,22 @@ describe('headless runner (real composition, scripted model)', () => {
 
   /**
    * A cross-capability claim, so it belongs against the FULL composition: the
-   * attachment plane exists wherever MiniDSH runs, but the model-facing tools
-   * that produce images do not, so the shipped tool surface is unchanged. And
-   * the store creates nothing until something is saved — the same discipline
-   * as a session that opened and was abandoned leaving no file behind.
+   * attachment plane exists wherever MiniDSH runs; `view_image` stays
+   * composition, and the one shipped image producer is the browser, which
+   * offers its five tools only where this host has a Chrome, Edge or Chromium
+   * (S20). And neither store creates anything until something is saved — the
+   * same discipline as a session that opened and was abandoned leaving no
+   * file behind.
    */
-  it('ships the attachment service, the job tools, and no other model-facing tool', async () => {
+  it('ships the attachment service, the job tools, the browser where one is installed, and no other model-facing tool', async () => {
     const sessionsRoot = tempDir('minidsh-sessions-')
     const attachmentsRoot = tempDir('minidsh-attachments-')
+    const browserProfileRoot = tempDir('minidsh-browser-')
     const { bootComposition } = await import('./headless.ts')
     const { ATTACHMENTS } = await import('../core/attachments/index.ts')
     const { TOOLS } = await import('../core/tools/index.ts')
-    const root = await bootComposition({ sessionsRoot, attachmentsRoot, logger: silent, ...scripted(new ScriptedAdapter()) })
+    const { locateBrowser } = await import('../capabilities/tool-browser/locate.ts')
+    const root = await bootComposition({ sessionsRoot, attachmentsRoot, browserProfileRoot, logger: silent, ...scripted(new ScriptedAdapter()) })
     try {
       expect(root.tryGet(ATTACHMENTS)).toBeDefined()
       // The shell tool is named after the host dialect, so name it that way
@@ -318,11 +322,17 @@ describe('headless runner (real composition, scripted model)', () => {
       // name it, and hidden from every agent until that agent's first applied
       // compaction — so what an agent is OFFERED is the shorter list, asserted
       // in the recall capability's own tests.
-      // S17 added the three job tools (`tool-jobs`); nothing else is offered.
+      // S17 added the three job tools (`tool-jobs`); S20 the five browser tools,
+      // where a browser exists (under MINIDSH_EXPECT_BROWSER that is every
+      // host this runs on: `test-support/browser-fixture.ts`).
+      const browserTools = locateBrowser(undefined) === undefined ? [] : ['browser_navigate', 'browser_snapshot', 'browser_act', 'browser_screenshot', 'browser_evaluate']
+      if (process.env.MINIDSH_EXPECT_BROWSER === '1') expect(browserTools, 'MINIDSH_EXPECT_BROWSER=1 but no browser was found').not.toEqual([])
       expect(root.get(TOOLS).schemas().map((schema) => schema.name).toSorted()).toEqual(
-        [defaultDialect(), 'str_replace_editor', 'subagent', 'history_read', 'job_start', 'job_output', 'job_cancel'].toSorted(),
+        [defaultDialect(), 'str_replace_editor', 'subagent', 'history_read', 'job_start', 'job_output', 'job_cancel', ...browserTools].toSorted(),
       )
       expect(readdirSync(attachmentsRoot)).toEqual([])
+      // The browser starts on its first call, not at boot: no profile yet.
+      expect(readdirSync(browserProfileRoot)).toEqual([])
     } finally {
       await root.dispose()
     }

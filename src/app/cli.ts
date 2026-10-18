@@ -251,6 +251,7 @@ function bootFields(plan: BootPlan): {
   sessionsRoot: string
   spillRoot: string
   attachmentsRoot: string
+  browserProfileRoot: string
   globalInstructionsPath: string
   credentialsPath: string
   settingsStorePath: string
@@ -695,6 +696,8 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'composition-record',
   'fs-local',
   'shell-stdio',
+  // Its `allowHosts` is what the browser may reach beyond loopback (ARCHITECTURE §7).
+  'tool-browser',
   'tool-shell',
   'tool-editor',
   'tool-subagent',

@@ -44,6 +44,7 @@ import { toolJobsPlugin } from '../capabilities/tool-jobs/index.ts'
 import { toolSubagentPlugin } from '../capabilities/tool-subagent/index.ts'
 import { toolHistoryPlugin } from '../capabilities/tool-history/index.ts'
 import { toolWebSearchPlugin } from '../capabilities/tool-web-search/index.ts'
+import { toolBrowserPlugin } from '../capabilities/tool-browser/index.ts'
 
 export interface Row {
   readonly id: string
@@ -95,6 +96,7 @@ export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
       toolHistoryPlugin,
       toolViewImagePlugin,
       toolWebSearchPlugin,
+      toolBrowserPlugin,
       contextRuntimePlugin,
       skillsPlugin,
       workspaceInstructionsPlugin,
@@ -306,6 +308,8 @@ export interface ComposeOptions {
   readonly spillRoot?: string
   /** Where image attachments are stored; omitted mounts no store, and a producer of images then refuses. */
   readonly attachmentsRoot?: string
+  /** Where the browser's per-launch profiles go (`app/home.ts`); omitted mounts no browser. */
+  readonly browserProfileRoot?: string
   /** The user's global AGENTS.md; omitted reads only the workspace's own files. */
   readonly globalInstructionsPath?: string
   readonly dialect: ShellDialect
@@ -406,12 +410,16 @@ export function compose(options: ComposeOptions): Row[] {
   rows.push(defineRow('jobs', jobsPlugin, {}))
   if (withInvariants) rows.push(defineRow('jobs-invariant', jobsInvariantPlugin))
   // A service row with no model-facing surface: the binary plane exists wherever
-  // MiniDSH runs, while the tools that PRODUCE images stay composition, so the
-  // shipped tool set does not grow.
+  // MiniDSH runs. `view_image` stays composition; the browser below is the one
+  // shipped producer of images, and it asks admission like any other.
   if (options.attachmentsRoot !== undefined) rows.push(defineRow('attachments', attachmentsLocalPlugin, { root: options.attachmentsRoot }))
   rows.push(defineRow('tool-editor', toolEditorPlugin, {}))
   rows.push(defineRow('tool-shell', toolShellPlugin, {}))
   rows.push(defineRow('tool-jobs', toolJobsPlugin, {}))
+  // Beside the jobs that run the servers it opens. It registers its tools only
+  // where a Chrome, Edge or Chromium is installed (`tool-browser/locate.ts`),
+  // and its `allowHosts` is authority-sensitive (`minidsh config` flags it).
+  if (options.browserProfileRoot !== undefined) rows.push(defineRow('tool-browser', toolBrowserPlugin, { profileRoot: options.browserProfileRoot }))
   rows.push(defineRow('tool-subagent', toolSubagentPlugin, {}))
   rows.push(defineRow('context-runtime', contextRuntimePlugin, {}))
   // The skill list, with no roots: an omitted `roots` means the deployment's,

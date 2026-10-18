@@ -33,6 +33,19 @@ export function attachmentsDir(): string {
   return join(resolveHome(), 'attachments')
 }
 
+/**
+ * Where `tool-browser` makes each launch's private profile. An AFFORDANCE,
+ * not content: a profile lives for one browser and is removed when it closes;
+ * one a killed host left behind is swept by the next launch on this host once
+ * its owner is provably dead (`tool-browser/launch.ts`). Per user, under the
+ * home, rather than a shared `/tmp` another user's harness could hold.
+ * Absolute, because the browser is handed the path and has its own idea of a
+ * working directory.
+ */
+export function browserProfilesDir(): string {
+  return resolve(resolveHome(), 'browser')
+}
+
 /** Declarative composition layer: patch rows + named agent presets. */
 export function compositionPath(): string {
   return join(resolveHome(), 'composition.json')
@@ -98,6 +111,7 @@ export interface HomeLayout {
   readonly sessionsRoot: string
   readonly spillRoot: string
   readonly attachmentsRoot: string
+  readonly browserProfileRoot: string
   readonly globalInstructionsPath: string
   readonly credentialsPath: string
   /**
@@ -115,6 +129,7 @@ export function homeLayout(): HomeLayout {
     sessionsRoot: sessionsDir(),
     spillRoot: spillDir(),
     attachmentsRoot: attachmentsDir(),
+    browserProfileRoot: browserProfilesDir(),
     globalInstructionsPath: globalInstructionsPath(),
     credentialsPath: credentialsPath(),
     settingsStorePath: settingsPath(),

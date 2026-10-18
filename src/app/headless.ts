@@ -47,6 +47,8 @@ export interface BootOptions {
   readonly spillRoot?: string
   /** Store for image attachments; omitted mounts no store, and a producer of images then refuses (hermetic tests). */
   readonly attachmentsRoot?: string
+  /** Where the browser's profiles go; omitted mounts no browser. */
+  readonly browserProfileRoot?: string
   /** The user's global AGENTS.md; omitted reads only the workspace's own files (hermetic tests). */
   readonly globalInstructionsPath?: string
   /** Secret-store path for the credentials row; omitted = env-only (hermetic tests). */
@@ -148,6 +150,7 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
       ...(options.confinement === undefined ? {} : { confinement: options.confinement }),
       ...(options.spillRoot === undefined ? {} : { spillRoot: options.spillRoot }),
       ...(options.attachmentsRoot === undefined ? {} : { attachmentsRoot: options.attachmentsRoot }),
+      ...(options.browserProfileRoot === undefined ? {} : { browserProfileRoot: options.browserProfileRoot }),
       ...(options.globalInstructionsPath === undefined ? {} : { globalInstructionsPath: options.globalInstructionsPath }),
       ...(options.credentialsPath === undefined ? {} : { credentialsPath: options.credentialsPath }),
       ...(options.settingsStorePath === undefined ? {} : { settingsStorePath: options.settingsStorePath }),
