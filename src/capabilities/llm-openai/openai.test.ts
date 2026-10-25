@@ -597,6 +597,13 @@ describe('OpenAI adapter', () => {
     expect(watched.reads()).toBe(0)
   })
 
+  it('forbids a tool call when the request says none, keeping the tools on the wire', () => {
+    const { adapter } = adapterWith()
+    const tools = [{ name: 't', description: 'd', parameters: { type: 'object' } }]
+    expect(adapter.buildBody({ ...base, model: 'gpt-5.4', tools, toolChoice: 'none' })).toMatchObject({ tools: [{ name: 't' }], tool_choice: 'none' })
+    expect(adapter.buildBody({ ...base, model: 'gpt-5.4', tools })).not.toHaveProperty('tool_choice')
+  })
+
   it('honours a temperature exactly where the API does: effort none on an effort-none row', () => {
     const { adapter } = adapterWith()
     expect(adapter.buildBody({ ...base, model: 'gpt-6-luna', reasoningEffort: 'none', temperature: 0.3 })).toMatchObject({ temperature: 0.3, reasoning: { effort: 'none' } })

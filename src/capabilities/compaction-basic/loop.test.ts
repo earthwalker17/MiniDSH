@@ -169,6 +169,21 @@ describe('compaction through the real loop', () => {
     expect(surfaceTexts(agent)[0]).toContain('<system-reminder>')
   })
 
+  // S20.5, live: a summarizer that spent its answer on tool calls wrote no
+  // summary, twice, and compaction declined both. The tools stay in the
+  // request (the loop's prefix) but none may be called.
+  it('asks for its summary with the tools shown and none callable', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
+    const { agent } = await test.create()
+    arm(test)
+    await grow(agent, 6)
+    expect((await test.root.get(COMPACTION).compactNow(agent)).kind).toBe('compacted')
+    const summary = test.adapter.calls.find((call) => call.purpose === 'compaction')!
+    expect(summary.toolChoice).toBe('none')
+    // Loop steps leave the choice to the model.
+    expect(test.adapter.calls.filter((call) => call.purpose === undefined).every((call) => call.toolChoice === undefined)).toBe(true)
+  })
+
   it('leaves history alone when the summary call fails, and still records the attempt', async () => {
     const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
     const { agent } = await test.create()

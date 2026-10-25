@@ -233,6 +233,12 @@ describe('Anthropic adapter', () => {
     expect(resolved).toBe(0)
   })
 
+  it('forbids a tool call when the request says none, keeping the tools on the wire', () => {
+    const tools = [{ name: 't', description: 'd', parameters: { type: 'object' } }]
+    expect(adapter.buildBody({ ...base, model: 'claude-sonnet-5', tools, toolChoice: 'none' })).toMatchObject({ tools: [{ name: 't' }], tool_choice: { type: 'none' } })
+    expect(adapter.buildBody({ ...base, model: 'claude-sonnet-5', tools })).not.toHaveProperty('tool_choice')
+  })
+
   it('spells thinking per model generation and never leaks a runtime-only field onto the wire', () => {
     const sonnet = adapter.buildBody({ ...base, model: 'claude-sonnet-5', reasoningEffort: 'max', system: 'be terse', tools: [{ name: 't', description: 'd', parameters: { type: 'object' } }], sessionId: 's' as never, purpose: 'compaction' })
     expect(sonnet).toEqual({

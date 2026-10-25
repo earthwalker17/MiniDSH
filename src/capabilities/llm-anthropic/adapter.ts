@@ -296,7 +296,7 @@ export class AnthropicAdapter implements LlmAdapter {
       cache_control: { type: 'ephemeral' },
       ...(request.system && request.system.length > 0 ? { system: request.system } : {}),
       messages: serializeMessages(request.messages, images),
-      ...(tools ? { tools } : {}),
+      ...(tools ? { tools, ...(request.toolChoice === 'none' ? { tool_choice: { type: 'none' } } : {}) } : {}),
       ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
       ...thinkingBody(entry, request.reasoningEffort),
     }

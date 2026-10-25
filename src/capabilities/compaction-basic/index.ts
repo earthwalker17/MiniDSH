@@ -449,6 +449,8 @@ class BasicCompaction implements Compaction {
       system: assembled.system,
       messages,
       tools: assembled.tools,
+      // Shown, never callable: a summary is prose (`LlmRequest.toolChoice`).
+      toolChoice: 'none',
       maxTokens: this.config.maxTokens,
       purpose: PURPOSE,
       ...(signal ? { signal } : {}),
@@ -456,8 +458,9 @@ class BasicCompaction implements Compaction {
     }
     try {
       const result = await runAuxCall(this.llm, session, request, plan.shadowedSeqs)
-      // An empty answer (the model called a tool instead of writing prose)
-      // is not a summary. The failed call stays in the log; the surface does not move.
+      // An empty answer is not a summary (the request forbids tool calls, so
+      // this is a model that wrote nothing). The failed call stays in the log;
+      // the surface does not move.
       if (result.text.trim().length === 0) return { kind: 'empty' }
       // Nor is one cut off at the output cap: it would replace history with a
       // summary that stops mid-sentence. Counted with the summary failures,

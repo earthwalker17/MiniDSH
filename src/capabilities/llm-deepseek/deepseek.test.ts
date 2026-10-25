@@ -196,6 +196,33 @@ describe('DeepSeek adapter options', () => {
     expect(() => adapter.validateOptions({ provider: 'deepseek', model: 'deepseek-flash', messages: [], temperature: 0.2, reasoningEffort: 'off' })).not.toThrow()
   })
 
+  it('forbids a tool call when the request says none, keeping the tools on the wire', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const server = createServer((request, response) => {
+      let raw = ''
+      request.on('data', (chunk: Buffer) => (raw += chunk.toString('utf8')))
+      request.on('end', () => {
+        bodies.push(JSON.parse(raw) as Record<string, unknown>)
+        response.writeHead(200, { 'content-type': 'text/event-stream' })
+        response.end('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"finish_reason":"stop","delta":{}}]}\n\ndata: [DONE]\n\n')
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const adapter = new DeepSeekAdapter({ apiKeyRef: 'DEEPSEEK_API_KEY', resolveKey: () => 'sk-test', baseURL: `http://127.0.0.1:${(server.address() as { port: number }).port}`, defaultMaxTokens: 8192 })
+      const tools = [{ name: 't', description: 'd', parameters: { type: 'object' } }]
+      for (const toolChoice of ['none', undefined] as const) {
+        for await (const _ of adapter.stream({ provider: 'deepseek', model: 'deepseek-flash', messages: [], tools, ...(toolChoice ? { toolChoice } : {}) })) {
+          // drained
+        }
+      }
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
+    expect(bodies[0]).toMatchObject({ tools: [{ type: 'function' }], tool_choice: 'none' })
+    expect(bodies[1]).not.toHaveProperty('tool_choice')
+  })
+
   it('refuses a key no HTTP header can carry by its reference, before any I/O, never quoting it', async () => {
     const adapter = new DeepSeekAdapter({ apiKeyRef: 'DEEPSEEK_API_KEY', resolveKey: () => 'sk-real-part\nsecond-line', baseURL: 'http://127.0.0.1:1', defaultMaxTokens: 8192 })
     const failure = await adapter.stream({ provider: 'deepseek', model: 'deepseek-flash', messages: [] })[Symbol.asyncIterator]().next().catch((error: unknown) => error)

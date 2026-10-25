@@ -188,7 +188,7 @@ export class DeepSeekAdapter implements LlmAdapter {
       ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
       ...(() => {
         const tools = serializeTools(request.tools)
-        return tools ? { tools } : {}
+        return tools ? { tools, ...(request.toolChoice === 'none' ? { tool_choice: 'none' } : {}) } : {}
       })(),
     }
 

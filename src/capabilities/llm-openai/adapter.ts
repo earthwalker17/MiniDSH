@@ -128,7 +128,7 @@ export class OpenAIAdapter implements LlmAdapter {
       max_output_tokens: request.maxTokens ?? Math.min(this.options.defaultMaxTokens, entry.maxOutputTokens),
       // The obfuscation padding on every delta is bandwidth and nothing else.
       stream_options: { include_obfuscation: false },
-      ...(tools ? { tools } : {}),
+      ...(tools ? { tools, ...(request.toolChoice === 'none' ? { tool_choice: 'none' } : {}) } : {}),
       ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
       ...this.reasoningFields(entry, request),
       // Deliberately absent: `truncation` (its default, `disabled`, makes an

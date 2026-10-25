@@ -72,6 +72,15 @@ export interface LlmRequest {
   readonly system?: string
   readonly messages: readonly Message[]
   readonly tools?: readonly ToolSchema[]
+  /**
+   * `'none'`: the tools are SHOWN — the prefix stays the loop's, so a cache
+   * keeps serving it — but none may be called. A summary needs prose: with
+   * tools callable, a summarizer that spent its answer on tool calls wrote
+   * nothing and compaction declined it (S20.5, live: deepseek-v4-pro, twice
+   * in a row). Omitted, the provider's default lets the model choose.
+   * Measured accepted beside thinking by all three providers (2026-10-26).
+   */
+  readonly toolChoice?: 'none'
   readonly maxTokens?: number
   readonly reasoningEffort?: string
   readonly temperature?: number
