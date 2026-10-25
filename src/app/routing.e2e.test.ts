@@ -314,7 +314,16 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
         return outcome.kind === 'applied' ? 'applied' : `declined:${outcome.reason}`
       })
     const applied = events.filter((event) => event.type === COMPACTION_APPLIED.type)
-    expect(applied.length, `no compaction under a ${BUDGET} budget after ${attempts.length} attempt(s): [${attempts.join(', ')}]`).toBeGreaterThanOrEqual(1)
+    // What each summary call came back with, so an empty one says whether the
+    // model spent its cap thinking or the provider answered nothing (S20.5: a
+    // CI leg declined two summaries empty, and this message could not tell).
+    const summaryCalls = events
+      .filter((event) => event.type === LLM_AUX_CALL.type && (event.data as AuxCallRecord).purpose === 'compaction')
+      .map((event) => {
+        const aux = event.data as AuxCallRecord & { truncated?: boolean }
+        return `${aux.provider}/${aux.model} out ${aux.usage?.outputTokens ?? '?'} reasoning ${aux.usage?.reasoningTokens ?? 0}${aux.truncated ? ' truncated' : ''}`
+      })
+    expect(applied.length, `no compaction under a ${BUDGET} budget after ${attempts.length} attempt(s): [${attempts.join(', ')}]; summary calls [${summaryCalls.join('; ')}]`).toBeGreaterThanOrEqual(1)
     // Every attempt closed: an unpaired start would mean one did not, which is a
     // crash, a disposal or a fork boundary — none of which happen here.
     expect(events.filter((event) => event.type === COMPACTION_START.type)).toHaveLength(attempts.length)
