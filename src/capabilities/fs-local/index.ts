@@ -165,9 +165,11 @@ class LocalFs implements Fs {
    *   open handle must be the inode that path now names, inside the fence;
    * - the version check and the write both go through that handle.
    *
-   * What remains (ARCHITECTURE §13): a swap timed into those windows can leave
-   * an EMPTY directory or file outside, never content; a hard link is still
-   * not detectable.
+   * What remains (ARCHITECTURE §13): on Linux a swap timed into those windows
+   * can leave an EMPTY directory or file outside, never content (the handle is
+   * judged through `/proc/self/fd`); elsewhere `verifyHeld` asks names, and a
+   * swap timed between its checks can still let content through. A hard link
+   * is still not detectable.
    */
   async writeText(target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }> {
     // Fenced before ANY effect — creating parent directories is already one.

@@ -30,17 +30,18 @@ A pure helper, an algorithm or a type does not need any of this. Architecture-fi
 - **Node 24** (`.nvmrc`). TypeScript runs natively; there is no build step in development. `bin/minidsh.js` runs the source in a checkout and the emitted `dist/` in an installed package.
 - **pnpm**, the version pinned in `package.json`'s `packageManager`: `corepack enable`, then `pnpm install`.
 - **Windows:** PowerShell 7 (`pwsh`) — the shell tool and its tests refuse to run under PowerShell 5.1. **Linux:** `bubblewrap` for the confinement tests. **macOS:** nothing extra.
-- Provider keys (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`) are needed only by the live arcs. They are never committed, never logged, and read only through the credential seam.
+- **Every host:** Chrome, Edge or Chromium for the browser tests, and Python 3 for the bundled skills' independent document check. Each test that needs one skips without it, unless its `MINIDSH_EXPECT_*` flag says it must run.
+- Provider keys (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `TAVILY_API_KEY` for the search arc) are needed only by the live arcs. They are never committed, never logged, and read only through the credential seam. `MINIDSH_EXPECT_KEYS=DEEPSEEK_API_KEY,…` makes the live suite fail rather than skip when a named key is missing.
 
 ```sh
 pnpm install
 pnpm check          # tsc --noEmit + oxlint + the dependency gate + the docs gate + vitest
-pnpm test:e2e       # the eight live arcs: real provider calls, real cost, needs the keys
+pnpm test:e2e       # the twelve live arcs and the catalog drift probes: real provider calls, real cost, needs the keys
 pnpm build          # emits dist/ — what the package runs; `prepack` runs it for you
 pnpm minidsh …      # run the checkout
 ```
 
-Set `MINIDSH_EXPECT_SHELL=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` on Linux and macOS, so a test that would self-skip for a missing shell or backend fails instead. That is what CI does, and it is the difference between "green" and "green having proved nothing".
+Set `MINIDSH_EXPECT_SHELL=1`, `MINIDSH_EXPECT_PYTHON=1` and `MINIDSH_EXPECT_BROWSER=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` on Linux and macOS, so a test that would self-skip for a missing shell, interpreter, browser or backend fails instead. That is what CI does, and it is the difference between "green" and "green having proved nothing".
 
 ## What the gate enforces
 
@@ -71,11 +72,11 @@ If a change needs state that must survive a restart, a resume or a fork, it is a
 
 ## Releases
 
-A release is a tag. Bump `package.json`, cut the CHANGELOG section, merge to `main`, and push `v<version>`: `release.yml` runs the whole gate, packs, drafts the GitHub release from that section, publishes the packed bytes through npm trusted publishing (no token exists anywhere in the repository or its secrets), installs the public package and verifies its provenance attestation, then publishes the draft. A tag that is not on `main`, or that disagrees with `package.json`, publishes nothing. The trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com.
+A release is a tag. Bump `package.json`, cut the CHANGELOG section, merge to `main`, and push `v<version>`: `release.yml` runs the whole gate, packs, drafts the GitHub release from that section, publishes the packed bytes through npm trusted publishing (no token exists anywhere in the repository or its secrets), installs the public package and verifies its provenance attestation, then publishes the draft. A tag that is not on `main`, that disagrees with `package.json`, or whose commit has no green `check.yml` and `live.yml` run, publishes nothing. The trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com.
 
 ## Scope
 
-BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (background jobs, parallel tool calls, a desktop launcher); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
+BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (continuable children, parallel tool calls, a desktop launcher); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
 
 ## License and attribution
 

@@ -162,7 +162,9 @@ export const COMPOSITION = serviceKey<Composition>('app-composition')
  * per-session state and write leases die with the plugin instance, so swapping
  * it under a live session silently stops durable writes while `flush()` — now
  * a dispatch with no listeners — keeps reporting success. This is the runtime
- * half of "what a layer must not override".
+ * half of "what a layer must not override". `shell` is deliberately not here:
+ * a live `reconfigure` of it leaves `enforcementFor` and recorded stamps
+ * describing a world no command runs in (ARCHITECTURE §13).
  */
 const SPINE = new Set(['session', 'llm', 'tools', 'prompt', 'agent', 'loop', 'persistence'])
 

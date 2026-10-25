@@ -281,7 +281,7 @@ export interface Inspection {
     readonly mode?: SandboxMode
     readonly enforcement?: SandboxEnforcement
     readonly approval?: ApprovalPolicy
-    /** The acceptance the log records for `mode`; absent when it records none (a pre-S16 log under a deployment default says nothing). */
+    /** The acceptance the log records for `mode`; absent when it records none (a pre-S16 log under a deployment default says nothing, and has no `tool/dispatch`, so its error results cannot be told as the gate's or the body's). */
     readonly accepts?: SandboxEnforcement
     readonly grants: readonly ApprovalGrant[]
     readonly delegation?: { readonly ceiling?: SandboxMode; readonly pin?: ApprovalPolicy; readonly accepts?: { readonly accepts: SandboxEnforcement; readonly forMode: SandboxMode } }

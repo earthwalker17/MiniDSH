@@ -2,7 +2,9 @@
 
 All notable changes to MiniDSH are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The session-by-session engineering record, with what each session measured, lives in [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
-## [Unreleased]
+## [1.2.0] — 2026-10-26
+
+Background work, a third provider, web search, skills and a real browser, built across four sessions; then the whole widened runtime was reviewed as one system and what that review found was fixed before release. Read the migration note at the end of this section before upgrading a deployment that sets a temperature, a base URL or an agent preset.
 
 ### Added
 
@@ -13,11 +15,12 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
   - `browser_screenshot` captures the page, on a vision-capable route only;
   - `browser_evaluate` runs JavaScript in the page.
 
-  Every result opens with what the page logged, failed, blocked or asked since the previous one. Each session gets its own headless browser under a private profile in `~/.minidsh/browser/`, started on first use and gone when the session ends, over a pipe rather than a debugging port. It reaches only localhost and the workspace's own files, plus any `allowHosts` you name in the `tool-browser` row. This is enforced inside the browser (a proxy the harness owns, resolver rules and a `file:` filter) and proved each time it starts. Downloads are refused. A page that stops answering (a script stuck in a loop) is replaced by a fresh one on the next call, and the model is told. It asks no consent, so a delegated verifier child can use it: a text-only model hands the look to a `subagent` entry routed to a vision model.
+  Every result opens with what the page logged, failed, blocked or asked since the previous one. Each session gets its own headless browser under a private profile in `~/.minidsh/browser/`, started on first use and gone when the session ends, over a pipe rather than a debugging port. It reaches only localhost and the workspace's own files, plus any `allowHosts` you name in the `tool-browser` row. This is enforced inside the browser (a proxy the harness owns, resolver rules and a `file:` filter) and proved each time it starts. Downloads are refused. A script still running at a call's deadline is stopped, and a page that still does not answer (a loop that re-arms itself) is replaced by a fresh one on the next call; the model is told either way. It asks no consent, so a delegated verifier child can use it: a text-only model hands the look to a `subagent` entry routed to a vision model.
 
 - **Background jobs.** `job_start` runs a long command beside the session — a dev server, a slow test run — and returns at once; `job_output` reads what it wrote since the last read (optionally waiting for it to end) and `job_cancel` stops it and what it started. A job's start and its one end are durable facts in the log; when a job ends on its own its notice arrives in the session and wakes an idle agent, at most eight times in a row before a person says something, and a stop someone asked for never wakes it. A job runs under the session's own authority, never an escalation, a durable switch of the sandbox mode or acceptance ends it, and it ends with its session. If the MiniDSH process dies, the next resume (and `sessions verify` before it) closes each running job as lost and tells the model so.
 - **OpenAI as a third provider.** `--provider openai --model gpt-6-luna` (or `/model openai/gpt-6-luna`, or `session/model`) routes a session to OpenAI's Responses API, mid-session included, with `OPENAI_API_KEY` in the environment or `credentials.json`. Nothing is stored at OpenAI (`store: false`): a reasoning model's encrypted reasoning travels back to the same model inside the session log, and is dropped, never forged, for any other. The catalog covers the current GPT-6, GPT-5.6, GPT-5.5, GPT-5.4, GPT-5.2 and GPT-5 mini/nano models with their measured effort sets; an option a model would refuse or silently ignore — an effort it lacks, a `temperature` with reasoning on, an output cap above its own — is refused before anything is sent.
 - **Web search, opt-in.** A `composition.json` row (`{"patches": [{"insert": [{"id": "tool-web-search", "plugin": "tool-web-search"}]}]}`) gives the model `web_search`, backed by Tavily (`TAVILY_API_KEY`). Every query asks first: the line you answer names the exact text that would leave the machine, where it goes and under which credential, and a session grant covers only that identical query. Results arrive as a numbered list of titles, URLs and snippets behind a fixed notice that they are untrusted content — never a provider's own summary. A delegated child is not offered the tool, and its pinned approvals would refuse every query anyway. There is no `web_fetch`.
+- **Skills: know-how as data.** A folder holding a `SKILL.md` (the open [agentskills.io](https://agentskills.io) format) in `~/.minidsh/skills/`, inside the package, or in a repository's `.agents/skills/` or `.claude/skills/` is listed to the model by name and description, and the model reads one with its ordinary file tools when a task fits. A skill is advice, never a permission: its scripts are shell commands under the session's own authority. A repository's skill never replaces yours or a bundled one (the operator is warned on stderr). Two ship, on Node alone: `office` builds, reads, unpacks and validly repacks .docx, .xlsx and .pptx, and `pdf` reads PDFs and writes simple ones. Real Word, Excel and PowerPoint open what they build.
 - **Jobs on every surface.** The session view lists jobs; `job/cancel` stops one over the protocol; the terminal has `/jobs` and `/jobs cancel <id>`; the browser shows a jobs strip with a stop button and per-session badges. A new `control/subscribe` sends every client a per-session summary (status, running jobs, held notices, pending approvals) whatever session it is watching, and a question stays answerable while such a client is connected.
 
 ### Changed
@@ -32,6 +35,51 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 - **A one-shot run stops what it started.** `minidsh run` (and a delegated child) stops a job still running when its task ends, records it, and says so on stderr; the exit code is unchanged.
 - **On Windows a process is killed with its tree** (`taskkill /T`): a timed-out or cancelled command's children no longer outlive it.
 - **PowerShell one-shot commands write UTF-8**, as the persistent shell always did: on a host whose console code page is not UTF-8 their non-ASCII output arrived garbled.
+- **The Anthropic catalog follows Anthropic's own model listing** (2026-10-25), and a live drift probe now holds it there, as the DeepSeek and OpenAI ones already were. The 5.5 models have rows of their own instead of their predecessors'. Effort `off` is refused where the model cannot turn thinking off (Opus 5.5, Sonnet 5.5, Fable 5 and 5.1). The 4.6–4.8 models are asked to think at a named effort (Opus 4.8, measured, did not think without it); Opus 4.5 thinks on a budget beside its effort. Sonnet 4.5's window is 200K. A temperature beside thinking is refused before anything is sent, since the API refuses it. An id the catalog does not know gets no output cap of ours.
+- **DeepSeek errors are classified by their HTTP status first**: a 5xx is retried as a server error even when its text mentions "context"; DeepSeek running out of capacity mid-stream is retried; its content filter ends the turn as a refusal.
+- **`llm-retry` gives up on a provider that asks for a long wait**: a `retry-after` past `maxRetryAfterMs` (default 60 s) ends the retries instead of holding the turn, and the failure says how long the provider asked for.
+- **The editor reads big files in part.** `view` of a file over 8 MiB shows its first 8 MiB and says how to read the rest with the shell; `str_replace` and `insert` refuse such a file the same way; an empty `old_str` is refused. Reading or writing a FIFO or a device is refused, never waited on.
+- **A resume or fork composes the world its session was created in**: under another agent preset it is refused, and over the wire (`serve`, `web`) an explicit `--sandbox`, `--approval` or `--accept` on the host now applies to a resumed session as it did on the CLI.
+- **`minidsh config` warns about more**: a provider row a layer changed (its `baseURL` decides where every conversation and its key go) and any plugin loaded from a module path.
+- **The office helper stops early.** `office read` stops rendering a document or deck once it is past what `--max-chars` prints (the paragraph counts then read `N+`), as it already did for a workbook, and renders a slide two entries name once; `pack` refuses such a deck.
+- **Releases wait for the live suite.** `release.yml` publishes only after a green `check.yml` and an unfiltered green `live.yml` for the tagged commit, runs the same install smoke as `check.yml`, and holds its publish credential in a job that installs no dependency. Contributors: `pnpm lint` fails on warnings.
+
+### Security
+
+Found by the 1.2 checkpoint's review; each fix has a test that failed before it.
+
+- **The file fence on Windows compared names case-insensitively**, and so read a name with the Kelvin sign (U+212A) as the workspace's own `k` directory: a write could land outside the workspace. Containment now compares the canonical path exactly.
+- **A write racing a link swap** (another process replacing a workspace directory with a link while the harness writes) could land content outside the workspace; on Linux 13 files did in 49 writes. The harness now checks the file it actually opened, through `/proc/self/fd` on Linux and by inode elsewhere (best effort there), and refuses otherwise. An empty file or directory can still be left outside.
+- **Keys stay out of error text.** A provider or a proxy that echoes the key in an error no longer gets it quoted into the log, the model's view or stderr (all three providers and web search). A base URL carrying a username or password is refused, from config or a `*_BASE_URL` variable. A malformed `credentials.json` is reported by position, never with the parser's message, which quoted the file.
+- **Every printed operator line blanks invisible characters** (zero-width, bidi, tag and private-use code points), not only consent lines: `sessions list`, `sessions show`, `inspect`, `verify` and the audit. A consent line also escapes every blank that is not an ordinary space, which could carry hidden bits after a visible query.
+- **Another user's `.git` above your working directory** (a planted `/tmp/.git`, or a link from there into your own home) no longer makes their `.agents/skills` or `AGENTS.md` part of your workspace, on Linux and macOS; a project marker in a filesystem root (`C:\`, `/`) is ignored on every platform. The operator is told when one is.
+- **Hostile files cannot hang or crash the host or its helpers.** A repository `SKILL.md` linked to `/proc` or a FIFO is skipped instead of read forever. The `office` and `pdf` helpers refuse deeply nested or oversized documents with a coded exit, where they used to overflow the stack or exhaust the heap, and no longer take quadratic time on a long word, many short lines or a long run of digits.
+- **`minidsh web` refuses to be framed** by another page (`X-Frame-Options`, `frame-ancestors`, `Sec-Fetch-Dest`), so a local page cannot overlay a signed-in tab.
+- **Authority switches are all-or-nothing**: a `session/authority` call, or a host's explicit flags on a resumed session, that a delegated session's ceiling or pin refuses no longer leaves the switches before it applied. The authority invariant also checks where a delegated session's acceptance sits, every field of a recorded decision, and that a decision credited to a standing consent names one live for that exact action.
+
+### Fixed
+
+- **A host out of file descriptors** (EMFILE) refused nothing and could crash on a shell, job or browser spawn; each now refuses with a code that says it is a moment, not a missing install. A confinement probe that could not run is warned about rather than passing silently for "this host has no backend"; restart once the load passes. A one-shot or job command too long to pass as an argument, or holding a NUL, is refused as the command's (`SHELL_COMMAND_INVALID`), with the way out.
+- **A browser call stuck in page code** (a looping getter in a returned value) is stopped at its deadline instead of wedging the page until it was replaced.
+- **A cancel at the wrong moment could lose a job's end notice**, and a step that rejected or filtered its input dropped the notices it had claimed. Both now keep them.
+- **A tool result of the wrong shape** left a call with no result, which crash repair later had to close; it is now an error result.
+- **A compaction summary cut off at its length limit** replaced the history anyway; it is declined. Compaction no longer fires on pressure the system prompt and tool list alone create, which it could not relieve.
+- **`exit` as the first shell command** was reported as a broken shell (`SHELL_UNAVAILABLE`); it is the command's own end, reported with its output. A shell session disposed while it restarted into another sandbox mode could leave a shell running.
+- **`str_replace` treated `$&` and `$$` in the replacement as patterns**, corrupting the text it wrote.
+- **A refused agent creation leaked the session**, so every later attempt in the same host failed "already exists".
+- **The DeepSeek and Anthropic stream readers** buffered a stream whose lines end in CRLF (a proxy's) until it failed; two DeepSeek tool calls sharing a stream index were merged into one; a base URL with a trailing slash doubled it.
+- **An Anthropic tool call whose arguments were not a JSON object** was replayed to the model as a call with no arguments.
+- **A relative `MINIDSH_HOME`** moved with each session's working directory; it is resolved once.
+- **The WebSocket carrier** could queue one large answer past its hard limit, and kept a closed socket open while its peer stopped reading. `minidsh web` failing to listen (a port in use) leaked everything it had started.
+- **The terminal's first output could race its attach**; settings that fail to parse are `SETTINGS_INVALID`.
+
+### Migration from 1.1
+
+- **Sessions.** The log format is unchanged: 1.2 resumes and forks 1.1 sessions. Going back, do not resume with 1.1.0 a session that ran background jobs: 1.1.0 continues an unfinished job without closing it as lost, so its model may believe a dead job is still running. 1.1.0 refuses a session that holds a web-search consent.
+- **Refusals that used to be silent.** A DeepSeek temperature while thinking, an Anthropic temperature beside thinking, effort `off` where a model cannot turn thinking off, a base URL carrying a password, and a resume or fork under a different agent preset are now refused before anything is sent, saying why.
+- **Credentials.** The model's shell no longer sees `OPENAI_API_KEY`.
+
+**On versioning.** Some of the changes above turn a silent degradation into a refusal (a temperature the provider would have ignored, a password in a URL, a hostile document that used to hang a helper). This project ships such a change in a minor release: a silent degradation or a leaked secret may become a refusal without a new major version. Everything else follows Semantic Versioning.
 
 ## [1.1.0] — 2026-09-27
 
@@ -96,5 +144,6 @@ The first public release: the smallest MiniDSH a developer can install, point at
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §13. The ones most likely to matter on day one: Windows has no shell confinement backend, so every shell command there costs one approval; confinement bounds file effects only, not the network or the environment; the filesystem fence cannot follow hard links.
 
+[1.2.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v1.2.0
 [1.1.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v1.1.0
 [1.0.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v1.0.0

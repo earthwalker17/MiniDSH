@@ -68,7 +68,11 @@ export function globalInstructionsPath(): string {
   return join(resolveHome(), 'AGENTS.md')
 }
 
-/** User settings layer (agent defaults). Never authority, never composition. */
+/**
+ * User settings layer (agent defaults). Never authority, never composition,
+ * and the one configuration file MiniDSH itself writes (`settings-local`);
+ * `composition.json` never is.
+ */
 export function settingsPath(): string {
   return join(resolveHome(), 'settings.json')
 }
