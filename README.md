@@ -158,7 +158,7 @@ ARCHITECTURE §11 is a table from *new thing* to *home*: a model provider is an 
 
 ## What MiniDSH learned from DeepSeek Harness
 
-DSH is a large, fast-moving system (336 packages by its [module graph](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md) on 2026-10-14); [`references/`](references/README.md) is this project's pinned map of it, and ARCHITECTURE §12 the reason for each difference below.
+DSH is a large, fast-moving system (363 packages by its [module graph](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md) on 2026-10-23); [`references/`](references/README.md) is this project's pinned map of it, and ARCHITECTURE §12 the reason for each difference below.
 
 ### Ideas taken
 
@@ -182,9 +182,9 @@ DSH is a large, fast-moving system (336 packages by its [module graph](https://g
 
 ### Where it diverges
 
-- **The workspace root is the whole writable ceiling**, where DSH's `workspace-write` also grants an ephemeral `/tmp`.
+- **The workspace root is the whole writable ceiling**, where DSH's `workspace-write` also grants the temporary directories and any extra roots an operator names.
 - **Whether the host can confine is probed and recorded when the agent is created**, even for a sole backend, and "no backend" is an honestly reported state a session can accept on the record.
-- **A delegated child's starting authority is an enforced ceiling**; **a consent is to the runtime's record of the call**, where DSH shows the model's prose; **the default and current model routes are recorded separately**; **an approval no connected client can answer is refused, not left hanging.**
+- **A delegated child's starting authority is an enforced ceiling**; **a consent is to the runtime's record of the call**, where DSH shows the model's prose; **a model role can route one kind of call away from the session's recorded route**; **an approval no connected client can answer is refused, not left hanging.**
 
 ### Not built
 

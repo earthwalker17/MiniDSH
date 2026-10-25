@@ -726,10 +726,10 @@ export class ProtocolHost {
   }
 
   /**
-   * A write is REQUIRED to echo the revision it read. The fence is optional
-   * upstream and enforced nowhere, which means two panes can lose each other's
-   * edits; a client that read a value has a revision to give, so requiring it
-   * costs nothing and closes that.
+   * A write is REQUIRED to echo the revision it read. Upstream refuses a stale
+   * revision but lets a write omit it, which means two panes can lose each
+   * other's edits; a client that read a value has a revision to give, so
+   * requiring it costs nothing and closes that.
    */
   private settingsSet(params: Record<string, unknown>): unknown {
     const ns = requireString(params, 'ns', 'settings/set')

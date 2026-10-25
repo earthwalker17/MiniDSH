@@ -14,9 +14,9 @@
  * deployment globals — so a summary can name it by tag without knowing which
  * capability provides it — and hidden from every agent by a `TOOLS.restrict` on
  * that agent's own scope, lifted at its first applied compaction. Upstream's
- * comparable `tool-session-query` is opt-in for exactly the cost this avoids:
- * "mounting it adds one concise guidance section and the five schemas to every
- * request". Here a session that never compacts never carries the schema and can
+ * comparable `tool-session-query` is experimental and opt-in for exactly the
+ * cost this avoids: one guidance section and five schemas on every request
+ * while it is mounted. Here a session that never compacts never carries the schema and can
  * never spend a step on a tool with nothing to read.
  *
  * The budgets are the other half. Recalled text re-enters the live surface, so

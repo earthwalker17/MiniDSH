@@ -2,20 +2,20 @@
 
 A curated local map of DeepSeek Harness (DSH) for MiniDSH sessions: **where an upstream subsystem lives, what MiniDSH leans on about it, and where to research next**. It is a navigation layer, never a mirror: upstream mechanisms are fetched on demand from the paths here, every claim carries a repository path, and the repository itself stays the authority.
 
-**Pins:** `deepseek-ai/deepseek-harness@477b4f42` (`master`, 2026-09-24, `dsh-v0.1.7-rc.2`), re-researched in S16.5 (2026-09-26/27), except what S17 (2026-10-15) rechecked at `57190202` (2026-10-14, `dsh-v0.2.1-alpha.3`) — `dsh/execution-jobs-agents.md`, the lines other files' headers name, the ledger's execution section and † rows — and what S18 (2026-10-16) rechecked at `86a40220` (2026-10-15, `dsh-0.2.1-alpha.4`): `dsh/llm-providers.md`, the web rows of `dsh/web-browser-attachments.md`, and the ledger's ‡ rows; and what S19 and S20 (2026-10-18) rechecked at `687f282e` (2026-10-17, `0.2.1-rc.2`): `dsh/skills-documents-extensions.md`, the browser rows of `dsh/web-browser-attachments.md`, the S20 bullets, and the ledger's § rows. An ordinary session moves the pin only for the area it researched, so each file's header says which commit it describes; the next `.5` moves the rest.
+**Pin:** `deepseek-ai/deepseek-harness@22ddee37` (`master`, 2026-10-23, `dsh-v0.2.1-rc.3`), every file and every ledger row re-researched in S20.5 (2026-10-25). An ordinary session moves the pin only for the area it researched, so each file's header says which commit it describes; the next `.5` moves the rest.
 
 ## The files
 
 | File | Area | Route sessions that start here |
 |---|---|---|
-| [dsh/architecture-map.md](dsh/architecture-map.md) | the two composition planes, the subsystem map, presets | every session: the entry map; S18–S20, S22 |
-| [dsh/session-durability.md](dsh/session-durability.md) | the session log, crash repair, format generations, locking, projections, replay | S17 |
-| [dsh/execution-jobs-agents.md](dsh/execution-jobs-agents.md) | loop, tool pipeline, jobs, subagents, teams, workflow, schedule | S17, S20, S21 |
-| [dsh/authority.md](dsh/authority.md) | sandbox backends (Windows included), approvals, grants, presets, hooks, the model reviewer | S18, S20, S21, S22 |
-| [dsh/skills-documents-extensions.md](dsh/skills-documents-extensions.md) | skills, document tooling, deliverables, extensions, MCP, PTC | S19, S22 |
-| [dsh/web-browser-attachments.md](dsh/web-browser-attachments.md) | web search and fetch, browser and computer use, the attachment plane | S18, S20, S21, S22 |
-| [dsh/llm-providers.md](dsh/llm-providers.md) | the LLM seam, adapters, the OpenAI path, model facts, retries | S18, S21 |
-| [dsh/surfaces.md](dsh/surfaces.md) | host, clients, carriers, profiles, attach and paging, Desktop | S17, S21, S22 |
+| [dsh/architecture-map.md](dsh/architecture-map.md) | the two composition planes, the subsystem map, presets | every session: the entry map; S21, S22 |
+| [dsh/session-durability.md](dsh/session-durability.md) | the session log, crash repair, format generations, locking, projections, replay | S21, S22 |
+| [dsh/execution-jobs-agents.md](dsh/execution-jobs-agents.md) | loop, tool pipeline, jobs, subagents, teams, workflow, schedule | S21, S22 |
+| [dsh/authority.md](dsh/authority.md) | sandbox backends (Windows included), approvals, grants, presets, hooks, the model reviewer | S21, S22 |
+| [dsh/skills-documents-extensions.md](dsh/skills-documents-extensions.md) | skills, document tooling, deliverables, extensions, MCP, PTC | S22, S22.5 |
+| [dsh/web-browser-attachments.md](dsh/web-browser-attachments.md) | web search and fetch, browser and computer use, the attachment plane | S21, S22 |
+| [dsh/llm-providers.md](dsh/llm-providers.md) | the LLM seam, adapters, the OpenAI path, model facts, retries | S21 |
+| [dsh/surfaces.md](dsh/surfaces.md) | host, clients, carriers, profiles, attach and paging, Desktop | S21, S22 |
 | [assumptions.md](assumptions.md) | the ledger: each claim a MiniDSH document leans on, its verdict, and where it is leaned on | every session that touches an area; every `.5` |
 
 Every area file has five sections: *What exists (at the pin)*, *Open for the route* (one fact and one upstream path per upcoming need), *Sources* (with check dates), *Likely to go stale*, *Not read*. Verdicts live only in the ledger.

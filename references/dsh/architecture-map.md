@@ -1,62 +1,60 @@
 # DSH reference: Architecture and subsystem map
 
-> The entry map to DSH ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@477b4f42` (master, 2026-09-24, dsh-v0.1.7-rc.2); checked 2026-09-26; the counts rechecked at `57190202` on 2026-10-15.
+> The entry map to DSH ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@22ddee37` (master, 2026-10-23, dsh-v0.2.1-rc.3); checked 2026-10-25.
 
 ## What exists (at the pin)
 
-A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 52 groups, 336 packages on 2026-10-14 (`docs/module-graph.md`, generated), four apps, six bundles. The HOST plane (bundles) owns registries, authority, persistence and the model route; the AGENT plane is a per-session preset, since 2026-09-21 an ordinary `@deepseek-ai/dsh-agent-preset` row a profile patch can override; only the preset IDENTITY persists (header `agentPreset`, log-only `agent-preset/selected`, `docs/persistence-catalog.md`). Status `default` = a live row in the base bundle unless the purpose names another.
+A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 52 groups, 363 packages on 2026-10-23 (`docs/module-graph.md`, generated), five apps, six bundles. The HOST plane (bundles) owns registries, authority, persistence and the model route; the AGENT plane is a per-session preset, an ordinary `@deepseek-ai/dsh-agent-preset` row whose `config.plugins` a `preset` patch edits by id; only the preset IDENTITY persists (header `agentPreset`, log-only `agent-preset/selected`, `docs/persistence-catalog.md`). A preset revision lives while an Agent binds it, a child joins its parent's exact revision, and a row publishing a service outside an `isolate` realm fails the mount (`packages/preset/agent-preset-registry/src/{index,mount}.ts`). Status `default` = a live row in the base bundle unless the purpose names another.
 
 | Component | Path | Status | Purpose |
 |---|---|---|---|
-| Core spine | `packages/core` | default | Log, tools, agents, swappable loop, prompt, `agent-default-model` |
+| Core spine | `packages/core` | default | Log, tools, agents, swappable loop, prompt, `agent-default-model`; executors are rows (`tool-executor-native`; `-ptc` off) |
 | Session data plane | `packages/session`, `packages/session-query` | default | JSONL, v0-v4 migrations, projections, queries |
 | LLM | `packages/llm` | default | DeepSeek api-key and account adapters, dormant pi-ai, retry, meter |
 | Execution world | `packages/fs`, `packages/shell`, `packages/subprocess` | default | fs tools, one-shot shell, process tree |
 | Authority | `packages/sandbox`, `packages/interaction` | default | Confinement, approval; `DSH_PERMISSION_MODE` fuses sandbox and approval |
 | Jobs | `packages/jobs` | default | Host registry keyed by owner; `job_*` tools |
-| Delegation | `packages/subagent`, `packages/workflow`, `packages/ptc-runtime` | default | Spawn, fork, codex and claude-code providers, workflow, PTC |
+| Delegation | `packages/subagent`, `packages/workflow`, `packages/ptc-runtime` | default | Spawn, fork, workflow, PTC; codex and claude-code providers on demand |
 | Goal, plan, todo, skills | `packages/goal`, `packages/plan`, `packages/todo`, `packages/skill` | default | Round driver, plan mode, todos, layered skills |
 | Context hygiene | `packages/compaction`, `packages/guard`, `packages/spill`, `packages/context` | default | Compaction, pruner, image offload, guards, spill, instructions, time context |
 | Web tools | `packages/web` | default | Search and fetch |
-| Stores, small groups | `packages/storage`, `settings`, `credentials`, `attachment`, `identity`, `feedback`, `workspace`, `typert` | default | KV and the named planes; `typert` is RPC types |
-| Boot | `packages/boot` | default | YAML layers (bundles, profile, home, `--patch`), config HMR, Plugin Manager |
+| Stores, small groups | `packages/storage`, `settings`, `credentials`, `attachment`, `identity`, `feedback`, `workspace`, `typert`, `telemetry` | default | KV and the named planes; `typert` is RPC types |
+| Boot | `packages/boot`, `packages/util/official-bundles` | default | YAML layers (bundles, profile, home, `--patch`), config HMR, Plugin Manager; the compiled bundle lists |
 | Agent presets | `packages/bundle/web-app/presets/<id>.patch.yml`, `packages/preset` | default | Web-app only: `standard` (default), `ptc`, `minimal`, `cordis` (Creator) |
-| Smallest complete tree | `packages/bundle/sdk-minimal/cordis.patch.yml` | opt-in | One insert, no base: no approval, fs tools or compaction; `danger-full-access` |
+| Smallest complete tree | `packages/bundle/sdk-minimal/cordis.patch.yml` | opt-in | No base: a PTY shell, image-only `tool-fs`, compaction; no approval, `danger-full-access`; checkpoints before dispatch |
 | Web surface | `packages/host`, `packages/client`, `packages/api`, `packages/deliverables`, `apps/web` | default | Web-app bundle: see [surfaces.md](surfaces.md) |
 | MCP | `packages/mcp` | opt-in | `mcp-resources` live; no `mcp-client` row |
 | Terminal (PTY) | `packages/terminal` | opt-in | The `minimal` preset and sdk-minimal only |
-| Extensions | `packages/extensions` | opt-in | `tool-cordis` in the `cordis` preset; inspect providers in web-app |
-| Unmounted groups | `packages/lsp`, `packages/ssh`, `packages/browser-use`, `packages/computer-use`; hooks and webhook under `packages/experimental` since 2026-10-06 | opt-in | No row in any bundle |
-| Optional bundles | `packages/experimental/agent-team-profile`, `voice-input-bundle`, `auto-review` | experimental | Offered by the Web plugin page |
-| Other carriers | `packages/sdk`, `packages/acp`, `packages/bundle/headless`, `sdk-app`, `acp-app` | opt-in | Overlays on base: persona restated, `session-title-llm` and HMR off |
+| Extensions | `packages/extensions`, `packages/boot/plugin-manager` | opt-in | `tool-cordis` in `cordis`; `plugin_manager` tools in `standard` (2026-10-21) and `cordis` |
+| Unmounted groups | `packages/lsp`, `ssh`, `browser-use`, `computer-use`; hooks and webhook under `packages/experimental` | opt-in | No row in any bundle |
+| Optional bundles | `packages/util/official-bundles/src/bundles.ts` | experimental | Fourteen, off by default (cua, terminal, agent-team, auto-review...); a list changes only with a release |
+| Other carriers | `packages/sdk`, `packages/acp`, `packages/bundle/headless`, `sdk-app`, `acp-app` | opt-in | Overlays on base: persona restated, HMR off; SDK and ACP drop `session-title-llm` |
 | Desktop | `apps/desktop`, `apps/desktop-host` | opt-in | Electron shell; a private Host runs the CLI-rejected `desktop` profile |
 | TUI | `packages/ui/tui` | removed | Deleted 2026-08-04; `tui` survives as an example name |
 
 ## Open for the route
 
-- **S18, the default route.** `agent-default-model` is a host row apart from the adapters; a saved selection overrides it at creation. `packages/bundle/base/cordis.patch.yml`
-- **S20, a held process.** fs and subprocess providers share one execution world and the subprocess seam owns the process range; both browser spawn paths bypass it (rechecked at `687f282e`). `packages/subprocess/subprocess/src/index.ts`
-- **S20, browser providers.** Playwright MCP, DevTools MCP and Cua stay explicit compositions, never optional bundles. `.agents/notes/implemented/architecture/2026-09-21-experimental-capabilities-as-optional-bundles.md`
-- **S22, one launcher.** `scripts/verify-application-entrypoints.ts` rejects a bin bypassing `dsh`; Desktop boots through `@deepseek-ai/dsh/profile-boot`. `apps/desktop-host/src/index.ts`
+- **S21, parallel calls are composition.** An executor row per deployment or preset; the loop forwards `agent-loop.maxParallelToolCalls` (default 10) to each `ctx.tools.execute()` batch. `docs/upgrade-guide/v0.2.1-rc.2/tool-executor-plugins/guide.md`
+- **S21, a child's capability set.** Its parent's exact preset revision, never the current definition. `packages/preset/agent-preset-registry/src/index.ts`
+- **S22, one launcher.** `scripts/verify-application-entrypoints.ts` rejects a bin bypassing `dsh`; Desktop boots through `@deepseek-ai/dsh/profile-boot`. `apps/cli/README.md`
 
 ## Sources
 
 | Path | What it establishes | Checked |
 |---|---|---|
-| `docs/architecture.md`, `docs/subsystems/README.md` | Planes, layering, seam roles, durability limits, Desktop; the index | 2026-09-26 |
-| `packages/README.md`, `docs/module-graph.md` | Group table and direction rule; the generated package count | 2026-09-26 |
-| `AGENTS.md`, `scripts/verify-application-entrypoints.ts`, `apps/cli/README.md` | Launch rule and its gate; profiles | 2026-09-26 |
-| `packages/bundle/*/cordis.patch.yml` | Default, disabled and overlay rows | 2026-09-26 |
-| `packages/bundle/web-app/presets`, `packages/preset/README.md` | Four declared presets: rows, realms, order | 2026-09-26 |
-| `.agents/notes/implemented/architecture/2026-09-18-declarative-agent-presets.md`, `2026-08-10-host-plane-ownership-after-presets.md` | Presets as rows; the host-plane rule | 2026-09-26 |
+| `docs/architecture.md`, `docs/subsystems/README.md` | Planes, seams, Desktop; the index | 2026-10-25 |
+| `packages/README.md`, `docs/module-graph.md` | Group table and direction rule; the generated package count | 2026-10-25 |
+| `apps/cli/README.md`, `packages/util/official-bundles/src/bundles.ts` | Launch rule, profiles; templates, optional and on-demand lists | 2026-10-25 |
+| `packages/bundle/*/cordis.patch.yml`, `packages/bundle/web-app/presets` | Default, disabled and overlay rows; the four presets | 2026-10-25 |
+| `packages/preset/agent-preset-registry/src` | Revision retention, the realm audit | 2026-10-25 |
+| `docs/upgrade-guide/v0.2.1-rc.2/*`, `v0.2.1-rc.3/*` | The release changes this file cites | 2026-10-25 |
 
 ## Likely to go stale
 
-- Presets: `tool-plugin-manager` sits disabled in every preset; the Coding Tools preference (renamed 09-24) gates selection.
-- web-app rows churn: `schedule` was inserted and disabled on 09-24 and is enabled at `57190202`.
-- The count (312 on 09-24, 336 on 10-14): the graph regenerates weekly.
+- Presets: the Coding Tools preference gates which presets a person may pick; `plugin_manager` moved into `standard` on 10-21.
+- The count (312 on 09-24, 336 on 10-14, 363 on 10-23): regenerated with each package change.
 
 ## Not read
 
-- 198 notes in `.agents/notes/implemented/architecture`; four read (above).
-- `packages/preset/agent-preset-registry/src`: the realm-less-row rejection and revision retention.
+- 194 notes in `.agents/notes/implemented/architecture` (outside the snapshot); five read.
+- `apps/desktop-host/src` (outside the snapshot): its `profile-boot` call is known only from `apps/cli/README.md`.

@@ -96,13 +96,13 @@ Official references:
 - Subsystem documentation: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
 - Cordis paper: https://github.com/cordiverse/paper
 
-These sources are actively changing, and DSH's notes move between `proposed/`, `implemented/` and `archived/` as they age, so a deep link into `.agents/notes` can go stale within weeks. Claude Code should inspect the current repository and primary docs whenever a design decision depends on them. Links here were last checked on 2026-09-26.
+These sources are actively changing, and DSH's notes move between `proposed/`, `implemented/` and `archived/` as they age, so a deep link into `.agents/notes` can go stale within weeks. Claude Code should inspect the current repository and primary docs whenever a design decision depends on them. Links here were last checked on 2026-10-25.
 
 ---
 
 ## 4. “Self-Evolving” Should Be Treated Carefully
 
-DeepSeek Harness's `extensions` family lets an agent install and run dynamic packages inside its own runtime (since 2026-09-16 through a gated `plugin_manager`), which is sometimes summarised as self-evolution. The direction is useful, but the architectural claim should be more precise.
+DeepSeek Harness's `plugin_manager` lets an agent install persistent packages into its own runtime, behind full access or a per-call approval (in its default preset since 2026-10-21), which is sometimes summarised as self-evolution. The direction is useful, but the architectural claim should be more precise.
 
 A dynamically composable harness does not automatically solve:
 
@@ -129,7 +129,7 @@ Self-improvement is behavior built on infrastructure.
 
 DeepSeek Harness already ships a minimal composition with a deliberately tiny model-facing tool surface. Its current minimal preset demonstrates an important point: a useful coding agent does not need dozens of overlapping tools.
 
-The official minimal configuration exposes essentially a persistent shell while omitting many higher-level conveniences (as of September 2026; until then it paired the shell with a structured file editor).
+The official minimal configuration exposes essentially a persistent shell, plus image-only file reading and compaction, while omitting many higher-level conveniences (as of October 2026; until September it paired the shell with a structured file editor).
 
 References:
 

@@ -21,9 +21,10 @@
  * What the parent's log records is the call and its result, plus two log-only
  * facts naming the child (`subagent/start|end`) — the child's own steps live
  * in the child's own log, where `sessions show <child>` reads them. That is a
- * deliberate divergence from DSH, which emits its lifecycle events as runtime
- * events and finds children by scanning stored headers; MiniDSH has no
- * projections, so the parent's log is where a human looks first.
+ * deliberate divergence from DSH, whose start and end are live events only
+ * and whose parent log holds an unpaired `subagent/catalog` membership fact,
+ * read through a projection; MiniDSH logs the pair, so the parent's log shows
+ * when each child ran and how it ended.
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'

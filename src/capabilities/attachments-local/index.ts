@@ -44,7 +44,7 @@ import {
 import { declaredMediaType, probeImage, safeDisplayName } from './image.ts'
 
 /**
- * Adapted DOWN from upstream's 20 MiB / 20 per message / 200 MiB / 64 MP / 8192,
+ * Adapted DOWN from upstream's 2026-09 defaults (20 MiB / 20 per message / 200 MiB / 64 MP / 8192; since relaxed to 50 MiB per image and 65,535 px per side),
  * and along a different axis. The per-REQUEST pair is the one that binds: a tool
  * that returns one image per result can never trip a per-message count, while
  * both providers tighten their own per-image limits once a request accumulates

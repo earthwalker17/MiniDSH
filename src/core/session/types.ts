@@ -209,9 +209,9 @@ export interface SessionHeader {
    * rather than event because lineage is header-owned, and it travels through
    * a resume and a fork exactly as the two fields beside it do.
    *
-   * DSH declines this question outright — no delegation record, receipt,
-   * header field or descriptor field points back at a spawning call — so this
-   * has no upstream oracle.
+   * DSH has no structured join either: only the spawning call's result text
+   * (`started subagent <id>`) names the child, and a host death before that
+   * result leaves nothing — so this has no upstream oracle.
    */
   readonly delegatedByCallId?: string
   /** Absent (zero) for a top-level session, the parent's depth + 1 for a delegated child. Durable, so a resumed child can never delegate as top-level. */

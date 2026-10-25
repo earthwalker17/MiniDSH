@@ -290,14 +290,14 @@ MiniDSH's decision and reason; upstream's mechanism and its verdict at the pin: 
 - **Scale and substrate.** Own kernel, not Cordis: its two composability properties in the fewest mechanisms (§2); a `{parse}` config contract, not a schema library; one package plus a dependency gate (§1).
 - **Concurrency.** Sequential tools, one foreground child; agent-owned jobs, waking bounded, a lost one closed `lost` and told (DSH: unbounded, a lost one left open).
 - **The wire.** One JSON-RPC protocol in DSH's SDK shape, bounded where DSH's is not: trace-free pages under a ceiling, tier-aware drops, unseen approvals settling `unavailable` (§8).
-- **Consent.** A trusted `subject` and the joined call on every ask (DSH: model prose); exact-subject session grants (DSH: none); acceptance of `none` (DSH cannot express it).
+- **Consent.** A trusted `subject` and the joined call on every ask (DSH: model prose); exact-subject session grants (DSH: none for tool calls); acceptance of `none` (DSH cannot express it).
 - **Confinement.** bwrap and Seatbelt, each probed even alone; no Landlock (a native launcher this no-build tree cannot carry), no Windows backend (§13); a shell child loses only declared credential names and `MINIDSH_*` (DSH: a name pattern).
-- **The ceiling.** `writableRoots` is the workspace root alone; DSH adds the temp roots, where MiniDSH's test workspaces live.
+- **The ceiling.** `writableRoots` is the workspace root alone; DSH adds the temp roots, where MiniDSH's test workspaces live, and operator-named extra roots.
 - **Durability.** A durable `tool/dispatch` after the gate and recorded effects; plain JSONL under a write lease, synced checkpoints, per-lifecycle writer claims (DSH: no top-level dispatch; checksummed generations naming no writer).
 - **Delegation and routing.** An enforced delegation ceiling (DSH: a seeded pin); `subagent/start|end` in the parent's log, every unpaired bracket closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
 - **Context.** No tool-result pruner (tools bound their output); recall gated, not opt-in, over this session's shadowed spans.
 - **Surfaces.** A terminal ships as a protocol client over an in-process carrier (DSH deleted its own).
-- **Providers.** Three direct adapters, each a source catalog, two held by a drift probe; an unknown DeepSeek id gets conservative facts (DSH: text-only at the full 1M).
+- **Providers.** Three direct adapters, each a source catalog, two held by a drift probe (DSH's DeepSeek routes read `GET /models` live); an unknown DeepSeek id gets conservative facts (DSH: text-only at the full 1M).
 - **Web.** One opt-in search tool, consent per query, structured sources only, no fetch (DSH: both default-mounted, unconsented, prose results).
 - **Browser.** Default where one is found, a pipe, fenced to loopback and the workspace inside Chrome, proved per launch (DSH: experimental explicit compositions; Stagehand's debug port open to any local process; no fence).
 - **Skills.** Name, description and absolute path, read with ordinary tools, worded optional (DSH: a mandatory `skill` tool); a repository skill never shadows (DSH: workspace first, ungated); documents on Node alone (DSH: Python and LibreOffice, no PDF).

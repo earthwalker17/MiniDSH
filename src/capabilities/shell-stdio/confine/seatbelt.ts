@@ -21,9 +21,9 @@ export const SEATBELT_BIN = 'sandbox-exec'
  * them does not widen the ceiling, and `(deny file-write*)` without them
  * breaks `> /dev/null` in the first command anyone runs.
  *
- * A deliberate widening over DSH, which allows `/dev/null` alone: DSH confines
- * a fresh `bash -c` per command, and this confines a PERSISTENT interactive
- * shell, which has more of the standard descriptors open. Written as literals
+ * A deliberate widening over DSH, whose Seatbelt profile allows `/dev/null`
+ * alone, for its persistent PTY shell too: this persistent shell writes to
+ * more of the standard descriptors than that grant covers. Written as literals
  * rather than a `/dev/` subpath, because that subpath would also grant the raw
  * disk devices.
  */
