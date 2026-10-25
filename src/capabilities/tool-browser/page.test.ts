@@ -548,13 +548,21 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
     })
 
     it('closes a popup unseen and names it', LONG, async () => {
+      type Target = { targetId: string; type: string; url: string }
+      const openPages = async (): Promise<Target[]> =>
+        (await browser.cdp.send<{ targetInfos: Target[] }>('Target.getTargets')).targetInfos.filter((target) => target.type === 'page')
+      // The pages this browser already holds are not this test's: it counted
+      // ALL pages to be exactly one, and on a CI runner another test's page
+      // still closing kept the count up (S20.5). What the click opened is the
+      // claim: none of it may remain.
+      const before = new Set((await openPages()).map((target) => target.targetId))
       await page.act({ kind: 'click', ref: refOf(await go('/popup'), 'button "Open"') }, acting())
       expect((await page.report()).popups).toEqual([`${fixture.origin}/popup-target`])
-      const pages = async (): Promise<number> => (await browser.cdp.send<{ targetInfos: { type: string }[] }>('Target.getTargets')).targetInfos.filter((target) => target.type === 'page').length
+      const opened = async (): Promise<Target[]> => (await openPages()).filter((target) => !before.has(target.targetId))
       // At the close's own bound (page.ts sends `Target.closeTarget` with a
-      // 10 s budget), plus a margin: 5 s was shorter than the product allows,
-      // and a loaded CI runner took longer (S20.5, check.yml on ubuntu).
-      expect(await until(async () => (await pages()) === 1, 12_000)).toBe(true)
+      // 10 s budget), plus a margin.
+      const closed = await until(async () => (await opened()).length === 0, 12_000)
+      expect(closed, `still open: ${JSON.stringify(await opened())}`).toBe(true)
     })
 
     it('notes a file chooser, which never opens', LONG, async () => {
