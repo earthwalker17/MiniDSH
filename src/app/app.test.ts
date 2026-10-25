@@ -5,7 +5,7 @@
  * file covers what two or more capabilities agree on (ARCHITECTURE §10).
  */
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -439,6 +439,34 @@ describe('cli surface', () => {
     // The descriptor on the result row, and the path to the bytes beneath it.
     expect(out).toContain('32×32')
     expect(out, `no host path in:\n${out}`).toContain(join('attachments', 'v1', 'objects', digest.slice(0, 2), digest))
+  })
+
+  // The S20.5 review: `sessions show` neutralized each event's line but
+  // printed its `type` raw, and a stored line's type is any non-empty string:
+  // an escape sequence there repainted the operator's terminal.
+  it('prints a stored event kind with no control character reaching the terminal', async () => {
+    const home = tempDir('minidsh-home-')
+    const previousHome = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    const fixture = readFileSync(fileURLToPath(new URL('../test-support/fixtures/sessions/minidsh-1.0.0.jsonl', import.meta.url)), 'utf8').trimEnd().split('\n')
+    const header = JSON.parse(fixture[0]!) as { id: string }
+    const ESC = String.fromCharCode(27)
+    const hostile = JSON.stringify({ type: `note${ESC}[2K${ESC}[1A FORGED`, seq: fixture.length - 1, time: 1, data: {} })
+    mkdirSync(join(home, 'sessions'), { recursive: true })
+    writeFileSync(join(home, 'sessions', `${header.id}.jsonl`), [...fixture, hostile, ''].join('\n'))
+    const chunks: string[] = []
+    const write = process.stdout.write.bind(process.stdout)
+    process.stdout.write = ((text: string) => (chunks.push(text), true)) as typeof process.stdout.write
+    try {
+      await main(['sessions', 'show', header.id])
+    } finally {
+      process.stdout.write = write
+      if (previousHome === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previousHome
+    }
+    const out = chunks.join('')
+    expect(out).toContain('FORGED')
+    expect(out).not.toContain(ESC)
   })
 
   /**

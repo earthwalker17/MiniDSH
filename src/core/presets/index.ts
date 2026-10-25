@@ -10,8 +10,8 @@
 import { serviceKey } from '../../kernel/index.ts'
 import type { ApprovalPolicy } from '../approval/index.ts'
 import type { SandboxMode } from '../sandbox/index.ts'
-import { isApprovalPolicy } from '../approval/index.ts'
-import { isSandboxMode } from '../sandbox/index.ts'
+import { delegationPin, isApprovalPolicy } from '../approval/index.ts'
+import { delegationCeiling, isSandboxMode, isWider } from '../sandbox/index.ts'
 import { eventKind } from '../session/types.ts'
 import type { Session } from '../session/session.ts'
 
@@ -79,3 +79,25 @@ export interface AuthorityPresets {
 }
 
 export const PRESETS = serviceKey<AuthorityPresets>('authority-presets')
+
+/**
+ * Why a SET of authority switches on one session is refused as a whole, or
+ * `undefined`: every knob held to a delegated session's ceiling and pins
+ * BEFORE any is appended, so a refused set changes nothing. Checked in turn,
+ * the mode landed durably and then the pinned approval threw. One rule for
+ * the wire's `session/authority` and the app's explicit flags on a resume
+ * (S20.5 review). A preset is held to the same pins by `apply` itself.
+ */
+export function authoritySwitchRefusal(
+  session: Pick<Session, 'facts' | 'header'>,
+  switches: { readonly sandbox?: SandboxMode | undefined; readonly approval?: ApprovalPolicy | undefined; readonly accepts?: unknown },
+): string | undefined {
+  const ceiling = delegationCeiling(session.facts)
+  if (switches.sandbox !== undefined && ceiling !== undefined && isWider(switches.sandbox, ceiling)) {
+    return `"${switches.sandbox}" widens past this delegated session's ceiling "${ceiling}"`
+  }
+  const pin = delegationPin(session.facts)
+  if (switches.approval !== undefined && pin !== undefined && switches.approval !== pin) return `this delegated session's approvals are pinned "${pin}"`
+  if (switches.accepts !== undefined && session.header.delegatedBy !== undefined) return 'a delegated session cannot change what it was started accepting'
+  return undefined
+}

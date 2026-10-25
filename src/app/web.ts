@@ -221,13 +221,11 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
     }
   })
 
-  // Filled once booted; the hook below runs only on a later wire resume.
-  const booted: { root?: Context } = {}
   const protocolConfig: ProtocolConfig = {
     serverVersion: VERSION,
     // An explicit authority flag is a durable switch on every session this
     // process continues, a wire resume included (ARCHITECTURE §9).
-    onResumed: (handle) => applyAuthority(booted.root!, handle, options),
+    onResumed: (handle, ctx) => applyAuthority(ctx, handle, options),
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
@@ -254,7 +252,6 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   }
 
   const root = await bootComposition({ ...options, extraBaseRows: [...(options.extraBaseRows ?? []), defineRow('protocol', protocolPlugin, protocolConfig)] })
-  booted.root = root
   // Registered LAST, after every carrier: an `upgrade` listener stops Node from
   // destroying the socket itself, so an upgrade to a path nobody serves would
   // otherwise be held open forever with no credential ever checked.

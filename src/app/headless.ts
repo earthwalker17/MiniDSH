@@ -13,7 +13,7 @@ import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
 import { JOBS } from '../core/jobs/index.ts'
 import { effectiveSandboxMode, SANDBOX, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
-import { PRESETS } from '../core/presets/index.ts'
+import { authoritySwitchRefusal, PRESETS } from '../core/presets/index.ts'
 import { SETTINGS } from '../core/settings/index.ts'
 import type { JsonValue } from '../core/json.ts'
 import { foldLastAssistantText, foldLastTurnEnd, SESSION_EVENT, type SessionEventFrame } from '../core/session/index.ts'
@@ -219,6 +219,10 @@ function registerAgentSettings(root: Context, base: AgentOptions): void {
  * not just a composition default — so it also governs a resumed session.
  */
 export function applyAuthority(root: Context, handle: AgentHandle, options: BootOptions & { readonly preset?: string }): void {
+  // All or nothing: a delegated child's pin refused the approval only after
+  // the mode had landed, durably (S20.5 review).
+  const refusal = authoritySwitchRefusal(handle.agent.session, { sandbox: options.sandbox, approval: options.approvalPolicy, accepts: options.accepts })
+  if (refusal !== undefined) throw new Error(refusal)
   if (options.sandbox !== undefined) root.get(SANDBOX).setMode(handle.agent.session, options.sandbox)
   if (options.approvalPolicy !== undefined) root.get(APPROVAL).setPolicy(handle.agent.session, options.approvalPolicy)
   // The preset before the acceptance and after the pair, because the pair and

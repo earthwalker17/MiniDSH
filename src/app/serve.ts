@@ -38,13 +38,11 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve
   })
-  // Filled once booted; the hook below runs only on a later wire resume.
-  const booted: { root?: Context } = {}
   const protocolConfig: ProtocolConfig = {
     serverVersion: VERSION,
     // An explicit authority flag is a durable switch on every session this
     // process continues, a wire resume included (ARCHITECTURE §9).
-    onResumed: (handle) => applyAuthority(booted.root!, handle, options),
+    onResumed: (handle, ctx) => applyAuthority(ctx, handle, options),
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
@@ -77,7 +75,6 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     ...options,
     extraBaseRows: [...(options.extraBaseRows ?? []), defineRow('protocol', protocolPlugin, protocolConfig)],
   })
-  booted.root = root
   let disposed: Promise<void> | undefined
   return {
     root,

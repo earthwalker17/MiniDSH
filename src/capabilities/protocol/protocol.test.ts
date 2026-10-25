@@ -2,6 +2,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { PassThrough } from 'node:stream'
 import { createInterface } from 'node:readline'
 import { z } from 'zod'
@@ -1014,6 +1015,27 @@ describe('protocol: workspaces are addressing, never authority', () => {
 
     const filtered = await client.result<{ sessions: { id: string }[] }>('sessions/list', { workspaceId: beta.id })
     expect(filtered.sessions.map((one) => one.id)).toEqual([theirs.sessionId])
+  })
+
+  // The S20.5 review: the listing canonicalized every stored cwd, which is
+  // synchronous filesystem I/O, and a cwd on an unreachable share blocked the
+  // host's event loop ~21 s per listing (Windows waits out the SMB connect).
+  it.runIf(process.platform === 'win32')('labels a stored session by spelling, so an unreachable cwd costs a listing nothing', { timeout: 60_000 }, async () => {
+    const sessionsRoot = tempDir('minidsh-ws-sessions-')
+    const fixture = readFileSync(fileURLToPath(new URL('../../test-support/fixtures/sessions/minidsh-1.0.0.jsonl', import.meta.url)), 'utf8')
+    const header = JSON.parse(fixture.slice(0, fixture.indexOf('\n'))) as { id: string; cwd: string }
+    const unreachable = '\\\\192.0.2.1\\share\\ws'
+    writeFileSync(join(sessionsRoot, `${header.id}.jsonl`), JSON.stringify({ ...header, cwd: unreachable }) + fixture.slice(fixture.indexOf('\n')))
+    const client = new TestClient()
+    hosts.push(
+      await startProtocolHost({ ...UNCONFINED, cwd: tempDir('minidsh-ws-a-'), sessionsRoot, logger: silent, patches: [{ id: 'llm-deepseek', disabled: true }], input: client.input, output: client.output }),
+    )
+    const started = performance.now()
+    const listed = await client.result<{ sessions: { id: string; workspaceId?: string }[] }>('sessions/list')
+    const elapsed = performance.now() - started
+    expect(listed.sessions.find((one) => one.id === header.id)).toMatchObject({ id: header.id })
+    expect(listed.sessions.find((one) => one.id === header.id)?.workspaceId).toBeUndefined()
+    expect(elapsed, `sessions/list took ${elapsed.toFixed(0)} ms`).toBeLessThan(3_000)
   })
 
   it('names each session by what was asked of it, so a list is readable without ids', async () => {

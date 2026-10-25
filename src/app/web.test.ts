@@ -8,7 +8,8 @@
  * from another page.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
-import { request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -54,6 +55,36 @@ async function web(options: { host?: string } = {}): Promise<{ host: WebHostHand
   hosts.push(host)
   return { host, origin: `http://127.0.0.1:${host.port}`, token: new URL(host.url).searchParams.get('token')! }
 }
+
+// The S20.5 review: a port already in use left the booted composition, every
+// agent row with it, running in a process whose web host never started.
+describe('a web host that cannot listen', () => {
+  it('disposes what it booted, and says why', async () => {
+    const blocker = createServer()
+    await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve))
+    const port = (blocker.address() as AddressInfo).port
+    let disposed = false
+    try {
+      await expect(
+        startWebHost({
+          cwd: tempDir('minidsh-web-cwd-'),
+          sessionsRoot: tempDir('minidsh-web-sessions-'),
+          logger: silent,
+          port,
+          patches: [{ id: 'llm-deepseek', disabled: true }],
+          prepare: (root) => {
+            root.effect(() => () => {
+              disposed = true
+            }, 'listen-probe')
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'EADDRINUSE' })
+      expect(disposed).toBe(true)
+    } finally {
+      await new Promise((resolve) => blocker.close(resolve))
+    }
+  })
+})
 
 /**
  * A raw request, so headers `fetch` refuses to forge (Host, Origin) can be set

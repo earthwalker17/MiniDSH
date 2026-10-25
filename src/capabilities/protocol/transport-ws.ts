@@ -251,17 +251,16 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
       // Over the soft limit the trace tier is the give: it is streaming
       // fidelity, and `assistant/message` carries the same text durably.
       if (droppable && queued > softLimit) return
-      // The frame counts too, behind a queue: a whole-log `session/events`
-      // answer used to pile up past the hard limit because only the bytes
-      // before it were counted. One frame onto an EMPTY queue still goes: the
-      // limit bounds what a peer that stopped reading can make this process
-      // hold, not the size of an answer a reading peer asked for.
-      const encoded = encodeTextFrame(JSON.stringify(frame))
-      if (queued > hardLimit || (queued > 0 && queued + encoded.length > hardLimit)) {
+      // The bytes ALREADY queued decide, never the frame about to join them:
+      // a peer that stopped reading is held to one frame past the limit, and a
+      // reading peer's large answer (a whole-log `session/events`) is still
+      // written while streamed bytes sit ahead of it (S20.5 review reverted a
+      // rule that counted the frame too and closed such a reader).
+      if (queued > hardLimit) {
         close(CLOSE_SLOW_CLIENT, 'slow-client')
         return
       }
-      socket.write(encoded)
+      socket.write(encodeTextFrame(JSON.stringify(frame)))
     }
 
     const peer = { close, beat: () => undefined as void }

@@ -95,7 +95,7 @@ export interface ProtocolConfig {
   /** The name of that preset, recorded in each session's header so a resume can compose the same world. */
   readonly agentPreset?: string
   /** Called on a session this host resumed, before anything runs on it (the app applies its explicit authority flags). */
-  readonly onResumed?: (handle: AgentHandle) => void
+  readonly onResumed?: (handle: AgentHandle, ctx: Context) => void
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
   readonly onClose?: () => void
 }

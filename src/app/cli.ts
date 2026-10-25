@@ -1081,7 +1081,8 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         }
         for (const event of stored.events) {
           const line = describeEvent(event)
-          process.stdout.write(`${String(event.seq).padStart(4)}  ${event.type}${line ? ` ${line}` : ''}\n`)
+          // The kind too: a stored line's `type` is any non-empty string the log holds (S20.5 review).
+          process.stdout.write(`${String(event.seq).padStart(4)}  ${printableText(event.type)}${line ? ` ${line}` : ''}\n`)
         }
         // Where the bytes are, for every image this session was shown. The
         // local-first answer to "let me look at it": the object is on this

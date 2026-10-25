@@ -15,7 +15,7 @@
  * "this client is gone" rather than "dispose the work it started".
  */
 import { statSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, posix, win32 } from 'node:path'
 import type { Context } from '../../kernel/index.ts'
 import { AGENTS, AGENT_OPTIONS, foldAgentOptions, INBOX_SPLICED, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
 import {
@@ -26,12 +26,12 @@ import {
   APPROVAL_POLICIES,
   APPROVAL_POLICY,
   ApprovalError,
-  delegationPin,
   effectiveApprovalPolicy,
   isApprovalPolicy,
   liveGrants,
   openApprovals,
   type ApprovalAnswer,
+  type ApprovalPolicy,
   type ApprovalPrompt,
   type OpenApproval,
 } from '../../core/approval/index.ts'
@@ -44,15 +44,13 @@ import { meterSession } from '../../core/metering/index.ts'
 import { PERSISTENCE, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
 import { SETTINGS, SettingsError, type Settings } from '../../core/settings/index.ts'
 import type { JsonValue } from '../../core/json.ts'
-import { AUTHORITY_PRESET, PRESETS } from '../../core/presets/index.ts'
+import { AUTHORITY_PRESET, authoritySwitchRefusal, PRESETS } from '../../core/presets/index.ts'
 import {
   acceptanceFor,
   canonicalPath,
-  delegationCeiling,
   effectiveSandboxMode,
   isInside,
   isSandboxMode,
-  isWider,
   SANDBOX,
   SANDBOX_ACCEPTANCE,
   SANDBOX_MODE,
@@ -185,12 +183,15 @@ export interface ProtocolServerConfig {
   /** The name of the preset `world` composes, recorded in each session's header. */
   readonly agentPreset?: string
   /**
-   * Called on a session this host resumed, before anything runs on it: the
+   * Called on a session this host resumed, before any tool runs on it (one
+   * its restored inbox woke may already have begun its first request): the
    * app applies the operator's EXPLICIT authority flags here as the durable
    * switch they are on every other path (§9). Without it a `web --sandbox
    * read-only` host continued a stored session at its recorded wider mode.
+   * It is handed the host's own context: a hook that read a root the app
+   * filled only after boot could meet a resume that arrived first (S20.5).
    */
-  readonly onResumed?: (handle: AgentHandle) => void
+  readonly onResumed?: (handle: AgentHandle, ctx: Context) => void
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
   /**
@@ -265,6 +266,19 @@ function pendingApprovalsOf(facts: readonly EventEnvelope[], agent: Agent | unde
 /** A notice in the inbox that will not wake the agent when it lands. */
 function quietlyQueued(record: JobRecord): boolean {
   return record.notice?.state === 'queued' && !record.notice.waking
+}
+
+/**
+ * Whether `path` is `root` or below it by SPELLING: separators unified, and
+ * case folded on Windows. No filesystem is asked, so it can label, never
+ * fence (`isInside` fences, on canonical paths).
+ */
+function spelledInside(root: string, path: string): boolean {
+  const windows = process.platform === 'win32'
+  const fold = (p: string): string => (windows ? win32.normalize(p).toLowerCase() : posix.normalize(p)).replace(/[\\/]+$/u, '')
+  const base = fold(root)
+  const target = fold(path)
+  return target === base || target.startsWith(`${base}${windows ? '\\' : '/'}`)
 }
 
 /**
@@ -789,15 +803,12 @@ export class ProtocolHost {
 
   /** The workspace a path belongs to, derived — no session stores a workspace id. */
   private workspaceOf(cwd: string): WorkspaceInfo | undefined {
-    // A header keeps the cwd as it was given; containment compares canonical
-    // spellings only (core/sandbox/paths.ts).
-    let canonical: string
-    try {
-      canonical = canonicalPath(cwd)
-    } catch {
-      return undefined
-    }
-    return this.config.workspaces.find((workspace) => isInside(workspace.root, canonical))
+    // A LABEL in a listing, never authority (a stored session may be resumed
+    // outside every root, ARCHITECTURE §13), so decided by spelling alone.
+    // Canonicalizing each stored cwd did synchronous I/O per session per
+    // listing, and one unreachable network cwd froze the host for 21 s
+    // (S20.5 review); the strict compare stays where authority is decided.
+    return this.config.workspaces.find((workspace) => spelledInside(workspace.root, cwd))
   }
 
   /**
@@ -898,18 +909,12 @@ export class ProtocolHost {
     // delegation ceiling and pins BEFORE any is appended. Checked in turn, a
     // narrowed mode landed durably and then the unpinned approval threw, so a
     // call answered with an error had already changed the session (S20.5).
-    const facts = agent.session.facts
-    const ceiling = delegationCeiling(facts)
-    if (params.sandbox !== undefined && ceiling !== undefined && isWider(params.sandbox as SandboxMode, ceiling)) {
-      throw new RpcFailure(INVALID_PARAMS, `session/authority: "${String(params.sandbox)}" widens past this delegated session's ceiling "${ceiling}"`)
-    }
-    const pin = delegationPin(facts)
-    if (params.approval !== undefined && pin !== undefined && params.approval !== pin) {
-      throw new RpcFailure(INVALID_PARAMS, `session/authority: this delegated session's approvals are pinned "${pin}"`)
-    }
-    if (params.accepts !== undefined && agent.session.header.delegatedBy !== undefined) {
-      throw new RpcFailure(INVALID_PARAMS, 'session/authority: a delegated session cannot change what it was started accepting')
-    }
+    const refusal = authoritySwitchRefusal(agent.session, {
+      sandbox: params.sandbox as SandboxMode | undefined,
+      approval: params.approval as ApprovalPolicy | undefined,
+      accepts: params.accepts,
+    })
+    if (refusal !== undefined) throw new RpcFailure(INVALID_PARAMS, `session/authority: ${refusal}`)
     if (params.preset !== undefined) {
       if (typeof params.preset !== 'string' || params.preset.length === 0) {
         throw new RpcFailure(INVALID_PARAMS, 'session/authority: "preset" must be a preset name')
@@ -1099,11 +1104,13 @@ export class ProtocolHost {
         .then(
           async (handle) => {
             try {
-              this.config.onResumed?.(handle)
+              this.config.onResumed?.(handle, this.ctx)
             } catch (error) {
-              // A switch the session refuses (a child's pin) leaves nothing half-done.
+              // This host's own flags refused by the session (a child's pin):
+              // refused whole before any append (`authoritySwitchRefusal`), and
+              // the caller's to resolve, as a format this host cannot continue is.
               await handle.dispose()
-              throw error
+              throw new RpcFailure(INVALID_PARAMS, `this host's authority flags cannot apply to session "${handle.agent.id}": ${error instanceof Error ? error.message : String(error)}`)
             }
             this.owned.set(handle.agent.id, handle)
             return handle.agent

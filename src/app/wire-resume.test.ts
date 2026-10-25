@@ -9,14 +9,19 @@
  *   `serve --sandbox read-only` host continued a stored session at its
  *   recorded, wider mode.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
+import { AGENTS } from '../core/agent/index.ts'
+import { APPROVAL } from '../core/approval/index.ts'
+import { asSessionId } from '../core/ids.ts'
 import { LLM } from '../core/llm/index.ts'
+import { createUserMessage } from '../core/llm/message.ts'
+import { SANDBOX } from '../core/sandbox/index.ts'
 import { assistantText, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
 import { startProtocolHost, type ProtocolHostHandle } from './serve.ts'
 
@@ -78,6 +83,50 @@ async function startHost(sessionsRoot: string, cwd: string, extra: Record<string
 }
 
 describe('a wire resume', () => {
+  // The S20.5 review: the host's explicit flags were applied one by one, so a
+  // delegated child's pin refused the approval after the narrowed mode had
+  // landed, and the client was answered -32603.
+  it('refuses flags a stored delegated child cannot take, whole, before any of them lands', async () => {
+    base = mkdtempSync(join(tmpdir(), 'minidsh-wire-resume-'))
+    const sessionsRoot = join(base, 'sessions')
+    let root!: Context
+    const first = await startHost(sessionsRoot, base, {
+      prepare: (r: Context) => {
+        root = r
+        void r.get(LLM).registerAdapter(r, new ScriptedAdapter().script(assistantText('one'), assistantText('two')))
+      },
+    })
+    const child = await root.get(AGENTS).create(root, {
+      cwd: base,
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('session-parent-gone'),
+      setup: (_ctx, agent) => {
+        root.get(SANDBOX).open(agent.session, { mode: 'workspace-write', reason: 'delegation' })
+        root.get(APPROVAL).open(agent.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    child.agent.followup(createUserMessage('hi'))
+    await child.agent.whenIdle()
+    const childId = child.agent.id
+    await child.dispose()
+    await first.handle.dispose()
+    const file = join(sessionsRoot, `${childId}.jsonl`)
+    const authorityFacts = (): string[] =>
+      readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .slice(1)
+        .filter((line) => line.includes('"type":"sandbox/') || line.includes('"type":"approval/'))
+    const before = authorityFacts()
+
+    const strict = await startHost(sessionsRoot, base, { sandbox: 'read-only', approvalPolicy: 'ask' })
+    const refused = await strict.call('session/prompt', { sessionId: childId, text: 'again' })
+    expect(refused.error).toMatchObject({ code: -32602, message: expect.stringContaining('pinned "never"') })
+    // No authority fact landed (the resume's own opening records are the resume's).
+    expect(authorityFacts()).toEqual(before)
+    expect(before.length).toBeGreaterThan(0)
+  })
+
   it('composes the preset its header names, and applies the host\'s explicit authority flags', async () => {
     base = mkdtempSync(join(tmpdir(), 'minidsh-wire-resume-'))
     const sessionsRoot = join(base, 'sessions')
