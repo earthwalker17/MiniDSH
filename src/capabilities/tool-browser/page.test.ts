@@ -551,7 +551,10 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
       await page.act({ kind: 'click', ref: refOf(await go('/popup'), 'button "Open"') }, acting())
       expect((await page.report()).popups).toEqual([`${fixture.origin}/popup-target`])
       const pages = async (): Promise<number> => (await browser.cdp.send<{ targetInfos: { type: string }[] }>('Target.getTargets')).targetInfos.filter((target) => target.type === 'page').length
-      expect(await until(async () => (await pages()) === 1, 5_000)).toBe(true)
+      // At the close's own bound (page.ts sends `Target.closeTarget` with a
+      // 10 s budget), plus a margin: 5 s was shorter than the product allows,
+      // and a loaded CI runner took longer (S20.5, check.yml on ubuntu).
+      expect(await until(async () => (await pages()) === 1, 12_000)).toBe(true)
     })
 
     it('notes a file chooser, which never opens', LONG, async () => {
