@@ -104,47 +104,15 @@ jobs:
       # tarball and Node would refuse to strip its types under node_modules
       # anyway. Keyless, so this proves the package installs and starts; the
       # arcs in live.yml are what prove it works.
+      # What the installed package must do is ONE script (scripts/smoke-installed.sh),
+      # which release.yml runs on the bytes it ships and on what the registry serves.
       - name: Pack, install into an empty directory, and start the installed bin
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').version")"
           pnpm pack --pack-destination "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP"
-          mkdir -p install && cd install
+          mkdir -p "$RUNNER_TEMP/install" && cd "$RUNNER_TEMP/install"
           npm init -y > /dev/null
           npm install --no-audit --no-fund ../minidsh-*.tgz
-          test ! -e node_modules/minidsh/src
-          test -f node_modules/minidsh/dist/app/cli.js
-          test -f node_modules/minidsh/dist/app/web/index.html
-          # app.js imports it at load: missing, the installed browser client is a blank page.
-          test -f node_modules/minidsh/dist/app/web/rows.js
-          # The checkout's own version, exactly: `^minidsh ` would also accept the
-          # "minidsh unknown" version.ts prints when the emit cannot find package.json.
-          node node_modules/minidsh/bin/minidsh.js --version | grep -qx "minidsh $VERSION"
-          # Each command must ASSERT something, not merely exit 0: `config`
-          # proves the whole plugin graph assembled, and the listing proves it
-          # answered the empty case rather than failing silently into no output.
-          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'core-agent-loop'
-          # The browser is a default row: the installed package must carry it.
-          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js config | grep -q 'tool-browser'
-          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js sessions list 2>&1 | grep -q 'no stored sessions'
-          # The bundled skills are data beside the code (`files` whitelists
-          # `skills`), and the INSTALLED binary must find them: listed, origin
-          # `bundled`, from inside the installed package — not from a checkout.
-          test -f node_modules/minidsh/skills/office/SKILL.md
-          test -f node_modules/minidsh/skills/pdf/scripts/pdf.mjs
-          MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js skills --json > skills.json
-          node -e "
-            const path = require('path');
-            const report = require('./skills.json');
-            const inside = path.join('node_modules', 'minidsh', 'skills');
-            for (const name of ['office', 'pdf']) {
-              const skill = report.listed.find((entry) => entry.name === name);
-              if (!skill || skill.origin !== 'bundled' || !path.resolve(skill.path).includes(inside)) {
-                console.error('not listed from the installed package: ' + name + '\n' + JSON.stringify(report, null, 2));
-                process.exit(1);
-              }
-            }
-            console.log('bundled skills listed: ' + report.listed.map((entry) => entry.name + ' (' + entry.origin + ')').join(', '));
-          "
+          bash "$GITHUB_WORKSPACE/scripts/smoke-installed.sh" "$PWD" "$VERSION"

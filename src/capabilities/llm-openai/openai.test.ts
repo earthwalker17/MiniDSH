@@ -865,4 +865,68 @@ describe('llm-openai row', () => {
     expect(root.get(LLM).hasProvider('openai')).toBe(false)
     await root.dispose()
   })
+
+  it('refuses a base URL carrying user info, from config or from the environment, without quoting the password', async () => {
+    expect(() => openaiPlugin.config!.parse({ baseURL: 'https://proxyuser:proxy-PASSWORD-123@proxy.example/v1' })).toThrow()
+    const saved = process.env.OPENAI_BASE_URL
+    process.env.OPENAI_BASE_URL = 'https://proxyuser:proxy-PASSWORD-123@proxy.example/v1'
+    try {
+      const root = createRoot({ logger: silent })
+      root.plugin(llmPlugin)
+      root.plugin(credentialsPlugin({}))
+      const handle = root.plugin(openaiPlugin)
+      const report = await root.settle()
+      expect(handle.state).toBe('failed')
+      const said = report.failed.map((entry) => String(entry.error)).join('\n')
+      expect(said).toMatch(/OPENAI_BASE_URL/)
+      expect(said).not.toContain('proxy-PASSWORD-123')
+      await root.dispose()
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_BASE_URL
+      else process.env.OPENAI_BASE_URL = saved
+    }
+  })
+})
+
+describe('OpenAI wire bounds (S20.5)', () => {
+  let closers: (() => Promise<void>)[] = []
+  afterEach(async () => {
+    for (const close of closers) await close()
+    closers = []
+  })
+  const base = { provider: 'openai', model: 'gpt-6-luna', messages: [createUserMessage('hi')] }
+
+  it('fails one event that never ends past its cap as MALFORMED_RESPONSE', async () => {
+    const chunk = 'x'.repeat(1024 * 1024)
+    await expect(collect(parseNamedSse(sseStream('event: x\ndata: "', ...Array.from({ length: 9 }, () => chunk)), () => {}))).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+  })
+
+  it('reads at most a bounded prefix of an error body, still classifying by status, and never quotes an echoed key', { timeout: 10_000 }, async () => {
+    const key = 'sk-proj-ECHOED-0123456789'
+    let mode: 'endless' | 'echo' = 'endless'
+    const api = await loopback((_request, response) => {
+      if (mode === 'endless') {
+        response.writeHead(503, { 'content-type': 'text/plain' })
+        response.write('y'.repeat(200 * 1024))
+        return
+      }
+      response.writeHead(401, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: { message: `Incorrect API key provided: ${key}.`, type: 'invalid_request_error', param: null, code: 'invalid_api_key' } }))
+    })
+    closers.push(api.close)
+    const adapter = new OpenAIAdapter({ apiKeyRef: 'OPENAI_API_KEY', resolveKey: () => key, baseURL: api.baseURL, defaultMaxTokens: 1024 })
+    const first = (): Promise<unknown> => adapter.stream(base)[Symbol.asyncIterator]().next().catch((error: unknown) => error)
+    expect(await first()).toMatchObject({ code: 'SERVER', failure: { status: 503 } })
+    mode = 'echo'
+    const failure = (await first()) as Error
+    expect(failure).toMatchObject({ code: 'AUTH' })
+    expect(failure.message).not.toContain(key)
+  })
+
+  it('reads the retry-after-ms header, which OpenAI sends beside retry-after, and prefers it', () => {
+    const body = JSON.stringify({ error: { message: 'Rate limit reached.', type: 'requests', param: null, code: 'rate_limit_exceeded' } })
+    expect(classifyHttp(429, body, new Headers({ 'retry-after-ms': '1500', 'retry-after': '2' }))).toMatchObject({ failure: { retryAfterMs: 1500 } })
+    expect(classifyHttp(429, body, new Headers({ 'retry-after-ms': '250' }))).toMatchObject({ failure: { retryAfterMs: 250 } })
+    expect(classifyHttp(429, body, new Headers({ 'retry-after': '2' }))).toMatchObject({ failure: { retryAfterMs: 2000 } })
+  })
 })

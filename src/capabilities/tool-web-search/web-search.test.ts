@@ -454,6 +454,19 @@ describe('what the model is shown', () => {
     expect(saved, 'the excerpt names no saved file').toBeDefined()
     const full = readFileSync(saved!, 'utf8')
     for (let index = 1; index <= 5; index++) expect(full).toContain(`https://example.com/${index}`)
+    // The remainder a later read pulls back into context is the same
+    // third-party text, so it carries the same fixed notice at its head.
+    expect(full.startsWith(`${WEB_SEARCH_NOTICE}\n\n1. Source 1`)).toBe(true)
+  })
+
+  it('never puts a key the provider echoes back into the durable, model-visible result', async () => {
+    const f = await setup({ key: KEY })
+    f.answer(allow)
+    f.server.respond = (_request, response) => json(response, 401, { detail: { error: `Unauthorized: invalid API key ${KEY}` } })
+    const outcome = await f.run('echo')
+    expect(outcome).toMatchObject({ isError: true, code: 'SEARCH_AUTH' })
+    expect(outcome.text).toContain('Unauthorized: invalid API key [redacted]')
+    expect(outcome.text).not.toContain(KEY)
   })
 })
 

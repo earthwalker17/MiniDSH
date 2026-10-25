@@ -58,6 +58,34 @@ describe('credentials-local', () => {
     expect(credentials.resolve(REF)).toBe('s')
   })
 
+  it('reports where a store is malformed and never what it says there: the parser quotes the text around the fault', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-'))
+    const store = join(dir, 'credentials.json')
+    const warn = async (content: string): Promise<string> => {
+      const warnings: string[] = []
+      const local = createRoot({ logger: { warn: (message) => void warnings.push(message), error: () => {} } })
+      local.plugin(credentialsLocalPlugin, { path: store })
+      await local.settle()
+      writeFileSync(store, content)
+      expect(local.get(CREDENTIALS).resolve(REF)).toBeUndefined()
+      await local.dispose()
+      expect(warnings).toHaveLength(1)
+      return warnings[0]!
+    }
+    // A single-quoted value: V8's message quotes about ten characters around
+    // the fault, which here is the head of the secret.
+    const quoted = await warn(`{\n  "MINIDSH_TEST_SECRET": 'sk-live-SECRETVALUE123'\n}`)
+    expect(quoted).toMatch(/is not valid JSON;/)
+    expect(quoted).not.toContain('sk-live')
+    // Where the parser names a position, the warning keeps it, and only it.
+    const comma = await warn(`{\n  "MINIDSH_TEST_SECRET": "sk-live-SECRETVALUE123",\n}`)
+    expect(comma).toMatch(/is not valid JSON at line 3, column 1;/)
+    expect(comma).not.toContain('sk-live')
+    // A root that parses but is no object is "not a JSON object", not a TypeError's words.
+    expect(await warn('null')).toMatch(/is not a JSON object/)
+    expect(await warn('["sk-live-SECRETVALUE123"]')).toMatch(/is not a JSON object/)
+  })
+
   it('resolves env over file, and the file when env is unset or blank', async () => {
     const { resolve, store } = await mountWithStore()
     writeFileSync(store, JSON.stringify({ MINIDSH_TEST_SECRET: 'from-file' }))

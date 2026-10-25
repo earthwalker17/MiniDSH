@@ -4,6 +4,7 @@ import { parseSse } from './sse.ts'
 import { DeepSeekTranslator, parseWireChunk } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
 import { resolveRequestImages } from '../../core/llm/content.ts'
+import { readErrorBody, redactLlmError } from '../../core/llm/wire.ts'
 import { serializeMessages, serializeTools } from './serialize.ts'
 
 export const DEEPSEEK_PROVIDER = 'deepseek'
@@ -202,7 +203,7 @@ export class DeepSeekAdapter implements LlmAdapter {
     let response: Response
     try {
       resetIdle()
-      response = await fetch(`${this.options.baseURL}/chat/completions`, {
+      response = await fetch(`${this.options.baseURL.replace(/\/+$/, '')}/chat/completions`, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${apiKey}`,
@@ -215,14 +216,17 @@ export class DeepSeekAdapter implements LlmAdapter {
       })
     } catch (error) {
       if (timer) clearTimeout(timer)
-      throw mapAbort(error, request.signal, idle.signal)
+      throw redactLlmError(mapAbort(error, request.signal, idle.signal), apiKey)
     }
 
     if (!response.ok) {
-      // The watchdog stays armed through the error body, as in the sibling adapters.
-      const body = await response.text().catch(() => '')
+      // The watchdog stays armed through the error body, as in the sibling
+      // adapters, and the body is read only to its cap: the status classifies.
+      const body = await readErrorBody(response)
       if (timer) clearTimeout(timer)
-      throw classifyHttp(response.status, body, response.headers)
+      // Every error built once the key is resolved passes through redaction: a
+      // proxy that echoes the presented key would otherwise put it in the log.
+      throw redactLlmError(classifyHttp(response.status, body, response.headers), apiKey)
     }
     if (!response.body) {
       if (timer) clearTimeout(timer)
@@ -239,7 +243,7 @@ export class DeepSeekAdapter implements LlmAdapter {
         for (const chunk of translator.push(parseWireChunk(data))) yield chunk
       }
     } catch (error) {
-      throw mapAbort(error, request.signal, idle.signal)
+      throw redactLlmError(mapAbort(error, request.signal, idle.signal), apiKey)
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -259,29 +263,45 @@ function mapAbort(error: unknown, caller: AbortSignal | undefined, idle: AbortSi
   return new LlmError('TRANSPORT', error instanceof Error ? error.message : String(error))
 }
 
+/**
+ * HTTP failures, as codes, by STATUS first; the body only refines a status
+ * that is ambiguous. Substring matching on the whole body once read a load
+ * balancer's 503 page saying "balance" as QUOTA (never retried), and any 400
+ * saying "context" or "maximum" as CONTEXT_WINDOW_EXCEEDED — the one code that
+ * authorizes a real compaction of the session before the same invalid
+ * request is retried.
+ */
 export function classifyHttp(status: number, body: string, headers: Headers): LlmError {
   let message = body.slice(0, 500)
   let providerCode = ''
+  let providerType = ''
   try {
-    const parsed = JSON.parse(body) as { error?: { message?: string; code?: string; type?: string } }
-    if (parsed.error?.message) message = parsed.error.message
-    providerCode = `${parsed.error?.code ?? ''} ${parsed.error?.type ?? ''}`.toLowerCase()
+    const parsed = JSON.parse(body) as { error?: { message?: unknown; code?: unknown; type?: unknown } }
+    if (typeof parsed.error?.message === 'string' && parsed.error.message.length > 0) message = parsed.error.message
+    if (typeof parsed.error?.code === 'string') providerCode = parsed.error.code
+    if (typeof parsed.error?.type === 'string') providerType = parsed.error.type
   } catch {
     // Non-JSON error body; keep the truncated text.
   }
-  const detail = `${providerCode} ${message}`.toLowerCase()
   const requestId = headers.get('x-request-id') ?? headers.get('x-ds-request-id') ?? undefined
   const retryAfterMs = parseRetryAfter(headers.get('retry-after'))
   const options = { status, ...(requestId ? { requestId } : {}), ...(retryAfterMs === undefined ? {} : { retryAfterMs }) }
   let code: LlmErrorCode
-  if (status === 401 || status === 403) code = 'AUTH'
+  if (status >= 500) code = 'SERVER'
+  else if (status === 401 || status === 403) code = 'AUTH'
+  // DeepSeek's documented "Insufficient Balance".
+  else if (status === 402) code = 'QUOTA'
+  // A 429 is "slow down" unless its code or type says the money ran out, which
+  // no retry can fix. The prose never decides.
+  else if (status === 429) code = /quota|balance|billing/i.test(`${providerCode} ${providerType}`) ? 'QUOTA' : 'RATE_LIMIT'
   // Measured 2026-10-16: "The supported API model names are deepseek-flash,
   // deepseek-v4-pro, but you passed …" — a 400, not a 404.
-  else if (status === 400 && detail.includes('supported api model names')) code = 'UNKNOWN_MODEL'
-  else if (detail.includes('insufficient') || detail.includes('quota') || detail.includes('balance')) code = 'QUOTA'
-  else if (status === 429) code = 'RATE_LIMIT'
-  else if (status === 400 && (detail.includes('context') || detail.includes('too long') || detail.includes('maximum'))) code = 'CONTEXT_WINDOW_EXCEEDED'
-  else if (status >= 500) code = 'SERVER'
+  else if (status === 400 && /supported api model names/i.test(message)) code = 'UNKNOWN_MODEL'
+  // The OpenAI-compatible overflow, "This model's maximum context length is N
+  // tokens. However, you requested M tokens …", or its code. Not re-measured
+  // against DeepSeek (a 1M window is costly to overflow); the phrase is the
+  // OpenAI-compatible wire's, and it is the whole phrase or nothing.
+  else if (status === 400 && (providerCode === 'context_length_exceeded' || /maximum context length/i.test(message))) code = 'CONTEXT_WINDOW_EXCEEDED'
   else code = 'INVALID_REQUEST'
   return new LlmError(code, `DeepSeek ${status}: ${message}`, options)
 }

@@ -50,6 +50,7 @@ import type { Context, Plugin } from '../../kernel/index.ts'
 import { APPROVAL } from '../../core/approval/index.ts'
 import { CREDENTIALS, credentialRef, type CredentialRef, isHeaderSafe } from '../../core/credentials/index.ts'
 import type { NetworkIntent } from '../../core/effects/index.ts'
+import { isPlainHttpBase, PLAIN_HTTP_BASE_RULE, redactSecret } from '../../core/llm/wire.ts'
 import { excerptWithSpill, excerptWithoutSpill, SPILL } from '../../core/spill/index.ts'
 import { printableText } from '../../core/text.ts'
 import { defineTool, NETWORK_TOOL, TOOLS, type ToolContext } from '../../core/tools/index.ts'
@@ -67,26 +68,15 @@ export interface WebSearchConfig {
   readonly maxOutputChars?: number | undefined
 }
 
-/**
- * A base the destination can be built from and a person can read as an
- * endpoint. Refused at the contract, so `minidsh config` names a bad row: a
- * non-http(s) base would make every ask a subject the authority invariant
- * refuses, and user info in the URL would put a password into a durable,
- * rendered consent subject.
- */
-function isPlainHttpBase(text: string): boolean {
-  try {
-    const url = new URL(text)
-    return (url.protocol === 'http:' || url.protocol === 'https:') && url.username === '' && url.password === ''
-  } catch {
-    return false
-  }
-}
-
 const configSchema = z
   .strictObject({
     apiKeyEnv: z.string().min(1).optional(),
-    baseURL: z.string().url().refine(isPlainHttpBase, 'baseURL must be an http(s) URL with no user info').optional(),
+    // A base the destination can be built from and a person can read as an
+    // endpoint (`isPlainHttpBase`, the rule the LLM rows share). Refused at the
+    // contract, so `minidsh config` names a bad row: a non-http(s) base would
+    // make every ask a subject the authority invariant refuses, and user info
+    // in the URL would put a password into a durable, rendered consent subject.
+    baseURL: z.string().url().refine(isPlainHttpBase, PLAIN_HTTP_BASE_RULE).optional(),
     maxResults: z.number().int().min(1).max(10).optional(),
     timeoutMs: z.number().positive().optional(),
     maxOutputChars: z.number().int().positive().optional(),
@@ -293,15 +283,19 @@ function renderSource(source: Source, index: number): string {
 async function search(query: string, key: string, exec: ToolContext, settings: SearchSettings): Promise<Source[]> {
   const deadline = AbortSignal.timeout(settings.timeoutMs)
   const signal = AbortSignal.any([exec.callSignal, deadline])
+  // Every failure leaves through here, and here the key is redacted from it —
+  // ONE place, because the second path once missed it: a provider or proxy
+  // that echoes the presented key in a 401 body put the whole secret into the
+  // tool result, which is durable and sent to the model on the next request.
+  // The platform's transport messages are no safer: some quote a request
+  // header, and the one header here carries the key.
   const failure = (error: unknown): WebSearchError => {
-    if (error instanceof WebSearchError) return error
+    if (error instanceof WebSearchError) return new WebSearchError(error.code, redactSecret(error.message, key))
     if (exec.callSignal.aborted) return new WebSearchError('SEARCH_CANCELLED', 'web search was cancelled after it was sent; the query may have reached the provider')
     if (deadline.aborted) return new WebSearchError('SEARCH_TIMEOUT', `web search timed out after ${settings.timeoutMs}ms`)
     // A refused redirect lands here too: undici reports it as a fetch failure
     // whose cause says so.
-    // Never the platform's message verbatim: some of them quote a request
-    // header, and the one header here carries the key.
-    const said = (text: string): string => text.split(key).join('[redacted]')
+    const said = (text: string): string => redactSecret(text, key)
     const cause = error instanceof Error && error.cause instanceof Error ? ` (${said(error.cause.message)})` : ''
     return new WebSearchError('SEARCH_TRANSPORT', `web search failed in transport: ${said(error instanceof Error ? error.message : String(error))}${cause}`)
   }
@@ -457,7 +451,10 @@ function bound(ctx: Context, exec: ToolContext, text: string, maxChars: number):
   const sessionId = exec.agent?.session.id
   if (!spill || !sessionId) return excerptWithoutSpill(text, options)
   try {
-    return excerptWithSpill(text, spill.save({ sessionId, callId: exec.callId, label: 'search', text }), options)
+    // The spilled copy carries the notice too: the remainder the excerpt
+    // points to comes back into context through a later read, and it is the
+    // same third-party text the notice exists to mark.
+    return excerptWithSpill(text, spill.save({ sessionId, callId: exec.callId, label: 'search', text: `${WEB_SEARCH_NOTICE}\n\n${text}` }), options)
   } catch {
     // A store that cannot write must not fail a search that succeeded.
     return excerptWithoutSpill(text, options)

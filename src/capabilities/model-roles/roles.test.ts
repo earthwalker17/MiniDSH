@@ -68,11 +68,16 @@ describe('model roles', () => {
     expect(await resolveCallConfig(agent, { turn: 1, step: 1 })).toEqual({ provider: 'scripted', model: 'scripted-model', reasoningEffort: 'high' })
   })
 
-  it('declares a strict config contract, so a misspelt role fails at the row', () => {
+  it('declares a strict config contract for a role’s FIELDS; the purpose keys are an open set', () => {
     const parse = (value: unknown) => modelRolesPlugin.config!.parse(value)
     expect(() => parse({ roles: { compaction: { provider: 'x' } } })).toThrowError()
     expect(() => parse({ rolls: {} })).toThrowError()
     expect(parse({ roles: {} })).toEqual({ roles: {} })
     expect(parse(undefined)).toBeUndefined()
+    // Not refused, and it cannot be from here: any delegation row may name its
+    // own purpose (`tool-subagent`'s `purpose`, the verifier's), so this row
+    // has no list to check a key against. A misspelt `compation` parses and
+    // never matches; nothing fails.
+    expect(parse({ roles: { compation: { provider: 'x', model: 'y' } } })).toEqual({ roles: { compation: { provider: 'x', model: 'y' } } })
   })
 })

@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AGENTS } from '../core/agent/index.ts'
+import { asCallId } from '../core/ids.ts'
+import { LLM, type StreamChunk } from '../core/llm/index.ts'
 import { createUserMessage, messageText } from '../core/llm/message.ts'
 import { defineTool, TOOLS } from '../core/tools/index.ts'
 import { coreHarness, type CoreHarness } from './harness.ts'
@@ -129,7 +131,6 @@ describe('llm-replay: out-of-loop calls', () => {
   it('refuses to serve a call recorded for one purpose to a request made for another', async () => {
     const harness = await coreHarness()
     harnesses.push(harness)
-    const { LLM } = await import('../core/llm/index.ts')
     const recorded: Recorded = [
       {
         type: 'llm/aux-call',
@@ -319,7 +320,6 @@ describe('replay answers a recorded route from the log', () => {
   it('answers a renamed provider from the log by model, rather than losing the route facts', async () => {
     const harness = await coreHarness()
     harnesses.push(harness)
-    const { LLM } = await import('../core/llm/index.ts')
     const log = [context('recorded', 'vision-model', { contextWindow: 60_000, inputModalities: ['text', 'image'] })]
     const replay = installLlmReplay(harness.root, { events: log, provider: 'renamed' })
     const resolved = harness.root.get(LLM).resolveModel('renamed', 'vision-model')
@@ -335,7 +335,6 @@ describe('replay answers a recorded route from the log', () => {
   it('a replayed adapter reports the modalities the recording used, merged across a child log', async () => {
     const harness = await coreHarness()
     harnesses.push(harness)
-    const { LLM } = await import('../core/llm/index.ts')
     // A provider name the harness has not already claimed for its scripted adapter.
     const parentLog = [context('recorded', 'text-model', { contextWindow: 50_000, inputModalities: ['text'] })]
     const childLog = [context('recorded', 'vision-model', { contextWindow: 60_000, inputModalities: ['text', 'image'] })]
@@ -419,4 +418,116 @@ describe('llm-replay: effects recorded', () => {
       /never runs a child/,
     )
   })
+
+  it('refuses every repair closer, not only an interrupted turn: a lost job, an interrupted child, an unclosed compaction', async () => {
+    // Each is written by crash repair (or a fork) about a writer that died,
+    // so the log beside it is not all a body's account either.
+    const recorded = await record()
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const n = recorded.events.length
+    for (const closer of [
+      { type: 'job/end', seq: n, time: 1, data: { jobId: 'j1', cause: 'lost' } },
+      { type: 'subagent/end', seq: n, time: 1, data: { callId: 'c9', childId: 'child', reason: { kind: 'interrupted' } } },
+      { type: 'compaction/end', seq: n, time: 1, data: { startSeq: 3, outcome: { kind: 'declined', reason: 'unclosed' } } },
+    ]) {
+      expect(() => installLlmReplay(harness.root, { events: [...recorded.events, closer], provider: 'replay', effects: 'recorded' }), closer.type).toThrowError(/repaired interruption/)
+    }
+  })
+
+  it('leaves its recording, and says how, when a call is a different tool here than there', async () => {
+    const recorded = await record()
+    // The recording's tool/call names "renamed"; the replayed model still calls "echo".
+    const renamed = recorded.events.map((event) => (event.type === 'tool/call' ? { ...event, data: { ...(event.data as object), name: 'renamed' } } : event))
+    const { replay, runs, handle } = await replayed(renamed)
+    expect(runs.value).toBe(0)
+    expect(() => replay.assertConsumed()).toThrowError(/left its recording: call 1:1:c1 is "echo" here and "renamed" in the recording/)
+    await handle.dispose()
+  })
+
+  it('leaves its recording when a call the recording refused before any body reaches one here', async () => {
+    // Recorded with no echo tool: UNKNOWN_TOOL at the gate, no tool/dispatch,
+    // in a lifecycle that claims it records dispatches — provably no body.
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    harness.adapter.script(assistantToolCall('c1', 'echo', { text: 'pong' }), assistantText('recorded answer'))
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('run it'))
+    await agent.whenIdle()
+    const recordedEvents = agent.session.events.map((event) => ({ ...event }))
+    expect(recordedEvents.some((event) => event.type === 'tool/dispatch')).toBe(false)
+    // Replayed with the gate lifted: echo is registered now.
+    const { replay, runs, handle } = await replayed(recordedEvents)
+    expect(runs.value).toBe(0)
+    expect(() => replay.assertConsumed()).toThrowError(/call 1:1:c1 \(echo\) reached a body here, and the recording refused it before one/)
+    await handle.dispose()
+  })
+
+  it('serves an undispatched call that reaches a body when its lifecycle claims nothing, though the segment holds a dispatch', async () => {
+    // Record two calls in one step: echo runs (dispatched), `missing` is
+    // refused at the gate (undispatched). Then strip the lifecycle's claim, as
+    // an S14–S15 writer recorded dispatches without claiming them.
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    harness.root.get(TOOLS).register(harness.root, echo)
+    harness.adapter.script(twoCalls(), assistantText('recorded answer'))
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('run it'))
+    await agent.whenIdle()
+    const claimless = agent.session.events.map((event) =>
+      event.type === 'session/lifecycle' ? { ...event, data: { ...(event.data as Record<string, unknown>), dispatch: undefined } } : { ...event },
+    )
+    expect(claimless.filter((event) => event.type === 'tool/dispatch')).toHaveLength(1)
+    // Replayed with `missing` registered, so its call reaches a body: the
+    // claim says nothing either way, so the recorded answer is served — a
+    // presence rule would read "no dispatch" as proof and refuse it.
+    const replayHarness = await coreHarness()
+    harnesses.push(replayHarness)
+    const replay = installLlmReplay(replayHarness.root, { events: claimless, provider: 'replay', effects: 'recorded' })
+    const { tool, runs } = counting()
+    replayHarness.root.get(TOOLS).register(replayHarness.root, tool)
+    replayHarness.root.get(TOOLS).register(replayHarness.root, defineTool({ ...missingTool, execute: () => ((runs.value += 1), { echoed: 'live' }) }))
+    const handle = await replayHarness.root.get(AGENTS).create(replayHarness.root, { cwd: process.cwd(), agentOptions: { provider: 'replay', model: 'replay' } })
+    handle.agent.followup(createUserMessage('run it'))
+    await handle.agent.whenIdle()
+    expect(runs.value).toBe(0)
+    replay.assertConsumed()
+    await handle.dispose()
+  })
+
+  it('advertises every effort the recording ran at, so a recording at one the default set lacks still replays as recorded', async () => {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    harness.adapter.script(assistantText('at medium'))
+    const { agent } = await harness.create({ reasoningEffort: 'medium' })
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    const replayHarness = await coreHarness()
+    harnesses.push(replayHarness)
+    installLlmReplay(replayHarness.root, { events: agent.session.events.map((event) => ({ ...event })), provider: 'replay', effects: 'recorded' })
+    expect(replayHarness.root.get(LLM).resolveModel('replay', 'scripted-model').reasoning.efforts).toContain('medium')
+  })
 })
+
+const missingTool = {
+  name: 'missing',
+  description: 'absent when recorded',
+  input: z.object({}),
+  output: z.object({ echoed: z.string() }),
+  render: (_args: unknown, value: { echoed: string }) => [{ type: 'text' as const, text: value.echoed }],
+}
+
+/** One step calling echo and `missing` together. */
+function twoCalls(): StreamChunk[] {
+  const echoArgs = JSON.stringify({ text: 'pong' })
+  return [
+    { type: 'block-start', index: 0, blockType: 'tool-call' },
+    { type: 'tool-call-delta', index: 0, id: asCallId('c1'), name: 'echo', argumentsDelta: echoArgs },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id: asCallId('c1'), name: 'echo', arguments: echoArgs } },
+    { type: 'block-start', index: 1, blockType: 'tool-call' },
+    { type: 'tool-call-delta', index: 1, id: asCallId('c2'), name: 'missing', argumentsDelta: '{}' },
+    { type: 'block-end', index: 1, block: { type: 'tool-call', id: asCallId('c2'), name: 'missing', arguments: '{}' } },
+    { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}

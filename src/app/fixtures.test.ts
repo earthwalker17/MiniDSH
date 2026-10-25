@@ -193,11 +193,21 @@ describe.each(FIXTURE_LIST)('the stored log $name', (fixture) => {
   })
 })
 
+/**
+ * A path or name of the machine that recorded a fixture. A fixture is JSON, so
+ * a Windows path in it is ESCAPED — `C:\\Users\\A` with doubled backslashes —
+ * and a pattern written for one separator never saw it.
+ */
+const RECORDER = /\/home\/|\/mnt\/c|Users[\\/]+A\b|earthwalker/i
+
 describe('the fixtures themselves', () => {
   it('carry no path or name of the machine that recorded them', () => {
+    for (const leak of ['/home/a/x', '/mnt/c/Users', 'C:\\Users\\A\\x', JSON.stringify({ cwd: 'C:\\Users\\A\\x' }), 'C:/Users/A/x', 'by earthwalker17']) {
+      expect(leak, 'the pattern itself misses a form it must catch').toMatch(RECORDER)
+    }
     for (const { name } of FIXTURE_LIST) {
       const text = readFileSync(join(FIXTURES, name), 'utf8')
-      expect(text).not.toMatch(/\/home\/|\/mnt\/c|Users[\\/]A|earthwalker/i)
+      expect(text).not.toMatch(RECORDER)
     }
   })
 
@@ -236,5 +246,40 @@ describe('the fixtures themselves', () => {
     const after = recordedAnswers(later)
     expect(before.size).toBeGreaterThan(0)
     for (const [key, answer] of before) expect(after.get(key)?.bodied, key).toBe(answer.bodied)
+  })
+
+  /**
+   * The test above cannot tell "the lifecycle CLAIM decides" from "the
+   * PRESENCE of a tool/dispatch decides": 1.0.0's segment holds no dispatch
+   * and the appended one holds no result. This segment separates them — it
+   * holds dispatches but claims nothing (an unreleased S14–S15 writer did
+   * exactly that). Under a presence rule the undispatched gate error would read
+   * `no` (proof no body ran) and the dispatched body error `yes` (owed).
+   */
+  it('reads a segment that holds dispatches but claims none conservatively, from the claim and never the presence', () => {
+    const message = (callId: string, isError: boolean) => ({
+      id: `m-${callId}`,
+      role: 'tool' as const,
+      source: { kind: 'tool' as const },
+      content: [{ type: 'tool-result' as const, callId, isError, content: [{ type: 'text' as const, text: isError ? 'Error' : 'ok' }] }],
+    })
+    let seq = 0
+    const at = (type: string, data: unknown): EventEnvelope => ({ type, seq: seq++, time: 1, data }) as EventEnvelope
+    const segment: EventEnvelope[] = [
+      at('session/lifecycle', { origin: 'created', durability: 'synced' }),
+      at('tool/call', { turn: 1, step: 1, callId: 'ok', name: 'read', arguments: '{}' }),
+      at('tool/dispatch', { turn: 1, step: 1, callId: 'ok' }),
+      at('tool/result', { turn: 1, step: 1, callId: 'ok', message: message('ok', false) }),
+      at('tool/call', { turn: 1, step: 1, callId: 'gate', name: 'read', arguments: '{}' }),
+      at('tool/result', { turn: 1, step: 1, callId: 'gate', message: message('gate', true), error: { name: 'FsError', code: 'FS_NOT_OBSERVED' } }),
+      at('tool/call', { turn: 1, step: 1, callId: 'body', name: 'read', arguments: '{}' }),
+      at('tool/dispatch', { turn: 1, step: 1, callId: 'body' }),
+      at('tool/result', { turn: 1, step: 1, callId: 'body', message: message('body', true), error: { name: 'FsError', code: 'FS_NOT_FOUND' } }),
+    ]
+    const bodied = (log: readonly EventEnvelope[]) => [...recordedAnswers(log)].map(([key, answer]) => `${key}:${answer.bodied}`)
+    expect(bodied(segment)).toEqual(['1:1:ok:yes', '1:1:gate:unknown', '1:1:body:unknown'])
+    // The same segment WITH the claim reads the dispatches as proof.
+    const claimed = [at('session/lifecycle', { origin: 'created', durability: 'synced', dispatch: true }), ...segment.slice(1)]
+    expect(bodied(claimed)).toEqual(['1:1:ok:yes', '1:1:gate:no', '1:1:body:yes'])
   })
 })

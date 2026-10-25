@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { killSpawnedWebHosts, WebHostProcess } from '../test-support/web-process.ts'
 import { AGENTS } from '../core/agent/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
@@ -92,7 +92,9 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
 
     // No --approve: every consent is a real decision answered over the socket.
     const host = new WebHostProcess(workspace, home)
-    const driver = await host.connect()
+    // The driver's connection can be KILLED (a reset, no close frame), which is
+    // what "a socket killed mid-turn" means below.
+    const { client: driver, sever } = await host.connectSeverable()
     const observer = await host.connect()
 
     const init = await driver.request<{ serverInfo: { name: string }; providers: { id: string }[]; workspaces: { id: string; root: string }[] }>('initialize')
@@ -201,9 +203,14 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
       sessionId,
       text: PROMPTS[3],
     })
-    await driver.waitFor(() => driver.statuses.find((entry) => entry.sessionId === sessionId && entry.status === 'running'), 'the turn to start')
+    // A frame of TURN 4 itself. A 'running' status matched turn 1's, which
+    // stays in the list, so the wait returned at once and the close could land
+    // before turn 4 had started at all.
+    await driver.waitFor(() => driver.events('turn/start', sessionId).find((event) => (event.data as { turn: number }).turn === 4), 'turn 4 to start')
     stopAnswering()
-    driver.close()
+    // Killed, not closed: both legs reset, so the host meets the dead peer the
+    // way a crashed browser leaves it, with no close handshake.
+    sever()
 
     // A disconnect is not a shutdown: the host is still serving, and the agent
     // it was driving is still running.
@@ -238,7 +245,7 @@ describe.skipIf(!KEY)('S7 live E2E: a browser-shaped client over a real socket',
       },
     })
     try {
-      const handle = await root.get(AGENTS).create(root, { cwd: replayWorkspace, agentOptions: { provider: 'deepseek', model: 'deepseek-v4-flash' } })
+      const handle = await root.get(AGENTS).create(root, { cwd: replayWorkspace, agentOptions: recordedRoute(recorded.events) })
       // Every recorded prompt in order, so the replayed session walks the path
       // the browser walked — including the turn the socket died inside.
       for (const text of PROMPTS) {

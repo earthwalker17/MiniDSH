@@ -11,6 +11,7 @@ import type { Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, credentialRef } from '../../core/credentials/index.ts'
 import { ATTACHMENTS } from '../../core/attachments/index.ts'
 import { LLM } from '../../core/llm/index.ts'
+import { baseURLFromEnv, isPlainHttpBase, PLAIN_HTTP_BASE_RULE } from '../../core/llm/wire.ts'
 import { OpenAIAdapter, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS } from './adapter.ts'
 
 export interface OpenAIConfig {
@@ -27,7 +28,9 @@ export interface OpenAIConfig {
 const configSchema = z
   .strictObject({
     apiKeyEnv: z.string().min(1).optional(),
-    baseURL: z.string().url().optional(),
+    // User info would reach every TRANSPORT error: Node's fetch refuses such a
+    // URL with a message that quotes it, password included.
+    baseURL: z.string().url().refine(isPlainHttpBase, PLAIN_HTTP_BASE_RULE).optional(),
     defaultMaxTokens: z.number().int().positive().optional(),
     reasoningSummaries: z.boolean().optional(),
   })
@@ -52,7 +55,7 @@ export const openaiPlugin: Plugin<OpenAIConfig | undefined> = {
       // See the sibling adapter: an attachment store is optional, never injected.
       resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
       // Set-but-empty reads as unset, as the OpenAI SDK reads it.
-      baseURL: config?.baseURL ?? (process.env.OPENAI_BASE_URL?.trim() || DEFAULT_BASE_URL),
+      baseURL: config?.baseURL ?? baseURLFromEnv('OPENAI_BASE_URL') ?? DEFAULT_BASE_URL,
       defaultMaxTokens: config?.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
       reasoningSummaries: config?.reasoningSummaries ?? true,
     })

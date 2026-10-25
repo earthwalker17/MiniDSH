@@ -70,6 +70,10 @@ export class DeepSeekTranslator {
     }
     for (const call of delta.tool_calls ?? []) {
       let block = this.tools.get(call.index)
+      // A fresh id on an index already in use is a second call, not more of
+      // the first: folding it in overwrote the first id and spliced the two
+      // argument strings into one invalid JSON text.
+      if (block && call.id !== undefined && block.id !== undefined && call.id !== block.id) block = undefined
       if (!block) {
         block = { index: this.nextIndex++, type: 'tool-call', text: '', args: '' }
         this.tools.set(call.index, block)
@@ -133,6 +137,13 @@ export class DeepSeekTranslator {
         return { kind: 'tool-calls' }
       case 'length':
         return { kind: 'max-tokens' }
+      // Both documented finish reasons. The first is a load-shed interruption,
+      // which the next attempt may well complete; the second is the provider
+      // declining, which no retry changes — the same reading llm-openai gives it.
+      case 'insufficient_system_resource':
+        return { kind: 'error', failure: { message: 'DeepSeek stopped generating for lack of system resources', code: 'SERVER' } }
+      case 'content_filter':
+        return { kind: 'error', failure: { message: 'DeepSeek filtered the response', code: 'REFUSAL' } }
       default:
         return { kind: 'error', failure: { message: `unexpected finish_reason "${this.wireFinish}"`, code: 'MALFORMED_RESPONSE' } }
     }

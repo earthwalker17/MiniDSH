@@ -56,14 +56,22 @@ class LocalCredentials implements Credentials {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.report(`is unreadable: ${error instanceof Error ? error.message : String(error)}`)
       return undefined
     }
+    let store: unknown
     try {
-      const store = JSON.parse(raw) as Record<string, unknown>
-      const value = store[ref]
-      return typeof value === 'string' ? present(value) : undefined
+      store = JSON.parse(raw)
     } catch (error) {
-      this.report(`is not valid JSON: ${error instanceof Error ? error.message : String(error)}`)
+      // WHERE, never what: V8's message quotes about ten characters around the
+      // fault, and in a store of secrets those are the head of a value (a
+      // single-quoted one printed `'sk-live-S` to the host's stderr).
+      this.report(`is not valid JSON${faultPosition(raw, error)}`)
       return undefined
     }
+    if (store === null || typeof store !== 'object' || Array.isArray(store)) {
+      this.report('is not a JSON object')
+      return undefined
+    }
+    const value = (store as Record<string, unknown>)[ref]
+    return typeof value === 'string' ? present(value) : undefined
   }
 
   describe(ref: CredentialRef): string {
@@ -76,6 +84,16 @@ class LocalCredentials implements Credentials {
     this.warned = true
     this.logger.warn(`credentials store ${this.path} ${what}; credentials resolve from the environment only until it is fixed`)
   }
+}
+
+/** ` at line L, column C` when the parser named a character offset, else nothing: only the digits of its message are read. */
+function faultPosition(raw: string, error: unknown): string {
+  const offset = error instanceof Error ? /at position (\d+)/u.exec(error.message)?.[1] : undefined
+  if (offset === undefined) return ''
+  const before = raw.slice(0, Number(offset))
+  const line = before.split('\n').length
+  const column = before.length - before.lastIndexOf('\n')
+  return ` at line ${line}, column ${column}`
 }
 
 export const credentialsLocalPlugin: Plugin<CredentialsLocalConfig | undefined> = {

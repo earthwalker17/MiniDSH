@@ -214,8 +214,11 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
     // ---- the ceiling still holds -------------------------------------------
     const stamps = childEvents.filter((event) => event.type === 'sandbox/mode').map((event) => event.data as { mode: string; reason: string })
     expect(stamps[0], 'the child must open under a delegation stamp').toMatchObject({ mode: 'read-only', reason: 'delegation' })
-    const decided = childEvents.filter((event) => event.type === 'approval/decided').map((event) => (event.data as { outcome: string }).outcome)
-    expect(decided.every((outcome) => outcome === 'rejected'), `an approval reached a client: ${decided.join(', ')}`).toBe(true)
+    // The pin itself, read off the child's own stamp. An `every` over its
+    // decisions used to stand here, and the verifier's allow filter leaves it
+    // no tool that can ask, so that list was always empty and the check could
+    // not fail even with the pin removed.
+    expect(childEvents.filter((event) => event.type === 'approval/policy').map((event) => event.data)).toEqual([{ policy: 'never', reason: 'delegation' }])
 
     // ---- the surface: a client attaches to the child by name ----------------
     // The only image in this run lives in the CHILD's log, so without this leg

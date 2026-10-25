@@ -47,13 +47,21 @@ function textOf(blocks: readonly ContentBlock[]): string {
   return contentText(blocks)
 }
 
+/**
+ * The wire wants an object; the log holds whatever the model sent. Arguments
+ * that are not a JSON object travel as the logged text under one key, so the
+ * model is shown the call it made (beside the INVALID_ARGS it got for it),
+ * never a call with no arguments: `{}` was what this sent until S20.5, where
+ * the DeepSeek and OpenAI wires already carried the raw string.
+ */
 function parseInput(args: string): unknown {
   try {
     const parsed: unknown = JSON.parse(args)
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
   } catch {
-    return {}
+    // Not JSON: the same projection.
   }
+  return { _unparsed_arguments: args }
 }
 
 function imageBlock(image: ResolvedImage): WireBlock {

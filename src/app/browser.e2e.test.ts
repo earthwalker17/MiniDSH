@@ -215,7 +215,9 @@ describe.skipIf(!KEY || testBrowser === undefined)('S20 live E2E: a frontend che
     await serve.request('initialize')
     const task = taskA(port)
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: task, agentOptions: { provider: 'deepseek', model: VISION_MODEL, maxSteps: 40 } })
-    await serve.waitFor(() => serve.events('turn/end', sessionId)[0], 'turn 1 to end', 900_000)
+    // Below the test's own 900 s, so this wait — and its stall diagnosis — fires
+    // before vitest's nameless timeout can.
+    await serve.waitFor(() => serve.events('turn/end', sessionId)[0], 'turn 1 to end', 840_000)
     const events = (await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId })).events
     await serve.shutdown()
 
@@ -314,6 +316,15 @@ describe.skipIf(!KEY || testBrowser === undefined)('S20 live E2E: a frontend che
     const positions = QUADRANT_COLOURS.map((colour) => verdict.indexOf(colour))
     expect(positions.every((at) => at >= 0), `verdict.txt was "${verdict.trim()}"; the test drew ${QUADRANT_COLOURS.join(', ')}`).toBe(true)
     expect(positions, `verdict.txt was "${verdict.trim()}"; the drawn order is ${QUADRANT_COLOURS.join(', ')}`).toEqual([...positions].toSorted((a, b) => a - b))
+    // And the parent wrote what the CHILD said — the verification arc's join.
+    // Without it a parent could decode the loopback PNG itself (a fetch through
+    // the shell or a job), delegate as a formality, and pass.
+    const childAnswer = childEvents
+      .filter((event) => event.type === 'assistant/message')
+      .map((event) => data<{ message: { content: { type: string; text?: string }[] } }>(event).message.content.filter((b) => b.type === 'text').map((b) => b.text ?? '').join(''))
+      .filter((text) => text.length > 0)
+      .at(-1)
+    expect((childAnswer ?? '').toLowerCase(), `the child said "${childAnswer ?? '(nothing)'}" but verdict.txt holds "${verdict.trim()}" — ${shape}`).toContain(verdict.trim())
 
     probe(['--- S20 browser arc B ---', shape, `child tool calls: ${childEvents.filter((e) => e.type === 'tool/call').map((e) => data<{ name: string }>(e).name).join(', ')}`, `verdict: ${verdict.trim()}`])
 

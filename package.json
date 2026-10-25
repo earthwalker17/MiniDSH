@@ -48,7 +48,7 @@
     "prepack": "node scripts/build.ts",
     "prepublishOnly": "pnpm check",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "oxlint src scripts skills",
+    "lint": "oxlint --deny-warnings src scripts skills",
     "check:deps": "node scripts/check-deps.ts",
     "check:docs": "node scripts/check-docs.ts",
     "test": "vitest run",

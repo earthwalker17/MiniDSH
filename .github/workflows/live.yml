@@ -24,6 +24,13 @@ on:
 permissions:
   contents: read
 
+# One dispatch at a time: two would spend the account twice, in parallel, on
+# the same commit. A second waits for the first instead of cancelling it — a
+# run half-way through its arcs is evidence, not noise.
+concurrency:
+  group: live-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   arcs:
     name: ${{ matrix.os }}
@@ -98,6 +105,9 @@ jobs:
           # The browser arc self-skips without a browser; both runner images
           # ship Chrome, so a skip here would be a green run that proved nothing.
           MINIDSH_EXPECT_BROWSER: '1'
+          # The keys this repository holds, as the suite's own guard
+          # (expect-keys.e2e.test.ts) reads them; the step above refuses earlier.
+          MINIDSH_EXPECT_KEYS: 'DEEPSEEK_API_KEY,ANTHROPIC_API_KEY'
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 

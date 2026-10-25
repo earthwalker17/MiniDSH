@@ -1,16 +1,19 @@
 /**
  * Source-shape gates. Three rules, one script:
  *
- * 1. Dependency direction, from docs/ARCHITECTURE.md §1: kernel imports nothing
- *    internal; core imports kernel + core (but nothing but app/test-support
- *    imports core/loop); capabilities import kernel + core (never each other or
- *    app); app imports anything; test-support imports anything. Static,
- *    dynamic (`import('…')`), side-effect and inline-type imports all count.
+ * 1. Dependency direction, from docs/ARCHITECTURE.md §1, as a whitelist per
+ *    layer: kernel imports only kernel; core imports kernel + core (but
+ *    nothing but app/test-support imports core/loop); a capability imports
+ *    kernel, core and its own directory — never another capability, app or
+ *    test-support; app and test-support import anything. Static, dynamic
+ *    (`import('…')`), side-effect and inline-type imports all count, and in
+ *    kernel, core and capabilities an `import()` whose target is not a string
+ *    literal is a violation in itself: no rule can see where it goes.
  *
  * 2. Payload discipline: outside tests and test-support, an event payload is
- *    read through `matches(event, KIND)`, never `event.data as {…}`. A cast
- *    hides a renamed field from the type checker; the S5.5 audit found the
- *    terminal printing `~NaNk` for exactly that reason.
+ *    read through `matches(event, KIND)`, never a type assertion on `.data`.
+ *    A cast hides a renamed field from the type checker; the S5.5 audit found
+ *    the terminal printing `~NaNk` for exactly that reason.
  *
  * 3. Core is acyclic at FILE level. Core packages depend on each other freely
  *    at package level (agent ↔ sandbox, session ↔ llm, …); what keeps that
@@ -21,13 +24,12 @@
  *    erased and do not count — an inline `{ type A }` specifier keeps the
  *    import and evaluates the module under Node's type stripping.
  *
- * Test files are exempt (they mount real compositions across layers).
+ * Test files are exempt (they mount real compositions across layers). The
+ * rules themselves live in `deps-graph.ts`, pure, and are tested there.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
-import { collectImports, findCycle } from './deps-graph.ts'
-
-type Layer = 'kernel' | 'core' | 'capabilities' | 'app' | 'test-support' | 'other'
+import { join, relative, resolve } from 'node:path'
+import { checkTree } from './deps-graph.ts'
 
 const SRC = resolve(import.meta.dirname, '..', 'src')
 
@@ -41,74 +43,11 @@ function walk(dir: string): string[] {
   return out
 }
 
-const posix = (path: string): string => path.replace(/\\/g, '/')
-
-function layerOf(relPath: string): Layer {
-  const top = posix(relPath).split('/')[0]
-  if (top === 'kernel' || top === 'core' || top === 'capabilities' || top === 'app' || top === 'test-support') return top
-  return 'other'
+const files = new Map<string, string>()
+for (const file of walk(SRC)) files.set(relative(SRC, file).replace(/\\/g, '/'), readFileSync(file, 'utf8'))
+const { violations, coreFiles } = checkTree(files)
+if (violations.length > 0) {
+  process.stderr.write(`source-shape violations:\n${violations.map((v) => `  ${v}`).join('\n')}\n`)
+  process.exit(1)
 }
-
-function capabilityOf(relPath: string): string | undefined {
-  const parts = posix(relPath).split('/')
-  return parts[0] === 'capabilities' ? parts[1] : undefined
-}
-
-function inLoop(relPath: string): boolean {
-  return posix(relPath).startsWith('core/loop/')
-}
-
-/** Any typed cast of a payload — object literal or named type; `as unknown` is the honest read of a possibly-forged one. */
-const PAYLOAD_CAST = /\.data as (?!unknown\b)/
-
-function main(): void {
-  const violations: string[] = []
-  /** File-level value-import graph over `src/core`, for the acyclicity rule. */
-  const coreGraph = new Map<string, Set<string>>()
-  for (const file of walk(SRC)) {
-    const relFile = posix(relative(SRC, file))
-    const importer = layerOf(relFile)
-    const source = readFileSync(file, 'utf8')
-    const fail = (why: string): void => void violations.push(`${relFile}: ${why}`)
-    if (importer === 'core') coreGraph.set(relFile, new Set())
-
-    const seen = new Set<string>()
-    for (const ref of collectImports(source)) {
-      const targetAbs = resolve(dirname(file), ref.spec)
-      const targetRel = posix(relative(SRC, targetAbs))
-      if (targetRel.startsWith('..')) continue // outside src
-      const target = layerOf(targetRel)
-      if (importer === 'core' && target === 'core' && !ref.typeOnly && targetRel !== relFile) coreGraph.get(relFile)!.add(targetRel)
-      if (seen.has(ref.spec)) continue
-      seen.add(ref.spec)
-      const why = (message: string): void => fail(`-> ${ref.spec}: ${message}`)
-
-      if (importer === 'kernel' && target !== 'kernel') why('kernel may import nothing internal')
-      if (importer === 'core') {
-        if (target !== 'kernel' && target !== 'core') why('core may import only kernel and core')
-        if (inLoop(targetRel) && !inLoop(relFile)) why('core/loop is swappable; only app/test-support may import it')
-      }
-      if (importer === 'capabilities') {
-        if (target === 'app') why('capabilities must not import app')
-        else if (target === 'capabilities' && capabilityOf(relFile) !== capabilityOf(targetRel)) why('capabilities must not import other capabilities')
-        else if (inLoop(targetRel)) why('core/loop is swappable; only app/test-support may import it')
-        else if (target === 'other') why('unexpected import target')
-      }
-    }
-
-    if (importer !== 'test-support' && PAYLOAD_CAST.test(source)) {
-      fail('reads an event payload through `event.data as <type>`; narrow with matches(event, KIND) so a renamed field is a type error')
-    }
-  }
-
-  const cycle = findCycle(coreGraph)
-  if (cycle) violations.push(`core is not acyclic at file level: ${cycle.join(' -> ')} (move the shared vocabulary below the service, into an events.ts/types.ts)`)
-
-  if (violations.length > 0) {
-    process.stderr.write(`source-shape violations:\n${violations.map((v) => `  ${v}`).join('\n')}\n`)
-    process.exit(1)
-  }
-  process.stdout.write(`check-deps: dependency direction, payload discipline and core acyclicity OK (${coreGraph.size} core files)\n`)
-}
-
-main()
+process.stdout.write(`check-deps: dependency direction, payload discipline and core acyclicity OK (${coreFiles} core files)\n`)

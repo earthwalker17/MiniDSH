@@ -10,11 +10,11 @@
  *                it in its own session and its answer reaches the parent
  *   the ceiling  the child opens under its parent's mode (`workspace-write`
  *                in the default composition: the row sets no narrower one) with
- *                approvals pinned `never`, `reason: 'delegation'`; on a host
- *                that cannot confine, a shell escalation it asks for is refused
- *                without anyone being asked (on one that can, it runs confined
- *                and asks for nothing), and a wire attempt to widen the child
- *                is refused too
+ *                approvals pinned `never`, `reason: 'delegation'`; its task
+ *                demands one escalated shell command, which on every host
+ *                reaches the approval seam and is refused by the pin without
+ *                anyone being asked, and a wire attempt to widen the child is
+ *                refused too
  *   the world    the parent then writes the file the child could not have
  *   replay       the parent's log replays keylessly
  *
@@ -27,7 +27,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import { effectiveSandboxMode } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { auditLines } from './present.ts'
 import { runTask } from './headless.ts'
@@ -76,9 +76,17 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
 
     // No --approve: an escalation would need a real answer, and none is coming.
     const serve = new ServeProcess(workspace, home, {})
+    // The child's task REQUIRES a consent: a named command, explicitly
+    // escalated. Reading files alone never reached the shell's escalation path —
+    // 0 asks in 6 of 6 S16.5 runs — so the refusal leg exercised nothing on
+    // any host. An escalation to `danger-full-access` is viable on every host
+    // (it needs no confinement), so it always reaches the approval seam, and
+    // the child's pinned `never` must refuse it without asking anyone.
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', {
       text:
-        'Use the subagent tool exactly once. Give it this task: "Read one.txt, two.txt and three.txt in the working directory and reply with the single line that contains the answer token, and nothing else." ' +
+        'Use the subagent tool exactly once. Give it this task, word for word: "First, use the shell tool to run the command `echo ESCALATION-PROBE` ' +
+        'with sandbox_permissions set to danger-full-access and justification set to \'the task requires it\' — exactly once, whatever happens. ' +
+        'Then read one.txt, two.txt and three.txt in the working directory and reply with the single line that contains the answer token, and nothing else." ' +
         'Then reply with only the token the subagent reported.',
     })
     await serve.waitForCompletedTurn(sessionId, 1)
@@ -104,14 +112,23 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     // The audit of the CHILD opens with the delegation, and of the PARENT names it.
     expect(auditLines(childEvents)[0]).toContain('(delegation')
     expect(auditLines(parentLog.events).some((line) => line.includes('delegated') && line.includes(childId))).toBe(true)
-    // Every approval the child asked for — if it asked at all — was refused
-    // without a client ever being consulted. `every` on an empty list is true,
-    // so the count is printed: a child that read its files with the editor
-    // never reached the shell, and this leg then exercised nothing (the
-    // refusal itself is pinned offline in subagent.test.ts).
-    const decided = childEvents.filter((event) => event.type === 'approval/decided').map((event) => (event.data as { outcome: string }).outcome)
-    expect(decided.every((outcome) => outcome === 'rejected')).toBe(true)
-    console.log(`[delegation arc] the child asked ${decided.length} time(s)${decided.length === 0 ? ': the refusal leg was not exercised this run' : `, all refused`}`)
+    // The escalation the task demanded reached the approval seam and was
+    // refused by the pin, without a client ever being consulted: the pinned
+    // `never` writes its ask and its refusal in one tick (core/approval), so
+    // every decision is the POLICY's, none a person's, and this client — which
+    // never answers in this arc — answered nothing. The count is required, not
+    // printed: `every` over nothing used to pass on every host.
+    const escalations = childEvents.filter(
+      (event) => event.type === 'tool/call' && /sandbox_permissions/.test((event.data as { arguments: string }).arguments),
+    )
+    const decided = childEvents.filter((event) => event.type === 'approval/decided').map((event) => event.data as { outcome: string; decidedBy?: string })
+    expect(
+      decided.length,
+      `the child made ${escalations.length} escalated shell call(s) and reached no approval: the model did not follow the task, so the refusal leg did not run`,
+    ).toBeGreaterThan(0)
+    expect(decided.map((decision) => decision.outcome)).toEqual(decided.map(() => 'rejected'))
+    expect(decided.map((decision) => decision.decidedBy), 'a delegated child\'s approval was decided by someone other than its pin').toEqual(decided.map(() => 'policy'))
+    console.log(`[delegation arc] the child escalated ${escalations.length} time(s); ${decided.length} decision(s), all refused by the pin`)
 
     // ---- a wire attempt to widen the child is refused ----------------------
     // The child is disposed with the call, so a resumed one is the only way to
@@ -182,7 +199,8 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
       {
         task: 'Use the subagent tool exactly once.',
         cwd: replayWorkspace,
-        model: 'deepseek-v4-flash',
+        // The route the recording ran on, never a literal (A8-11).
+        ...recordedRoute(parentTurnOne),
         approve: true,
         sessionsRoot: tempDir('minidsh-e2e6d-replay-'),
         // What `serve` mounted: the recorded requests carry its skill list.

@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
@@ -86,13 +86,22 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
     const workspace = tempDir('minidsh-jobs-ws-')
     const home = tempDir('minidsh-jobs-home-')
     const marker = `DONE-${Math.random().toString(36).slice(2, 10)}`
-    writeFileSync(join(workspace, 'slow.cjs'), `setTimeout(() => console.log(${JSON.stringify(marker)}), 6000)\n`, 'utf8')
+    // The job ends only once the TEST says so, after turn 1 has ended — as
+    // replay-jobs.test.ts holds its job on a `go` file. A six-second timer left
+    // the premise to provider latency: a turn-1 second request slower than the
+    // job took the waking notice inside turn 1, and turn 2 never came (A1-6).
+    writeFileSync(
+      join(workspace, 'slow.cjs'),
+      `const { existsSync } = require('node:fs')\n` +
+        `const poll = setInterval(() => { if (existsSync('go')) { clearInterval(poll); setTimeout(() => console.log(${JSON.stringify(marker)}), 500) } }, 100)\n`,
+      'utf8',
+    )
 
     const serve = new ServeProcess(workspace, home, SERVE)
     await serve.request('initialize')
     const prompt =
       'Use the job_start tool to run this command in the background: node slow.cjs\n' +
-      'It prints one line after about six seconds. Do not wait for it and do not poll it: reply with the single word started and end your turn.\n' +
+      'It prints one line some seconds from now. Do not wait for it and do not poll it: reply with the single word started and end your turn.\n' +
       'Later, when you are notified that the job has ended, read its output with job_output, then use str_replace_editor with the create command ' +
       'to write result.txt in the workspace containing exactly the line the job printed, and nothing else.'
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: prompt })
@@ -103,6 +112,9 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
       `tool calls ${JSON.stringify(serve.events('tool/call', sessionId).map((event) => [data<{ name: string }>(event).name, data<{ arguments: string }>(event).arguments.slice(0, 120)]))}; ` +
       `job facts ${JSON.stringify(serve.frames.filter((frame) => frame.sessionId === sessionId && frame.event.type.startsWith('job/')).map((frame) => frame.event.data))}`
     expect(serve.events('job/start', sessionId), `turn 1 started no job: ${shape()}`).toHaveLength(1)
+    // Turn 1 is over, so the job's end can only land while the agent is idle.
+    expect(serve.events('job/end', sessionId), `the job ended inside turn 1, before it was released: ${shape()}`).toHaveLength(0)
+    writeFileSync(join(workspace, 'go'), '')
     try {
       await serve.waitFor(() => serve.events('job/end', sessionId)[0], 'the job to end', 120_000)
       await serve.waitForCompletedTurn(sessionId, 2)
@@ -136,7 +148,8 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
       {
         task: prompt,
         cwd: tempDir('minidsh-jobs-replay-ws-'),
-        model: 'deepseek-v4-flash',
+        // The route the recording ran on, never a literal (A8-11).
+        ...recordedRoute(events),
         sessionsRoot: tempDir('minidsh-jobs-replay-'),
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),

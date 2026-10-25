@@ -66,6 +66,12 @@ export class AnthropicTranslator {
       case 'content_block_start': {
         const wireIndex = data.index as number
         const start = data.content_block as { type: string; id?: string; name?: string; text?: string; thinking?: string; data?: string }
+        // A call with no id cannot be answered and one with no name cannot be
+        // dispatched: refused here, as llm-openai refuses the same, rather than
+        // becoming a call whose id and name are both the empty string.
+        if (start.type === 'tool_use' && (typeof start.id !== 'string' || start.id.length === 0 || typeof start.name !== 'string' || start.name.length === 0)) {
+          throw new LlmError('MALFORMED_RESPONSE', 'Anthropic opened a tool_use block without an id or a name')
+        }
         const block = this.open(wireIndex, start)
         out.push({ type: 'block-start', index: block.index, blockType: block.type })
         // The assembler learns a tool call's identity from its first delta.

@@ -1,5 +1,6 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
 import { isHeaderSafe } from '../../core/credentials/index.ts'
+import { readErrorBody, redactLlmError } from '../../core/llm/wire.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
 import { AnthropicTranslator, ANTHROPIC_PROVIDER, errorCode } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
@@ -14,21 +15,37 @@ const IDLE_TIMEOUT_MS = 300_000
 // No version in it, for the reason the sibling adapter gives: one version string, in package.json.
 const USER_AGENT = 'minidsh (+https://github.com/earthwalker17/MiniDSH)'
 
+/** A `thinking.type` the API accepts, as `capabilities.thinking.types` lists them. */
+export type ThinkingType = 'enabled' | 'adaptive' | 'disabled'
+
 /**
- * How a model takes its thinking configuration. `adaptive` models (the 5
- * family, Opus 4.7+) accept `output_config.effort` and refuse manual budgets;
- * `manual` models (Haiku 4.5 and older) accept `thinking: {enabled,
- * budget_tokens}` and know no effort. Neither is guessed at request time:
- * the catalog says, and an unlisted id gets the current default (`adaptive`).
+ * One model's facts. The first five fields are the `GET /v1/models` listing's
+ * own (`max_input_tokens`, `max_tokens`, `capabilities.effort`,
+ * `capabilities.thinking.types`, `capabilities.image_input`), so the drift
+ * probe compares them one for one (`catalog.e2e.test.ts`). The effort
+ * vocabulary MiniDSH offers is DERIVED from them, never listed beside them:
+ * `off` exactly where `disabled` is accepted, the API's own levels where the
+ * model takes an effort, and the budget names where it takes neither.
  */
-interface CatalogModel extends ModelInfo {
+export interface CatalogModel extends ModelInfo {
   readonly contextWindow: number
   readonly maxOutputTokens: number
-  readonly thinking: 'adaptive' | 'manual'
-  /** Effort ids this model accepts; `off` means thinking disabled. */
-  readonly efforts: readonly string[]
+  /** The levels `output_config.effort` takes; empty where the model takes no effort. */
+  readonly effortLevels: readonly string[]
+  /** `adaptive` means effort steers thinking; without it a model thinks only on a budget (`enabled`). */
+  readonly thinkingTypes: readonly ThinkingType[]
+  /**
+   * Whether the model thinks when the request sends no `thinking` field — the
+   * one fact here the listing does not give, so it is MEASURED, paid: Opus 5
+   * at effort `high` with no field thought; Opus 4.8 at `max` with no field
+   * used 0 thinking tokens, and 2,723 with `{type:'adaptive'}`. Where it is
+   * false the adapter sends `adaptive` beside a named effort, or the logged
+   * effort would be served without reasoning.
+   */
+  readonly thinksUnasked: boolean
+  /** What the model serves when the request names no effort, in MiniDSH's vocabulary (`off`: no thinking). */
   readonly defaultEffort?: string
-  /** Whether `temperature` is honoured; the 5 family returns 400 for any non-default value. */
+  /** Whether `temperature` is honoured; the 5 family and 4.7+ return 400 for any non-default value. */
   readonly sampling: boolean
   /**
    * What the model takes as input. A per-model fact, not a constant: the
@@ -41,86 +58,112 @@ interface CatalogModel extends ModelInfo {
 }
 
 const TEXT_AND_IMAGE: readonly ModelModality[] = ['text', 'image']
-const ADAPTIVE_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-/** Budgets for a manual-thinking model's effort ids; each must stay below `max_tokens`. */
-const MANUAL_BUDGETS: Readonly<Record<string, number>> = { low: 2048, high: 6144, max: 24_576 }
-
-/** A dated snapshot answers to its undated alias: `claude-haiku-4-5` IS `claude-haiku-4-5-20251001`. */
-const ALIASES: Readonly<Record<string, string>> = { 'claude-haiku-4-5': 'claude-haiku-4-5-20251001' }
+const FIVE_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+const FOUR_LEVELS = ['low', 'medium', 'high', 'max'] as const
+const ADAPTIVE_ONLY: readonly ThinkingType[] = ['adaptive']
+const ADAPTIVE_OR_OFF: readonly ThinkingType[] = ['adaptive', 'disabled']
+const BUDGET_OR_OFF: readonly ThinkingType[] = ['enabled', 'disabled']
+/** Budgets for a budget-thinking model's effort ids; each must stay below `max_tokens`. */
+const MANUAL_BUDGETS: Readonly<Record<string, number>> = { low: 2048, medium: 4096, high: 6144, max: 24_576 }
+/** The effort ids of a budget-thinking model that takes no effort of its own (Haiku and Sonnet 4.5). */
+const BUDGET_EFFORTS = ['low', 'high', 'max'] as const
 
 /**
- * Verified against the live `GET /v1/models` on 2026-09-08, reading each
- * model's own `max_input_tokens`, `max_tokens` and `capabilities.effort`.
+ * Verified against the live `GET /v1/models` on 2026-10-25, reading each
+ * model's own `max_input_tokens`, `max_tokens`, `capabilities.effort`,
+ * `.thinking.types` and `.image_input`; the default efforts are the API
+ * reference's (high, except `medium` on Opus 5.5 and Haiku 5.5). Other
+ * values are MEASURED provider answers, not doc readings: `temperature` is
+ * "deprecated for this model" on 4-7 and 4-8 and accepted by 4-6 and the 4.5
+ * rows; `thinking.type.disabled` "is not supported" on Opus 5.5.
  */
 const CATALOG: readonly CatalogModel[] = [
-  // Fable 5 refuses `thinking.type: "disabled"`, so `off` is not in its set.
-  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-fable-5', name: 'Claude Fable 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'off'), defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'medium', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: true, defaultEffort: 'medium', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-fable-5', name: 'Claude Fable 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   // The 4 family, which one prefix could never have expressed: its members
-  // disagree about the window, the output cap, the effort set AND whether they
-  // take a temperature. Left unlisted they all took the flat 200K/8192 default
-  // — a window wrong by five times, which is what a compaction budget is
-  // measured against, and a cap that refuses a legal `maxTokens` before any
-  // I/O. Every value below is a MEASURED provider answer, not a doc reading:
-  // `xhigh` on 4-6 is a 400 naming "high, low, max, medium"; `max` on 4-5 is a
-  // 400 naming "high, low, medium"; `temperature` is "deprecated for this
-  // model" on 4-7 and 4-8 and accepted by 4-6 and 4-5; the caps are the two
-  // 400s that name 128000 and 64000.
-  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'xhigh'), defaultEffort: 'high', sampling: true, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 1_000_000, maxOutputTokens: 128_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'xhigh'), defaultEffort: 'high', sampling: true, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS.filter((effort) => effort !== 'xhigh' && effort !== 'max'), defaultEffort: 'high', sampling: true, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', contextWindow: 1_000_000, maxOutputTokens: 64_000, thinking: 'manual', efforts: ['off', ...Object.keys(MANUAL_BUDGETS)], defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, thinking: 'manual', efforts: ['off', ...Object.keys(MANUAL_BUDGETS)], defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
+  // disagree about the window, the output cap, the effort set, whether they
+  // take a temperature AND whether they think unasked. None of 4.6–4.8 does,
+  // so each serves `off` when nothing is named.
+  { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: false, defaultEffort: 'off', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: false, defaultEffort: 'off', sampling: false, modalities: TEXT_AND_IMAGE },
+  // 4.6 still accepts a budget (`enabled`, deprecated); adaptive is how it is driven here.
+  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FOUR_LEVELS, thinkingTypes: ['enabled', 'adaptive', 'disabled'], thinksUnasked: false, defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FOUR_LEVELS, thinkingTypes: ['enabled', 'adaptive', 'disabled'], thinksUnasked: false, defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
+  // Opus 4.5 has an effort but no adaptive thinking: it thinks only on a
+  // budget, and its effort sets the token spend beside it.
+  { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, effortLevels: ['low', 'medium', 'high'], thinkingTypes: BUDGET_OR_OFF, thinksUnasked: false, defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
+  // 200K, not 1M: the larger window needs a beta header MiniDSH does not send.
+  { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, effortLevels: [], thinkingTypes: BUDGET_OR_OFF, thinksUnasked: false, defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200_000, maxOutputTokens: 64_000, effortLevels: [], thinkingTypes: BUDGET_OR_OFF, thinksUnasked: false, defaultEffort: 'off', sampling: true, modalities: TEXT_AND_IMAGE },
 ]
 
 /**
- * Model families, matched by prefix, so an id this table has not caught up with
- * inherits the FAMILY's facts rather than a flat default.
+ * An id's MINOR version: `claude-<family>-<major>[-<minor>]`, any 8-digit date
+ * snapshot dropped. `claude-opus-4-5-20251101`, `claude-opus-4-5` and
+ * `claude-opus-4-5-20990101` share one; `claude-opus-5-5` and `claude-opus-5`
+ * do not.
  *
- * The catalog demonstrably lags: it was verified three days before
- * `claude-fable-5-1` shipped, and an exact-id miss handed that model a 200K
- * window — wrong by five times — an output cap of 8192 against its real 128K,
- * and an effort set including `off`, which the Fable family refuses with a 400.
- * Adding one row fixes one id; matching the family fixes the class, and the next
- * dated snapshot of a known family lands correctly on its own.
+ * Family granularity was the S19 rule and it rotted on the first new
+ * generation: `claude-opus-5-5` inherited Opus 5's row, including `off`,
+ * which it answers with a 400. Members of one family disagree about exactly
+ * the facts that matter — the window, the effort set, whether thinking can be
+ * disabled — so only the same minor version, or a dated snapshot of it, may
+ * borrow a row.
  */
-const FAMILIES: readonly { readonly prefix: string; readonly like: string }[] = [
-  { prefix: 'claude-fable-5', like: 'claude-fable-5' },
-  { prefix: 'claude-opus-5', like: 'claude-opus-5' },
-  { prefix: 'claude-sonnet-5', like: 'claude-sonnet-5' },
-  // The 4 family is matched at MINOR-version granularity, not family
-  // granularity, because its members disagree about the window and the effort
-  // set — a `claude-opus-4-` prefix would hand `opus-4-5`'s 200K to
-  // `opus-4-8`'s 1M. A dated snapshot still lands on its own minor version.
-  { prefix: 'claude-opus-4-8', like: 'claude-opus-4-8' },
-  { prefix: 'claude-opus-4-7', like: 'claude-opus-4-7' },
-  { prefix: 'claude-opus-4-6', like: 'claude-opus-4-6' },
-  { prefix: 'claude-sonnet-4-6', like: 'claude-sonnet-4-6' },
-  { prefix: 'claude-opus-4-5', like: 'claude-opus-4-5-20251101' },
-  { prefix: 'claude-sonnet-4-5', like: 'claude-sonnet-4-5-20250929' },
-  { prefix: 'claude-haiku-4-5', like: 'claude-haiku-4-5-20251001' },
-]
+function versionKey(id: string): string | undefined {
+  const match = /^(claude-[a-z]+-\d+)(-\d{1,2})?(?:-\d{8})?$/u.exec(id)
+  return match ? `${match[1]}${match[2] ?? ''}` : undefined
+}
+
+/** The catalogued row an id answers to — exact, or the same minor version — or `undefined` when none does. */
+export function catalogRowFor(id: string): CatalogModel | undefined {
+  const exact = CATALOG.find((entry) => entry.id === id)
+  if (exact) return exact
+  const key = versionKey(id)
+  const known = key === undefined ? undefined : CATALOG.find((entry) => versionKey(entry.id) === key)
+  return known ? { ...known, id, name: id } : undefined
+}
+
+/** The snapshot, for the live drift probe that holds it to `GET /v1/models`. */
+export function anthropicCatalog(): readonly CatalogModel[] {
+  return CATALOG
+}
 
 /**
- * An id no family claims: a conservative window, the current thinking shape, no
- * sampling — and images, deliberately.
+ * An id no row answers to: the current generation's thinking shape, no
+ * sampling, a conservative window — and no output cap of ours, and images.
  *
- * The permissive side is right here and the choice is asymmetric. Every model
- * Anthropic currently serves accepts images, so a wrong ALLOW costs one provider
- * 400 that names itself; a wrong REFUSE makes a capability the model has
- * unreachable, with no override, on any id this table has not caught up with.
- * The sibling DeepSeek adapter makes the opposite call for the opposite reason:
+ * The cap is the sibling adapters' rule: one would be a guess, and a guessed
+ * cap refusing what the provider serves is worse than none — the old 8192
+ * refused `maxTokens: 16000` before any I/O for models that serve 128K. The
+ * deployment default applies and the provider judges. Images and `off` are
+ * permissive for the reason the asymmetry gives: every model Anthropic serves
+ * takes images, so a wrong ALLOW costs one provider 400 that names itself,
+ * while a wrong REFUSE makes a capability unreachable with no override. The
+ * sibling DeepSeek adapter makes the opposite call for the opposite reason:
  * there, one known id has vision and an unknown one almost certainly does not.
  */
 function unlisted(id: string): CatalogModel {
-  const family = FAMILIES.find((entry) => id.startsWith(entry.prefix))
-  const known = family ? CATALOG.find((entry) => entry.id === family.like) : undefined
-  if (known) return { ...known, id, name: id }
-  return { id, name: id, contextWindow: 200_000, maxOutputTokens: 8192, thinking: 'adaptive', efforts: ADAPTIVE_EFFORTS, sampling: false, modalities: TEXT_AND_IMAGE }
+  return { id, name: id, contextWindow: 200_000, maxOutputTokens: Number.POSITIVE_INFINITY, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: true, sampling: false, modalities: TEXT_AND_IMAGE }
+}
+
+const adaptive = (entry: CatalogModel): boolean => entry.thinkingTypes.includes('adaptive')
+
+/** MiniDSH's effort vocabulary for a row, derived from what the listing says it accepts. */
+function effortsOf(entry: CatalogModel): readonly string[] {
+  const levels = adaptive(entry) || entry.effortLevels.length > 0 ? entry.effortLevels : BUDGET_EFFORTS
+  return entry.thinkingTypes.includes('disabled') ? ['off', ...levels] : [...levels]
+}
+
+/** Whether a request at `effort` runs with thinking on. */
+function thinks(entry: CatalogModel, effort: string | undefined): boolean {
+  if (effort === undefined) return entry.thinksUnasked
+  return effort !== 'off'
 }
 
 export interface AnthropicAdapterOptions {
@@ -154,12 +197,11 @@ export class AnthropicAdapter implements LlmAdapter {
   }
 
   private catalog(model: string): CatalogModel {
-    const id = ALIASES[model] ?? model
-    return CATALOG.find((entry) => entry.id === id) ?? unlisted(model)
+    return catalogRowFor(model) ?? unlisted(model)
   }
 
   /**
-   * The output cap for a request. A named effort on a manual-thinking model
+   * The output cap for a request. A named effort on a budget-thinking model
    * needs room for its budget AND an answer, so a caller who named an effort
    * but no cap gets one large enough to honour it — refusing here would make
    * an effort this adapter advertises unusable at its own default.
@@ -167,7 +209,7 @@ export class AnthropicAdapter implements LlmAdapter {
   private capFor(entry: CatalogModel, request: LlmRequest): number {
     if (request.maxTokens !== undefined) return request.maxTokens
     const base = Math.min(this.options.defaultMaxTokens, entry.maxOutputTokens)
-    const budget = entry.thinking === 'manual' && request.reasoningEffort !== undefined ? MANUAL_BUDGETS[request.reasoningEffort] : undefined
+    const budget = !adaptive(entry) && request.reasoningEffort !== undefined ? MANUAL_BUDGETS[request.reasoningEffort] : undefined
     return budget === undefined ? base : Math.min(entry.maxOutputTokens, Math.max(base, budget + base))
   }
 
@@ -176,7 +218,7 @@ export class AnthropicAdapter implements LlmAdapter {
     return {
       contextWindow: entry.contextWindow,
       defaultMaxTokens: Math.min(this.options.defaultMaxTokens, entry.maxOutputTokens),
-      reasoning: { efforts: entry.efforts, ...(entry.defaultEffort === undefined ? {} : { defaultEffort: entry.defaultEffort }) },
+      reasoning: { efforts: effortsOf(entry), ...(entry.defaultEffort === undefined ? {} : { defaultEffort: entry.defaultEffort }) },
       inputModalities: entry.modalities,
     }
   }
@@ -201,11 +243,20 @@ export class AnthropicAdapter implements LlmAdapter {
       throw new LlmError('UNSUPPORTED_OPTION', `Anthropic model "${request.model}" caps output at ${entry.maxOutputTokens} tokens, but the request asks for ${request.maxTokens}`)
     }
     const effort = request.reasoningEffort
-    if (effort === undefined) return
-    if (!entry.efforts.includes(effort)) {
-      throw new LlmError('UNSUPPORTED_REASONING_EFFORT', `Anthropic model "${request.model}" does not support reasoning effort "${effort}" (one of ${entry.efforts.join(', ')})`)
+    const efforts = effortsOf(entry)
+    if (effort !== undefined && !efforts.includes(effort)) {
+      throw new LlmError('UNSUPPORTED_REASONING_EFFORT', `Anthropic model "${request.model}" does not support reasoning effort "${effort}" (one of ${efforts.join(', ')})`)
     }
-    if (entry.thinking === 'manual' && effort !== 'off') {
+    // Measured on Haiku 4.5 with a 1024 budget: 400 "`temperature` may only be
+    // set to 1 when thinking is enabled". The rule names thinking, not its
+    // shape, so it holds for the adaptive field this adapter adds on 4.6 too.
+    if (request.temperature !== undefined && thinks(entry, effort)) {
+      throw new LlmError(
+        'UNSUPPORTED_OPTION',
+        `Anthropic model "${request.model}" refuses a temperature while thinking, which reasoning effort "${effort ?? entry.defaultEffort ?? 'default'}" turns on: set the effort to "off", or route the session to a model that honours a temperature (a recorded temperature cannot be cleared)`,
+      )
+    }
+    if (!adaptive(entry) && effort !== undefined && effort !== 'off') {
       const budget = MANUAL_BUDGETS[effort]!
       // Only an EXPLICIT cap can be too small: `capFor` sizes an implicit one to
       // fit. Refuse rather than shrink the budget the caller asked for.
@@ -229,15 +280,6 @@ export class AnthropicAdapter implements LlmAdapter {
     this.validateOptions(request)
     const entry = this.catalog(request.model)
     const maxTokens = this.capFor(entry, request)
-    const effort = request.reasoningEffort
-    let thinking: Record<string, unknown> = {}
-    if (effort !== undefined) {
-      if (entry.thinking === 'adaptive') {
-        thinking = effort === 'off' ? { thinking: { type: 'disabled' } } : { output_config: { effort } }
-      } else if (effort !== 'off') {
-        thinking = { thinking: { type: 'enabled', budget_tokens: MANUAL_BUDGETS[effort]! } }
-      }
-    }
     const tools = serializeTools(request.tools)
     return {
       model: request.model,
@@ -250,7 +292,7 @@ export class AnthropicAdapter implements LlmAdapter {
       messages: serializeMessages(request.messages, images),
       ...(tools ? { tools } : {}),
       ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
-      ...thinking,
+      ...thinkingBody(entry, request.reasoningEffort),
     }
   }
 
@@ -289,7 +331,7 @@ export class AnthropicAdapter implements LlmAdapter {
     let response: Response
     try {
       resetIdle()
-      response = await fetch(`${this.options.baseURL}/v1/messages`, {
+      response = await fetch(`${this.options.baseURL.replace(/\/+$/, '')}/v1/messages`, {
         method: 'POST',
         headers: {
           'x-api-key': apiKey,
@@ -303,15 +345,17 @@ export class AnthropicAdapter implements LlmAdapter {
       })
     } catch (error) {
       if (timer) clearTimeout(timer)
-      throw mapAbort(error, request.signal, idle.signal)
+      throw redactLlmError(mapAbort(error, request.signal, idle.signal), apiKey)
     }
 
     if (!response.ok) {
       // The watchdog stays armed through the error body: one that stalls after
-      // its headers would otherwise hang a run nobody can cancel.
-      const text = await response.text().catch(() => '')
+      // its headers would otherwise hang a run nobody can cancel. Read only to
+      // its cap — the status classifies — and redacted, as every error is once
+      // the key is resolved: a proxy that echoes it would put it in the log.
+      const text = await readErrorBody(response)
       if (timer) clearTimeout(timer)
-      throw classifyHttp(response.status, text, response.headers)
+      throw redactLlmError(classifyHttp(response.status, text, response.headers), apiKey)
     }
     if (!response.body) {
       if (timer) clearTimeout(timer)
@@ -325,13 +369,31 @@ export class AnthropicAdapter implements LlmAdapter {
         if (translator.complete) break
       }
     } catch (error) {
-      throw mapAbort(error, request.signal, idle.signal)
+      throw redactLlmError(mapAbort(error, request.signal, idle.signal), apiKey)
     } finally {
       if (timer) clearTimeout(timer)
     }
     if (!translator.complete) throw new LlmError('STREAM_CLOSED', 'Anthropic stream ended without message_stop')
     for (const chunk of translator.finalize()) yield chunk
   }
+}
+
+/**
+ * The thinking fields for an effort, per the row:
+ * - `off` is `{type:'disabled'}` on an adaptive model, and nothing on a budget
+ *   model (where nothing already means no thinking);
+ * - an adaptive model gets `output_config.effort`, plus `{type:'adaptive'}`
+ *   when it does not think unasked (4.6–4.8: the effort alone was served with
+ *   0 thinking tokens);
+ * - a budget model gets `{type:'enabled', budget_tokens}`, plus its own effort
+ *   where it has one (Opus 4.5).
+ * No effort named sends nothing: the row's `defaultEffort` says what that serves.
+ */
+function thinkingBody(entry: CatalogModel, effort: string | undefined): Record<string, unknown> {
+  if (effort === undefined) return {}
+  if (effort === 'off') return adaptive(entry) ? { thinking: { type: 'disabled' } } : {}
+  if (adaptive(entry)) return { ...(entry.thinksUnasked ? {} : { thinking: { type: 'adaptive' } }), output_config: { effort } }
+  return { thinking: { type: 'enabled', budget_tokens: MANUAL_BUDGETS[effort]! }, ...(entry.effortLevels.includes(effort) ? { output_config: { effort } } : {}) }
 }
 
 function mapAbort(error: unknown, caller: AbortSignal | undefined, idle: AbortSignal): LlmError {

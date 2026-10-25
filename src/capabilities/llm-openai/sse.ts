@@ -1,76 +1,26 @@
 import { LlmError } from '../../core/llm/index.ts'
+import { parseSseEvents, type SseEvent } from '../../core/llm/wire.ts'
 
 /**
  * One named server-sent event. The Responses API names every event and ends
  * the stream with a terminal lifecycle event (`response.completed`,
- * `.incomplete`, `.failed`): measured 2026-10-16, there is no `[DONE]`.
+ * `.incomplete`, `.failed`): measured 2026-10-16, there is no `[DONE]`. An
+ * event flushed at end of body without its blank line carries `tail`.
  */
-export interface SseEvent {
-  readonly event: string
-  readonly data: string
-  /** Flushed at end of body without its blank line: complete, or a cut. The reader decides which. */
-  readonly tail?: true
-}
+export type { SseEvent }
 
 /**
- * Parses a `text/event-stream` body into named events, tolerating CRLF and
- * lone-CR line ends as the SSE grammar allows. The stream is over when the
- * body ends; whether it ended PROPERLY is the translator's call, because only
- * it knows what a terminal event is. A `data: [DONE]` sentinel, should one
- * ever arrive, is skipped rather than handed on as JSON that is not.
+ * Parses a `text/event-stream` body into named events. Framing (CRLF and
+ * lone-CR line ends, the per-event cap) is the shared `core/llm/wire.ts`, which
+ * began as this parser. The stream is over when the body ends; whether it
+ * ended PROPERLY is the translator's call, because only it knows what a
+ * terminal event is. A `data: [DONE]` sentinel, should one ever arrive, is
+ * skipped rather than handed on as JSON that is not.
  */
 export async function* parseNamedSse(body: ReadableStream<Uint8Array>, onActivity: () => void): AsyncIterable<SseEvent> {
-  const reader = body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  // A CR that ends one read may be the first half of a CRLF split across two:
-  // normalizing it alone would turn one line end into two, and two line ends
-  // are an event boundary.
-  let carry = ''
-  const append = (text: string): void => {
-    let next = carry + text
-    carry = ''
-    if (next.endsWith('\r')) {
-      carry = '\r'
-      next = next.slice(0, -1)
-    }
-    buffer += next.replace(/\r\n?/g, '\n')
+  for await (const event of parseSseEvents(body, onActivity, { provider: 'OpenAI' })) {
+    if (event.data !== '[DONE]') yield event
   }
-  try {
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) break
-      onActivity()
-      append(decoder.decode(value, { stream: true }))
-      let boundary = buffer.indexOf('\n\n')
-      while (boundary >= 0) {
-        const parsed = eventOf(buffer.slice(0, boundary))
-        buffer = buffer.slice(boundary + 2)
-        if (parsed) yield parsed
-        boundary = buffer.indexOf('\n\n')
-      }
-    }
-    append(decoder.decode())
-    buffer += carry.replace(/\r/g, '\n')
-    for (const raw of buffer.split('\n\n')) {
-      const parsed = eventOf(raw)
-      if (parsed) yield { ...parsed, tail: true }
-    }
-  } finally {
-    reader.cancel().catch(() => {})
-  }
-}
-
-function eventOf(raw: string): SseEvent | undefined {
-  let event = 'message'
-  const data: string[] = []
-  for (const line of raw.split('\n')) {
-    if (line.startsWith('event:')) event = line.slice(6).trim()
-    else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''))
-  }
-  if (data.length === 0) return undefined
-  const joined = data.join('\n')
-  return joined === '[DONE]' ? undefined : { event, data: joined }
 }
 
 /** Parses one event's data as a wire object. */

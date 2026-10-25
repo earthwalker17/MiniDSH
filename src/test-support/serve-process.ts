@@ -13,9 +13,21 @@ export const SERVE_BIN = join(import.meta.dirname, '..', '..', 'bin', 'minidsh.j
 
 const spawned: ChildProcess[] = []
 
+/**
+ * How a child ended, or `undefined` while it runs. BOTH fields: on Linux and
+ * macOS a child killed by a signal (the OOM killer, a SIGSEGV) has `exitCode`
+ * null and `signalCode` set, and a check of the exit code alone read it as
+ * alive — a wait then sat out its whole deadline and said "timed out".
+ */
+export function endOf(child: Pick<ChildProcess, 'exitCode' | 'signalCode'>): string | undefined {
+  if (child.signalCode !== null) return `signal ${child.signalCode}`
+  if (child.exitCode !== null) return `code ${child.exitCode}`
+  return undefined
+}
+
 /** Kills any serve child still running (call from `afterAll`). */
 export function killSpawnedServes(): void {
-  for (const child of spawned) if (child.exitCode === null) child.kill('SIGKILL')
+  for (const child of spawned) if (endOf(child) === undefined) child.kill('SIGKILL')
   spawned.length = 0
 }
 
@@ -147,7 +159,8 @@ export class ServeProcess {
     for (;;) {
       const value = pick()
       if (value !== undefined) return value
-      if (this.child.exitCode !== null) throw new Error(`serve exited while waiting for ${what}\n${this.describeStall()}\nstderr: ${this.stderr}`)
+      const ended = endOf(this.child)
+      if (ended !== undefined) throw new Error(`serve exited (${ended}) while waiting for ${what}\n${this.describeStall()}\nstderr: ${this.stderr}`)
       if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}\n${this.describeStall()}\nstderr: ${this.stderr}`)
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
@@ -194,11 +207,10 @@ export class ServeProcess {
     this.child.stdin!.end()
     const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000))
     await Promise.race([this.exited, timeout])
-    if (this.child.exitCode === null) this.child.kill('SIGKILL')
+    if (endOf(this.child) === undefined) this.child.kill('SIGKILL')
   }
 }
 
-/** The bytes of the valid line prefix (through the last newline). */
 /**
  * `minidsh sessions <verify|inspect|show> <id> [...]` in a SEPARATE process
  * over `home`'s store: a reader that is not the runtime that wrote the log,
@@ -216,6 +228,7 @@ export function coldRead(home: string, argv: readonly string[]): { code: number 
   return { code: result.status, out: result.stdout, err: result.stderr, ...(json === undefined ? {} : { json }) }
 }
 
+/** The bytes of the valid line prefix (through the last newline). */
 export function validPrefix(file: string): Buffer {
   const bytes = readFileSync(file)
   const lastNewline = bytes.lastIndexOf(0x0a)

@@ -41,8 +41,9 @@
  * ever runs when the delegating call's result is served.
  */
 import type { Context, Disposer } from '../kernel/index.ts'
-import { AGENT_OPTIONS, AGENTS, INBOX_SPLICED } from '../core/agent/index.ts'
-import { JOB_START, noticeJobId } from '../core/jobs/events.ts'
+import { AGENT_OPTIONS, AGENTS, INBOX_SPLICED, SUBAGENT_END } from '../core/agent/index.ts'
+import { COMPACTION_END } from '../core/compaction/events.ts'
+import { JOB_END, JOB_START, noticeJobId } from '../core/jobs/events.ts'
 import { restoreMessage } from '../core/llm/message.ts'
 import type { Message } from '../core/llm/types.ts'
 import { LLM, type LlmAdapter, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../core/llm/index.ts'
@@ -178,7 +179,8 @@ export function auxCallChunks(record: AuxCallRecord): StreamChunk[] {
   if (text.length > 0) chunks.push({ type: 'text-delta', index: 0, text })
   chunks.push({ type: 'block-end', index: 0, block: { type: 'text', text } })
   if (record.usage) chunks.push({ type: 'usage', usage: record.usage })
-  chunks.push({ type: 'finish', reason: { kind: 'stop' } })
+  // A cut answer replays as one, so its consumer declines it again.
+  chunks.push({ type: 'finish', reason: record.outcome.truncated ? { kind: 'max-tokens' } : { kind: 'stop' } })
   return chunks
 }
 
@@ -234,6 +236,37 @@ export function modalitiesIn(events: readonly EventEnvelope[]): Map<string, read
     }
   }
   return modalities
+}
+
+/** The adapters' common vocabulary, always advertised: what a replay serves when the log names no effort. */
+const BASE_EFFORTS = ['off', 'low', 'high', 'max'] as const
+
+/**
+ * Every effort the log ran at, after the common ones. A fixed set could not
+ * advertise a recording made at `medium`, `xhigh` or `minimal` (the OpenAI and
+ * Anthropic vocabularies), so a replay would describe a route the recording
+ * never had.
+ */
+export function effortsIn(events: readonly EventEnvelope[]): readonly string[] {
+  const efforts = new Set<string>(BASE_EFFORTS)
+  for (const event of events) {
+    if (matches(event, REQUEST_HEADER) && event.data.header.reasoningEffort !== undefined) efforts.add(event.data.header.reasoningEffort)
+    else if (matches(event, AGENT_OPTIONS) && event.data.options.reasoningEffort !== undefined) efforts.add(event.data.options.reasoningEffort)
+  }
+  return [...efforts]
+}
+
+/**
+ * The route a recorded session OPENED on — its first `request/context` — for
+ * a replay to open on the same one. A literal in its place drifted: six arcs
+ * replayed on the retired `deepseek-v4-flash` alias what serve had recorded on
+ * `deepseek-flash`, so every route fact fell back to a text-only, 1,000,000
+ * window default. For a one-route log it is `foldRequestContext`'s answer.
+ */
+export function recordedRoute(events: readonly EventEnvelope[]): { readonly provider: string; readonly model: string } {
+  const first = events.find((event) => matches(event, REQUEST_CONTEXT))
+  if (first === undefined || !matches(first, REQUEST_CONTEXT)) throw new Error('llm-replay: the log recorded no request/context, so it names no route to replay on')
+  return { provider: first.data.provider, model: first.data.model }
 }
 
 /** The same facts keyed by model alone, for a replay whose provider was renamed. */
@@ -305,12 +338,22 @@ export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, R
   return answers
 }
 
-/** A log that repair answered is not an oracle: its synthetic results say what nobody's body did. */
+/**
+ * A log that repair answered is not an oracle: its synthetic results say what
+ * nobody's body did. Every closer repair (or a fork of a held log) writes
+ * counts — a conservative tool result, `turn/end{interrupted}`, and the three
+ * brackets it closes beside them, `job/end{lost}`, `subagent/end{interrupted}`
+ * and `compaction/end{unclosed}`. The header promised all of them and the
+ * check once read only the first two.
+ */
 function repairedInterruption(events: readonly EventEnvelope[]): boolean {
   return events.some(
     (event) =>
       (matches(event, TOOL_RESULT) && (event.data.error?.name === 'InterruptedError' || CONSERVATIVE_ERROR_NAMES.has(event.data.error?.name ?? ''))) ||
-      (matches(event, TURN_END) && event.data.reason.kind === 'interrupted'),
+      (matches(event, TURN_END) && event.data.reason.kind === 'interrupted') ||
+      (matches(event, JOB_END) && event.data.cause === 'lost') ||
+      (matches(event, SUBAGENT_END) && event.data.reason.kind === 'interrupted') ||
+      (matches(event, COMPACTION_END) && event.data.outcome.kind === 'declined' && event.data.outcome.reason === 'unclosed'),
   )
 }
 
@@ -491,12 +534,14 @@ class ReplayAdapter implements LlmAdapter {
   private readonly windowsByModel: ReadonlyMap<string, number>
   private readonly modalitiesByModel: ReadonlyMap<string, readonly ModelModality[]>
   private readonly fallbackWindow: number
+  private readonly efforts: readonly string[]
   constructor(
     provider: string,
     shared: ReplayDispatch,
     windows: ReadonlyMap<string, number>,
     modalities: ReadonlyMap<string, readonly ModelModality[]>,
     fallbackWindow: number,
+    efforts: readonly string[] = BASE_EFFORTS,
   ) {
     this.provider = provider
     this.shared = shared
@@ -505,6 +550,7 @@ class ReplayAdapter implements LlmAdapter {
     this.windowsByModel = byModel(windows)
     this.modalitiesByModel = byModel(modalities)
     this.fallbackWindow = fallbackWindow
+    this.efforts = efforts
   }
 
   stream(request: LlmRequest): AsyncIterable<StreamChunk> {
@@ -526,7 +572,7 @@ class ReplayAdapter implements LlmAdapter {
     return {
       contextWindow,
       defaultMaxTokens: 8192,
-      reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'high' },
+      reasoning: { efforts: this.efforts, defaultEffort: 'high' },
       ...(inputModalities === undefined ? {} : { inputModalities }),
     }
   }
@@ -645,7 +691,8 @@ export function installLlmReplay(
   const named = options.providers ?? (options.provider === undefined ? [...new Set(logs.flatMap((events) => providersIn(events)))] : [options.provider])
   const providers = named.length > 0 ? named : ['deepseek']
   const llm = owner.get(LLM)
-  const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, modalities, options.contextWindow ?? 1_000_000)))
+  const efforts = [...new Set(logs.flatMap((events) => effortsIn(events)))]
+  const disposers = providers.map((provider) => llm.registerAdapter(owner, new ReplayAdapter(provider, shared, windows, modalities, options.contextWindow ?? 1_000_000, efforts)))
   if (effects === 'recorded') {
     disposers.push(owner.on(TOOLS_EXECUTE, (execution, next) => answerFromRecording(shared, execution, next)))
     // A notice that woke a turn is owed once the turn before it ends — on a

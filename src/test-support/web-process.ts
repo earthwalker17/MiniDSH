@@ -6,15 +6,17 @@
  * client does not also do.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
+import { connect, createServer, type AddressInfo, type Socket } from 'node:net'
 import { join } from 'node:path'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { endOf } from './serve-process.ts'
 
 export const WEB_BIN = join(import.meta.dirname, '..', '..', 'bin', 'minidsh.js')
 
 const spawned: ChildProcess[] = []
 
 export function killSpawnedWebHosts(): void {
-  for (const child of spawned) if (child.exitCode === null) child.kill('SIGKILL')
+  for (const child of spawned) if (endOf(child) === undefined) child.kill('SIGKILL')
   spawned.length = 0
 }
 
@@ -87,6 +89,51 @@ export class WebHostProcess {
   async connect(): Promise<WebClient> {
     const { origin, cookie } = await this.signIn()
     return WebClient.open(`${origin.replace('http', 'ws')}/ws`, cookie)
+  }
+
+  /**
+   * A connection that can be KILLED rather than closed: the client reaches the
+   * host through a loopback TCP relay this process owns, and `sever()` resets
+   * both legs, so the host sees a connection reset with no close frame — what
+   * a crashed browser or a dropped network does. `WebClient.close()` is a
+   * graceful close handshake, which is not that case at all, and the
+   * WebSocket client Node ships exposes no socket to destroy.
+   *
+   * The relay rewrites one thing, the request's Host line, back to the host's
+   * own authority: the host fences Host (and binds its cookie to it), and that
+   * fence is not what this connection is testing.
+   */
+  async connectSeverable(): Promise<{ client: WebClient; sever: () => void }> {
+    const { origin, cookie } = await this.signIn()
+    const target = new URL(origin)
+    const legs: Socket[] = []
+    const relay = createServer((inbound) => {
+      const outbound = connect(Number(target.port), target.hostname)
+      legs.push(inbound, outbound)
+      inbound.on('error', () => undefined)
+      outbound.on('error', () => undefined)
+      let head = Buffer.alloc(0)
+      const onHead = (chunk: Buffer): void => {
+        head = Buffer.concat([head, chunk])
+        if (head.indexOf('\r\n\r\n') < 0) return
+        inbound.off('data', onHead)
+        // latin1 is byte-for-byte, so whatever followed the head survives the round trip.
+        outbound.write(Buffer.from(head.toString('latin1').replace(/^host:[^\r\n]*/im, `Host: ${target.host}`), 'latin1'))
+        inbound.pipe(outbound)
+        outbound.pipe(inbound)
+      }
+      inbound.on('data', onHead)
+    })
+    await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve))
+    const { port } = relay.address() as AddressInfo
+    const client = await WebClient.open(`ws://127.0.0.1:${port}/ws`, cookie)
+    return {
+      client,
+      sever: () => {
+        for (const leg of legs) leg.resetAndDestroy()
+        relay.close()
+      },
+    }
   }
 
   kill(): void {

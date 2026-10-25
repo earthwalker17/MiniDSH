@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
 import { runTask } from './headless.ts'
@@ -45,7 +45,11 @@ describe.skipIf(!KEY)('S4 live E2E: a from-disk composition drives the real runt
   it('a module-loaded tool executes, settings choose the route, a preset switches authority, and the log replays', { timeout: 480_000 }, async () => {
     const workspace = tempDir('minidsh-e2e4-ws-')
     const home = tempDir('minidsh-e2e4-home-')
-    writeFileSync(join(home, 'settings.json'), JSON.stringify({ agent: { model: 'deepseek-v4-flash', reasoningEffort: 'low' } }))
+    // A catalogued id that is NOT serve's default, so the header proves the
+    // settings layer chose it. Never a retired alias: DeepSeek routes those only
+    // "temporarily", and the day it stops this arc would fail UNKNOWN_MODEL,
+    // which says nothing about settings (A8-11).
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({ agent: { model: 'deepseek-v4-pro', reasoningEffort: 'low' } }))
     writeFileSync(
       join(home, 'composition.json'),
       JSON.stringify({
@@ -79,7 +83,7 @@ describe.skipIf(!KEY)('S4 live E2E: a from-disk composition drives the real runt
     // The settings layer chose the route, recorded in the durable header.
     const header = log.events.find((event) => event.type === 'request/header')!
     expect((header.data as { header: { model: string; reasoningEffort?: string } }).header).toMatchObject({
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
       reasoningEffort: 'low',
     })
 
@@ -103,7 +107,7 @@ describe.skipIf(!KEY)('S4 live E2E: a from-disk composition drives the real runt
       {
         task: TASK,
         cwd: workspace,
-        model: 'deepseek-v4-flash',
+        ...recordedRoute(log.events),
         sessionsRoot: replaySessionsRoot,
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),

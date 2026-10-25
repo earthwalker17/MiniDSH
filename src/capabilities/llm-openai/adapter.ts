@@ -2,6 +2,7 @@ import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type Mod
 import { isHeaderSafe } from '../../core/credentials/index.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
 import { resolveRequestImages } from '../../core/llm/content.ts'
+import { readErrorBody, redactLlmError } from '../../core/llm/wire.ts'
 import { catalogEntry, factsFor, OPENAI_CATALOG, type OpenAICatalogModel } from './catalog.ts'
 import { serializeInput, serializeTools, type ImageBytes } from './serialize.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
@@ -204,15 +205,17 @@ export class OpenAIAdapter implements LlmAdapter {
       })
     } catch (error) {
       if (timer) clearTimeout(timer)
-      throw mapAbort(error, request.signal, idle.signal)
+      throw redactLlmError(mapAbort(error, request.signal, idle.signal), apiKey)
     }
 
     if (!response.ok) {
       // The watchdog stays armed through the error body: one that stalls after
-      // its headers would otherwise hang a run nobody can cancel.
-      const text = await response.text().catch(() => '')
+      // its headers would otherwise hang a run nobody can cancel. Read only to
+      // its cap — the status classifies — and redacted, as every error is once
+      // the key is resolved: a proxy that echoes it would put it in the log.
+      const text = await readErrorBody(response)
       if (timer) clearTimeout(timer)
-      throw classifyHttp(response.status, text, response.headers)
+      throw redactLlmError(classifyHttp(response.status, text, response.headers), apiKey)
     }
     if (!response.body) {
       if (timer) clearTimeout(timer)
@@ -228,7 +231,7 @@ export class OpenAIAdapter implements LlmAdapter {
         if (translator.complete) break
       }
     } catch (error) {
-      throw mapAbort(error, request.signal, idle.signal)
+      throw redactLlmError(mapAbort(error, request.signal, idle.signal), apiKey)
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -271,7 +274,9 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
     // Non-JSON error body; keep the truncated text.
   }
   const requestId = headers.get('x-request-id') ?? undefined
-  const retryAfterMs = parseRetryAfter(headers.get('retry-after'))
+  // OpenAI sends the finer `retry-after-ms` beside `retry-after` (what its own
+  // SDKs read first); the coarse one alone rounds a 250 ms wait up to seconds.
+  const retryAfterMs = parseRetryAfterMs(headers.get('retry-after-ms')) ?? parseRetryAfter(headers.get('retry-after'))
   const options = { status, ...(requestId ? { requestId } : {}), ...(retryAfterMs === undefined ? {} : { retryAfterMs }) }
   let result: LlmErrorCode
   // 504 before the 5xx row: a gateway that gave up is a timeout, and the retry
@@ -290,6 +295,12 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   else if (status >= 500) result = 'SERVER'
   else result = 'INVALID_REQUEST'
   return new LlmError(result, `OpenAI ${status}: ${message}`, options)
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (value === null || value.trim().length === 0) return undefined
+  const ms = Number(value)
+  return Number.isFinite(ms) ? Math.max(0, ms) : undefined
 }
 
 function parseRetryAfter(value: string | null): number | undefined {

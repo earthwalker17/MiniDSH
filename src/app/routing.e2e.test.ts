@@ -26,11 +26,12 @@ import type { Logger } from '../kernel/index.ts'
 import { AGENT_OPTIONS } from '../core/agent/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/compaction/index.ts'
 import { LLM_AUX_CALL, type AuxCallRecord } from '../core/llm/index.ts'
-import { foldRequestContext, type EventEnvelope } from '../core/session/index.ts'
+import { deriveEventMessage, foldRequestContext, foldSurfaceSeqs, type EventEnvelope } from '../core/session/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
 import { createUserMessage, restoreMessage } from '../core/llm/message.ts'
 import type { Message } from '../core/llm/types.ts'
 import type { ResolvedImage } from '../core/llm/content.ts'
+import { serializeMessages as serializeAnthropic } from '../capabilities/llm-anthropic/index.ts'
 import { serializeMessages as serializeDeepSeek } from '../capabilities/llm-deepseek/index.ts'
 import { serializeInput as serializeOpenAI } from '../capabilities/llm-openai/index.ts'
 import { QUADRANT_COLOURS, quadPng } from '../test-support/images.ts'
@@ -45,24 +46,43 @@ const ANTHROPIC = process.env.ANTHROPIC_API_KEY
 const OPENAI = process.env.OPENAI_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
 /**
- * Low enough that three file reads cross it for real, and no lower.
+ * Low enough that one note read crosses it for real, and high enough that the
+ * fixed prefix does not.
  *
- * Raised from 6,000 at S11, which is a calibration repair rather than a
- * loosening. A confined host carries 48 more tokens of FIXED prefix per
- * request (measured: the runtime-context section gains two lines and the shell
- * tool's guidance changes), and at 6,000 the threshold sits at 3,000 with
- * roughly one turn of headroom left after a compaction — so those 48 tokens
- * cost it headroom, and `assertConsumed()` requires the REPLAY to reproduce
- * every recorded out-of-loop call. The larger cause was the prompts, which
- * named no tool: measured at 6,000 with them, 1 of 3 runs passed and all three
- * failed in the replay; at 6,400 with the editor named, 3 of 4.
+ * Recalibrated at S20.5 against the measured prefix. The estimator puts the
+ * header — system, eleven tool schemas with the browser row's five, the skill
+ * list — at 3,347 tokens, and the S11 budget of 6,400 put the threshold at
+ * 3,200: the prefix ALONE was over it, so the first compaction landed in turn
+ * 1 or 2, on DeepSeek, before the switch, and the role assertion could not
+ * fail. Now the threshold is 5,500 (11,000 × 0.5):
+ *
+ *   - step 1 (prefix + one prompt, ~3.5–3.7K priced) sits near 65% of it, and
+ *     the arc asserts it is below, so the premise fails by name when it decays;
+ *   - one note read (161 lines, ~2,800 tokens as the editor numbers them) takes
+ *     the next step to ~120%: a crossing is a READ;
+ *   - after a compaction the floor is the prefix + a summary (≤ 1,024) + a
+ *     short tail, ~3.9–4.5K, so pressure does not re-fire at every step;
+ *   - `retainRatio` 0.25 keeps under ~1K of tail, less than one note, so a
+ *     turn-boundary plan shadows the read it follows — including the first one
+ *     after the switch, which is the compaction the role assertion reads.
  *
  * Compaction is this arc's vehicle, not its subject: what it exists to prove
  * is that a route switch is one durable fact, that a role can send the summary
- * somewhere else, and that the mixed log replays. It still asserts at least
- * one applied compaction.
+ * somewhere else, and that the mixed log replays.
  */
-const BUDGET = 6_400
+const BUDGET = 11_000
+const THRESHOLD = 0.5
+/**
+ * The compaction role's route: one the LOOP never takes. It was
+ * `deepseek-flash`, the loop's own starting route, so a model-roles that
+ * ignored the role sent the summary down the identical route and the arc
+ * stayed green. `deepseek-v4-pro` is catalogued text-only, which a summary
+ * request never minds; effort `off`, because a summary needs no reasoning and
+ * DeepSeek thinks by default, inside the same 1,024-token cap as the answer.
+ */
+const ROLE = { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'off' } as const
+/** The Anthropic leg THINKS: Haiku 4.5 on a 2,048-token budget, so a signed thinking block exists to round-trip. */
+const ANTHROPIC_ROUTE = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', reasoningEffort: 'low' } as const
 
 let dirs: string[] = []
 afterAll(() => {
@@ -107,14 +127,14 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     const home = tempDir('minidsh-e2e6-home-')
     seedWorkspace(workspace)
 
-    // The deployment's own budget, and a compaction role pointing at the
-    // CHEAP DeepSeek model — plain composition config, no code, no flags.
+    // The deployment's own budget, and a compaction role pointing at a route
+    // the loop never takes — plain composition config, no code, no flags.
     writeFileSync(
       join(home, 'composition.json'),
       JSON.stringify({
         patches: [
-          { id: 'compaction', config: { budgetTokens: BUDGET, thresholdRatio: 0.5, retainRatio: 0.25, maxTokens: 1024 } },
-          { id: 'model-roles', config: { roles: { compaction: { provider: 'deepseek', model: 'deepseek-flash' } } } },
+          { id: 'compaction', config: { budgetTokens: BUDGET, thresholdRatio: THRESHOLD, retainRatio: 0.25, maxTokens: 1024 } },
+          { id: 'model-roles', config: { roles: { compaction: ROLE } } },
         ],
       }),
       'utf8',
@@ -154,8 +174,8 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     await serve.waitForCompletedTurn(sessionId, 2)
 
     // ---- the switch: same session, same loop, another provider ------------
-    const route = await serve.request<{ provider: string; model: string }>('session/model', { sessionId, provider: 'anthropic', model: 'claude-haiku-4-5-20251001' })
-    expect(route).toMatchObject({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' })
+    const route = await serve.request<{ provider: string; model: string }>('session/model', { sessionId, ...ANTHROPIC_ROUTE })
+    expect(route).toMatchObject(ANTHROPIC_ROUTE)
 
     // ---- turn 3: Anthropic, over history DeepSeek produced ----------------
     await serve.request('session/prompt', { sessionId, text: PROMPTS[2] })
@@ -186,14 +206,44 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     ])
     expect(foldRequestContext(events)!.provider).toBe('anthropic')
 
+    // ---- the premise: the prefix alone does not cross the threshold -------
+    const firstMessage = events.find((event) => event.type === 'assistant/message' && (event.data as { usage?: unknown }).usage !== undefined)!
+    const firstUsage = (firstMessage.data as { usage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } }).usage
+    const stepOnePrompt = firstUsage.inputTokens + (firstUsage.cacheReadTokens ?? 0) + (firstUsage.cacheWriteTokens ?? 0)
+    expect(
+      stepOnePrompt,
+      `step 1 was priced at ${stepOnePrompt} prompt tokens against a ${BUDGET * THRESHOLD} threshold; the fixed prefix has grown — recalibrate BUDGET`,
+    ).toBeLessThan(BUDGET * THRESHOLD)
+
     // ---- mixed history, correctly attributed -------------------------------
     const sources = events
       .filter((event) => event.type === 'assistant/message')
       .map((event) => (event.data as { message: { source: { provider: string; model: string; replayState?: unknown } } }).message.source)
     expect(sources.some((source) => source.provider === 'deepseek')).toBe(true)
     expect(sources.some((source) => source.provider === 'anthropic')).toBe(true)
-    // Anthropic's signed thinking rides on its own messages and nowhere else.
+    // Anthropic's signed thinking rides on its own messages and nowhere else —
+    // and there IS some: the leg runs at effort `low`, a budget, so the claim
+    // is not an `every` over nothing.
     expect(sources.filter((source) => source.replayState !== undefined).every((source) => source.provider === 'anthropic')).toBe(true)
+    const signatureOf = (event: EventEnvelope): string | undefined => {
+      const state = (event.data as { message: { source: { replayState?: { blocks?: unknown[] } } } }).message.source.replayState
+      const block = state?.blocks?.find((entry) => typeof entry === 'object' && entry !== null && (entry as { type?: unknown }).type === 'thinking')
+      return block === undefined ? undefined : (block as { signature: string }).signature
+    }
+    const anthropicMessages = events.filter(
+      (event) => event.type === 'assistant/message' && (event.data as { message: { source: { provider?: string } } }).message.source.provider === 'anthropic',
+    )
+    const signed = anthropicMessages.find((event) => (signatureOf(event) ?? '').length > 0)
+    expect(signed, `none of ${anthropicMessages.length} Anthropic message(s) carried a signed thinking block`).toBeDefined()
+    // ...and the NEXT Anthropic request carries it back: the history that
+    // request was built from, through the adapter's own serializer, echoes the
+    // signature verbatim (a tool-use loop that drops it is a provider 400).
+    const next = anthropicMessages.find((event) => event.seq > signed!.seq)
+    expect(next, 'no Anthropic request followed the signed message').toBeDefined()
+    const history = foldSurfaceSeqs(events.filter((event) => event.seq < next!.seq))
+      .map((seq) => deriveEventMessage(events[seq]!))
+      .filter((message): message is Message => message !== null)
+    expect(JSON.stringify(serializeAnthropic(history)), 'the next Anthropic request did not carry the signed thinking block').toContain(signatureOf(signed!)!)
     // The Anthropic turns worked over history a DeepSeek turn produced, tool call and all.
     expect(events.some((event) => event.type === 'tool/call')).toBe(true)
     const answers = assistantTexts(events).join('\n')
@@ -256,15 +306,32 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     // Every attempt closed: an unpaired start would mean one did not, which is a
     // crash, a disposal or a fork boundary — none of which happen here.
     expect(events.filter((event) => event.type === COMPACTION_START.type)).toHaveLength(attempts.length)
-    const record = applied[0]!.data as { budgetTokens: number; auxCallSeq: number }
-    expect(record.budgetTokens).toBe(BUDGET)
-    const aux = events[record.auxCallSeq]!.data as AuxCallRecord
-    expect(events[record.auxCallSeq]!.type).toBe(LLM_AUX_CALL.type)
-    expect(aux.purpose).toBe('compaction')
-    // The summary went down the ROLE's route — a different provider from the
-    // loop's own at that moment, and the log names it.
-    expect([aux.provider, aux.model]).toEqual(['deepseek', 'deepseek-flash'])
-    expect(aux.usage!.inputTokens + (aux.usage!.cacheReadTokens ?? 0)).toBeGreaterThan(0)
+    // The base route at a given moment: the last request/context before it,
+    // which the driver writes before the step's pre-step listeners run.
+    const baseAt = (seq: number): string => {
+      const context = events.findLast((event) => event.type === 'request/context' && event.seq < seq)!.data as { provider: string; model: string }
+      return `${context.provider}/${context.model}`
+    }
+    const switchSeq = events.find((event) => event.type === AGENT_OPTIONS.type && (event.data as { reason: string }).reason === 'change')!.seq
+    // Every summary went down the ROLE's route, never the base route of the
+    // moment, and the log names it.
+    for (const event of applied) {
+      const record = event.data as { budgetTokens: number; auxCallSeq: number }
+      expect(record.budgetTokens).toBe(BUDGET)
+      expect(events[record.auxCallSeq]!.type).toBe(LLM_AUX_CALL.type)
+      const aux = events[record.auxCallSeq]!.data as AuxCallRecord
+      expect(aux.purpose).toBe('compaction')
+      expect(`${aux.provider}/${aux.model}`, `compaction at seq ${event.seq}`).toBe(`${ROLE.provider}/${ROLE.model}`)
+      expect(baseAt(event.seq), `compaction at seq ${event.seq} ran on the loop's own route`).not.toBe(`${ROLE.provider}/${ROLE.model}`)
+      expect(aux.usage!.inputTokens + (aux.usage!.cacheReadTokens ?? 0)).toBeGreaterThan(0)
+    }
+    // And at least one ran AFTER the switch, while the loop was on Anthropic:
+    // the summary went to a different PROVIDER from the loop's own at that moment.
+    const afterSwitch = applied.filter((event) => event.seq > switchSeq)
+    expect(
+      afterSwitch.map((event) => baseAt(event.seq)),
+      `no compaction applied after the switch at seq ${switchSeq}; attempts [${attempts.join(', ')}] at seqs ${applied.map((event) => event.seq).join(', ')}`,
+    ).toContain(`${ANTHROPIC_ROUTE.provider}/${ANTHROPIC_ROUTE.model}`)
 
     // ---- the mixed log is still its own oracle ------------------------------
     const replayWorkspace = tempDir('minidsh-e2e6-replay-ws-')
@@ -294,7 +361,7 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
       // The same prompts, in order, with the SAME switch at the same point:
       // the replayed session walks the path the recording walked.
       for (const [index, text] of PROMPTS.entries()) {
-        if (index === 2) handle.agent.configure({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' })
+        if (index === 2) handle.agent.configure(ANTHROPIC_ROUTE)
         handle.agent.followup(createUserMessage(text))
         await handle.agent.whenIdle()
       }

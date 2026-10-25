@@ -15,16 +15,18 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
+const HOLD_PLUGIN = fileURLToPath(new URL('../test-support/fixtures/hold-plugin.ts', import.meta.url))
 let dirs: string[] = []
 afterAll(() => {
   killSpawnedServes()
@@ -45,6 +47,14 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     const decoy = join(workspace, 'decoy.txt')
     writeFileSync(decoy, 'must never change\n', 'utf8')
     const decoyBytes = readFileSync(decoy)
+    // A disk-loaded tool whose body waits for this file: the kill below lands
+    // inside a dispatched call every run, not when a poll happens to catch one.
+    const release = join(home, 'release-hold')
+    writeFileSync(
+      join(home, 'composition.json'),
+      JSON.stringify({ patches: [{ insert: [{ id: 'tool-hold', plugin: HOLD_PLUGIN, config: { releaseFile: release } }] }] }),
+      'utf8',
+    )
 
     // ---- lifecycle 1: complete task A, then die mid-task-B ----------------
     const first = new ServeProcess(workspace, home, { approve: true })
@@ -60,14 +70,19 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
 
     await first.request('session/prompt', {
       sessionId,
-      text: 'Now append a second line to greeting.txt reading exactly: resumed and finished',
+      text: 'First call the hold tool once. Then append a second line to greeting.txt reading exactly: resumed and finished',
     })
-    // Die mid-turn: as soon as turn 2 issues its first tool call.
-    await first.waitFor(
-      () => first.events('tool/call', sessionId).find((event) => (event.data as { turn: number }).turn === 2),
-      'the first tool call of turn 2',
-    )
+    // Die mid-turn, INSIDE a call: once the hold call is dispatched — durable
+    // before its body runs, and its body cannot finish until released.
+    const held = await first.waitFor(() => {
+      const call = first.events('tool/call', sessionId).find((event) => (event.data as { turn: number; name: string }).turn === 2 && (event.data as { name: string }).name === 'hold')
+      if (call === undefined) return undefined
+      const callId = (call.data as { callId: string }).callId
+      return first.events('tool/dispatch', sessionId).some((event) => (event.data as { callId: string }).callId === callId) ? callId : undefined
+    }, 'the hold call of turn 2 to be dispatched')
     await first.kill()
+    // Released before the resume, so a model that calls hold again is not held.
+    writeFileSync(release, '')
 
     const sessionFile = join(home, 'sessions', `${encodeURIComponent(sessionId)}.jsonl`)
     const beforeResume = validPrefix(sessionFile)
@@ -145,12 +160,14 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
      * as "never started" and tell a resumed model to redo work that was done.
      * It holds on every call of every turn here, killed or not.
      *
-     * The second is the equivalence, over whatever the kill actually caught.
-     * `waitFor` sees turn 2's `tool/call` frame and SIGKILLs, but the call can
-     * finish inside that window — so the count is printed rather than required,
-     * and this run's value is on the record either way. The killed lifecycle's
-     * record claims `dispatch` and `synced` (asserted below), so any synthetic
-     * result here is decided by the synced-writer row, not the 1.0.0 fallback.
+     * The second is the equivalence, and it is exercised on EVERY run: the kill
+     * lands while the hold call's body waits for its release file, after its
+     * `tool/dispatch` and before any result, so repair must synthesize
+     * TOOL_OUTCOME_UNKNOWN for it. (It used to SIGKILL on a 50 ms poll of the
+     * `tool/call` frame, and the call usually finished inside that window, so
+     * the loop below ran over nothing.) The killed lifecycle's record claims
+     * `dispatch` and `synced` (asserted below), so a synthetic result here is
+     * decided by the synced-writer row, not the 1.0.0 fallback.
      */
     const dispatched = new Set(
       storedEvents.filter((event) => event.type === 'tool/dispatch').map((event) => (event.data as { callId: string }).callId),
@@ -167,10 +184,10 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
       const code = (event.data as { error?: { code: string } }).error?.code
       return code === 'TOOL_OUTCOME_UNKNOWN' || code === 'TOOL_NOT_STARTED'
     })
-    console.log(
-      `[live arc] ${dispatched.size} dispatch(es), ${results.length} result(s), ${synthetic.length} synthesized by repair` +
-        (synthetic.length === 0 ? ' — the kill landed after the call completed, so the equivalence was not exercised this run' : ''),
-    )
+    console.log(`[live arc] ${dispatched.size} dispatch(es), ${results.length} result(s), ${synthetic.length} synthesized by repair`)
+    const heldResult = synthetic.find((event) => (event.data as { callId: string }).callId === held)
+    expect(heldResult, `repair synthesized no result for the held call ${held}`).toBeDefined()
+    expect((heldResult!.data as { error: { code: string } }).error.code).toBe('TOOL_OUTCOME_UNKNOWN')
     for (const result of synthetic) {
       const { callId, error } = result.data as { callId: string; error: { code: string } }
       expect({ callId, unknown: error.code === 'TOOL_OUTCOME_UNKNOWN' }).toEqual({ callId, unknown: dispatched.has(callId) })
@@ -220,7 +237,8 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
       {
         task: 'Read greeting.txt and reply with its second line, exactly, and nothing else.',
         cwd: workspace,
-        model: 'deepseek-v4-flash',
+        // The route the recording ran on, never a literal (A8-11).
+        ...recordedRoute(freshLog.events),
         sessionsRoot: tempDir('minidsh-e2e-replay-'),
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),

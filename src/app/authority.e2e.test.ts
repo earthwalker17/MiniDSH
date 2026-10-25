@@ -32,7 +32,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import { canonicalPath } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
-import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
@@ -106,8 +106,8 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     expect(serve.events('approval/asked', sessionId)).toHaveLength(0)
 
     // The boundary that governed that work is in the log before any effect of
-    // it is: the call record is written before dispatch, the stamp when the
-    // policy is first resolved, and both before the result the effect produced.
+    // it is: the call record is written before dispatch, the opening stamp at
+    // creation (`sandbox.open`), and both before the result the effect produced.
     const stamp = serve.events('sandbox/mode', sessionId).at(0)!
     expect(dataOf<{ mode: string; reason: string }>(stamp)).toMatchObject({ mode: 'workspace-write', reason: 'initial' })
     const firstResult = serve.events('tool/result', sessionId).at(0)!
@@ -465,7 +465,9 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
       {
         task: FRESH_TASK,
         cwd: replayCwd,
-        model: 'deepseek-v4-flash',
+        // The route the recording ran on, never a literal: a retired alias here
+        // replayed on fallback route facts (A8-11).
+        ...recordedRoute(freshLog.events),
         sessionsRoot: tempDir('minidsh-auth-replay-'),
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),

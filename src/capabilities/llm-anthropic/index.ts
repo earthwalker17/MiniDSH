@@ -11,6 +11,7 @@ import type { Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, credentialRef } from '../../core/credentials/index.ts'
 import { ATTACHMENTS } from '../../core/attachments/index.ts'
 import { LLM } from '../../core/llm/index.ts'
+import { baseURLFromEnv, isPlainHttpBase, PLAIN_HTTP_BASE_RULE } from '../../core/llm/wire.ts'
 import { AnthropicAdapter, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS } from './adapter.ts'
 
 export interface AnthropicConfig {
@@ -25,7 +26,9 @@ export interface AnthropicConfig {
 const configSchema = z
   .strictObject({
     apiKeyEnv: z.string().min(1).optional(),
-    baseURL: z.string().url().optional(),
+    // User info would reach every TRANSPORT error: Node's fetch refuses such a
+    // URL with a message that quotes it, password included.
+    baseURL: z.string().url().refine(isPlainHttpBase, PLAIN_HTTP_BASE_RULE).optional(),
     defaultMaxTokens: z.number().int().positive().optional(),
   })
   .optional()
@@ -48,7 +51,7 @@ export const anthropicPlugin: Plugin<AnthropicConfig | undefined> = {
       // See the sibling adapter: an attachment store is optional, never injected.
       resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
       // Set-but-empty reads as unset.
-      baseURL: config?.baseURL ?? (process.env.ANTHROPIC_BASE_URL?.trim() || DEFAULT_BASE_URL),
+      baseURL: config?.baseURL ?? baseURLFromEnv('ANTHROPIC_BASE_URL') ?? DEFAULT_BASE_URL,
       defaultMaxTokens: config?.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
     ctx.get(LLM).registerAdapter(ctx, adapter)

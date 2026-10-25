@@ -31,7 +31,7 @@ import { meterSession } from '../core/metering/index.ts'
 import { foldSurfaceSeqs, REQUEST_HEADER, type EventEnvelope } from '../core/session/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
-import { installLlmReplay } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
 import { applyAuthority, bootComposition, type BootOptions } from './headless.ts'
@@ -55,9 +55,33 @@ const pwsh = process.platform === 'win32'
  * call(s)`. The claim this file makes is about context management, not about
  * how a model chooses to search, so the search is spelled out and the claim
  * is left to stand on its own.
+ *
+ * The numbers, from what the first request really costs (S20.5): deepseek-flash
+ * priced the first request of this composition — browser row included — at
+ * about 3,650 prompt tokens, of which the estimator's header is 2,802 (tools
+ * 2,579, the five browser tools 1,386 of them). At the S11 budget of 8,000 that
+ * prefix alone filled 88% of the 4,000 threshold, so the "crossing" was schema
+ * weight, not history. Now:
+ *
+ *   - threshold 8,000 (16,000 × 0.5): step 1 sits near 46% of it, asserted
+ *     below 60% so this premise fails BY NAME the next time the prefix grows;
+ *   - one note read is ~5,600 estimator tokens (300 lines, 22,443 characters as
+ *     the editor numbers them, shown whole by an editor allowed 32,000), so a
+ *     single bulky read takes the next step to ~9,250 — a clear ~115–125%;
+ *   - the post-compaction floor is header + re-entered rules + summary (≤ 2,048)
+ *     + tail: the planner does not subtract the header (A5-9), so it is ~4–5.5K,
+ *     well under the threshold, and pressure does not re-fire at every step;
+ *   - `retainRatio` 0.25 caps the kept tail at a quarter of the live surface,
+ *     below one note, so a turn-boundary plan always shadows the read it follows;
+ *   - the peak a compaction cannot avoid (the floor plus one note) is ~10–12K,
+ *     under the 16,000 budget the arc's last assertion holds it to.
  */
-const BUDGET = 8_000
+const BUDGET = 16_000
 const THRESHOLD = 0.5
+/** One note: shown whole by the editor (its default cap of 16,000 characters would cut it near line 210). */
+const NOTE_LINES = 300
+const EDITOR_MAX_CHARS = 32_000
+const MARKER_PHRASE = 'THE MARKER FOR THIS FILE IS'
 const MARKER = '# BLUEBERRY-7'
 /** Row 450 of the generated output: only reachable from the spilled middle. */
 const NEEDLE = `row-450:${450 * 7}`
@@ -78,8 +102,8 @@ function tempDir(prefix: string): string {
 
 /** A file big enough that reading it is a real context cost, with one findable marker. */
 function bulkNote(marker: string): string {
-  const filler = Array.from({ length: 260 }, (_unused, index) => `note line ${index}: routine project background, nothing important here.`)
-  filler.splice(130, 0, `THE MARKER FOR THIS FILE IS ${marker}`)
+  const filler = Array.from({ length: NOTE_LINES }, (_unused, index) => `note line ${index}: routine project background, nothing important here.`)
+  filler.splice(NOTE_LINES / 2, 0, `${MARKER_PHRASE} ${marker}`)
   return `${filler.join('\n')}\n`
 }
 
@@ -145,6 +169,7 @@ describe.skipIf(!KEY)('S5 live E2E: a long session stays in budget without the l
         patches: [
           { id: 'compaction', config: { budgetTokens: BUDGET, thresholdRatio: THRESHOLD, retainRatio: 0.25, maxTokens: 2048, maxSummaryFailures: 6 } },
           { id: 'tool-shell', config: { maxOutputChars: 700, tailChars: 150 } },
+          { id: 'tool-editor', config: { maxOutputChars: EDITOR_MAX_CHARS } },
         ],
       }),
       'utf8',
@@ -206,6 +231,17 @@ ${summary}
 --- last answer:
 ${assistantTexts(events).at(-1)}`).toBe(true)
 
+    // ---- the premise: HISTORY crossed the budget, not the fixed prefix -------
+    // Step 1 is the prefix plus one prompt; if it is already near the
+    // threshold, a crossing proves nothing about reading (see BUDGET above).
+    const firstMessage = events.find((event) => event.type === 'assistant/message' && (event.data as { usage?: unknown }).usage !== undefined)!
+    const firstUsage = (firstMessage.data as { usage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } }).usage
+    const stepOnePrompt = firstUsage.inputTokens + (firstUsage.cacheReadTokens ?? 0) + (firstUsage.cacheWriteTokens ?? 0)
+    expect(
+      stepOnePrompt,
+      `step 1 was priced at ${stepOnePrompt} prompt tokens against a ${BUDGET * THRESHOLD} threshold (premise: below ${0.6 * BUDGET * THRESHOLD}); the fixed prefix has grown — recalibrate BUDGET`,
+    ).toBeLessThan(0.6 * BUDGET * THRESHOLD)
+
     // ---- compaction --------------------------------------------------------
     const applied = events.filter((event) => event.type === COMPACTION_APPLIED.type)
     // The two ways this can be zero are different failures and the message has
@@ -235,6 +271,15 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
     expect(record.surfaceTokensAfter).toBeLessThan(record.surfaceTokensBefore)
     expect(record.surfaceTokensAfter).toBeGreaterThan(0)
     expect(record.shadowedSeqs.length).toBeGreaterThan(1)
+    // What it compacted was a READ: it lands after the first note read, and
+    // the range it shadows holds a note's result — the bulk that crossed.
+    const noteReads = events.filter((event) => event.type === 'tool/result' && JSON.stringify(event.data).includes(MARKER_PHRASE))
+    expect(noteReads.length, 'no tool result ever carried a note: the model never read one').toBeGreaterThan(0)
+    expect(applied[0]!.seq, 'the first compaction came before any note was read').toBeGreaterThan(noteReads[0]!.seq)
+    expect(
+      noteReads.some((read) => record.shadowedSeqs.includes(read.seq)),
+      `the first compaction shadowed ${record.shadowedSeqs.join(', ')} and no note read (${noteReads.map((read) => read.seq).join(', ')})`,
+    ).toBe(true)
 
     // The replace cites every node it shadowed, and the log still holds them all.
     const replace = events.find((event) => event.seq > applied[0]!.seq && event.surfaceOp?.op === 'replace')!
@@ -342,7 +387,8 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
     try {
       const handle = await root.get(AGENTS).create(root, {
         cwd: replayWorkspace,
-        agentOptions: { provider: 'deepseek', model: 'deepseek-v4-flash' },
+        // The route the recording ran on, never a literal (A8-11).
+        agentOptions: recordedRoute(events),
       })
       applyAuthority(root, handle, boot)
       // Every recorded prompt in order, so the replayed session walks the same path.

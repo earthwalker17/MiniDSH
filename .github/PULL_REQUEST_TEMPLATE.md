@@ -14,9 +14,9 @@
 
 ## Verification
 
-- [ ] `pnpm check` green locally, with `MINIDSH_EXPECT_SHELL=1` (and `MINIDSH_EXPECT_CONFINEMENT=1` on Linux/macOS)
+- [ ] `pnpm check` green locally with every flag your host can meet — `MINIDSH_EXPECT_SHELL=1`, `MINIDSH_EXPECT_PYTHON=1`, `MINIDSH_EXPECT_BROWSER=1`, and `MINIDSH_EXPECT_CONFINEMENT=1` on Linux/macOS — because without them a suite whose tool is missing skips, and a skip looks like a pass
 - [ ] Tests mount a real composition; a claim that spans capabilities is pinned in `src/app/app.test.ts`
-- [ ] Live arcs run, if authority, the session log or the protocol changed: <!-- which ones, and how many times -->
+- [ ] Live arcs run, if authority, the session log or the protocol changed, with `MINIDSH_EXPECT_KEYS` naming every key the run promises (each arc self-skips without its key — DeepSeek for all, Anthropic, OpenAI and Tavily for theirs; see `vitest.e2e.config.ts`): <!-- which ones, and how many times -->
 
 ## Documentation impact
 

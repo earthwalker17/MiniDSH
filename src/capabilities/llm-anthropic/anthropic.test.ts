@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { createServer, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { afterEach, describe, expect, it } from 'vitest'
+import { createRoot } from '../../kernel/index.ts'
 import { asCallId } from '../../core/ids.ts'
-import { BlockAssembler, type StreamChunk } from '../../core/llm/index.ts'
+import { BlockAssembler, llmPlugin, type LlmError, type StreamChunk } from '../../core/llm/index.ts'
 import { createAssistantMessage, createPluginMessage, createToolResultMessage, createUserMessage } from '../../core/llm/message.ts'
+import { credentialsLocalPlugin } from '../credentials-local/index.ts'
 import { AnthropicAdapter, classifyHttp } from './adapter.ts'
+import { anthropicPlugin } from './index.ts'
 import { serializeMessages, serializeTools } from './serialize.ts'
 import { parseNamedSse } from './sse.ts'
 import { AnthropicTranslator } from './translate.ts'
@@ -190,6 +195,15 @@ describe('Anthropic serialization', () => {
     ])
   })
 
+  it('sends arguments that are not a JSON object as the text the log holds, never as no arguments', () => {
+    const calls = ['{"path": "a', '[1, 2]'].map((args, k) =>
+      createAssistantMessage([{ type: 'tool-call', id: asCallId(`c${k}`), name: 'view', arguments: args }], 'anthropic', 'claude-sonnet-5'),
+    )
+    const wire = serializeMessages([createUserMessage('go'), calls[0]!, createToolResultMessage(asCallId('c0'), [{ type: 'text', text: 'bad args' }], true), calls[1]!])
+    const inputs = wire.flatMap((turn) => turn.content).flatMap((block) => (block.type === 'tool_use' ? [block.input] : []))
+    expect(inputs).toEqual([{ _unparsed_arguments: '{"path": "a' }, { _unparsed_arguments: '[1, 2]' }])
+  })
+
   it('serializes tools with their JSON schema as input_schema', () => {
     expect(serializeTools(undefined)).toBeUndefined()
     expect(serializeTools([{ name: 'x', description: 'd', parameters: { type: 'object' } }])).toEqual([{ name: 'x', description: 'd', input_schema: { type: 'object' } }])
@@ -257,32 +271,21 @@ describe('Anthropic adapter', () => {
     expect(() => adapter.buildBody({ ...request, model: 'claude-opus-4-6', temperature: 0.3 })).not.toThrow()
     expect(() => adapter.buildBody({ ...request, model: 'claude-opus-4-8', maxTokens: 100_000 })).not.toThrow()
     expect(() => adapter.buildBody({ ...request, model: 'claude-opus-4-5-20251101', maxTokens: 100_000 })).toThrowError(expect.objectContaining({ code: 'UNSUPPORTED_OPTION' }))
-    expect(adapter.listModels().map((model) => model.id)).toEqual([
-      'claude-fable-5-1',
-      'claude-fable-5',
-      'claude-opus-5',
-      'claude-sonnet-5',
-      'claude-opus-4-8',
-      'claude-opus-4-7',
-      'claude-opus-4-6',
-      'claude-sonnet-4-6',
-      'claude-opus-4-5-20251101',
-      'claude-sonnet-4-5-20250929',
-      'claude-haiku-4-5-20251001',
-    ])
   })
 
   /**
    * An exact-id table rots one model at a time, and it rots on the fields that
-   * matter most. Before the family match, `claude-fable-5-1` — a model that had
-   * already shipped — resolved to a 200K window (wrong by five times), an 8192
-   * output cap against its real 128K, and an effort set including `off`, which
-   * the Fable family answers with a 400.
+   * matter most. Before any version match, `claude-fable-5-1` — a model that
+   * had already shipped — resolved to a 200K window (wrong by five times), an
+   * 8192 output cap against its real 128K, and an effort set including `off`,
+   * which the Fable family answers with a 400. Family granularity then rotted
+   * the other way (5.5 inheriting 5), so the match is by minor version.
    */
-  it('gives an unknown id its FAMILY’s facts, so the next dated snapshot lands correctly', () => {
+  it('gives a dated snapshot its minor version’s facts, so the next one lands correctly', () => {
     expect(adapter.resolveModel('claude-sonnet-5-20261101')).toMatchObject({ contextWindow: 1_000_000, defaultMaxTokens: 8192 })
-    expect(adapter.resolveModel('claude-fable-5-2').reasoning.efforts).not.toContain('off')
+    expect(adapter.resolveModel('claude-fable-5-1-20261101').reasoning.efforts).not.toContain('off')
     expect(adapter.resolveModel('claude-haiku-4-5-20990101')).toMatchObject({ contextWindow: 200_000, reasoning: { defaultEffort: 'off' } })
+    expect(adapter.resolveModel('claude-haiku-4-5')).toEqual(adapter.resolveModel('claude-haiku-4-5-20251001'))
     // An id no family claims still gets the conservative default, and still
     // gets images: every model this provider serves takes them, so a wrong
     // refusal would make a real capability unreachable with no override.
@@ -302,5 +305,195 @@ describe('Anthropic adapter', () => {
     expect(classifyHttp(529, body('overloaded_error', 'Overloaded'), headers())).toMatchObject({ code: 'SERVER' })
     expect(classifyHttp(504, body('timeout_error', 'slow'), headers())).toMatchObject({ code: 'TIMEOUT' })
     expect(classifyHttp(502, '<html>bad gateway</html>', headers())).toMatchObject({ code: 'SERVER' })
+  })
+})
+
+// ---- S20.5: the catalog against the measured listing, and thinking actually on ----
+
+describe('Anthropic catalog (GET /v1/models, 2026-10-25)', () => {
+  const adapter = new AnthropicAdapter({ apiKeyRef: 'ANTHROPIC_API_KEY', resolveKey: () => 'never-used', baseURL: 'http://127.0.0.1:1', defaultMaxTokens: 8192 })
+  const base = { provider: 'anthropic', messages: [createUserMessage('hi')] }
+  const FIVE = ['low', 'medium', 'high', 'xhigh', 'max']
+
+  it('carries the 5.5 generation as its own rows, never its predecessor’s', () => {
+    for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']) {
+      expect(adapter.resolveModel(id), id).toMatchObject({ contextWindow: 1_000_000, inputModalities: ['text', 'image'] })
+    }
+    // Thinking cannot be disabled on Opus 5.5 or Sonnet 5.5 (measured: a 400
+    // naming "thinking.type.disabled"), so `off` is not theirs to offer; Haiku 5.5 takes it.
+    expect(adapter.resolveModel('claude-opus-5-5').reasoning).toEqual({ efforts: FIVE, defaultEffort: 'medium' })
+    expect(adapter.resolveModel('claude-sonnet-5-5').reasoning).toEqual({ efforts: FIVE, defaultEffort: 'high' })
+    expect(adapter.resolveModel('claude-haiku-5-5').reasoning).toEqual({ efforts: ['off', ...FIVE], defaultEffort: 'medium' })
+    expect(() => adapter.buildBody({ ...base, model: 'claude-opus-5-5', reasoningEffort: 'off' })).toThrowError(expect.objectContaining({ code: 'UNSUPPORTED_REASONING_EFFORT' }))
+    expect(() => adapter.buildBody({ ...base, model: 'claude-haiku-5-5', maxTokens: 100_000 })).not.toThrow()
+    expect(adapter.listModels().map((model) => model.id)).toEqual([
+      'claude-fable-5-1',
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+      'claude-haiku-5-5',
+      'claude-fable-5',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-opus-4-6',
+      'claude-sonnet-4-6',
+      'claude-opus-4-5-20251101',
+      'claude-sonnet-4-5-20250929',
+      'claude-haiku-4-5-20251001',
+    ])
+  })
+
+  it('offers `off` exactly where the listing says thinking can be disabled', () => {
+    const offers = (id: string): boolean => adapter.resolveModel(id).reasoning.efforts.includes('off')
+    expect(['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5'].filter(offers)).toEqual([])
+    expect(['claude-haiku-5-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-haiku-4-5-20251001'].every(offers)).toBe(true)
+  })
+
+  it('gives Sonnet 4.5 its 200K window: the 1M one needs a beta header MiniDSH never sends', () => {
+    expect(adapter.resolveModel('claude-sonnet-4-5-20250929')).toMatchObject({ contextWindow: 200_000 })
+  })
+
+  it('matches a family at minor-version granularity, and gives an unknown id no output cap of its own', () => {
+    // A dated snapshot lands on its own minor version...
+    expect(adapter.resolveModel('claude-opus-5-20261201').reasoning.efforts).toContain('off')
+    // ...but 5.5 never inherits 5's row, and an unknown minor gets the fallback.
+    expect(adapter.resolveModel('claude-opus-5-5-20261201').reasoning.efforts).not.toContain('off')
+    expect(adapter.resolveModel('claude-fable-5-2')).toMatchObject({ contextWindow: 200_000, defaultMaxTokens: 8192 })
+    // The provider judges a cap for an id this table does not know: a guessed
+    // 8192 refused 16000 for models that serve 128K.
+    expect(() => adapter.buildBody({ ...base, model: 'claude-mythos-5-1', maxTokens: 16_000 })).not.toThrow()
+    expect(() => adapter.buildBody({ ...base, model: 'claude-next-99', maxTokens: 100_000 })).not.toThrow()
+    expect(new AnthropicAdapter({ apiKeyRef: 'K', resolveKey: () => 'x', baseURL: 'http://127.0.0.1:1', defaultMaxTokens: 500_000 }).resolveModel('claude-next-99').defaultMaxTokens).toBe(500_000)
+  })
+
+  it('turns thinking on where the model does not think unasked, and leaves it to the model where it does', () => {
+    // Measured: Opus 4.8 at effort `max` with no thinking field used 0 thinking tokens; with adaptive, 2,723.
+    for (const id of ['claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6']) {
+      expect(adapter.buildBody({ ...base, model: id, reasoningEffort: 'high' }), id).toMatchObject({ thinking: { type: 'adaptive' }, output_config: { effort: 'high' } })
+      expect(adapter.buildBody({ ...base, model: id, reasoningEffort: 'off' }), id).toMatchObject({ thinking: { type: 'disabled' } })
+      expect(adapter.buildBody({ ...base, model: id }), id).not.toHaveProperty('thinking')
+      // Its default is what it serves with nothing named: no thinking.
+      expect(adapter.resolveModel(id).reasoning.defaultEffort, id).toBe('off')
+    }
+    // Measured: Opus 5 at `high` with no thinking field DID think.
+    const opus5 = adapter.buildBody({ ...base, model: 'claude-opus-5', reasoningEffort: 'high' })
+    expect(opus5).toMatchObject({ output_config: { effort: 'high' } })
+    expect(opus5).not.toHaveProperty('thinking')
+  })
+
+  it('gives Opus 4.5 a thinking budget beside its own effort, since it has no adaptive thinking', () => {
+    expect(adapter.resolveModel('claude-opus-4-5-20251101').reasoning).toEqual({ efforts: ['off', 'low', 'medium', 'high'], defaultEffort: 'off' })
+    expect(adapter.buildBody({ ...base, model: 'claude-opus-4-5-20251101', reasoningEffort: 'medium' })).toMatchObject({ thinking: { type: 'enabled', budget_tokens: 4096 }, output_config: { effort: 'medium' } })
+    expect(adapter.buildBody({ ...base, model: 'claude-opus-4-5-20251101', reasoningEffort: 'off' })).not.toHaveProperty('thinking')
+  })
+
+  it('refuses a temperature beside thinking before any I/O, naming both ways out', () => {
+    // Measured: Haiku 4.5, temperature 0.2 and a 1024 budget answered 400
+    // "`temperature` may only be set to 1 when thinking is enabled".
+    expect(() => adapter.buildBody({ ...base, model: 'claude-haiku-4-5-20251001', reasoningEffort: 'low', temperature: 0.2 })).toThrowError(/effort to "off", or route the session/)
+    expect(() => adapter.buildBody({ ...base, model: 'claude-haiku-4-5-20251001', reasoningEffort: 'low', temperature: 0.2 })).toThrowError(expect.objectContaining({ code: 'UNSUPPORTED_OPTION' }))
+    expect(() => adapter.buildBody({ ...base, model: 'claude-opus-4-6', reasoningEffort: 'high', temperature: 0.2 })).toThrowError(expect.objectContaining({ code: 'UNSUPPORTED_OPTION' }))
+    expect(() => adapter.buildBody({ ...base, model: 'claude-haiku-4-5-20251001', reasoningEffort: 'off', temperature: 0.2 })).not.toThrow()
+    expect(() => adapter.buildBody({ ...base, model: 'claude-haiku-4-5-20251001', temperature: 0.2 })).not.toThrow()
+  })
+})
+
+/** A loopback stand-in for the API: `respond` writes each answer; every request's path is kept. */
+async function loopback(respond: (response: ServerResponse) => void): Promise<{ baseURL: string; seen: string[]; close: () => Promise<void> }> {
+  const seen: string[] = []
+  const server = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      seen.push(request.url ?? '')
+      respond(response)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  return {
+    baseURL: `http://127.0.0.1:${port}`,
+    seen,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+  }
+}
+
+describe('Anthropic wire framing and bounds', () => {
+  const first = (adapter: AnthropicAdapter): Promise<unknown> =>
+    adapter.stream({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001', messages: [createUserMessage('hi')] })[Symbol.asyncIterator]().next().catch((error: unknown) => error)
+
+  it('frames CRLF and lone-CR line ends as the SSE grammar allows', async () => {
+    const crlf = sseStream('event: message_start\r\ndata: {"a":1}\r', '\n\r\nevent: message_stop\r\ndata: {"b":2}\r\n\r\n')
+    expect(await collect(parseNamedSse(crlf, () => {}))).toEqual([
+      { event: 'message_start', data: '{"a":1}' },
+      { event: 'message_stop', data: '{"b":2}' },
+    ])
+    const cr = sseStream('event: ping\rdata: {}\r\r')
+    expect(await collect(parseNamedSse(cr, () => {}))).toEqual([{ event: 'ping', data: '{}' }])
+  })
+
+  it('fails one event that never ends past its cap as MALFORMED_RESPONSE', async () => {
+    const chunk = 'x'.repeat(1024 * 1024)
+    await expect(collect(parseNamedSse(sseStream('event: x\ndata: "', ...Array.from({ length: 9 }, () => chunk)), () => {}))).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+  })
+
+  it('reads at most a bounded prefix of an error body, takes a trailing slash, and never quotes an echoed key', { timeout: 10_000 }, async () => {
+    const key = 'sk-ant-ECHOED-0123456789'
+    let mode: 'endless' | 'echo' = 'endless'
+    const api = await loopback((response) => {
+      if (mode === 'endless') {
+        response.writeHead(529, { 'content-type': 'text/plain' })
+        response.write('y'.repeat(200 * 1024))
+        return
+      }
+      response.writeHead(401, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: `invalid x-api-key ${key}` } }))
+    })
+    try {
+      const adapter = new AnthropicAdapter({ apiKeyRef: 'ANTHROPIC_API_KEY', resolveKey: () => key, baseURL: `${api.baseURL}/`, defaultMaxTokens: 1024 })
+      expect(await first(adapter)).toMatchObject({ code: 'SERVER', failure: { status: 529 } })
+      mode = 'echo'
+      const failure = (await first(adapter)) as LlmError
+      expect(failure).toMatchObject({ code: 'AUTH' })
+      expect(failure.message).not.toContain(key)
+      expect(api.seen).toEqual(['/v1/messages', '/v1/messages'])
+    } finally {
+      await api.close()
+    }
+  })
+
+  it('refuses a tool_use block with no id or name as MALFORMED_RESPONSE, as the OpenAI translator does', () => {
+    const translator = new AnthropicTranslator()
+    translator.push('message_start', { type: 'message_start', message: { usage: { input_tokens: 1 } } })
+    expect(() => translator.push('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', input: {} } })).toThrowError(expect.objectContaining({ code: 'MALFORMED_RESPONSE' }))
+    const unnamed = new AnthropicTranslator()
+    expect(() => unnamed.push('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: '', input: {} } })).toThrowError(expect.objectContaining({ code: 'MALFORMED_RESPONSE' }))
+  })
+})
+
+describe('Anthropic row contract', () => {
+  const saved = process.env.ANTHROPIC_BASE_URL
+  afterEach(() => {
+    if (saved === undefined) delete process.env.ANTHROPIC_BASE_URL
+    else process.env.ANTHROPIC_BASE_URL = saved
+  })
+
+  it('refuses a base URL carrying user info, from config or from the environment, without quoting the password', async () => {
+    expect(() => anthropicPlugin.config!.parse({ baseURL: 'https://proxyuser:proxy-PASSWORD-123@proxy.example' })).toThrow()
+    process.env.ANTHROPIC_BASE_URL = 'https://proxyuser:proxy-PASSWORD-123@proxy.example'
+    const root = createRoot({ logger: { warn: () => {}, error: () => {} } })
+    root.plugin(llmPlugin)
+    root.plugin(credentialsLocalPlugin)
+    const handle = root.plugin(anthropicPlugin)
+    const report = await root.settle()
+    expect(handle.state).toBe('failed')
+    const said = report.failed.map((entry) => String(entry.error)).join('\n')
+    expect(said).toMatch(/ANTHROPIC_BASE_URL/)
+    expect(said).not.toContain('proxy-PASSWORD-123')
+    await root.dispose()
   })
 })

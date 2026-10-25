@@ -8,6 +8,7 @@ import type { Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, credentialRef } from '../../core/credentials/index.ts'
 import { ATTACHMENTS } from '../../core/attachments/index.ts'
 import { LLM } from '../../core/llm/index.ts'
+import { baseURLFromEnv, isPlainHttpBase, PLAIN_HTTP_BASE_RULE } from '../../core/llm/wire.ts'
 import { DeepSeekAdapter, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS } from './adapter.ts'
 
 export interface DeepSeekConfig {
@@ -22,7 +23,9 @@ export interface DeepSeekConfig {
 const configSchema = z
   .strictObject({
     apiKeyEnv: z.string().min(1).optional(),
-    baseURL: z.string().url().optional(),
+    // User info would reach every TRANSPORT error: Node's fetch refuses such a
+    // URL with a message that quotes it, password included.
+    baseURL: z.string().url().refine(isPlainHttpBase, PLAIN_HTTP_BASE_RULE).optional(),
     defaultMaxTokens: z.number().int().positive().optional(),
   })
   .optional()
@@ -33,8 +36,10 @@ export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
   config: configSchema,
   apply(ctx, config) {
     // Validated at apply, so a bad reference fails the row loudly at settle
-    // instead of surfacing as a missing key on the first paid request.
+    // instead of surfacing as a missing key on the first paid request. The
+    // environment's base too, which the schema never sees.
     const ref = credentialRef(config?.apiKeyEnv ?? 'DEEPSEEK_API_KEY')
+    const baseURL = config?.baseURL ?? baseURLFromEnv('DEEPSEEK_BASE_URL') ?? DEFAULT_BASE_URL
     // Declared, so anything that hands a child process an environment can
     // withhold it — this row's own config may have renamed it, and nothing
     // outside this row would otherwise know what it is called.
@@ -47,8 +52,8 @@ export const deepseekPlugin: Plugin<DeepSeekConfig | undefined> = {
       // `tryGet`, not `inject`: an adapter must not REQUIRE an attachment store.
       // Without one it refuses image content instead of failing to mount.
       resolveAttachments: () => ctx.tryGet(ATTACHMENTS),
-      // Set-but-empty reads as unset.
-      baseURL: config?.baseURL ?? (process.env.DEEPSEEK_BASE_URL?.trim() || DEFAULT_BASE_URL),
+      // Set-but-empty reads as unset (`baseURLFromEnv`).
+      baseURL,
       defaultMaxTokens: config?.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
     ctx.get(LLM).registerAdapter(ctx, adapter)
