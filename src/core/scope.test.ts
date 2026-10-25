@@ -151,7 +151,10 @@ describe('scope contract', () => {
       expect((await edit('c1', a, 'hello', 'bye')).isError).toBe(false)
       expect((await edit('c2', b, 'bye', 'hi')).isError).toBe(false)
       expect(intents).toEqual([a.id])
-      expect(observed).toEqual([a.id, a.id]) // A's read and A's write; nothing of B's
+      // A's write, and nothing of B's. An edit's own READ observes nothing:
+      // an observation is a licence to overwrite, and the read inside a
+      // refused edit licensed its retry (tool-editor `readForEdit`, S20.5).
+      expect(observed).toEqual([a.id])
     } finally {
       await harness.dispose()
       harness = undefined

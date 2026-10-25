@@ -113,4 +113,59 @@ describe('str_replace_editor: what the log says actually happened', () => {
       rmSync(outside, { recursive: true, force: true })
     }
   })
+
+  // `String.prototype.replace` reads `$$`, `$&`, `$'` and `` $` `` in a STRING
+  // replacement as patterns, so a shell script's `$$` landed as `$` and
+  // `$'\n'` pulled in the rest of the file, while the tool said "Edited"
+  // (S20.5 audit, A6-05).
+  it('writes new_str exactly as given, dollar patterns included', async () => {
+    const { run, dir } = await setup()
+    writeFileSync(join(dir, 'run.sh'), 'echo start\nPLACEHOLDER\necho end\n')
+    await run({ command: 'view', path: join(dir, 'run.sh') })
+    const newStr = 'echo "pid $$"; IFS=$\'\\n\'; cost="$&"; before="$`"'
+    const edited = await run({ command: 'str_replace', path: join(dir, 'run.sh'), old_str: 'PLACEHOLDER', new_str: newStr })
+    expect(edited.isError).toBe(false)
+    expect(readFileSync(join(dir, 'run.sh'), 'utf8')).toBe(`echo start\n${newStr}\necho end\n`)
+  })
+
+  // One view of a ~130 MiB file aborted the host on V8's heap and ~100 MiB
+  // blocked its loop for ~30 s: the whole file was read, split and numbered
+  // before 16,000 characters were shown (S20.5 audit, A6-02). The cost of a
+  // view is now bounded by what it reads, and it says what it left out.
+  it('views a file far larger than it will show by reading a bounded prefix, and says so', async () => {
+    const { run, dir } = await setup()
+    writeFileSync(join(dir, 'huge.log'), 'a log line\n'.repeat(2_000_000))
+    const view = await run({ command: 'view', path: join(dir, 'huge.log') })
+    expect(view.isError).toBe(false)
+    expect(view.text).toContain('     1  a log line')
+    expect(view.text).toMatch(/the first [\d,]+ bytes of [\d,]+/)
+    expect(view.text.length).toBeLessThan(20_000)
+    const edit = await run({ command: 'str_replace', path: join(dir, 'huge.log'), old_str: 'nothing', new_str: 'x' })
+    expect(edit.isError).toBe(true)
+    expect(edit.text).toContain('larger than')
+  })
+
+  // A refused edit's own read used to OBSERVE the new content, so the same
+  // call repeated was accepted against content the model was never shown
+  // (S20.5 audit, A6-11): an observation is a licence to overwrite.
+  it('does not let a stale refusal license the retry', async () => {
+    const { run, dir } = await setup()
+    writeFileSync(join(dir, 'd.txt'), 'one two\n')
+    await run({ command: 'view', path: join(dir, 'd.txt') })
+    writeFileSync(join(dir, 'd.txt'), 'one two three, changed by someone else\n')
+    const first = await run({ command: 'str_replace', path: join(dir, 'd.txt'), old_str: 'two', new_str: '2' })
+    expect(first.text).toContain('changed since it was read')
+    const retry = await run({ command: 'str_replace', path: join(dir, 'd.txt'), old_str: 'two', new_str: '2' })
+    expect(retry.text).toContain('changed since it was read')
+    expect(readFileSync(join(dir, 'd.txt'), 'utf8')).toBe('one two three, changed by someone else\n')
+  })
+
+  it('refuses an empty old_str, which matches everywhere or nowhere', async () => {
+    const { run, dir } = await setup()
+    writeFileSync(join(dir, 'e.txt'), '')
+    await run({ command: 'view', path: join(dir, 'e.txt') })
+    const edited = await run({ command: 'str_replace', path: join(dir, 'e.txt'), old_str: '', new_str: 'x' })
+    expect(edited.isError).toBe(true)
+    expect(readFileSync(join(dir, 'e.txt'), 'utf8')).toBe('')
+  })
 })

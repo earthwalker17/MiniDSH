@@ -326,6 +326,7 @@ function continueArgs(options: ContinueOptions): {
     // settings-layer model can never rewrite what a session recorded.
     defaults: options.agentDefaults ?? defaultAgentOptions(),
     ...(options.world === undefined ? {} : { world: options.world }),
+    ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
   }
 }
 

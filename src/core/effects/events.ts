@@ -33,7 +33,7 @@
  */
 import type { SandboxEnforcement, SandboxMode } from '../sandbox/events.ts'
 import { eventKind } from '../session/types.ts'
-import { printableText } from '../text.ts'
+import { isInvisible, printableText } from '../text.ts'
 
 /** What happened, per family. Closed: a third family is a deliberate vocabulary change. */
 export type EffectRecord =
@@ -168,16 +168,13 @@ function escapeControls(text: string): string {
 }
 
 /**
- * Characters that render as NOTHING a person can read, in a terminal or a
- * browser: format characters (zero-width spaces, bidi controls, the Unicode
- * TAG block), private-use and unassigned code points, the line and paragraph
- * separators, and the variation selectors. A C0/C1 control at least moves the
- * cursor; these move nothing, which is worse on a consent line: the S18 review
- * encoded a secret in TAG characters after a visible query, the line read as
- * the query alone, and the hidden text was in the POST body. Escaped like a
- * control, so what a person approves is every character sent.
+ * A character that renders as NOTHING (`isInvisible`, core/text.ts) is worse
+ * on a consent line than a control, which at least moves the cursor: the S18
+ * review encoded a secret in TAG characters after a visible query, the line
+ * read as the query alone, and the hidden text was in the POST body. Escaped
+ * like a control, so what a person approves is every character sent.
  */
-const INVISIBLE = /[\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/u
+const INVISIBLE = { test: isInvisible }
 
 /** True iff `escapeControls` would change anything but a backslash. */
 function hasControls(text: string): boolean {

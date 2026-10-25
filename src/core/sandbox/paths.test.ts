@@ -97,6 +97,39 @@ describe.skipIf(!linksWork)('canonicalPath and links', () => {
   })
 })
 
+describe('containment decides by the filesystem\'s own name identity', () => {
+  // NTFS compares names through its own upcase table, in which the Kelvin
+  // sign is not a "K"; JavaScript's toLowerCase folds it to "k". A fence that
+  // compared by the second while the disk resolved by the first accepted
+  // `..\des\u{212A}top-work\owned.txt` as inside `desktop-work` and the write
+  // created a sibling directory OUTSIDE the workspace (S20.5 audit, A6-01).
+  it.skipIf(process.platform !== 'win32')('refuses a homoglyph sibling the disk treats as a different directory', async () => {
+    const base = tempDir('minidsh-fold-')
+    const workspace = join(base, 'desktop-work')
+    mkdirSync(workspace)
+    const sibling = join(workspace, '..', 'des\u{212A}top-work', 'owned.txt')
+    expect(isInside(canonicalPath(workspace), canonicalPath(sibling))).toBe(false)
+
+    root = createRoot({ logger: silent })
+    root.plugin(sandboxPlugin, { mode: 'workspace-write', workspaceRoot: workspace })
+    root.plugin(fsLocalPlugin)
+    await root.settle()
+    const fs: Fs = root.get(FS)
+    await expect(fs.writeText(fs.resolve(sibling, workspace), 'no', { kind: 'unconditional' }, {})).rejects.toThrowError(/FS_SANDBOX_DENIED|outside/)
+    expect(existsSync(join(base, 'des\u{212A}top-work'))).toBe(false)
+    // The case a person types differently is still the same directory, and inside.
+    expect(isInside(canonicalPath(workspace), canonicalPath(join(base, 'DESKTOP-WORK', 'fine.txt')))).toBe(true)
+  })
+
+  it('keeps an inside name that merely begins with two dots', () => {
+    const workspace = tempDir('minidsh-ws-')
+    for (const name of ['..env.bak', '...', join('..hidden', 'x.txt')]) {
+      expect(isInside(canonicalPath(workspace), canonicalPath(join(workspace, name))), name).toBe(true)
+    }
+    expect(isInside(canonicalPath(workspace), canonicalPath(join(workspace, '..', 'x.txt')))).toBe(false)
+  })
+})
+
 describe('canonicalPath without links', () => {
   // The name used to promise the refusal and the body asserted the opposite
   // case, so a green result said nothing about either. The refusal itself —

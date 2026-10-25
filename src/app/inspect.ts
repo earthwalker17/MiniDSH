@@ -515,7 +515,8 @@ function verdictWords(verdict: Verdict, inFlux: boolean): string {
 export function verifyLines(id: string, verification: Verification): string[] {
   const lines = [`session ${id}: ${verification.verdict} — ${verdictWords(verification.verdict, verification.inFlux)}`]
   for (const finding of verification.findings) lines.push(findingLine(finding))
-  return lines
+  // A stored log is not this runtime's word: every line is neutralized at the exit.
+  return lines.map(printableText)
 }
 
 export function inspectLines(inspection: Inspection): string[] {
@@ -603,5 +604,6 @@ export function inspectLines(inspection: Inspection): string[] {
     }
   }
   if (inspection.findings.length > 0) lines.push('findings:', ...inspection.findings.map(findingLine))
-  return lines
+  // A stored header (cwd, lineage, lease host) is not this runtime's word either.
+  return lines.map(printableText)
 }

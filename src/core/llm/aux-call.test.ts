@@ -53,6 +53,26 @@ describe('an out-of-loop model call', () => {
     expect(agent.session.deriveMessages()).toHaveLength(before)
   })
 
+  // The S20.5 audit's reproduction: an answer cut off at maxTokens was
+  // recorded as an ordinary `text` outcome, and compaction applied the cut
+  // summary in place of the history it replaced.
+  it('says when the answer was cut off at its output cap, in the record and to the caller', async () => {
+    const test = await newHarness()
+    const { agent } = await test.create()
+    const cut: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: '## Primary Request\n- the user asked to refactor the par' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: '## Primary Request\n- the user asked to refactor the par' } },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ]
+    test.adapter.script(cut, assistantText('complete'))
+    const result = await runAuxCall(test.root.get(LLM), agent.session, auxRequest())
+    expect(result.truncated).toBe(true)
+    expect((agent.session.events.at(-1)!.data as AuxCallRecord).outcome).toMatchObject({ kind: 'text', truncated: true })
+    const whole = await runAuxCall(test.root.get(LLM), agent.session, auxRequest())
+    expect(whole.truncated).toBeUndefined()
+  })
+
   it('writes no assistant/chunk, so the replay script’s turn/step grouping cannot be corrupted', async () => {
     const test = await newHarness()
     const { agent } = await test.create()

@@ -52,7 +52,7 @@ import {
   type Session,
   type TurnEndReason,
 } from '../session/index.ts'
-import { TOOLS, toolCall, type Tools } from '../tools/index.ts'
+import { TOOLS, toolCall, type ToolResult, type Tools } from '../tools/index.ts'
 import { markLoopRequest } from './marker.ts'
 
 export interface LoopDeps {
@@ -261,13 +261,11 @@ export class ReactLoopAgent implements Agent {
       while (true) {
         if (signal.aborted) throw new Error('turn aborted')
         step += 1
-        const { messages: claimed, splice: claimSplice } = this.inbox.claim(firstStep)
+        const { messages: claimed } = this.inbox.claim(firstStep)
         // Whatever consumed (or killed) the claim commits it, so durable = live
         // on every exit path — including a pre-step listener throw or a cancel
-        // landing inside the pre-step await.
-        const commitClaim = (): void => {
-          if (claimSplice) this.session.append(INBOX_SPLICED, claimSplice)
-        }
+        // landing inside the pre-step await (whose clear records it first).
+        const commitClaim = (): void => this.inbox.commitClaim()
         let decision: PreStepDecision
         let config: CallConfig
         try {
@@ -294,14 +292,22 @@ export class ReactLoopAgent implements Agent {
         }
         if (decision.kind === 'reject') {
           commitClaim()
+          // A job's end notice has an exactly-once delivery contract: a step
+          // that never entered it hands it back, as the throw and cancel
+          // paths above do (S20.5 review).
+          this.requeueNotices(claimed)
           reason = { kind: 'blocked' }
           break
         }
         const entered = decision.messages
+        const dropped = claimed.filter((message) => !entered.includes(message))
         if (firstStep && entered.length === 0) {
           commitClaim()
+          this.requeueNotices(dropped)
           break
         }
+        // A listener may narrow a batch; a notice it left out is owed, not consumed.
+        if (dropped.length > 0) this.requeueNotices(dropped)
         this.session.append(STEP_START, { turn, step })
         let result: StepResult
         try {
@@ -508,7 +514,16 @@ export class ReactLoopAgent implements Agent {
           throw error
         }
       }
-      const result = await deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, signal, onDispatch))
+      let result: ToolResult
+      try {
+        result = await deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, signal, onDispatch))
+      } catch (error) {
+        // The pipeline turns a throw into a result; this is the floor under it.
+        // A logged call with no result is a history every provider refuses, and
+        // no repair heals one inside a closed turn (S20.5 review).
+        const text = error instanceof Error ? error.message : String(error)
+        result = { isError: true, content: [{ type: 'text', text: `Error: ${text}` }], error: { message: text, info: { name: 'Error', code: 'TOOL_FAILED' } } }
+      }
       const message = createToolResultMessage(call.id, [...result.content], result.isError)
       this.session.append(
         TOOL_RESULT,

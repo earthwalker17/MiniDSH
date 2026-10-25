@@ -27,7 +27,7 @@ import { FS } from '../core/fs/index.ts'
 import { sandboxPlugin } from '../core/sandbox/index.ts'
 import { fsLocalPlugin } from '../capabilities/fs-local/index.ts'
 import { discoverSkills, fitSkillList, oneLine, skillsPlugin, type SkillDiscovery, type SkillsConfig } from '../capabilities/skills/index.ts'
-import { compose, defaultDialect, type Row } from './compose.ts'
+import { builtinPlugins, compose, defaultDialect, type Row } from './compose.ts'
 import {
   agentPresetWorld,
   applyLayers,
@@ -43,6 +43,7 @@ import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener
 import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
+import { printableText } from '../core/text.ts'
 import { auditLines, describeEvent } from './present.ts'
 import { inspectLines, inspectStored, verdictExitCode, verifyAttachments, verifyLines, verifyStored } from './inspect.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
@@ -707,7 +708,19 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'spill-local',
   'persistence-jsonl',
   'credentials-local',
+  // Their `baseURL` and `apiKeyEnv` decide where every conversation is sent and
+  // under which credential: the reason web search is here, for every request.
+  'llm-deepseek',
+  'llm-anthropic',
+  'llm-openai',
 ])
+
+/**
+ * A plugin no builtin row ships is arbitrary code (ARCHITECTURE §13), whatever
+ * name it gives itself: a module could call itself `session-title` and answer
+ * every approval. Keyed by IDENTITY, not by name, for exactly that reason.
+ */
+const BUILTIN_PLUGIN_OBJECTS: ReadonlySet<unknown> = new Set(builtinPlugins.values())
 
 /**
  * `minidsh config` — the EFFECTIVE composition: the same base and layer
@@ -761,7 +774,7 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     }
     for (const row of effective.rows) {
       const layer = touched(row.id)
-      const sensitive = layer !== 'built-in' && AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin.name)
+      const sensitive = layer !== 'built-in' && (AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin.name) || !BUILTIN_PLUGIN_OBJECTS.has(row.plugin))
       const marks = [row.disabled === true ? 'disabled' : undefined, sensitive ? '!' : undefined].filter((mark) => mark !== undefined)
       process.stdout.write(`  ${row.id.padEnd(22)} ${row.plugin.name.padEnd(28)} ${layer}${marks.length > 0 ? `  [${marks.join(' ')}]` : ''}\n`)
       if (sensitive) {
@@ -778,7 +791,7 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     if (plan.loaded.agentPresets.size > 0) {
       process.stdout.write(`\nagent presets:\n`)
       for (const [name, spec] of plan.loaded.agentPresets) {
-        const sensitive = spec.rows.filter((row) => AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin))
+        const sensitive = spec.rows.filter((row) => AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin) || !builtinPlugins.has(row.plugin))
         const marks = sensitive.length > 0 ? '  [!]' : ''
         process.stdout.write(`  ${name.padEnd(22)} ${spec.rows.map((row) => `${row.id}(${row.plugin})`).join(', ')}${marks}\n`)
         for (const row of sensitive) warnings.push(`agent preset "${name}" mounts authority-sensitive row "${row.id}" (${row.plugin}) into every agent it composes`)
@@ -1014,7 +1027,8 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         // The name last, so the three columns that were here before keep their
         // positions for anything already cutting this output apart. A title has
         // no tabs by construction: the fold collapses whitespace.
-        process.stdout.write(`${header.id}\t${new Date(header.createdAt).toISOString()}\t${header.cwd}\t${title ?? ''}${lineage}\n`)
+        // Each column neutralized: a stored header is not this runtime's word.
+        process.stdout.write(`${printableText(header.id)}\t${new Date(header.createdAt).toISOString()}\t${printableText(header.cwd)}\t${printableText(title ?? '')}${printableText(lineage)}\n`)
       }
       return 0
     })
@@ -1032,7 +1046,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
       }
       const stored = read
       if (args.flags.get('audit') === true) {
-        process.stdout.write(`authority and effects of ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        process.stdout.write(`${printableText(`authority and effects of ${stored.header.id} (cwd ${stored.header.cwd})`)}\n`)
         // A crashed log nobody resumed yet: the call in flight is only a line
         // once something repairs it, so the audit shows what a resume would say.
         for (const line of auditLines(stored.events, pendingClosers(stored))) process.stdout.write(`${line}\n`)
@@ -1041,17 +1055,17 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         // Machine readers must see damage too: a trailer object (no `event` field) a frame consumer skips.
         if (stored.damaged) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, damaged: true })}\n`)
       } else {
-        process.stdout.write(`session ${stored.header.id} (cwd ${stored.header.cwd})\n`)
+        process.stdout.write(`${printableText(`session ${stored.header.id} (cwd ${stored.header.cwd})`)}\n`)
         // The whole log is in hand here, so this is the recorded title or the
         // derivation over everything — never the bounded-prefix answer a
         // listing settles for.
         const title = foldSessionTitle(stored.events)
-        if (title !== undefined) process.stdout.write(`title: ${title}\n`)
+        if (title !== undefined) process.stdout.write(`title: ${printableText(title)}\n`)
         if (stored.header.delegatedBy !== undefined) {
           // The CALL too, where the log records one: two children of a single
           // step are otherwise indistinguishable from this side.
           const call = stored.header.delegatedByCallId === undefined ? '' : `, call ${stored.header.delegatedByCallId}`
-          process.stdout.write(`delegated by ${stored.header.delegatedBy} (depth ${stored.header.delegationDepth ?? 1}${call})\n`)
+          process.stdout.write(`${printableText(`delegated by ${stored.header.delegatedBy} (depth ${stored.header.delegationDepth ?? 1}${call})`)}\n`)
         }
         // What this session cost and how full its context got, measured
         // against the window the log itself names for the route in use; a log

@@ -136,8 +136,9 @@ export function delegationCeiling(events: readonly EventEnvelope[]): SandboxMode
  * `never` and unable to ask anyone anything, would inherit that from a parent
  * that only ever accepted it for a wider mode. Recording the mode the
  * acceptance was GIVEN FOR, and honouring it only for that mode, closes both
- * with one mechanism: `/sandbox read-only` re-refuses, and a narrowed child's
- * mode no longer matches its parent's.
+ * with one mechanism: after a per-session `/accept`, `/sandbox read-only`
+ * re-refuses (a deployment default of `none` covers every mode, by design: §7),
+ * and a narrowed child's mode no longer matches its parent's.
  *
  * Deliberately NOT a field on `sandbox/mode`: that record's `enforcement` is a
  * REPORTED host fact, this is a DECISION about the shell world, and a field on

@@ -25,6 +25,8 @@ import {
   APPROVAL_GRANT,
   APPROVAL_POLICIES,
   APPROVAL_POLICY,
+  ApprovalError,
+  delegationPin,
   effectiveApprovalPolicy,
   isApprovalPolicy,
   liveGrants,
@@ -46,14 +48,18 @@ import { AUTHORITY_PRESET, PRESETS } from '../../core/presets/index.ts'
 import {
   acceptanceFor,
   canonicalPath,
+  delegationCeiling,
   effectiveSandboxMode,
   isInside,
   isSandboxMode,
+  isWider,
   SANDBOX,
   SANDBOX_ACCEPTANCE,
   SANDBOX_MODE,
   SANDBOX_MODES,
+  SandboxError,
   type SandboxEnforcement,
+  type SandboxMode,
 } from '../../core/sandbox/index.ts'
 import {
   ASSISTANT_MESSAGE,
@@ -178,6 +184,13 @@ export interface ProtocolServerConfig {
   readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name of the preset `world` composes, recorded in each session's header. */
   readonly agentPreset?: string
+  /**
+   * Called on a session this host resumed, before anything runs on it: the
+   * app applies the operator's EXPLICIT authority flags here as the durable
+   * switch they are on every other path (§9). Without it a `web --sandbox
+   * read-only` host continued a stored session at its recorded wider mode.
+   */
+  readonly onResumed?: (handle: AgentHandle) => void
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
   /**
@@ -369,11 +382,13 @@ export class ProtocolHost {
   }
 
   /**
-   * The AUTHORIZATION rule for `approval/answer`: a connection answers only a
-   * question it was SHOWN — it receives that session's frames, so the
-   * `approval/asked` event reached it, or its attach frame's
-   * `pendingApprovals` carried it. `false` for the reason
-   * `settleUnwatchedApprovals` gives: nothing delegated is ever parked.
+   * The AUTHORIZATION rule for `approval/answer`: a connection answers only
+   * for a session whose frames it RECEIVES. That is "may see", not "was
+   * shown": one that opened after the ask and never attached receives the
+   * session yet missed its `approval/asked`, and may answer (S20.5 audit).
+   * With one principal behind one token (§13) this is no privilege boundary;
+   * it keeps a client watching only B from answering A. `false` for the
+   * reason `settleUnwatchedApprovals` gives: nothing delegated is ever parked.
    */
   private mayAnswer(connection: ClientConnection, sessionId: string): boolean {
     return this.receives(connection, sessionId, false)
@@ -385,7 +400,7 @@ export class ProtocolHost {
    * its summaries count the session's `pendingApprovals`, so it can attach, be
    * shown the question, and answer then. Built ON `mayAnswer` and wider by
    * exactly that, so the two cannot drift: a subscriber keeps a question
-   * parked and never answers one it was not shown. A child mid-delegation is
+   * parked and never answers for a session it does not watch. A child mid-delegation is
    * in no summary, so for one only `receives` counts.
    */
   private couldAnswer(connection: ClientConnection, sessionId: string, underParent: boolean): boolean {
@@ -559,8 +574,8 @@ export class ProtocolHost {
   /**
    * One session's summary, by the rules its view follows: jobs through
    * `summarizeJobs`, questions through `pendingApprovalsOf`. No `agent` means
-   * its agent is gone, which is `closed`, and then the counts are what the
-   * log holds — notices a disposal queued quiet included.
+   * its agent is gone, which is `closed`, and then every count is zero by
+   * design (below).
    */
   private summaryOf(sessionId: string, facts: readonly EventEnvelope[], agent: Agent | undefined): ControlSummary {
     // Closed is closed: nothing here runs, asks or holds anything for it now,
@@ -774,7 +789,15 @@ export class ProtocolHost {
 
   /** The workspace a path belongs to, derived — no session stores a workspace id. */
   private workspaceOf(cwd: string): WorkspaceInfo | undefined {
-    return this.config.workspaces.find((workspace) => isInside(workspace.root, cwd))
+    // A header keeps the cwd as it was given; containment compares canonical
+    // spellings only (core/sandbox/paths.ts).
+    let canonical: string
+    try {
+      canonical = canonicalPath(cwd)
+    } catch {
+      return undefined
+    }
+    return this.config.workspaces.find((workspace) => isInside(workspace.root, canonical))
   }
 
   /**
@@ -871,6 +894,22 @@ export class ProtocolHost {
     if (params.approval !== undefined && !isApprovalPolicy(params.approval)) {
       throw new RpcFailure(INVALID_PARAMS, `session/authority: "approval" must be one of ${APPROVAL_POLICIES.join(' | ')}`)
     }
+    // ONE call is all or nothing: every knob is held to the session's
+    // delegation ceiling and pins BEFORE any is appended. Checked in turn, a
+    // narrowed mode landed durably and then the unpinned approval threw, so a
+    // call answered with an error had already changed the session (S20.5).
+    const facts = agent.session.facts
+    const ceiling = delegationCeiling(facts)
+    if (params.sandbox !== undefined && ceiling !== undefined && isWider(params.sandbox as SandboxMode, ceiling)) {
+      throw new RpcFailure(INVALID_PARAMS, `session/authority: "${String(params.sandbox)}" widens past this delegated session's ceiling "${ceiling}"`)
+    }
+    const pin = delegationPin(facts)
+    if (params.approval !== undefined && pin !== undefined && params.approval !== pin) {
+      throw new RpcFailure(INVALID_PARAMS, `session/authority: this delegated session's approvals are pinned "${pin}"`)
+    }
+    if (params.accepts !== undefined && agent.session.header.delegatedBy !== undefined) {
+      throw new RpcFailure(INVALID_PARAMS, 'session/authority: a delegated session cannot change what it was started accepting')
+    }
     if (params.preset !== undefined) {
       if (typeof params.preset !== 'string' || params.preset.length === 0) {
         throw new RpcFailure(INVALID_PARAMS, 'session/authority: "preset" must be a preset name')
@@ -888,8 +927,14 @@ export class ProtocolHost {
     }
     const sandbox = this.ctx.get(SANDBOX)
     const approval = this.ctx.get(APPROVAL)
-    if (params.sandbox !== undefined) sandbox.setMode(agent.session, params.sandbox)
-    if (params.approval !== undefined) approval.setPolicy(agent.session, params.approval)
+    try {
+      if (params.sandbox !== undefined) sandbox.setMode(agent.session, params.sandbox)
+      if (params.approval !== undefined) approval.setPolicy(agent.session, params.approval)
+    } catch (error) {
+      // A refusal of the authority plane is the caller's to fix, never a host failure.
+      if (error instanceof SandboxError || error instanceof ApprovalError) throw new RpcFailure(INVALID_PARAMS, error.message)
+      throw error
+    }
     // Read through the pure fold, never through `resolve` — resolving is the
     // audit act of an effect boundary, and looking is not an effect.
     const mode = effectiveSandboxMode(agent.session.facts) ?? sandbox.defaultMode
@@ -1047,9 +1092,19 @@ export class ProtocolHost {
     let inflight = this.resuming.get(requested)
     if (!inflight) {
       inflight = agents
-        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.agentDefaults(), ...world })
+        // The preset this host composes is named, so a session composed under
+        // another one is refused rather than run under a world its header does
+        // not name (core/agent `assertSamePreset`).
+        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.agentDefaults(), ...world, ...preset })
         .then(
-          (handle) => {
+          async (handle) => {
+            try {
+              this.config.onResumed?.(handle)
+            } catch (error) {
+              // A switch the session refuses (a child's pin) leaves nothing half-done.
+              await handle.dispose()
+              throw error
+            }
             this.owned.set(handle.agent.id, handle)
             return handle.agent
           },
@@ -1303,8 +1358,8 @@ export class ProtocolHost {
    * answer to it from a non-receiver.
    *
    * It is not identity — there are no accounts here (§13) — but it is the
-   * difference between "a client that was shown this" and "any open socket",
-   * and it is what `decidedBy: 'user'` is allowed to mean.
+   * difference between "a client that may see this session" and "any open
+   * socket", and it is what `decidedBy: 'user'` is allowed to mean.
    *
    * A control subscriber that watches elsewhere keeps the question parked
    * (`couldAnswer`) but is refused here (`mayAnswer`): its summary showed a

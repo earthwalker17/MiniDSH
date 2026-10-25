@@ -155,10 +155,15 @@ async function scopeChain(fs: Fs, cwd: string, markers: readonly string[]): Prom
     chain.push(current)
     let isRoot = false
     for (const marker of markers) {
-      if (await fs.stat(fs.resolve(join(current, marker), current))) {
-        isRoot = true
-        break
-      }
+      const found = await fs.stat(fs.resolve(join(current, marker), current))
+      if (!found) continue
+      // Above the cwd, a marker another user owns is not this user's
+      // repository, and its instructions are not this user's either: a `.git`
+      // planted in a shared `/tmp` would otherwise enter the AGENTS.md beside
+      // it into every session below (S20.5 review). The cwd stands alone.
+      if (depth > 0 && found.ownedByMe === false) return [cwd]
+      isRoot = true
+      break
     }
     if (isRoot) {
       root = current
@@ -178,7 +183,9 @@ async function readIfPresent(fs: Fs, path: string, cwd: string, maxSourceBytes: 
   const info = await fs.stat(target)
   if (!info || info.type !== 'file' || info.size > maxSourceBytes) return undefined
   try {
-    const { text } = await fs.readText(target, {})
+    // Bounded by the bytes read, not the size stat reported (core/fs `FsReadOptions`):
+    // a repository AGENTS.md linked to a procfs file is size 0 and never ends.
+    const { text } = await fs.readText(target, {}, { maxBytes: maxSourceBytes })
     return text.trim().length === 0 ? undefined : { path: target.path, text }
   } catch {
     return undefined

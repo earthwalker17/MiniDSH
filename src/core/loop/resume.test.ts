@@ -274,6 +274,61 @@ describe('durable inbox', () => {
       .map((message) => (message.content[0] as { text: string }).text)
     expect(texts).toEqual(['hi', 'also consider this'])
   })
+
+  // The S20.5 audit's reproduction: a person's cancel lands inside the
+  // pre-step await, after the claim was taken and before it was recorded,
+  // with a job's end notice arriving in the same window. The clear kept the
+  // notice and re-inserted it; the deferred claim recorded after the clear then
+  // drained the re-inserted notice from the durable fold, so a restart lost it.
+  it('keeps a job notice a cancel kept, even when the cancel lands before the step recorded its claim', async () => {
+    const { harness: h } = await persistedHarness()
+    const { foldInbox, AGENT_PRE_STEP } = await import('../agent/index.ts')
+    const { jobNotice } = await import('../jobs/events.ts')
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    let first = true
+    h.root.on(AGENT_PRE_STEP, async (_context, next) => {
+      if (first) {
+        first = false
+        await gate
+      }
+      return next()
+    }, { global: true })
+    h.adapter.script(assistantText('ok'), assistantText('ok'))
+    const { agent } = await h.create()
+    agent.steer(createUserMessage('steer S1'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const notice = jobNotice({ jobId: 'job-1', kind: 'shell', label: 'sleep', mode: 'workspace-write', enforcement: 'full' }, { jobId: 'job-1', cause: 'exited', exitCode: 0 })
+    agent.inject(notice)
+    agent.cancel({ kind: 'user' })
+    release()
+    await agent.whenIdle()
+    // The live queue (the driver's own, not on the Agent contract) still owes it…
+    expect((agent as unknown as { inbox: { hasStepPending: boolean } }).inbox.hasStepPending).toBe(true)
+    // What a resume restores equals what is live: the notice is still owed.
+    expect(foldInbox(agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
+  })
+
+  it('requeues a job notice a pre-step listener did not let enter, as the throw and cancel paths do', async () => {
+    const { harness: h } = await persistedHarness()
+    const { foldInbox, AGENT_PRE_STEP } = await import('../agent/index.ts')
+    const { jobNotice } = await import('../jobs/events.ts')
+    let rejectOnce = true
+    h.root.on(AGENT_PRE_STEP, async (_context, next) => {
+      if (rejectOnce) {
+        rejectOnce = false
+        return { kind: 'reject' } as const
+      }
+      return next()
+    }, { global: true })
+    h.adapter.script(assistantText('ok'))
+    const { agent } = await h.create()
+    const notice = jobNotice({ jobId: 'job-2', kind: 'shell', label: 'sleep', mode: 'workspace-write', enforcement: 'full' }, { jobId: 'job-2', cause: 'exited', exitCode: 0 })
+    agent.inject(notice)
+    agent.steer(createUserMessage('go'))
+    await agent.whenIdle()
+    expect(foldInbox(agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
+  })
 })
 
 describe('agents.fork', () => {
@@ -499,9 +554,10 @@ describe('lineage survives the process', () => {
     const id = child.agent.id
     await child.dispose()
 
-    const resumed = await agents.resume(h.root, id)
+    // Continued under the preset its header names (core/agent `assertSamePreset`).
+    const resumed = await agents.resume(h.root, id, { agentPreset: 'reviewer' })
     expect(resumed.agent.session.header).toMatchObject({ delegatedBy: 'session-parent', delegatedByCallId: 'call-7', delegationDepth: 2, agentPreset: 'reviewer' })
-    const forked = await agents.fork(h.root, id)
+    const forked = await agents.fork(h.root, id, undefined, { agentPreset: 'reviewer' })
     expect(forked.agent.session.header).toMatchObject({ parentId: id, delegatedBy: 'session-parent', delegatedByCallId: 'call-7', delegationDepth: 2, agentPreset: 'reviewer' })
     await forked.dispose()
     await resumed.dispose()
@@ -617,5 +673,87 @@ describe('salvage: forking a damaged log from its readable prefix', () => {
     await expect(h.root.get(AGENTS).fork(h.root, asSessionId('child'), undefined, { agentOptions: { provider: 'scripted', model: 'scripted-model' }, salvage: true })).rejects.toThrowError(
       /the damage removed the delegation opening/,
     )
+  })
+
+  // The S20.5 audit: fork refused exactly this and resume did not, so a child
+  // whose stamps were lost (a torn first write, a tampered file) resumed at
+  // the deployment default with approvals `ask` — wider than its ceiling.
+  it('refuses to RESUME a delegated child whose log holds no delegation opening, as a fork refuses', async () => {
+    const { harness: h } = await persistedHarness()
+    const sessions = h.root.get(SESSIONS)
+    const child = sessions.create({ cwd: process.cwd(), id: asSessionId('orphan-child'), delegatedBy: asSessionId('parent') })
+    child.append(TURN_START, { turn: 1 })
+    child.append(USER_MESSAGE, { message: createUserMessage('x') }, { surfaceOp: { op: 'append' } })
+    await sessions.detach(child)
+    await expect(h.root.get(AGENTS).resume(h.root, asSessionId('orphan-child'), { agentOptions: { provider: 'scripted', model: 'scripted-model' } })).rejects.toThrowError(
+      /delegation opening/,
+    )
+  })
+})
+
+describe('a refused creation leaves nothing behind', () => {
+  // The S20.5 audit's reproduction: a seed an invariant refuses at the first
+  // live append (the lifecycle record, before the creation transaction's try)
+  // left the session registered in the store, so the same host's retry said
+  // "already exists" instead of the real reason, even after the file was fixed.
+  it('gives the same reason on a retry, because the refused attempt left no session registered', async () => {
+    const { harness: h, dir: base } = await persistedHarness()
+    h.adapter.script(assistantText('one'))
+    const first = await h.create()
+    const id = first.agent.id
+    first.agent.followup(createUserMessage('hi'))
+    await first.agent.whenIdle()
+    const next = first.agent.session.events.length
+    await first.dispose()
+    // Envelope-valid, so the store reads it; the jobs invariant refuses it.
+    appendFileSync(fileFor(base, id), `${JSON.stringify({ type: 'job/end', seq: next, time: Date.now(), data: { jobId: 'ghost', cause: 'exited' } })}\n`)
+    const reasons: string[] = []
+    for (let attempt = 0; attempt < 2; attempt++) {
+      reasons.push(await h.root.get(AGENTS).resume(h.root, id).then(() => 'resumed', (error: Error) => error.message))
+    }
+    expect(reasons[0]).toMatch(/no job\/start/)
+    expect(reasons[1]).toBe(reasons[0])
+  })
+})
+
+describe('a continuation composes the world its header names', () => {
+  // The S20.5 audit's reproduction: the header names the agent preset a
+  // session was composed under, but every continuation ran whatever world its
+  // CALLER supplied — a host started with another preset, or with none — while
+  // the header, `sessions show` and `inspect` still named the original.
+  it('refuses a resume or a fork whose caller supplies another preset\'s world, or none', async () => {
+    const { harness: h } = await persistedHarness()
+    h.adapter.script(assistantText('one'))
+    const agents = h.root.get(AGENTS)
+    const made = await agents.create(h.root, { cwd: process.cwd(), agentOptions: { provider: 'scripted', model: 'scripted-model' }, agentPreset: 'reviewer' })
+    made.agent.followup(createUserMessage('go'))
+    await made.agent.whenIdle()
+    const id = made.agent.id
+    await made.dispose()
+    const world = (): void => {}
+    await expect(agents.resume(h.root, id, { agentPreset: 'builder', world })).rejects.toThrowError(/agent preset "reviewer"/)
+    await expect(agents.resume(h.root, id)).rejects.toThrowError(/agent preset "reviewer"/)
+    await expect(agents.fork(h.root, id, undefined, { agentPreset: 'builder', world })).rejects.toThrowError(/agent preset "reviewer"/)
+    const resumed = await agents.resume(h.root, id, { agentPreset: 'reviewer', world })
+    expect(resumed.agent.session.header.agentPreset).toBe('reviewer')
+    await resumed.dispose()
+  })
+})
+
+describe('a fork closes what its boundary cut', () => {
+  // A compaction bracket an idle `/compact` opened lies outside any turn, so a
+  // fork may cut between its start and its end. Jobs were closed at the
+  // boundary; the bracket was carried open until the fork itself resumed.
+  it('closes a compaction bracket the boundary cut, as it closes a job', async () => {
+    const { harness: h } = await persistedHarness()
+    h.adapter.script(assistantText('one'))
+    const { agent } = await h.create()
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    const start = agent.session.append(COMPACTION_START, { trigger: 'explicit', budgetTokens: 1000, projectedTokens: 900, plannedStart: 0, plannedEnd: 1, plannedNodes: 1 })
+    const forked = await h.root.get(AGENTS).fork(h.root, agent.session, start.seq)
+    const ends = forked.agent.session.events.filter((event) => event.type === COMPACTION_END.type)
+    expect(ends.map((event) => (event.data as { startSeq: number }).startSeq)).toEqual([start.seq])
+    await forked.dispose()
   })
 })

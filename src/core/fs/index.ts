@@ -30,6 +30,8 @@ export type FsErrorCode =
   | 'FS_AMBIGUOUS_EDIT'
   | 'FS_SANDBOX_DENIED'
   | 'FS_EXISTS'
+  | 'FS_TOO_LARGE'
+  | 'FS_NOT_A_FILE'
   | 'FS_IO'
 
 export class FsError extends Error {
@@ -53,6 +55,12 @@ export interface FsInfo {
   readonly type: 'file' | 'directory' | 'other'
   readonly version: string
   readonly size: number
+  /**
+   * Whether this process's own user owns the entry; absent where the platform
+   * has no such notion to ask (win32). What a walk above the workspace asks
+   * before it trusts a marker it finds there (skills, workspace instructions).
+   */
+  readonly ownedByMe?: boolean
 }
 
 export interface DirEntry {
@@ -84,11 +92,27 @@ export interface FsActor {
   readonly callId?: CallId
 }
 
+/**
+ * How much a read may take. A read of a path a repository or a model names is
+ * bounded by the bytes ACTUALLY read, never by the size `stat` reports: a
+ * procfs file is a regular file of size 0 whose read never ends, and a
+ * repository symlink to `/proc/self/pagemap` OOM-killed the host through the
+ * skill scan (S20.5, measured at 3.46 GB). So a provider opens the target
+ * (a FIFO without blocking), refuses one that is not a regular file once open
+ * (`FS_NOT_A_FILE`), and reads at most `maxBytes + 1` bytes — its own ceiling
+ * when none is given. Past the bound it refuses `FS_TOO_LARGE`, or with
+ * `partial` returns the first `maxBytes` and `complete: false`.
+ */
+export interface FsReadOptions {
+  readonly maxBytes?: number
+  readonly partial?: boolean
+}
+
 export interface Fs {
   resolve(path: string, cwd: string): FsTarget
   stat(target: FsTarget): Promise<FsInfo | undefined>
   /** Reads a file and emits `fs/observed` so the read-before-edit policy can record it. */
-  readText(target: FsTarget, actor: FsActor): Promise<{ text: string; version: string }>
+  readText(target: FsTarget, actor: FsActor, options?: FsReadOptions): Promise<{ text: string; version: string; complete: boolean }>
   /**
    * Reads a file as bytes — and, unlike `readText`, emits NOTHING.
    *
@@ -107,7 +131,7 @@ export interface Fs {
    * canonicalizes it; reads pass in every sandbox mode, so it grants nothing
    * `readText` did not.
    */
-  readBytes(target: FsTarget, actor: FsActor): Promise<{ bytes: Uint8Array; version: string }>
+  readBytes(target: FsTarget, actor: FsActor, options?: FsReadOptions): Promise<{ bytes: Uint8Array; version: string; complete: boolean }>
   writeText(target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }>
   listDir(target: FsTarget): Promise<DirEntry[]>
 }

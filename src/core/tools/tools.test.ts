@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { APPROVAL_REQUEST } from '../approval/index.ts'
 import type { Agent } from '../agent/types.ts'
-import { defineTool, TOOLS, TOOLS_POST_EXECUTE, TOOLS_PRE_EXECUTE, toolCall, type Tools } from './index.ts'
+import { defineTool, TOOLS, TOOLS_EXECUTE, TOOLS_POST_EXECUTE, TOOLS_PRE_EXECUTE, toolCall, type Tools } from './index.ts'
 
 let harness: CoreHarness | undefined
 afterEach(async () => {
@@ -135,6 +135,23 @@ describe('tool execution pipeline', () => {
     const result = await tools.execute(call('boom', { text: 'x' }, agent, signal))
     expect(result.isError).toBe(true)
     expect(result.content[0]).toMatchObject({ type: 'text', text: 'Error: kaboom' })
+  })
+
+  // The S20.5 audit's reproduction: a render that returns no block list, or a
+  // middleware that answers with nothing, made `execute` reject OUTSIDE its
+  // try. The driver then wrote no `tool/result`, the turn closed, and every
+  // later request carried a tool call without its result, which every
+  // provider refuses — a session no repair could heal.
+  it('turns a malformed result into an isError result, never a rejection', async () => {
+    const { tools, agent, signal } = await setup()
+    tools.register(harness!.root, { ...upper, name: 'badrender', render: () => undefined as never })
+    const rendered = await tools.execute(call('badrender', { text: 'x' }, agent, signal))
+    expect(rendered.isError).toBe(true)
+    expect(rendered.error?.info?.code).toBe('TOOL_FAILED')
+    tools.register(harness!.root, upper)
+    harness!.root.on(TOOLS_EXECUTE, async () => undefined as never)
+    const answered = await tools.execute(call('upper', { text: 'x' }, agent, signal))
+    expect(answered.isError).toBe(true)
   })
 
   it('applies monotonic guards after pre-execute', async () => {

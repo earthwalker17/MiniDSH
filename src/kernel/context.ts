@@ -58,6 +58,13 @@ interface EffectRecord {
 interface EffectOwner {
   readonly label: string
   readonly active: boolean
+  /**
+   * Throws exactly when `addEffect` would, and is asked FIRST: a registration
+   * that performed its side effect (a listener on the bus, a service in a
+   * realm, a mounted plugin) and only then learned its owner was gone threw
+   * "refused" for a registration that was live (S20.5 review).
+   */
+  admit(label: string): void
   addEffect(record: EffectRecord): Disposer
 }
 
@@ -215,10 +222,14 @@ class PluginInstance implements EffectOwner, PluginHandle {
     return this.state === 'loading' || this.state === 'active'
   }
 
-  addEffect(record: EffectRecord): Disposer {
+  admit(label: string): void {
     if (!this.mounted || this.state === 'unloading' || this.state === 'disposed') {
-      throw new KernelError('INACTIVE_OWNER', `cannot register "${record.label}" on ${this.label}: ${this.state}`)
+      throw new KernelError('INACTIVE_OWNER', `cannot register "${label}" on ${this.label}: ${this.state}`)
     }
+  }
+
+  addEffect(record: EffectRecord): Disposer {
+    this.admit(record.label)
     return this.effects.add(record)
   }
 
@@ -370,8 +381,11 @@ class Scope implements EffectOwner {
     this.label = label
     this.logger = logger
   }
+  admit(label: string): void {
+    if (!this.active) throw new KernelError('INACTIVE_OWNER', `cannot register "${label}" on disposed ${this.label}`)
+  }
   addEffect(record: EffectRecord): Disposer {
-    if (!this.active) throw new KernelError('INACTIVE_OWNER', `cannot register "${record.label}" on disposed ${this.label}`)
+    this.admit(record.label)
     return this.effects.add(record)
   }
   attachParentRelease(release: Disposer): void {
@@ -479,6 +493,7 @@ export class Context {
 
   /** Claims a service key in this context's realm. An effect: unprovided on unwind. */
   provide<T>(key: ServiceKey<T>, value: T): Disposer {
+    this.owner.admit(`provide("${key.name}")`)
     if (this.realm.has(key.name)) {
       throw new KernelError('SERVICE_DUPLICATE', `service "${key.name}" is already provided in this realm`)
     }
@@ -512,6 +527,7 @@ export class Context {
    */
   plugin<C>(plugin: Plugin<C>, ...args: undefined extends C ? [config?: C] : [config: C]): PluginHandle
   plugin<C>(plugin: Plugin<C>, config?: C): PluginHandle {
+    this.owner.admit(`plugin("${plugin.name}")`)
     const instance = new PluginInstance(this.root, this, plugin as Plugin<unknown>, config)
     this.root.instances.add(instance)
     const mountDisposer = this.effect(() => () => instance.dispose(), `plugin("${plugin.name}")`)
@@ -522,6 +538,7 @@ export class Context {
 
   /** Registers a reversible effect on this context's owner. */
   effect(execute: () => EffectCleanup | void, label = 'effect'): Disposer {
+    this.owner.admit(label)
     const dispose = execute() ?? (() => {})
     return this.owner.addEffect({ dispose, label })
   }
@@ -537,6 +554,7 @@ export class Context {
     if (options.scope !== undefined && this.scope !== undefined && options.scope !== this.scope) {
       throw new KernelError('SCOPE_NESTED', `cannot re-tag a child of ${this.owner.label}: scopes are flat`)
     }
+    this.owner.admit(options.label ?? 'child scope')
     const scope = new Scope(options.label ?? `scope(${String(options.scope ?? 'anonymous')})`, this.root.logger)
     const ctx = new Context(
       {
@@ -580,6 +598,7 @@ export class Context {
   // ---- events -------------------------------------------------------------
 
   on<K extends AnyEventKey>(key: K, listener: Listener<K>, options: ListenOptions = {}): Disposer {
+    this.owner.admit(`on("${key.name}")`)
     const remove = this.root.bus.add(
       { name: key.name, fn: listener as (...args: unknown[]) => unknown, scope: this.scope, global: options.global ?? false },
       options.prepend ?? false,
@@ -589,6 +608,7 @@ export class Context {
 
   /** Pre-delivery observation of every dispatch on this root (the invariant seam). */
   observe(observer: Observer): Disposer {
+    this.owner.admit('observe')
     const remove = this.root.bus.observe(observer)
     return this.effect(() => remove, 'observe')
   }

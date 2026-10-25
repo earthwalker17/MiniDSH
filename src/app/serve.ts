@@ -8,7 +8,7 @@ import type { Context } from '../kernel/index.ts'
 import { protocolPlugin, type Carrier, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
 import { VERSION } from './version.ts'
-import { bootComposition, type BootOptions } from './headless.ts'
+import { applyAuthority, bootComposition, type BootOptions } from './headless.ts'
 
 export interface ServeOptions extends BootOptions {
   readonly cwd: string
@@ -38,8 +38,13 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
   const closed = new Promise<void>((resolve) => {
     resolveClosed = resolve
   })
+  // Filled once booted; the hook below runs only on a later wire resume.
+  const booted: { root?: Context } = {}
   const protocolConfig: ProtocolConfig = {
     serverVersion: VERSION,
+    // An explicit authority flag is a durable switch on every session this
+    // process continues, a wire resume included (ARCHITECTURE §9).
+    onResumed: (handle) => applyAuthority(booted.root!, handle, options),
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
@@ -72,6 +77,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     ...options,
     extraBaseRows: [...(options.extraBaseRows ?? []), defineRow('protocol', protocolPlugin, protocolConfig)],
   })
+  booted.root = root
   let disposed: Promise<void> | undefined
   return {
     root,

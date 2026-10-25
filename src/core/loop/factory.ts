@@ -46,23 +46,36 @@ class LoopFactory implements AgentFactory {
     // through `onDispatch`, durable before every body); `durability` is only
     // ever what the provider DECLARED.
     const durability = this.ctx.tryGet(PERSISTENCE)?.durability
-    session.append(SESSION_LIFECYCLE, {
-      origin: session.origin,
-      dispatch: true,
-      ...(durability === undefined ? {} : { durability }),
-      ...(options.salvage === undefined ? {} : { salvage: options.salvage }),
-    })
-    const agent = new ReactLoopAgent(session, options.agentOptions, options.world)
-    // The scope resolves services through the loop context and is keyed by the agent itself.
-    const scope = this.ctx.child({ scope: agent, label: `agent:${session.id}` })
-    agent.attach(scope)
-    // The base route is an opening fact, like the authority knobs: written
-    // before publication iff the seed does not already say it. A log from
-    // before the record existed gets one at pickup (`initial`); an override at
-    // resume is a `resume`; a fork born with overrides changed at its birth.
-    const folded = foldAgentOptions(session.facts)
-    if (!folded || !sameAgentOptions(folded, agent.options)) {
-      session.append(AGENT_OPTIONS, { options: agent.options, reason: !folded ? 'initial' : session.origin === 'resumed' ? 'resume' : 'change' })
+    // The transaction starts at the session, not at the `try` below: the first
+    // live append is where every invariant folds the seed, and a refusal there
+    // (or a malformed stored inbox at `attach`) left the unpublished session
+    // registered, so the same host's retry said "already exists" instead of
+    // the real reason (S20.5 review).
+    let agent: ReactLoopAgent | undefined
+    let scope: Context | undefined
+    try {
+      session.append(SESSION_LIFECYCLE, {
+        origin: session.origin,
+        dispatch: true,
+        ...(durability === undefined ? {} : { durability }),
+        ...(options.salvage === undefined ? {} : { salvage: options.salvage }),
+      })
+      agent = new ReactLoopAgent(session, options.agentOptions, options.world)
+      // The scope resolves services through the loop context and is keyed by the agent itself.
+      scope = this.ctx.child({ scope: agent, label: `agent:${session.id}` })
+      agent.attach(scope)
+      // The base route is an opening fact, like the authority knobs: written
+      // before publication iff the seed does not already say it. A log from
+      // before the record existed gets one at pickup (`initial`); an override at
+      // resume is a `resume`; a fork born with overrides changed at its birth.
+      const folded = foldAgentOptions(session.facts)
+      if (!folded || !sameAgentOptions(folded, agent.options)) {
+        session.append(AGENT_OPTIONS, { options: agent.options, reason: !folded ? 'initial' : session.origin === 'resumed' ? 'resume' : 'change' })
+      }
+    } catch (error) {
+      await scope?.dispose()
+      await sessions.detach(session)
+      throw error
     }
 
     // One disposal, run at most once, shared by every path that can end the agent:
@@ -108,7 +121,10 @@ class LoopFactory implements AgentFactory {
       // refusal (a held write lease, a damaged or mismatched stored log) cannot
       // throw through it. For a RESUME that refusal must reach the caller BEFORE
       // any paid work, not at the first turn-end flush — so surface it here,
-      // inside the transaction, where it rolls the creation back unannounced.
+      // inside the transaction, where it rolls the creation back. Not
+      // unannounced: the lease is taken AT publication, so by now
+      // `agent/created` and `session/created` were heard, and the rollback's
+      // disposals withdraw them (S20.5 review).
       if (session.origin === 'resumed') {
         try {
           await sessions.flush(session)

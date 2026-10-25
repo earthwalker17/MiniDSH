@@ -162,7 +162,9 @@ describe('persistence-jsonl: the session write lease', () => {
     // is blocked (fail-safe) rather than racing a second deleter.
     writeFileSync(`${lock}.steal`, JSON.stringify({ pid: deadPid, host: hostname(), acquiredAt: 1 }))
     const blocked = resumeStored(rootA, 'race')
-    await expect(blocked.flush()).rejects.toSatisfy(flushError(/locked by pid/))
+    // Named, as the lease's comment promises: removing only the lock recovers
+    // this once, and leaves every later reclaim blocked (S20.5 audit).
+    await expect(blocked.flush()).rejects.toSatisfy(flushError(/locked by pid .*remove .*\.lock and .*\.lock\.steal, a reclaim's mutex/))
     await rootA.get(SESSIONS).detach(blocked)
 
     // With the mutex cleared, the same reclaim succeeds.

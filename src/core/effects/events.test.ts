@@ -234,4 +234,24 @@ describe('describeIntent', () => {
     // Ordinary non-ASCII text is not invisible and stays verbatim.
     expect(clampIntent(intent({ command: 'echo café 中文' })).escaped).toBeUndefined()
   })
+
+  // The S20.5 audit's reproduction: the same attack through default-ignorable
+  // code points that are NOT format characters (Mongolian free variation
+  // selectors are Mn, the Hangul fillers Lo), which rendered as the visible
+  // query alone and left the request unmarked.
+  it('escapes every default-ignorable code point, whatever its general category', () => {
+    const bits = '\u{180B}\u{180C}\u{180C}\u{180B}'
+    const hidden = clampIntent(request({ payload: `node 24 release date${bits}` }))
+    expect(hidden.escaped).toBe(true)
+    expect(describeIntent(hidden)).toContain('\\u{180b}\\u{180c}\\u{180c}\\u{180b}')
+    const ignorable = /\p{Default_Ignorable_Code_Point}/u
+    const missed: string[] = []
+    for (let code = 0; code <= 0x10ffff; code++) {
+      if (code >= 0xd800 && code <= 0xdfff) continue
+      const ch = String.fromCodePoint(code)
+      if (!ignorable.test(ch)) continue
+      if (clampIntent(intent({ command: `a${ch}b` })).escaped !== true) missed.push(code.toString(16))
+    }
+    expect(missed).toEqual([])
+  })
 })

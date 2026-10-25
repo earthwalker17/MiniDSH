@@ -322,13 +322,14 @@ const P = (path: string): string => resolve(path)
  * `FS_NOT_FOUND`, and only `listDir` reports an errno. `special` stages a path
  * that stats as neither file nor directory (a FIFO, a link to a device).
  */
-function stagedFs(listing: Record<string, DirEntry[]>, files: Record<string, string>, refuse: Record<string, string> = {}, special: readonly string[] = []): Fs {
+function stagedFs(listing: Record<string, DirEntry[]>, files: Record<string, string>, refuse: Record<string, string> = {}, special: readonly string[] = [], foreign: readonly string[] = []): Fs {
   const errno = (code: string): Error => Object.assign(new Error(`${code}: staged`), { code })
   return {
     resolve: (path, cwd) => ({ path: resolve(cwd, path), displayPath: path }),
     stat: async (target) => {
       if (refuse[target.path] !== undefined) return undefined
       if (special.includes(target.path)) return { type: 'other', version: '1', size: 0 }
+      if (foreign.includes(target.path)) return { type: 'directory', version: '1', size: 0, ownedByMe: false }
       const text = files[target.path]
       if (text !== undefined) return { type: 'file', version: '1', size: Buffer.byteLength(text, 'utf8') }
       return listing[target.path] !== undefined ? { type: 'directory', version: '1', size: 0 } : undefined
@@ -336,10 +337,13 @@ function stagedFs(listing: Record<string, DirEntry[]>, files: Record<string, str
     readText: async () => {
       throw new Error('discovery must not use readText: it emits fs/observed')
     },
-    readBytes: async (target) => {
+    readBytes: async (target, _actor, options) => {
       const text = files[target.path]
       if (text === undefined || refuse[target.path] !== undefined) throw new FsError('FS_NOT_FOUND', `cannot read "${target.displayPath}"`)
-      return { bytes: Buffer.from(text, 'utf8'), version: '1' }
+      const bytes = Buffer.from(text, 'utf8')
+      // The seam's contract: the bound is decided by the bytes, never by `stat`.
+      if (options?.maxBytes !== undefined && bytes.byteLength > options.maxBytes) throw new FsError('FS_TOO_LARGE', `"${target.displayPath}" is larger than ${options.maxBytes} bytes`)
+      return { bytes, version: '1', complete: true }
     },
     writeText: async () => {
       throw new Error('discovery never writes')
@@ -355,6 +359,24 @@ function stagedFs(listing: Record<string, DirEntry[]>, files: Record<string, str
 }
 
 const SKILL_TEXT = '---\nname: alpha\ndescription: Use for alpha.\n---\nbody\n'
+
+describe('the workspace walk', () => {
+  // The S20.5 audit: the walk climbed to the first ancestor holding a `.git`,
+  // so another user's `.git` planted in a shared /tmp made every session in a
+  // directory below it list that user's skills, under this user's authority.
+  it('trusts no project root above the cwd that another user owns', async () => {
+    const tmp = P('/staged/tmp')
+    const cwd = join(tmp, 'work')
+    const planted = join(tmp, '.agents', 'skills')
+    const listing = { [planted]: [{ name: 'evil', type: 'directory' as const }], [join(planted, 'evil')]: [{ name: 'SKILL.md', type: 'file' as const }] }
+    const files = { [join(planted, 'evil', 'SKILL.md')]: SKILL_TEXT.replace('alpha', 'evil') }
+    const foreign = await discoverSkills(stagedFs(listing, files, {}, [], [join(tmp, '.git')]), cwd, { roots: [] })
+    expect(foreign.listed).toEqual([])
+    // The same layout, owned by this user, is the repository root it looks like.
+    const mine = await discoverSkills(stagedFs({ ...listing, [join(tmp, '.git')]: [] }, files), cwd, { roots: [] })
+    expect(mine.listed.map((skill) => skill.name)).toEqual(['evil'])
+  })
+})
 
 describe('the failure rule', () => {
   const cwd = P('/staged/ws')

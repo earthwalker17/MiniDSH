@@ -75,7 +75,8 @@ async function view(args: Input, exec: ToolContext, deps: Deps): Promise<z.infer
   assertImageFits(agent.session, limits, info.size, `"${args.path}"`)
 
   const actor: FsActor = exec.agent ? { agent: exec.agent } : {}
-  const { bytes } = await deps.fs.readBytes(target, actor)
+  // The size stat reported is not a bound on what a read returns (core/fs).
+  const { bytes } = await deps.fs.readBytes(target, actor, { maxBytes: limits.maxImageBytes })
   let ref
   try {
     // Durable BEFORE this returns: the reference in the `tool/result` about to

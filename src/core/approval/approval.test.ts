@@ -61,6 +61,13 @@ describe('approval seam', () => {
     expect(reason).toBe('read one file [2Kapprove str_replace_editor (view README.md')
     expect(seen).toBe(reason)
 
+    // A bidi override reorders what follows it on the consent line, and TAG
+    // letters carry text nobody sees (S20.5): blanked like the controls.
+    const { agent: hidden } = await harness.create()
+    await harness.root.get(APPROVAL).request({ agent: hidden, toolName: 'bash', reason: 'ok\u{202E}evil\u{E0041}' })
+    const hiddenReason = (hidden.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { reason: string }).reason
+    expect(hiddenReason).toBe('ok evil')
+
     const { agent: second } = await harness.create()
     await harness.root.get(APPROVAL).request({ agent: second, toolName: 'bash', reason: 'x'.repeat(5_000) })
     const long = (second.session.events.find((event) => matches(event, APPROVAL_ASKED))!.data as { reason: string }).reason

@@ -25,7 +25,7 @@ import type { Context } from '../kernel/index.ts'
 import { protocolPlugin, upgradeWasHandled, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
 import { VERSION } from './version.ts'
-import { bootComposition, type BootOptions } from './headless.ts'
+import { applyAuthority, bootComposition, type BootOptions } from './headless.ts'
 
 export interface WebOptions extends BootOptions {
   readonly cwd: string
@@ -137,6 +137,9 @@ function sameAuthority(request: IncomingMessage, authorities: ReadonlySet<string
   return authorities === undefined ? originAuthority === host : authorities.has(originAuthority)
 }
 
+/** `Sec-Fetch-Dest` values a browser sends when this page is being put inside another one. */
+const EMBEDDING_DESTINATIONS: ReadonlySet<string> = new Set(['iframe', 'frame', 'embed', 'object', 'fencedframe'])
+
 export async function startWebHost(options: WebOptions): Promise<WebHostHandle> {
   const token = options.token ?? randomBytes(24).toString('base64url')
   const secret = randomBytes(32)
@@ -160,7 +163,16 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   let tokenSpent = false
   const server: Server = createServer((request: IncomingMessage, response: ServerResponse) => {
     const authority = request.headers.host ?? ''
-    if (!sameAuthority(request, authorities)) {
+    // Top-level only. The cookie and the Host/Origin fence stop another page
+    // DRIVING this one, not HOLDING it: a frame navigation sends no Origin,
+    // and a SameSite=Strict cookie still rides a same-site embed — and every
+    // port on 127.0.0.1 is the same site, where agents serve their dev
+    // servers. Consent buttons a frame can overlay are not consent (S20.5).
+    response.setHeader('x-frame-options', 'DENY')
+    response.setHeader('content-security-policy', "frame-ancestors 'none'")
+    response.setHeader('x-content-type-options', 'nosniff')
+    response.setHeader('referrer-policy', 'no-referrer')
+    if (!sameAuthority(request, authorities) || EMBEDDING_DESTINATIONS.has(String(request.headers['sec-fetch-dest'] ?? ''))) {
       response.writeHead(403).end('forbidden')
       return
     }
@@ -209,8 +221,13 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
     }
   })
 
+  // Filled once booted; the hook below runs only on a later wire resume.
+  const booted: { root?: Context } = {}
   const protocolConfig: ProtocolConfig = {
     serverVersion: VERSION,
+    // An explicit authority flag is a durable switch on every session this
+    // process continues, a wire resume included (ARCHITECTURE §9).
+    onResumed: (handle) => applyAuthority(booted.root!, handle, options),
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
@@ -237,6 +254,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   }
 
   const root = await bootComposition({ ...options, extraBaseRows: [...(options.extraBaseRows ?? []), defineRow('protocol', protocolPlugin, protocolConfig)] })
+  booted.root = root
   // Registered LAST, after every carrier: an `upgrade` listener stops Node from
   // destroying the socket itself, so an upgrade to a path nobody serves would
   // otherwise be held open forever with no credential ever checked.
@@ -245,10 +263,16 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
     socket.end('HTTP/1.1 404 Not Found' + CRLF + 'Connection: close' + CRLF + CRLF)
   })
   const bind = options.host ?? '127.0.0.1'
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(options.port ?? 0, bind, resolve)
-  })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(options.port ?? 0, bind, resolve)
+    })
+  } catch (error) {
+    // A port in use leaked the booted composition, every agent row with it (S20.5 review).
+    await root.dispose()
+    throw error
+  }
   const address = server.address()
   const port = typeof address === 'object' && address !== null ? address.port : 0
   authorities = authoritiesFor(bind, port)

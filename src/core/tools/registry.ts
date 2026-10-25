@@ -81,6 +81,17 @@ export function toParameters(schema: z.ZodType): Record<string, unknown> {
   return rest
 }
 
+/** A result the driver can log: a block list, and contexts that are a list when present. */
+function wellFormed(result: ToolResult): ToolResult {
+  if (typeof result !== 'object' || result === null || !Array.isArray(result.content)) {
+    throw new Error('the tool produced no content block list')
+  }
+  if (result.additionalContexts !== undefined && !Array.isArray(result.additionalContexts)) {
+    throw new Error('the tool produced additional contexts that are not a list')
+  }
+  return result
+}
+
 function errorResult(message: string, name: string, code: string): ToolResult {
   return { isError: true, content: [{ type: 'text', text: `Error: ${message}` }], error: { message, info: { name, code } } }
 }
@@ -117,19 +128,24 @@ class ToolRegistry implements Tools {
     const def = definition as unknown as AnyToolDefinition
     const layer = this.definitions.layerFor(owner)
     if (layer.has(def.name)) throw new Error(`tool "${def.name}" is already registered in this scope`)
-    layer.set(def.name, def)
-    this.ctx.emit(TOOLS_CHANGE)
-    return owner.effect(() => () => {
-      if (layer.get(def.name) === def) layer.delete(def.name)
+    // The mutation inside the effect, so the owner is admitted before it (kernel `admit`).
+    return owner.effect(() => {
+      layer.set(def.name, def)
       this.ctx.emit(TOOLS_CHANGE)
+      return () => {
+        if (layer.get(def.name) === def) layer.delete(def.name)
+        this.ctx.emit(TOOLS_CHANGE)
+      }
     }, `tool("${def.name}")`)
   }
 
   guard(owner: Context, guard: ToolGuard): Disposer {
     const layer = this.guards.layerFor(owner)
     const key = `guard#${++this.guardSeq}`
-    layer.set(key, guard)
-    return owner.effect(() => () => void layer.delete(key), 'tool.guard')
+    return owner.effect(() => {
+      layer.set(key, guard)
+      return () => void layer.delete(key)
+    }, 'tool.guard')
   }
 
   restrict(owner: Context, restriction: ToolRestriction): Disposer {
@@ -143,12 +159,14 @@ class ToolRegistry implements Tools {
       this.restrictions.set(scope, list)
     }
     const entry: ToolRestriction = { ...(restriction.allow === undefined ? {} : { allow: [...restriction.allow] }), ...(restriction.deny === undefined ? {} : { deny: [...restriction.deny] }) }
-    list.push(entry)
-    this.ctx.emit(TOOLS_CHANGE)
-    return owner.effect(() => () => {
-      const index = list.indexOf(entry)
-      if (index >= 0) list.splice(index, 1)
+    return owner.effect(() => {
+      list.push(entry)
       this.ctx.emit(TOOLS_CHANGE)
+      return () => {
+        const index = list.indexOf(entry)
+        if (index >= 0) list.splice(index, 1)
+        this.ctx.emit(TOOLS_CHANGE)
+      }
     }, 'tool.restrict')
   }
 
@@ -212,7 +230,11 @@ class ToolRegistry implements Tools {
     let result: ToolResult
     try {
       const gate = await this.gate(execution, scope)
-      result = gate ?? (await this.dispatch(tool, validated.data as unknown, execution, scope, call.onDispatch))
+      // Checked INSIDE the try: a render that returned no block list, or a
+      // middleware that answered with nothing, rejected `execute` past it,
+      // and the driver then logged a call with no result — a session every
+      // provider refuses from then on (S20.5 review). A throw is a result.
+      result = wellFormed(gate ?? (await this.dispatch(tool, validated.data as unknown, execution, scope, call.onDispatch)))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       result = errorResult(message, error instanceof Error ? error.name : 'Error', codeOf(error))

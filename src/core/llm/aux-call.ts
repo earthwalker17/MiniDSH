@@ -36,7 +36,13 @@ export interface AuxCallRecord {
    */
   readonly inputSeqs?: readonly number[]
   readonly usage?: TokenUsage
-  readonly outcome: { readonly kind: 'text'; readonly text: string } | { readonly kind: 'error'; readonly failure: LlmFailure }
+  /**
+   * `truncated`: the answer stopped at the output cap (`max-tokens`), so the
+   * text is a prefix of what the model meant to write. A caller that would
+   * act on the whole answer (a summary replacing history) must not act on
+   * this one; the record says so, so the log explains the decline.
+   */
+  readonly outcome: { readonly kind: 'text'; readonly text: string; readonly truncated?: true } | { readonly kind: 'error'; readonly failure: LlmFailure }
 }
 
 /** Log-only: durable and replayable, never part of model history. */
@@ -46,6 +52,8 @@ export interface AuxCallResult {
   readonly seq: number
   readonly text: string
   readonly usage?: TokenUsage
+  /** The answer stopped at the output cap: a prefix, never a whole answer. */
+  readonly truncated?: true
 }
 
 export class AuxCallError extends Error {
@@ -108,8 +116,11 @@ export async function runAuxCall(
   }
   const usage = assembler.usage
   const text = textOf(assembler.blocks())
-  const event = session.append(LLM_AUX_CALL, { ...base, ...(usage === undefined ? {} : { usage }), outcome: { kind: 'text', text } })
-  return { seq: event.seq, text, ...(usage === undefined ? {} : { usage }) }
+  // Recorded as such: a cut answer read as a whole one let compaction replace
+  // history with a summary that stopped mid-sentence (S20.5 review).
+  const truncated = assembler.finish.kind === 'max-tokens'
+  const event = session.append(LLM_AUX_CALL, { ...base, ...(usage === undefined ? {} : { usage }), outcome: { kind: 'text', text, ...(truncated ? { truncated: true as const } : {}) } })
+  return { seq: event.seq, text, ...(usage === undefined ? {} : { usage }), ...(truncated ? { truncated: true as const } : {}) }
 }
 
 /** Every recorded auxiliary call, in log order — the replay script's source. */

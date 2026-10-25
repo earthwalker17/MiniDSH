@@ -55,18 +55,23 @@ class PromptRegistry implements Prompt {
   section(owner: Context, section: PromptSection): Disposer {
     const layer = this.sections.layerFor(owner)
     if (layer.has(section.name)) throw new Error(`prompt section "${section.name}" is already registered in this scope`)
-    layer.set(section.name, section)
-    return owner.effect(() => () => {
-      if (layer.get(section.name) === section) layer.delete(section.name)
+    // The mutation inside the effect, so the owner is admitted before it (kernel `admit`).
+    return owner.effect(() => {
+      layer.set(section.name, section)
+      return () => {
+        if (layer.get(section.name) === section) layer.delete(section.name)
+      }
     }, `prompt.section("${section.name}")`)
   }
 
   variable(owner: Context, name: string, provider: () => string | undefined): Disposer {
     const layer = this.variables.layerFor(owner)
     if (layer.has(name)) throw new Error(`prompt variable "${name}" is already registered in this scope`)
-    layer.set(name, provider)
-    return owner.effect(() => () => {
-      if (layer.get(name) === provider) layer.delete(name)
+    return owner.effect(() => {
+      layer.set(name, provider)
+      return () => {
+        if (layer.get(name) === provider) layer.delete(name)
+      }
     }, `prompt.variable("${name}")`)
   }
 

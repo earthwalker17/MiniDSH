@@ -331,6 +331,26 @@ describe('agent loop: turn/step lifecycle', () => {
     expect(messageText(agent.session.deriveMessages().at(-1)!)).toBe('done')
   })
 
+  // The floor under the pipeline's own "a throw is a result": even if
+  // `execute` rejects, the call gets a result, because a logged call without
+  // one is a history every provider refuses and no repair heals (S20.5).
+  it('logs an error result for a call whose pipeline rejected, so the history stays answerable', async () => {
+    harness = await coreHarness()
+    const tools = harness.root.get(TOOLS)
+    tools.execute = async () => {
+      throw new Error('the pipeline itself broke')
+    }
+    harness.adapter.script(assistantToolCall('c1', 'anything', {}), assistantText('done'))
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    const result = agent.session.events.find((event) => event.type === 'tool/result')
+    expect(result?.data).toMatchObject({ callId: 'c1', error: { code: 'TOOL_FAILED' } })
+    // The second request carries the call AND its result, and the turn completed.
+    expect(harness.adapter.calls).toHaveLength(2)
+    expect(messageText(agent.session.deriveMessages().at(-1)!)).toBe('done')
+  })
+
   it('ends the turn with max-tokens when the model is truncated', async () => {
     harness = await coreHarness()
     harness.adapter.script([

@@ -227,6 +227,29 @@ describe('kernel: temporal composability', () => {
     expect(() => inner.effect(() => () => {})).toThrowError(KernelError)
   })
 
+  // The S20.5 audit's reproduction: a refused registration THREW, but only
+  // after its side effect had happened — the listener stayed on the bus, the
+  // service in the realm, the plugin in the root's instances — so the throw
+  // that said "refused" described a registration that was in fact live.
+  it('a refused registration leaves nothing behind: no listener, no service, no plugin, no effect run', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const event = emitEvent<[]>('test/refused')
+    const key = serviceKey<number>('test-refused')
+    const scope = root.child({ scope: 'dead' })
+    await scope.dispose()
+    let heard = 0
+    let ran = 0
+    expect(() => scope.on(event, () => void heard++, { global: true })).toThrowError(KernelError)
+    expect(() => scope.provide(key, 1)).toThrowError(KernelError)
+    expect(() => scope.plugin({ name: 'orphan', apply: () => void ran++ })).toThrowError(KernelError)
+    expect(() => scope.effect(() => void ran++)).toThrowError(KernelError)
+    root.emit(event)
+    await root.settle()
+    expect(heard).toBe(0)
+    expect(ran).toBe(0)
+    expect(root.tryGet(key)).toBeUndefined()
+  })
+
   it('disposing the root unwinds every mounted plugin', async () => {
     const root = createRoot({ logger: testLogger() })
     const order: string[] = []

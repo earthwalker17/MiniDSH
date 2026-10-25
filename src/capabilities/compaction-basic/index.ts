@@ -48,7 +48,7 @@ import {
 import { AuxCallError, LLM, runAuxCall, type Llm } from '../../core/llm/index.ts'
 import { createPluginMessage } from '../../core/llm/message.ts'
 import type { LlmRequest, Message } from '../../core/llm/types.ts'
-import { estimateMessage, meterSession } from '../../core/metering/index.ts'
+import { estimateMessage, estimateTokens, meterSession } from '../../core/metering/index.ts'
 import { PROMPT, type AssembledPrompt, type Prompt } from '../../core/prompt/index.ts'
 import { deriveEventMessage, foldRequestContext, matches, USER_MESSAGE, type Session } from '../../core/session/index.ts'
 import { RECALL_TOOL, TOOLS } from '../../core/tools/index.ts'
@@ -320,6 +320,15 @@ class BasicCompaction implements Compaction {
     // defines as a crash, a disposal or a fork boundary on a session that is
     // healthy and live. It depends on neither the plan nor the route.
     const assembled = await this.prompt.assemble(agent)
+    // A prefix (system prompt + tool schemas) at or past the threshold is
+    // pressure no compaction can relieve: the plan shadows history, never the
+    // prefix, so every step boundary bought a summary that moved nothing it
+    // measured, each applied one resetting the give-up count (S20.5 review).
+    // Pressure only: a person's explicit request and an overflow still try.
+    if (trigger === 'pressure') {
+      const prefix = estimateTokens(assembled.system) + estimateTokens(JSON.stringify(assembled.tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))))
+      if (prefix >= budget * this.config.thresholdRatio) return { kind: 'nothing-to-do' }
+    }
     const plan = planCompaction(session.facts, session.surfaceSeqs(), {
       budgetTokens: this.planBudget(route, budget),
       retainRatio: this.config.retainRatio,
@@ -448,7 +457,12 @@ class BasicCompaction implements Compaction {
       const result = await runAuxCall(this.llm, session, request, plan.shadowedSeqs)
       // An empty answer (the model called a tool instead of writing prose)
       // is not a summary. The failed call stays in the log; the surface does not move.
-      return result.text.trim().length === 0 ? { kind: 'empty' } : { kind: 'text', text: result.text, seq: result.seq }
+      if (result.text.trim().length === 0) return { kind: 'empty' }
+      // Nor is one cut off at the output cap: it would replace history with a
+      // summary that stops mid-sentence. Counted with the summary failures,
+      // which it is; the aux record says `truncated` (S20.5 review).
+      if (result.truncated) return { kind: 'failed' }
+      return { kind: 'text', text: result.text, seq: result.seq }
     } catch (error) {
       // `runAuxCall` already recorded why. A compaction that cannot summarise
       // must leave history alone rather than drop it — but it must say WHICH

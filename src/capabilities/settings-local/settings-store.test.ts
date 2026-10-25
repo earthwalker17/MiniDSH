@@ -70,7 +70,9 @@ describe('the settings store', () => {
     settings.write('agent', { model: 'good' }, { expectedRevision: 0 })
     const before = readFileSync(path, 'utf8')
 
-    expect(() => settings.write('agent', { model: '' }, { expectedRevision: 1 })).toThrow()
+    // The caller's error by its code: a bare throw let the wire answer a bad
+    // value as a host failure (-32603), which a retry policy retries forever.
+    expect(() => settings.write('agent', { model: '' }, { expectedRevision: 1 })).toThrowError(expect.objectContaining({ code: 'SETTINGS_INVALID' }))
     expect(readFileSync(path, 'utf8')).toBe(before)
     expect(settings.read('agent').value).toEqual({ provider: 'deepseek', model: 'good' })
   })

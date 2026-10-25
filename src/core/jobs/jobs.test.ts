@@ -540,3 +540,16 @@ describe('the review cases', () => {
     await resumed.dispose()
   })
 })
+
+describe('a stored log the writer did not write', () => {
+  // The S20.5 audit's reproduction: the folds read payloads unchecked, so a
+  // parseable but malformed record made repair, a cold verify and the host's
+  // summaries throw a raw TypeError instead of reporting a finding.
+  it('folds past malformed job and inbox records instead of throwing, and the invariant still names them', () => {
+    const at = (seq: number, type: string, data: unknown): EventEnvelope => ({ type, seq, time: 0, data }) as EventEnvelope
+    const events = [at(0, 'job/start', null), at(1, INBOX_SPLICED.type, { op: 'insert', queue: 'next-step' }), at(2, 'job/end', { cause: 'lost' })]
+    expect(() => foldJobs(events)).not.toThrow()
+    expect(() => closeUnpairedJobs(events, events.length, 0)).not.toThrow()
+    expect(checkJobsLog(events)).toBeDefined()
+  })
+})

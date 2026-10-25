@@ -128,7 +128,11 @@ class InvariantRegistry implements Invariants {
   }
 }
 
-/** Provides `ctx.invariants`. Omit from shipped compositions; mount in tests and E2E. */
+/**
+ * Provides `ctx.invariants`. Mounted by default (`app/compose.ts`); a
+ * composition that omits it loses the pre-commit refusals `core/session/format.ts`
+ * relies on for an older reader.
+ */
 export const invariantsPlugin: Plugin<InvariantsConfig | undefined> = {
   name: 'core-invariants',
   config: configSchema,

@@ -1,5 +1,5 @@
 /** The terminal surface: pure render folds plus scripted end-to-end runs over the loopback pair. */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -447,6 +447,28 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     await driver.see('continuing the plan')
     driver.type('/exit')
     expect(await exitCode).toBe(0)
+  })
+
+  // The S20.5 audit's reproduction: a piped script (or quick typing) whose
+  // first line arrives before the resume's attach completes sent that line
+  // with no session id, so the HOST created a second, hidden session — a paid
+  // turn nobody saw — and the resumed session never received the line.
+  it('holds a line typed before the resume attached, and delivers it to the resumed session', async () => {
+    const sessionsRoot = tempDir('minidsh-term-sessions-')
+    const cwd = tempDir('minidsh-term-cwd-')
+    const first = await runTask({ task: 'remember the plan', cwd, model: 'scripted-model', provider: 'scripted', sessionsRoot, ...scriptedBoot(new ScriptedAdapter().script(assistantText('plan remembered'))) })
+    const driver = terminalDriver()
+    // Already waiting when the terminal starts, as a piped script's first line is.
+    driver.type('go on with the plan')
+    const adapter = new ScriptedAdapter().script(assistantText('continuing the plan'))
+    const exitCode = runTerminal({ cwd, sessionsRoot, resumeId: first.sessionId, ...scriptedBoot(adapter), io: { input: driver.input, output: driver.output } })
+    await driver.see('continuing the plan')
+    driver.type('/exit')
+    expect(await exitCode).toBe(0)
+    const sent = adapter.calls[0]!.messages.map((message) => JSON.stringify(message.content))
+    // The resumed history came with it: the line reached the session it was typed into.
+    expect(sent.some((text) => text.includes('remember the plan'))).toBe(true)
+    expect(readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))).toHaveLength(1)
   })
 
   it('pages a long session instead of dumping it, and /history walks backwards', async () => {

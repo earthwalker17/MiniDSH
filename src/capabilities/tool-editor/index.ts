@@ -38,6 +38,16 @@ const configSchema = z.strictObject({ maxOutputChars: z.number().int().positive(
 
 const TRUNCATED = '\n<response clipped><NOTE>To save context only part of this file has been shown. Use `grep -n` to find line ranges, then view a specific range.</NOTE>'
 
+/**
+ * What one call may read of a file, and why there is a bound at all: a view of
+ * a ~130 MiB file read, split and numbered the whole file before showing
+ * 16,000 characters, and aborted the host on V8's heap (S20.5, measured; ~100
+ * MiB blocked its loop for ~30 s). A view reads a prefix and says what it left
+ * out; an edit of a larger file is refused, and the shell can still do it.
+ */
+const VIEW_READ_BYTES = 8 * 1024 * 1024
+const EDIT_MAX_BYTES = 8 * 1024 * 1024
+
 function numberLines(text: string, startLine: number): string {
   const lines = text.split('\n')
   return lines.map((line, index) => `${String(startLine + index).padStart(6)}  ${line}`).join('\n')
@@ -105,18 +115,24 @@ async function view(fs: Fs, target: FsTarget, args: Input, max: number, actor: F
       .toSorted()
     return `Directory ${target.displayPath}:\n${shown.join('\n')}`
   }
-  const { text } = await fs.readText(target, actor)
+  const { text, complete } = await fs.readText(target, actor, { maxBytes: VIEW_READ_BYTES, partial: true })
   const lines = text.split('\n')
+  // A partial read can end inside a line; that line is not shown as if whole.
+  if (!complete) lines.pop()
   let start = 1
-  let body = text
+  let body = complete ? text : lines.join('\n')
   if (args.view_range && args.view_range.length === 2) {
     const [from, to] = args.view_range as [number, number]
     start = Math.max(1, from)
     const end = to === -1 ? lines.length : Math.min(lines.length, to)
     body = lines.slice(start - 1, end).join('\n')
   }
-  const header = `Here's ${target.displayPath} (${lines.length} lines total)${args.view_range ? ` [lines ${start}-${args.view_range[1]}]` : ''}:`
-  return truncate(`${header}\n${numberLines(body, start)}`, max)
+  const extent = complete
+    ? `${lines.length} lines total`
+    : `the first ${VIEW_READ_BYTES.toLocaleString('en-US')} bytes of ${(info?.size ?? 0).toLocaleString('en-US')}: ${lines.length} lines; read past them with the shell`
+  const header = `Here's ${target.displayPath} (${extent})${args.view_range ? ` [lines ${start}-${args.view_range[1]}]` : ''}:`
+  // Numbered no further than the clip can show: the work is the output's, not the file's.
+  return truncate(`${header}\n${numberLines(body.length > max ? body.slice(0, max) : body, start)}`, max)
 }
 
 async function create(_ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
@@ -127,11 +143,11 @@ async function create(_ctx: Context, fs: Fs, target: FsTarget, args: Input, acto
 }
 
 async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
-  if (args.old_str === undefined) throw new FsError('FS_IO', '"str_replace" requires old_str')
+  if (args.old_str === undefined || args.old_str.length === 0) throw new FsError('FS_IO', '"str_replace" requires a non-empty old_str')
   // The observed version is the CAS token: a file changed since the model read it
   // must be rejected, so we must NOT re-derive the version from a fresh read.
   const observed = editIntent(ctx, target, actor)
-  const read = await fs.readText(target, actor)
+  const read = await readForEdit(fs, target, actor)
   const text = read.text
   const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version
   const occurrences = text.split(args.old_str).length - 1
@@ -141,7 +157,11 @@ async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, a
   if (occurrences > 1) {
     throw new FsError('FS_AMBIGUOUS_EDIT', `old_str appears ${occurrences} times in ${target.displayPath}; add more context to make it unique.`)
   }
-  const next = text.replace(args.old_str, args.new_str ?? '')
+  // Spliced, never `String.prototype.replace`: a string replacement reads
+  // `$$`, `$&` and `$'` as patterns, and a shell script's `$$` landed as `$`
+  // while the result said "Edited" (S20.5). Uniqueness is proven above.
+  const at = text.indexOf(args.old_str)
+  const next = text.slice(0, at) + (args.new_str ?? '') + text.slice(at + args.old_str.length)
   await fs.writeText(target, next, { kind: 'replaceIfVersion', version }, actor)
   return `Edited ${target.displayPath}.`
 }
@@ -149,7 +169,7 @@ async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, a
 async function insert(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
   if (args.insert_line === undefined || args.new_str === undefined) throw new FsError('FS_IO', '"insert" requires insert_line and new_str')
   const observed = editIntent(ctx, target, actor)
-  const read = await fs.readText(target, actor)
+  const read = await readForEdit(fs, target, actor)
   const text = read.text
   const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version
   const lines = text.split('\n')
@@ -159,4 +179,22 @@ async function insert(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor
   lines.splice(args.insert_line, 0, args.new_str)
   await fs.writeText(target, lines.join('\n'), { kind: 'replaceIfVersion', version }, actor)
   return `Inserted text into ${target.displayPath}.`
+}
+
+/**
+ * An edit's own read, which must NOT observe: `fs/observed` is a licence to
+ * overwrite, and a refused edit whose read observed the new content let the
+ * same call, repeated, write over text the model was never shown (S20.5). The
+ * licence comes only from what the model viewed, or from its own last write.
+ */
+async function readForEdit(fs: Fs, target: FsTarget, actor: FsActor): Promise<{ text: string; version: string }> {
+  try {
+    const { bytes, version } = await fs.readBytes(target, actor, { maxBytes: EDIT_MAX_BYTES })
+    return { text: new TextDecoder().decode(bytes), version }
+  } catch (error) {
+    if (error instanceof FsError && error.code === 'FS_TOO_LARGE') {
+      throw new FsError('FS_TOO_LARGE', `${target.displayPath} is larger than ${EDIT_MAX_BYTES.toLocaleString('en-US')} bytes, more than this tool edits; change it with the shell`)
+    }
+    throw error
+  }
 }

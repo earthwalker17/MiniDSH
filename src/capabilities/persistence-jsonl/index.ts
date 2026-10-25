@@ -555,6 +555,7 @@ class JsonlArchive implements Persistence {
     }
     if (tryCreate()) return
     const holder = readLeaseHolder(lock)
+    let stranded: string | undefined
     if (holder && holderIsDead(holder)) {
       const steal = `${lock}.steal`
       let mutex = false
@@ -562,7 +563,9 @@ class JsonlArchive implements Persistence {
         writeFileSync(steal, payload, { flag: 'wx' })
         mutex = true
       } catch {
-        // Another reclaimer holds the steal mutex; fall through and refuse.
+        // Another reclaimer holds the steal mutex, or a dead one left it:
+        // fall through and refuse, naming it.
+        stranded = steal
       }
       if (mutex) {
         try {
@@ -587,7 +590,7 @@ class JsonlArchive implements Persistence {
       }
     }
     const who = holder ? `pid ${holder.pid} on ${holder.host}` : 'an unreadable holder'
-    throw new Error(`session ${session.id}: the stored log is locked by ${who}; if that process is gone, remove ${lock}`)
+    throw new Error(`session ${session.id}: the stored log is locked by ${who}; if that process is gone, remove ${lock}${stranded === undefined ? '' : ` and ${stranded}, a reclaim's mutex`}`)
   }
 
   /** Removes only a lock this archive still owns — never one another process has since taken. */

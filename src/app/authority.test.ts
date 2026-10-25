@@ -300,16 +300,20 @@ describe('what a delegated child is told', () => {
         delegatedBy: asSessionId(top.agent.id),
         delegationDepth: 1,
         setup: (_agentCtx, agent) => {
-          root.get(SANDBOX).open(agent.session, { mode: 'read-only', reason: 'delegation' })
+          root.get(SANDBOX).open(agent.session, { mode: 'workspace-write', reason: 'delegation' })
           root.get(APPROVAL).open(agent.session, { policy: 'never', reason: 'delegation' })
         },
       })
       const before = await root.get(PROMPT).assemble(child.agent)
-      expect(before.system).toContain('Sandbox: read-only')
+      expect(before.system).toContain('Sandbox: workspace-write')
       expect(before.system).toContain('Approvals: never.')
       expect(before.system).toContain('You are a delegated subagent')
       // The statement reads the OPENING stamps: the section never moves for the session's life.
+      // A REAL switch, for a child a legal one (narrowing): the S20.5 audit found
+      // this test 'switching' read-only to read-only, which records nothing and
+      // could not fail whatever the prompt read.
       root.get(SANDBOX).setMode(child.agent.session, 'read-only')
+      expect(child.agent.session.events.filter((event) => event.type === 'sandbox/mode').map((event) => (event.data as { reason: string }).reason)).toEqual(['delegation', 'change'])
       const after = await root.get(PROMPT).assemble(child.agent)
       expect(after.system).toBe(before.system)
       await child.dispose()

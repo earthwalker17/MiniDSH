@@ -154,6 +154,13 @@ export interface ResumeAgentOptions {
   readonly defaults?: AgentOptions
   /** The continued lifecycle's world — inheritable, exactly as at creation. */
   readonly world?: CreateAgentOptions['world']
+  /**
+   * The agent preset that `world` was composed from, or none. The header
+   * names the preset a session was composed under and is immutable, so a
+   * continuation must compose the SAME one: a mismatch is refused rather than
+   * run under a world the header does not name (S20.5 review).
+   */
+  readonly agentPreset?: string
 }
 
 export interface ForkAgentOptions extends ResumeAgentOptions {

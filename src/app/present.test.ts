@@ -186,6 +186,31 @@ describe('present: background jobs', () => {
   })
 })
 
+describe('present: every field a provider or a stored log controls', () => {
+  // The S20.5 audit's reproduction: these were interpolated raw, so a tool-call
+  // name the provider streamed, a model id the wire accepted or an error code
+  // in a hand-edited log reached the terminal with its ESC intact.
+  it('neutralizes a hostile tool name, model id, error code and joined call on every line', () => {
+    const ESC = String.fromCharCode(27)
+    const hostile = `x${ESC}[2K${ESC}[1A`
+    const at = (type: string, data: Record<string, unknown>, seq = 0) => ({ type, seq, time: 0, data }) as never
+    const lines = [
+      describeEvent(at(TOOL_CALL.type, { turn: 1, step: 1, callId: 'c1', name: hostile, arguments: '{}' })),
+      describeEvent(at('agent/options', { reason: 'change', options: { provider: 'deepseek', model: hostile } })),
+      describeEvent(at('request/context', { turn: 1, step: 1, route: { provider: 'deepseek', model: hostile } })),
+      describeEvent(at(APPROVAL_ASKED.type, { id: 'approval-1', toolName: hostile, callId: 'c1' })),
+      describeEvent(at(TURN_END.type, { turn: 1, reason: { kind: 'error', code: hostile, message: 'm' } })),
+      ...auditLines([
+        at(TOOL_CALL.type, { turn: 1, step: 1, callId: 'c1', name: hostile, arguments: '{}' }, 0),
+        at(APPROVAL_ASKED.type, { id: 'approval-1', toolName: 'bash', callId: 'c1' }, 1),
+        at(TOOL_RESULT.type, { turn: 1, step: 1, callId: 'c1', error: { name: 'E', code: 'DENIED' } }, 2),
+      ]),
+    ].filter((line): line is string => line !== undefined)
+    expect(lines.length).toBeGreaterThanOrEqual(7)
+    for (const line of lines) expect(line.includes(ESC), JSON.stringify(line)).toBe(false)
+  })
+})
+
 describe('present: a failed turn says why', () => {
   it('prints the code and the message of a turn that ended in error, and only the kind otherwise', async () => {
     const root = createRoot({ logger: silent })

@@ -4,10 +4,19 @@ import { fileURLToPath } from 'node:url'
 import { canonicalPath } from '../core/sandbox/paths.ts'
 import type { SkillRoot } from '../capabilities/skills/index.ts'
 
-/** MiniDSH home: `$MINIDSH_HOME` or `~/.minidsh`. Holds all durable user data. */
+/**
+ * MiniDSH home: `$MINIDSH_HOME` or `~/.minidsh`. Holds all durable user data.
+ *
+ * Absolute, always, against the directory the process started in: every path
+ * below is handed to plugins as config, and a relative one was resolved by
+ * each reader against its OWN base — spill against the process, the global
+ * `AGENTS.md` against the SESSION's cwd, so a repository could supply the
+ * user's "global" instructions (S20.5 review). S19 resolved only the skill
+ * roots; this resolves the home once, for everything derived from it.
+ */
 export function resolveHome(): string {
   const configured = process.env.MINIDSH_HOME
-  return configured && configured.length > 0 ? configured : join(homedir(), '.minidsh')
+  return resolve(configured && configured.length > 0 ? configured : join(homedir(), '.minidsh'))
 }
 
 export function sessionsDir(): string {

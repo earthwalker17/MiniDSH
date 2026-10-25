@@ -7,7 +7,7 @@
  * mode/policy vocabularies would otherwise fold into a boundary nobody chose.
  */
 import type { Plugin } from '../../kernel/index.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, isApprovalDecider, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
 import { credentialRef } from '../credentials/index.ts'
 import { intentKey, type EffectIntent } from '../effects/events.ts'
 import { firstViolation, INVARIANTS, type InvariantFailure, type InvariantInstaller, type LogViolation } from '../invariants/index.ts'
@@ -41,6 +41,8 @@ interface Trace {
   grantIds: Set<string>
   ceiling: SandboxMode | undefined
   pin: ApprovalPolicy | undefined
+  /** The seq of this session's delegation `sandbox/mode`: the one place its acceptance pin may follow. */
+  delegationModeSeq: number | undefined
 }
 
 function freshTrace(): Trace {
@@ -56,6 +58,7 @@ function freshTrace(): Trace {
     grantIds: new Set(),
     ceiling: undefined,
     pin: undefined,
+    delegationModeSeq: undefined,
   }
 }
 
@@ -129,6 +132,7 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     if (reason === 'delegation') {
       if (trace.sandboxStamps > 0) fail('a delegation opening must be the first sandbox/mode of its session')
       if (isSandboxMode(mode)) trace.ceiling = mode
+      trace.delegationModeSeq = event.seq
     } else if (trace.ceiling !== undefined && isSandboxMode(mode) && isWider(mode, trace.ceiling)) {
       fail(`sandbox/mode "${mode}" widens past the delegation ceiling "${trace.ceiling}"`)
     }
@@ -155,6 +159,13 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     if (typeof reason !== 'string' || !SANDBOX_REASONS.has(reason)) fail(`sandbox/acceptance carries an unknown reason ${JSON.stringify(reason)}`)
     if (reason === 'delegation') {
       if (trace.acceptanceStamps > 0) fail('a delegation opening must be the first sandbox/acceptance of its session')
+      // Only where `SandboxService.open` writes it: right after this session's
+      // delegation mode, for that mode. "First acceptance" alone admitted a
+      // LATE one in a child that recorded none at its opening (a strict parent
+      // needs no line), and that widened the pin (S20.5 review).
+      if (trace.delegationModeSeq === undefined || event.seq !== trace.delegationModeSeq + 1 || forMode !== trace.ceiling) {
+        fail("a delegation acceptance must directly follow its session's delegation opening, for that mode")
+      }
       trace.acceptancePinned = true
     } else if (trace.acceptancePinned || trace.pin !== undefined) {
       // A pin, not a ceiling: a child that cannot ask anyone anything has no
@@ -201,6 +212,16 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     if (!isApprovalOutcome(event.data.outcome)) fail(`approval/decided carries an unknown outcome ${JSON.stringify(event.data.outcome)}`)
     if (!trace.asked.has(id)) fail(`approval/decided for "${id}" has no matching approval/asked`)
     if (trace.decided.has(id)) fail(`approval/decided for "${id}" was already decided`)
+    // Who decided is part of the audit, so a forged "who" is a forged fact:
+    // only the four deciders, a grant that this log minted, and a policy that
+    // only ever refuses (`never`). The writer guarantees each (core/approval).
+    // Read as `unknown`: a forged payload does not honour the type.
+    const decision: unknown = event.data
+    const { decidedBy, grantId, outcome } = decision as { decidedBy?: unknown; grantId?: unknown; outcome?: unknown }
+    if (decidedBy !== undefined && !isApprovalDecider(decidedBy)) fail(`approval/decided for "${id}" names an unknown decider ${JSON.stringify(decidedBy)}`)
+    if (grantId !== undefined && (typeof grantId !== 'string' || !trace.grantIds.has(grantId))) fail(`approval/decided for "${id}" names a grant this session never minted`)
+    if (decidedBy === 'grant' && (grantId === undefined || outcome !== 'allowed-once')) fail(`approval/decided for "${id}" credits a grant without naming the grant it allowed under`)
+    if (decidedBy === 'policy' && outcome !== 'rejected') fail(`approval/decided for "${id}" credits the policy with an outcome only an answer can give`)
     trace.decided.add(id)
     trace.openSubjects.delete(id)
     return

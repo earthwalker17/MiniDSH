@@ -1257,23 +1257,20 @@ describe('protocol: more than one client', () => {
 
     second.input.end()
     // With its last possible answerer gone the question is closed, and the turn
-    // finishes instead of hanging on someone who will never look. Polled by
-    // re-reading the view, because this client stopped receiving frames.
+    // finishes instead of hanging on someone who will never look. Polled through
+    // `session/events`, which never touches a watch set: the attach-then-detach
+    // poll this used before settled the question ITSELF (detach settles too), so
+    // the test passed with disconnect's own settling removed (S20.5 audit).
     const deadline = Date.now() + 5000
-    let settled: AttachResult | undefined
     for (;;) {
-      const attached = await first.result<AttachResult>('session/attach', { sessionId })
-      if (attached.view.status === 'idle' && attached.view.pendingApprovals.length === 0) {
-        settled = attached
+      const log = await logOf(first, sessionId)
+      if (log.some((event) => event.type === 'turn/end')) {
+        expect(log.filter((event) => event.type === 'approval/decided')).toHaveLength(1)
         break
       }
-      if (Date.now() > deadline) throw new Error(`the approval never settled: ${JSON.stringify(attached.view)}`)
-      // Re-attaching to read the view widened this client's watch set again; step back out.
-      await first.result('session/detach', { sessionId })
+      if (Date.now() > deadline) throw new Error(`the approval never settled: ${JSON.stringify(log.map((event) => event.type))}`)
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
-    const decided = settled.page.events.filter((event) => event.type === 'approval/decided')
-    expect(decided).toHaveLength(1)
   })
 
   it('refuses shutdown from a carrier that does not own the process', async () => {
@@ -1473,6 +1470,14 @@ describe('protocol: a delegated child is its parent, not a client', () => {
     const widened = await client.call('session/authority', { sessionId: childId, sandbox: 'danger-full-access' })
     expect(widened.error?.message).toMatch(/ceiling|cannot be widened/i)
     expect(widened.error?.message).not.toContain('is a subagent of')
+    // The caller's error, not the host's, and ONE call is all or nothing: a
+    // legal narrowing paired with an illegal unpinning changes nothing
+    // (S20.5 audit: the mode landed, then the approval threw, as -32603).
+    expect(widened.error?.code).toBe(-32602)
+    const before = await client.result<{ sandbox: string; approval: string }>('session/authority', { sessionId: childId })
+    const half = await client.call('session/authority', { sessionId: childId, sandbox: 'read-only', approval: 'ask' })
+    expect(half.error?.code).toBe(-32602)
+    expect(await client.result('session/authority', { sessionId: childId })).toMatchObject({ sandbox: before.sandbox, approval: before.approval })
   })
 })
 

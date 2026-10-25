@@ -47,8 +47,20 @@ function confinement(mode: string, enforcement: string): string {
   return mode === 'danger-full-access' ? 'unconfined' : `shell confinement ${enforcement}`
 }
 
-/** One line for one event, or nothing when the event has no human-facing shape. No indentation, no newline. */
+/**
+ * One line for one event, or nothing when the event has no human-facing shape. No indentation, no newline.
+ *
+ * Neutralized WHOLE, at the one exit, never field by field: the S20.5 audit
+ * found a tool-call name, a model id, an error code and an approval's tool name
+ * interpolated raw, each a string a provider or a stored log controls, and an
+ * ESC in any of them repaints the line above a person's [y/N].
+ */
 export function describeEvent(event: EventEnvelope): string | undefined {
+  const line = lineFor(event)
+  return line === undefined ? undefined : printableText(line)
+}
+
+function lineFor(event: EventEnvelope): string | undefined {
   if (matches(event, USER_MESSAGE)) {
     const message = restoreMessage(event.data.message)
     return message.source.kind === 'user' ? undefined : `· context (${message.source.kind})`
@@ -248,7 +260,9 @@ export function auditLines(events: readonly EventEnvelope[], pending: readonly E
     // A closer nobody has written yet is marked on every line it produced.
     if (pendingLine) for (let i = before; i < lines.length; i++) lines[i] += ' (on resume)'
   }
-  return lines
+  // Every line neutralized at the exit, as `describeEvent` is: a joined call's
+  // name and a denied call's id are as model-controlled as its arguments.
+  return lines.map(printableText)
 
   function audit(event: EventEnvelope, pendingLine: boolean): void {
     if (matches(event, EFFECT_RECORDED)) {

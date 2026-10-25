@@ -689,7 +689,7 @@ describe('what the review found', () => {
     const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
     await handle.dispose()
     const agents = w.root.get(AGENTS)
-    // seq 0 is `agent/options`; the delegation stamps follow it.
+    // seq 0 is the `session/lifecycle` opening; the delegation stamps come after it.
     await expect(agents.fork(w.root, asSessionId(start.childId), 0)).rejects.toThrowError(/cuts below the delegation opening/)
     const whole = await agents.fork(w.root, asSessionId(start.childId))
     expect(whole.agent.session.header).toMatchObject({ delegatedBy: handle.agent.id, delegationDepth: 1 })

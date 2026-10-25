@@ -10,6 +10,7 @@
  * gets a bulky reply whose reported prompt grows the way a real one does.
  */
 import { afterEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { AGENTS, agentPlugin, type Agent, type AgentHandle } from '../../core/agent/index.ts'
 import { agentInvariantPlugin } from '../../core/agent/invariant.ts'
@@ -23,7 +24,7 @@ import { PROMPT, promptPlugin } from '../../core/prompt/index.ts'
 import { sandboxPlugin } from '../../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../../core/sandbox/invariant.ts'
 import { sessionInvariantPlugin, sessionPlugin } from '../../core/session/index.ts'
-import { toolsPlugin } from '../../core/tools/index.ts'
+import { defineTool, TOOLS, toolsPlugin } from '../../core/tools/index.ts'
 import { installLlmReplay } from '../../test-support/llm-replay.ts'
 import { ScriptedAdapter, assistantText, type ScriptedResponse } from '../../test-support/scripted-adapter.ts'
 import { compactionBasicPlugin, type CompactionBasicConfig } from './index.ts'
@@ -82,7 +83,7 @@ async function harness(config: CompactionBasicConfig, withAdapter = true): Promi
   return created
 }
 
-function responder(options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean } = {}): ScriptedResponse {
+function responder(options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean; truncatedSummary?: boolean } = {}): ScriptedResponse {
   let steps = 0
   let calls = 0
   return (request) => {
@@ -90,6 +91,8 @@ function responder(options: { overflowOnCall?: number; failSummary?: boolean; bl
       if (options.failSummary) return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'nope', code: 'SERVER' } } }]
       // A summariser that answers a short span at length: the call succeeds,
       // and the "compaction" it offers would leave the surface bigger.
+      // A summary the output cap cut off mid-sentence.
+      if (options.truncatedSummary) return [...assistantText('## Primary Request\n- the user asked to refactor the par').slice(0, -1), { type: 'finish', reason: { kind: 'max-tokens' } }]
       if (options.bloatedSummary) return assistantText(`## Primary Request\n- keep going ${'z'.repeat(20_000)}`)
       return assistantText('## Primary Request\n- keep going\n## Next Step\n- finish the job')
     }
@@ -103,7 +106,7 @@ function responder(options: { overflowOnCall?: number; failSummary?: boolean; bl
 }
 
 /** Enough scripted answers that no test runs out of script mid-turn. */
-function arm(test: Harness, options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean } = {}): void {
+function arm(test: Harness, options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean; truncatedSummary?: boolean } = {}): void {
   const shared = responder(options)
   test.adapter.script(...Array.from({ length: 40 }, () => shared))
 }
@@ -180,6 +183,22 @@ describe('compaction through the real loop', () => {
     // has to explain itself.
     const aux = agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type).at(-1)!
     expect((aux.data as AuxCallRecord).outcome.kind).toBe('error')
+  })
+
+  // The S20.5 audit's reproduction: a summary cut off at the output cap was
+  // applied as if whole, replacing history with text that stops mid-sentence.
+  it('refuses a summary the output cap cut off, and counts it as a failure', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
+    const { agent } = await test.create()
+    arm(test, { truncatedSummary: true })
+    await grow(agent, 6)
+    const nodesBefore = [...agent.session.surfaceSeqs()]
+    expect(await test.root.get(COMPACTION).compactNow(agent)).toMatchObject({ kind: 'nothing-to-do', reason: 'summary-failed' })
+    expect(agent.session.surfaceSeqs()).toEqual(nodesBefore)
+    expect(appliedRecords(agent)).toHaveLength(0)
+    const aux = agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type).at(-1)!
+    expect((aux.data as AuxCallRecord).outcome).toMatchObject({ kind: 'text', truncated: true })
+    expect(foldCompactionFailures(agent.session.facts)).toBe(1)
   })
 
   it('brackets every attempt, and names why one produced nothing', async () => {
@@ -344,6 +363,54 @@ describe('compaction through the real loop', () => {
 
     expect(appliedRecords(agent)).toHaveLength(1)
     expect(agent.status).toBe('idle')
+  })
+
+  // §6 names THE hazard: the summary is an await, and a turn may start during
+  // it. The guard (status captured before any await, compared with none after)
+  // had no behavioural test, so moving it past an await would have passed
+  // every test while a replace landed between a step's request and its answer.
+  it('declines a summary a turn started during, and asks again at that turn\'s next boundary', async () => {
+    const test = await harness({ budgetTokens: 1_000_000, retainRatio: 0.2, thresholdRatio: 0.99 })
+    const { agent } = await test.create()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const state = { held: false }
+    const shared = responder()
+    test.adapter.script(
+      ...Array.from({ length: 40 }, () => async (request: Parameters<Exclude<ScriptedResponse, unknown[]>>[0]) => {
+        if (request.purpose === 'compaction' && !state.held) {
+          state.held = true
+          await gate
+        }
+        return (shared as Exclude<ScriptedResponse, unknown[]>)(request)
+      }),
+    )
+    await grow(agent, 6)
+    const outcome = test.root.get(COMPACTION).compactNow(agent)
+    while (!state.held) await new Promise((resolve) => setTimeout(resolve, 5))
+    agent.followup(createUserMessage('a turn that starts during the summary'))
+    release()
+    expect(await outcome).toMatchObject({ kind: 'nothing-to-do', reason: 'turn-started' })
+    await agent.whenIdle()
+    // Re-armed, and honoured where a replace is legal: a step boundary of that turn.
+    const applied = appliedRecords(agent)
+    expect(applied).toHaveLength(1)
+    expect((applied[0]!.data as { trigger: string }).trigger).toBe('explicit')
+  })
+
+  // The S20.5 audit: the planner shadows history, never the prefix (system
+  // prompt + tool schemas), so a prefix at or past the threshold is pressure
+  // no compaction can relieve — and each boundary bought another summary,
+  // every applied one resetting the give-up count.
+  it('buys no summary for pressure the fixed prefix alone creates', async () => {
+    const test = await harness({ budgetTokens: 400, retainRatio: 0.2, thresholdRatio: 0.5 })
+    // A schema heavier than the threshold on its own (~250 estimator tokens against 200).
+    test.root.get(TOOLS).register(test.root, defineTool({ name: 'heavy', description: 'x'.repeat(1_000), input: z.object({}), output: z.object({}), execute: () => ({}), render: () => [] }))
+    const { agent } = await test.create()
+    arm(test)
+    await grow(agent, 3)
+    expect(agent.session.events.filter((event) => event.type === 'compaction/start')).toHaveLength(0)
+    expect(agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type)).toHaveLength(0)
   })
 
   it('defers an explicit compaction on a running agent to its next step boundary', async () => {

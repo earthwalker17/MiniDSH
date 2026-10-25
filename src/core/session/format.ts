@@ -17,9 +17,13 @@
  * a run. A new fact kind usually is (an older reader skips it as an opaque
  * fact); a new surface kind, a new envelope field, a changed meaning, or a
  * fact whose ABSENCE an older reader would read less conservatively — one that
- * narrows authority, or that repair must honour — is not, and bumps
- * `SESSION_FORMAT_VERSION` with an in-memory migration for reading. A new
- * VALUE of a lifecycle claim is additive: repair trusts only the values it
+ * narrows authority, or one whose loss would make an older reader's repair
+ * write a false record of what happened (an effect, a call's outcome) — is
+ * not, and bumps `SESSION_FORMAT_VERSION` with an in-memory migration for
+ * reading. A fact whose loss only leaves the MODEL less informed is noted
+ * below instead: a bump makes every stored session fork-only for the newer
+ * writer, which is too high a price for a notice (user decision, S20.5). A
+ * new VALUE of a lifecycle claim is additive: repair trusts only the values it
  * knows (`session/lifecycle`).
  *
  * **What 1.0.0 cannot do with an S16 log.** It reads and continues one (the
@@ -28,9 +32,20 @@
  * invariant admits only `TOOL_NOT_STARTED` there, so it refuses the seed.
  * That refusal is the conservative direction, and needs no bump.
  *
+ * **What 1.1.0 cannot do with an S17 log.** It continues a log whose
+ * `job/start` has no end (a host killed mid-job) without closing it `lost` or
+ * telling the model — measured at S20.5: the resumed model said the job was
+ * probably still inside its sleep. No authority moves and no effect is
+ * misrecorded (1.1.0 has no job tools, and the process was already
+ * unsupervised), and a later resume by this writer still closes it `lost`.
+ * Noted, not bumped.
+ *
  * **What 1.1.0 cannot do with an S18 log.** One carrying a network consent
  * subject (`effect: 'network-request'`) is one its authority invariant names
- * malformed, so it refuses to continue it — a refusal again, and no bump.
+ * malformed, so it refuses to continue it — a refusal again, and no bump. Its
+ * cold readers fail on such a log too (the grant fold throws, so `inspect`
+ * reports the authority fold malformed and a wire attach errors): still the
+ * refusal direction.
  *
  * **Inside a declared format, a malformed line is damage, not format.** A
  * writer that follows the rule above never writes an envelope key or a surface

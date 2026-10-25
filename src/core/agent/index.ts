@@ -18,6 +18,7 @@ import {
   type SessionHeader,
 } from '../session/index.ts'
 import { AGENT_CREATED, AGENT_DISPOSED, AGENT_REQUEST, foldAgentOptions, type InboxSplice, type InboxState } from './events.ts'
+import { closeUnpairedCompactions } from '../compaction/events.ts'
 import { closeUnpairedJobs, isJobNotice } from '../jobs/events.ts'
 import { repairTail } from './repair.ts'
 import type {
@@ -159,6 +160,16 @@ export class Inbox {
     this.dispatch('inserted', message, target)
   }
 
+  /**
+   * A claim taken and not yet recorded. The driver records it AFTER the
+   * messages it entered (`commitClaim`), so a crash in between re-delivers
+   * rather than loses; the inbox holds it meanwhile, because a durable clear
+   * landing in that window must record it FIRST. Recorded after the clear, the
+   * claim drained the job notice the clear had just re-inserted, and the log
+   * said "claimed" for a notice nobody saw (S20.5 review).
+   */
+  private pendingClaim: InboxSplice | undefined
+
   /** Removes all next-step messages plus, on the first step, one next-turn message. */
   claim(firstStep: boolean): { messages: Message[]; splice?: InboxSplice } {
     const steps = this.stepQueue.length
@@ -169,7 +180,17 @@ export class Inbox {
       turns = 1
     }
     for (const message of claimed) this.dispatch('claimed', message)
-    return { messages: claimed, ...(steps + turns > 0 ? { splice: { op: 'claim', steps, turns } as const } : {}) }
+    const splice = steps + turns > 0 ? ({ op: 'claim', steps, turns } as const) : undefined
+    this.pendingClaim = splice
+    return { messages: claimed, ...(splice === undefined ? {} : { splice }) }
+  }
+
+  /** Records the claim taken last, once: after a clear already recorded it, nothing. */
+  commitClaim(): void {
+    const splice = this.pendingClaim
+    if (splice === undefined) return
+    this.pendingClaim = undefined
+    this.record(splice)
   }
 
   /**
@@ -191,6 +212,9 @@ export class Inbox {
     // stays, re-recorded QUIET after the clear, so the cancel that kept it does
     // not wake a turn for it. Dropping it lost a job's end for good (S17 review).
     const kept = queued.filter(isJobNotice)
+    // The claim in flight first: what it took is already out of the live
+    // queues, and the clear below must not be the record it drains from.
+    this.commitClaim()
     if (queued.length > 0) this.record({ op: 'clear' })
     for (const message of kept) {
       this.stepQueue.push({ message, waking: false })
@@ -204,6 +228,18 @@ export class Inbox {
     this.turnQueue.push(...state.turnQueue)
     this.stepQueue.push(...state.stepQueue)
   }
+}
+
+/**
+ * A continuation composes the world its header names: the header is what
+ * `sessions show`, `inspect` and the audit read, so running another preset's
+ * world under it would make all three describe a session that is not running.
+ */
+function assertSamePreset(recorded: string | undefined, supplied: string | undefined, what: string): void {
+  if (recorded === supplied) return
+  const was = recorded === undefined ? 'no agent preset' : `agent preset "${recorded}"`
+  const now = supplied === undefined ? 'none' : `"${supplied}"`
+  throw new Error(`${what}: the session was composed under ${was}, and this caller supplies ${now}; continue it with the same preset (--agent-preset)`)
 }
 
 // ---- registry -------------------------------------------------------------
@@ -258,6 +294,14 @@ class AgentRegistry implements Agents {
     const stored = this.loadStored(id)
     const closers = repairTail(stored.events)
     const seed = closers.length === 0 ? stored.events : [...stored.events, ...closers]
+    // The rule `fork` keeps, kept here too: a session its header calls a child
+    // never re-opens at a deployment default. Resume skipped it, so a child
+    // whose opening stamps were lost (a torn first write, a tampered file)
+    // came back with approvals `ask`, wider than its ceiling (S20.5 review).
+    if (stored.header.delegatedBy !== undefined && (delegationCeiling(seed) === undefined || delegationPin(seed) === undefined)) {
+      throw new Error(`resume of "${id}": its header says it was delegated, but the log records no delegation opening, so it would re-open wider than the authority it was delegated under`)
+    }
+    assertSamePreset(stored.header.agentPreset, options.agentPreset, `resume of "${id}"`)
     return this.create(owner, {
       cwd: stored.header.cwd,
       sessionId: stored.header.id,
@@ -278,14 +322,21 @@ class AgentRegistry implements Agents {
 
   async fork(owner: Context, source: Session | SessionId, boundary?: number, options: ForkAgentOptions = {}): Promise<AgentHandle> {
     const src = this.forkSource(source, options.salvage === true)
+    assertSamePreset(src.header.agentPreset, options.agentPreset, `fork of "${src.parentId}"`)
     const sliced = sliceForkSeed(src.events, boundary)
     // A fork never supervises its source's jobs: the registry that runs them
     // is the source's, and a cold source's repair closed only what was open at
     // the END of its log, not at this boundary. So the sliced seed is closed
     // here, for every source — a job running at the cut is `lost` to the fork,
     // and the fork's model is told (`core/jobs/events.ts`).
-    const jobClosers = closeUnpairedJobs(sliced, sliced.length, sliced.at(-1)?.time ?? Date.now())
-    const seed = jobClosers.length === 0 ? sliced : [...sliced, ...jobClosers]
+    const time = sliced.at(-1)?.time ?? Date.now()
+    // The same holds for a compaction bracket an idle `/compact` opened: it
+    // lies outside any turn, so a boundary may cut it, and nothing else would
+    // close it until the fork itself resumed (S20.5 review).
+    const compactionClosers = closeUnpairedCompactions(sliced, sliced.length, time)
+    const closed = compactionClosers.length === 0 ? sliced : [...sliced, ...compactionClosers]
+    const jobClosers = closeUnpairedJobs(closed, closed.length, time)
+    const seed = jobClosers.length === 0 ? closed : [...closed, ...jobClosers]
     // A fork of a delegated session must carry that session's fence with it.
     // A seed without the opening stamps would produce a session the header
     // still calls a child while its authority re-opened at the deployment

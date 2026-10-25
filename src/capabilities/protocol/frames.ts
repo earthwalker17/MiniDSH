@@ -217,7 +217,7 @@ export interface SessionView {
   /** Asked and not yet decided. A page cannot fold this: half a pair is a phantom prompt or a stranded one. */
   readonly pendingApprovals: readonly OpenApproval[]
   readonly authority: AuthorityView
-  /** The BASE route (`agent/options`). Absent for a session that is not live. */
+  /** The BASE route (`agent/options`): the live agent's, else the stored log's fold. Absent only where neither names one. */
   readonly options?: AgentOptions
   /** The EFFECTIVE route of the last request, and the window its adapter advertises. */
   readonly route?: RequestContextRecord
@@ -424,7 +424,8 @@ export interface SessionViewParams {
  * a person, without watching its events. Whole-state and superseding — the
  * latest one for a session is all there is to know — and coalesced per
  * session per tick. `closed` is sent once, when the session's agent is
- * disposed; its counts are what the log then holds.
+ * disposed; its counts are zero by design (nothing runs or waits in a session
+ * no agent holds), and a reader wanting the log's own debts attaches cold.
  */
 export interface ControlSummary {
   readonly sessionId: string

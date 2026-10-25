@@ -45,7 +45,7 @@
  * not hand out a read-before-edit token for it.
  */
 import { join, dirname } from 'node:path'
-import type { DirEntry, Fs, FsTarget } from '../../core/fs/index.ts'
+import { FsError, type DirEntry, type Fs, type FsTarget } from '../../core/fs/index.ts'
 import { isSkillName, parseSkillFile } from './frontmatter.ts'
 
 export type SkillOrigin = 'user' | 'bundled' | 'workspace'
@@ -131,7 +131,14 @@ async function nearestFirst(fs: Fs, cwd: string, markers: readonly string[]): Pr
   for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
     chain.push(current)
     for (const marker of markers) {
-      if (await fs.stat(fs.resolve(join(current, marker), current))) return chain
+      const found = await fs.stat(fs.resolve(join(current, marker), current))
+      if (!found) continue
+      // Above the cwd, a marker another user owns is not this user's
+      // repository: a `.git` planted in a shared `/tmp` made every session in a
+      // directory below it list that user's skills (S20.5 review). The cwd
+      // stands alone instead.
+      if (depth > 0 && found.ownedByMe === false) return [cwd]
+      return chain
     }
     const parent = dirname(current)
     if (parent === current) break
@@ -315,12 +322,17 @@ async function readCandidate(fs: Fs, cwd: string, rootPath: string, entry: DirEn
   if (UNSHOWABLE.test(skill.path)) return { kind: 'skip', path: skill.path, reason: 'its path holds a control, format or separator character, or an angle bracket' }
   let bytes: Uint8Array
   try {
-    ;({ bytes } = await fs.readBytes(skill, {}))
+    // Bounded by the bytes that arrive, not by the size `stat` reported: a
+    // procfs file is a regular file of size 0 that streams forever, and a
+    // repository link to `/proc/self/pagemap` OOM-killed the host on every
+    // prompt (S20.5). The seam refuses it once open (core/fs `FsReadOptions`).
+    ;({ bytes } = await fs.readBytes(skill, {}, { maxBytes: maxSkillBytes }))
   } catch (error) {
+    if (error instanceof FsError && error.code === 'FS_TOO_LARGE') return { kind: 'skip', path: skill.path, reason: `larger than ${maxSkillBytes} bytes` }
+    if (error instanceof FsError && error.code === 'FS_NOT_A_FILE') return { kind: 'skip', path: skill.path, reason: 'not a regular file' }
     // The listing showed the file, so this is a failure, not an absence.
     return { kind: 'incomplete', path: skill.path, reason: `cannot be read (${describeFailure(error)})` }
   }
-  if (bytes.byteLength > maxSkillBytes) return { kind: 'skip', path: skill.path, reason: `larger than ${maxSkillBytes} bytes` }
   let text: string
   try {
     text = utf8.decode(bytes)

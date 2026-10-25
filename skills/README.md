@@ -18,7 +18,7 @@ Skills are looked up one level deep, as `<root>/<name>/SKILL.md`, under three ki
 | `bundled` | this `skills/` directory, inside the installed package | replaced by a user skill of the same name |
 | `workspace` | `.agents/skills` and `.claude/skills` in each directory from the session's cwd up to the project root (the `.git` directory) | the nearest one wins among workspace roots |
 
-Precedence is user, then bundled, then workspace. A repository's skill never replaces one of yours or a bundled one: a workspace skill whose name is taken is not listed, and the operator gets a warning on stderr. Skills in other tools' home folders, such as `~/.claude/skills`, are reached only through the `skills` row's `roots` config, which then lists every user and bundled root to scan (absolute paths).
+Precedence is user, then bundled, then workspace. A repository's skill never replaces one of yours or a bundled one: a workspace skill whose name is taken is not listed, and the operator gets a warning on stderr. Skills in other tools' home folders, such as `~/.claude/skills`, are reached only through the `skills` row's `roots` config, which then lists every user and bundled root to scan (absolute paths). One exception: when your home folder is itself a git checkout (a dotfiles repository), a session started anywhere under it with no `.git` of its own climbs to that one, so `~/.claude/skills` is read as a workspace root. On Linux and macOS, a `.git` above the cwd that another user owns ends the walk at the cwd instead.
 
 Run `minidsh skills` to see what a new session in the current directory would be offered, what was skipped and why, and the effective roots. It takes `--json`, `--cwd <dir>` and `--patch <file>`.
 

@@ -14,6 +14,7 @@ import { AGENTS } from '../agent/index.ts'
 import { asSessionId } from '../ids.ts'
 import { APPROVAL, APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, APPROVAL_REQUEST, type ApprovalAnswer, type ApprovalOutcome } from '../approval/index.ts'
 import { matches, type EventEnvelope } from '../session/index.ts'
+import { checkAuthorityLog } from './invariant.ts'
 import {
   canonicalPath,
   acceptanceFor,
@@ -80,7 +81,10 @@ describe('sandbox policy: one stamp, derived roots', () => {
   it.skipIf(process.platform !== 'win32')('containment refuses a different drive instead of reading it as inside', () => {
     // path.relative between different roots returns the target verbatim.
     expect(isInside('C:\\ws', 'D:\\ws\\a.ts')).toBe(false)
-    expect(isInside('C:\\ws', 'c:\\WS\\a.ts')).toBe(true)
+    // The root is compared as Windows compares it; below it, names compare
+    // exactly, because both sides are canonical spellings (paths.ts).
+    expect(isInside('C:\\ws', 'c:\\ws\\a.ts')).toBe(true)
+    expect(isInside('C:\\ws', 'C:\\WS\\a.ts')).toBe(false)
   })
 })
 
@@ -563,6 +567,49 @@ describe('what enforcement a session accepts', () => {
     } finally {
       await child.dispose()
     }
+  })
+
+  // The S20.5 audit's reproduction: a child whose parent accepted nothing
+  // records no acceptance at its opening, so a LATE acceptance labelled
+  // `delegation` passed the "first acceptance" check and widened the pin; the
+  // cold check agreed. A delegation acceptance belongs only right after the
+  // session's delegation mode, for that mode — where `open` writes it.
+  it('refuses a delegation acceptance anywhere but right after its delegation opening', async () => {
+    harness = await coreHarness()
+    const sandbox = harness.root.get(SANDBOX)
+    const child = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('parent-session'),
+      setup: (_childCtx, agent) => {
+        sandbox.open(agent.session, { mode: 'workspace-write', reason: 'delegation' })
+        harness!.root.get(APPROVAL).open(agent.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    try {
+      const session = child.agent.session
+      expect(() => session.append(SANDBOX_ACCEPTANCE, { accepts: 'none', forMode: 'workspace-write', reason: 'delegation' })).toThrowError(/delegation acceptance/)
+      expect(sandbox.acceptsFor(session, 'workspace-write')).toBe('full')
+      // The cold reader holds a stored log to the same rule.
+      const forged = [...session.events, { type: SANDBOX_ACCEPTANCE.type, seq: session.events.length, time: 0, data: { accepts: 'none', forMode: 'workspace-write', reason: 'delegation' } }]
+      expect(checkAuthorityLog(forged)?.message).toMatch(/delegation acceptance/)
+    } finally {
+      await child.dispose()
+    }
+  })
+
+  it('refuses a decision naming a decider or a grant the log does not have', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const ask = (id: string): void => void agent.session.append(APPROVAL_ASKED, { id, toolName: 'bash' })
+    ask('approval-x1')
+    expect(() => agent.session.append(APPROVAL_DECIDED, { id: 'approval-x1', outcome: 'allowed-once', decidedBy: 'root' as never })).toThrowError(/decider/)
+    ask('approval-x2')
+    expect(() => agent.session.append(APPROVAL_DECIDED, { id: 'approval-x2', outcome: 'allowed-once', decidedBy: 'grant', grantId: 'grant-does-not-exist' })).toThrowError(/grant/)
+    ask('approval-x3')
+    expect(() => agent.session.append(APPROVAL_DECIDED, { id: 'approval-x3', outcome: 'allowed-once', decidedBy: 'policy' })).toThrowError(/policy/)
+    // The honest shapes still pass.
+    agent.session.append(APPROVAL_DECIDED, { id: 'approval-x3', outcome: 'rejected', decidedBy: 'policy' })
   })
 
   it('refuses to be renegotiated inside a delegated session, and refuses a forged one pre-commit', async () => {

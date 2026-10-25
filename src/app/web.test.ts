@@ -112,6 +112,22 @@ describe('the web surface trust fence', () => {
     expect(await status(host.port, { cookie, origin: `http://127.0.0.1:${host.port}` })).toBe(200)
   })
 
+  // The S20.5 audit: a same-site page (any port on 127.0.0.1, where agents
+  // serve their dev servers) could load the signed-in UI — consent buttons
+  // and all — in a frame: a top-level frame navigation sends no Origin, and a
+  // SameSite=Strict cookie still rides a same-site embed.
+  it('renders only as a top-level document: no frame may hold it', async () => {
+    const { host, origin, token } = await web()
+    const cookie = await signIn(origin, token)
+    const page = await fetch(`${origin}/`, { headers: { cookie } })
+    expect(page.headers.get('x-frame-options')).toBe('DENY')
+    expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+    for (const dest of ['iframe', 'frame', 'embed', 'object']) {
+      expect(await status(host.port, { cookie, 'sec-fetch-dest': dest }), dest).toBe(403)
+    }
+    expect(await status(host.port, { cookie, 'sec-fetch-dest': 'document' })).toBe(200)
+  })
+
   it('serves no path but its own flat assets', async () => {
     const { host, origin, token } = await web()
     const cookie = await signIn(origin, token)

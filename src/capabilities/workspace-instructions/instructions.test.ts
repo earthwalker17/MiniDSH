@@ -125,6 +125,34 @@ describe('discovery', () => {
     const sources = await collectInstructions(root!.get(FS), child, { maxBytes: 32_000 })
     expect(sources.map((source) => source.text)).toEqual(['child rule'])
   })
+
+  // The S20.5 audit: a `.git` another user planted in a shared /tmp made the
+  // AGENTS.md beside it enter every session below — that user's instructions,
+  // read as this user's repository rules.
+  it('trusts no project root above the cwd that another user owns', async () => {
+    const parent = tempDir()
+    const child = join(parent, 'child')
+    mkdirSync(child)
+    mkdirSync(join(parent, '.git'))
+    writeFileSync(join(parent, 'AGENTS.md'), 'a stranger\'s rule', 'utf8')
+    writeFileSync(join(child, 'AGENTS.md'), 'child rule', 'utf8')
+    await mount({ maxBytes: 32_000 })
+    const real = root!.get(FS)
+    const marker = real.resolve(join(parent, '.git'), parent).path
+    const strangers: typeof real = {
+      resolve: (path, cwd) => real.resolve(path, cwd),
+      stat: async (target) => {
+        const info = await real.stat(target)
+        return info !== undefined && target.path === marker ? { ...info, ownedByMe: false } : info
+      },
+      readText: (target, actor, options) => real.readText(target, actor, options),
+      readBytes: (target, actor, options) => real.readBytes(target, actor, options),
+      writeText: (target, text, intent, actor) => real.writeText(target, text, intent, actor),
+      listDir: (target) => real.listDir(target),
+    }
+    expect((await collectInstructions(strangers, child, { maxBytes: 32_000 })).map((source) => source.text)).toEqual(['child rule'])
+    expect((await collectInstructions(real, child, { maxBytes: 32_000 })).map((source) => source.text)).toEqual(['a stranger\'s rule', 'child rule'])
+  })
 })
 
 describe('the budget', () => {

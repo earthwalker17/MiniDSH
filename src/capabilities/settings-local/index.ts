@@ -122,8 +122,14 @@ class LocalSettings implements Settings {
       }
       const layer = options.replace === true ? patch : (mergeLayers(document[ns] ?? {}, patch) as JsonValue)
       // Validated before anything is persisted: a rejected edit leaves the
-      // document exactly as it was.
-      value = entry.schema.parse(mergeLayers(entry.base, layer))
+      // document exactly as it was. Thrown as the CALLER's error: the owner's
+      // schema throws its own kind, which the wire answered as a host failure
+      // a retry policy would retry forever (S20.5 review).
+      try {
+        value = entry.schema.parse(mergeLayers(entry.base, layer))
+      } catch (error) {
+        throw new SettingsError('SETTINGS_INVALID', `settings "${ns}" refuses that value: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+      }
       revision = current + 1
       const revisions = { ...((document.revisions ?? {}) as Record<string, number>), [ns]: revision }
       this.persist({ ...document, [ns]: layer, revisions })

@@ -671,8 +671,12 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
 
   // Lines are strictly serialized: a pasted second line waits for the first
   // prompt's response, sees its sessionId, and becomes a followup/steer instead
-  // of creating a second session.
-  let lineChain: Promise<void> = Promise.resolve()
+  // of creating a second session. And no line runs before the terminal knows
+  // WHICH session it is in: a line a piped script had waiting before a resume
+  // attached went out with no session id, and the host made a second, hidden
+  // session of it — a paid turn nobody saw (S20.5 review).
+  let ready!: () => void
+  let lineChain: Promise<void> = new Promise<void>((resolve) => (ready = resolve))
   const enqueueLine = (raw: string): void => {
     // A TTY echoed the user's keystrokes and their Enter, so the cursor has
     // already left the prompt and the next event needs no break. A PIPE echoes
@@ -706,6 +710,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
         agentOptions: overrides,
         defaults: init.defaultAgentOptions,
         ...(options.agentWorld === undefined ? {} : { world: options.agentWorld }),
+        ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
       }
       const handle =
         options.resumeId !== undefined
@@ -742,6 +747,8 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       for (const frame of backlog.splice(0)) handleFrame(frame)
     }
 
+    // The session is known (or this is a fresh chat): lines held so far run now, in order.
+    ready()
     if (options.task !== undefined && options.task.length > 0) enqueueLine(options.task)
     else if (status === 'idle') {
       // A resumed session whose job the closer ended `lost` holds its notice.

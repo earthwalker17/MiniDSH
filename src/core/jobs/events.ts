@@ -146,7 +146,7 @@ export function jobNoticeText(start: JobStart | undefined, end: JobEnd): string 
       return (
         `${what}${origin.length > 0 ? ` (${origin})` : ''} is no longer supervised by this session: its record ended while the job was running — ` +
         'the process that supervised it stopped, or this session was forked from the one that runs it. ' +
-        `Its process may still be running, but nothing more from it will arrive here. Check before starting it again.${output}`
+        `Its process may still be running, but nothing more from it will arrive here. Check before starting it again: the pid is the job's shell, and a program it started can be running under a pid of its own.${output}`
       )
     }
   }
@@ -183,6 +183,12 @@ interface MutableRecord {
   notice?: { seq: number; waking: boolean; state: JobNoticeState }
 }
 
+/** A record's job id, or nothing for a payload that carries none. */
+function jobIdOf(data: unknown): string | undefined {
+  const id = typeof data === 'object' && data !== null ? (data as { jobId?: unknown }).jobId : undefined
+  return typeof id === 'string' && id.length > 0 ? id : undefined
+}
+
 /**
  * Every job the log names, in start order. A notice's state mirrors the inbox
  * queues exactly as `foldInbox` does — a claim drains counts from the front —
@@ -196,19 +202,27 @@ export function foldJobs(events: readonly EventEnvelope[]): JobRecord[] {
     const notice = jobId === undefined ? undefined : records.get(jobId)?.notice
     if (notice && notice.state === 'queued') notice.state = state
   }
+  // Payloads are read as untrusted: a stored log is not the writer's word, and
+  // a parseable but malformed record made repair, a cold verify and the host's
+  // summaries throw a TypeError instead of reporting it (S20.5 review). A
+  // record this fold cannot read is skipped; `checkJobsLog` names it.
   for (const event of events) {
     if (matches(event, JOB_START)) {
-      if (!records.has(event.data.jobId)) records.set(event.data.jobId, { start: event.data, startSeq: event.seq })
+      const jobId = jobIdOf(event.data)
+      if (jobId !== undefined && !records.has(jobId)) records.set(jobId, { start: event.data, startSeq: event.seq })
     } else if (matches(event, JOB_END)) {
-      const record = records.get(event.data.jobId)
+      const jobId = jobIdOf(event.data)
+      const record = jobId === undefined ? undefined : records.get(jobId)
       if (record && record.end === undefined) {
         record.end = event.data
         record.endSeq = event.seq
       }
     } else if (matches(event, INBOX_SPLICED)) {
       const splice: InboxSplice = event.data
+      if (typeof splice !== 'object' || splice === null) continue
       if (splice.op === 'insert') {
-        const jobId = noticeJobId(splice.message)
+        const message: unknown = splice.message
+        const jobId = typeof message === 'object' && message !== null ? noticeJobId(message as Pick<Message, 'id'>) : undefined
         const record = jobId === undefined ? undefined : records.get(jobId)
         // The LATEST insert is the notice's state: a person's cancel or a killed
         // claim puts a job's notice back, quiet (`Inbox.clear`, the driver).

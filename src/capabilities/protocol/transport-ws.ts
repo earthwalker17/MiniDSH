@@ -45,6 +45,8 @@ const CLOSE_UNSUPPORTED_DATA = 1003
 const CLOSE_TOO_LARGE = 1009
 const CLOSE_PROTOCOL_ERROR = 1002
 const CLOSE_SLOW_CLIENT = 1013
+/** How long a closed socket may take to flush its close frame before it is destroyed. */
+const CLOSE_GRACE_MS = 2_000
 
 export interface WebSocketCarrierOptions {
   /** The HTTP server whose upgrades this carrier answers. The app owns the server and its routes. */
@@ -235,6 +237,10 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
         // The peer is already gone; the end below is what matters.
       }
       socket.end()
+      // A peer that stopped reading never lets `end` finish: its queued bytes
+      // and the socket would stay until TCP gave up. A short grace for a polite
+      // close, then destroyed (S20.5 review).
+      setTimeout(() => socket.destroy(), CLOSE_GRACE_MS).unref()
       peers.delete(peer)
       options.onClose(connection)
     }
@@ -245,11 +251,17 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
       // Over the soft limit the trace tier is the give: it is streaming
       // fidelity, and `assistant/message` carries the same text durably.
       if (droppable && queued > softLimit) return
-      if (queued > hardLimit) {
+      // The frame counts too, behind a queue: a whole-log `session/events`
+      // answer used to pile up past the hard limit because only the bytes
+      // before it were counted. One frame onto an EMPTY queue still goes: the
+      // limit bounds what a peer that stopped reading can make this process
+      // hold, not the size of an answer a reading peer asked for.
+      const encoded = encodeTextFrame(JSON.stringify(frame))
+      if (queued > hardLimit || (queued > 0 && queued + encoded.length > hardLimit)) {
         close(CLOSE_SLOW_CLIENT, 'slow-client')
         return
       }
-      socket.write(encodeTextFrame(JSON.stringify(frame)))
+      socket.write(encoded)
     }
 
     const peer = { close, beat: () => undefined as void }

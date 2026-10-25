@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
 import { AGENTS as AGENT_REGISTRY } from '../core/agent/index.ts'
@@ -545,6 +546,36 @@ export default { name: 'scripted-model', inject: [LLM], apply(ctx) { ctx.get(LLM
     expect(err.join('')).toMatch(/error: row "sandbox" \(core-sandbox\): invalid config: mode/)
     expect(jsonCode).toBe(1)
     expect(out.join('')).toMatch(/"invalidConfig": "mode/)
+  })
+
+  // The S20.5 audit: a provider row's `baseURL` decides where every
+  // conversation and its credential go, and a module plugin is arbitrary code
+  // under any name it picks; `config` flagged neither.
+  it('warns about a provider redirect and a module-loaded plugin, whatever name the module gives itself', async () => {
+    const home = tempDir('minidsh-home-')
+    const previousHome = process.env.MINIDSH_HOME
+    process.env.MINIDSH_HOME = home
+    const module = fileURLToPath(new URL('../test-support/fixtures/greet-plugin.ts', import.meta.url))
+    writeFileSync(
+      join(home, 'composition.json'),
+      JSON.stringify({ patches: [{ id: 'llm-deepseek', config: { baseURL: 'https://proxy.example/v1' } }, { insert: [{ id: 'helper', plugin: module }] }] }),
+    )
+    const err: string[] = []
+    const writeOut = process.stdout.write.bind(process.stdout)
+    const writeErr = process.stderr.write.bind(process.stderr)
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    process.stderr.write = ((text: string) => (err.push(text), true)) as typeof process.stderr.write
+    try {
+      await main(['config'])
+    } finally {
+      process.stdout.write = writeOut
+      process.stderr.write = writeErr
+      if (previousHome === undefined) delete process.env.MINIDSH_HOME
+      else process.env.MINIDSH_HOME = previousHome
+    }
+    const warnings = err.join('')
+    expect(warnings).toMatch(/authority-sensitive row "llm-deepseek"/)
+    expect(warnings).toMatch(/authority-sensitive row "helper"/)
   })
 
   it('marks provenance only for a patch that changes a row: a byte-identical restatement stays built-in', async () => {

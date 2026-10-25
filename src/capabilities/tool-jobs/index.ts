@@ -81,7 +81,7 @@ function buildJobTools(ctx: Context, maxWaitMs: number) {
     description: `Start a long-running command as a background job and return its id at once.
 * Use it for servers, watchers, and slow builds or test runs you want to keep working beside; use the shell tool for everything else.
 * It runs in a fresh ${dialect} process at the workspace root — not in the shell tool's current directory or environment — under this session's sandbox policy, and cannot be escalated.
-* You are notified in this session when it ends; read its output with job_output and stop it with job_cancel. Jobs end with their session.`,
+* You are notified in this session when it ends; read its output with job_output and stop it with job_cancel. Jobs end with their session; on Windows a program a job leaves running after its own command has ended is not stopped with it.`,
     input: z.object({ command: z.string().min(1).describe('The command to run in the background.') }),
     output: z.object({ jobId: z.string(), pid: z.number().nullable(), output: z.string().nullable() }),
     render: (_args, value) => [

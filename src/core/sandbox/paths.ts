@@ -22,7 +22,7 @@
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve as resolvePath } from 'node:path'
 import { relative as posixRelative } from 'node:path/posix'
-import { parse as winParse, relative as winRelative } from 'node:path/win32'
+import { parse as winParse } from 'node:path/win32'
 
 /** Matches the kernel's own limit closely enough; a cycle must terminate, not hang. */
 const MAX_LINK_HOPS = 32
@@ -68,20 +68,40 @@ export function canonicalPath(path: string): string {
 }
 
 /**
- * True when `target` is inside `root` (case-insensitive on win32).
+ * True when `target` is inside `root`. Both must be CANONICAL (`canonicalPath`):
+ * every existing component then carries the spelling the disk resolved, so
+ * containment is an exact comparison of names, never a case fold of them.
  *
- * Path roots must match first: `path.relative` between different roots (a UNC
- * share vs a drive, or two different drives) returns the target verbatim, which
- * would otherwise read as "inside".
+ * Why no fold on win32, where names are case-insensitive: NTFS compares through
+ * its own upcase table, and JavaScript's `toLowerCase` is not that table. The
+ * Kelvin sign folds to "k" in JS and is a different letter on disk, so a fence
+ * that lowercased both sides accepted `..\desKtop-work\x` as inside
+ * `desktop-work` while the write created a sibling directory outside it
+ * (S20.5, measured). An existing component already arrives in its on-disk
+ * spelling, and a missing one cannot equal an existing sibling by another
+ * spelling, so the exact comparison refuses nothing that is really inside.
+ * A caller that passes a raw spelling is refused, which is the safe direction.
+ * Only the root (a drive letter, a UNC server and share) is compared without
+ * case, as Windows itself does.
+ *
+ * Path roots must match first: between different roots (a UNC share and a
+ * drive, two drives) nothing below them can be compared.
  */
 export function isInside(root: string, target: string): boolean {
   if (process.platform === 'win32') {
     const rootParsed = winParse(root)
     const targetParsed = winParse(target)
     if (rootParsed.root.toLowerCase() !== targetParsed.root.toLowerCase()) return false
-    const rel = winRelative(root.toLowerCase(), target.toLowerCase())
-    return rel === '' || (!rel.startsWith('..') && !winParse(rel).root)
+    const base = belowRoot(root, rootParsed.root)
+    const rest = belowRoot(target, targetParsed.root)
+    return base === '' || rest === base || rest.startsWith(`${base}\\`)
   }
   const rel = posixRelative(root, target)
-  return rel === '' || (!rel.startsWith('..') && !rel.startsWith('/'))
+  // `..` as a whole first SEGMENT, never as a prefix: `..env.bak` is a name.
+  return rel === '' || (rel !== '..' && !rel.startsWith('../') && !rel.startsWith('/'))
+}
+
+/** A win32 path's part below its root, one separator style, no trailing separator. */
+function belowRoot(path: string, root: string): string {
+  return path.slice(root.length).replaceAll('/', '\\').replace(/\\+$/, '')
 }

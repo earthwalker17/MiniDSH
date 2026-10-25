@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto'
 import type { IncomingMessage, Server as HttpServer } from 'node:http'
 import { basename } from 'node:path'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { AGENTS, AGENT_CREATED, AGENT_DISPOSED, AGENT_STATUS, type AgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, AGENT_CREATED, AGENT_DISPOSED, AGENT_STATUS, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { canonicalPath, SANDBOX } from '../../core/sandbox/index.ts'
@@ -94,6 +94,8 @@ export interface ProtocolConfig {
   readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, recorded in each session's header so a resume can compose the same world. */
   readonly agentPreset?: string
+  /** Called on a session this host resumed, before anything runs on it (the app applies its explicit authority flags). */
+  readonly onResumed?: (handle: AgentHandle) => void
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
   readonly onClose?: () => void
 }
@@ -134,6 +136,7 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
       closeWithLastClient: carriers.every((carrier) => carrier.kind === 'stream'),
       ...(config.world === undefined ? {} : { world: config.world }),
       ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }),
+      ...(config.onResumed === undefined ? {} : { onResumed: config.onResumed }),
       ...(config.onClose === undefined ? {} : { onClose: config.onClose }),
     })
     ctx.on(SESSION_EVENT, (session, event) => host.onSessionEvent(session, event))
