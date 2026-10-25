@@ -58,7 +58,7 @@ Nineteen service keys: eighteen `core` (below) + app-only `app-composition`; `lo
 | `spill` | output with NO OTHER HOME: `save` → a path, `open` streams a job's; head/tail excerpt renderers | threshold (each tool's own) |
 | `jobs` | owner-scoped background work: identity, admission (a cap), ONE terminal fact (first-wins), delivery through the owner's inbox (§6); `stopAll`; each job's output tail and capped spill file | processes (the producer's, which forwards chunks), wire state, a queue or scheduler |
 | `settings` | REMOTE-writable defaults: `register/describe/read/write` (`expectedRevision`, §8); `settings/changed` | store; authority; composition; anything a resumed session recorded |
-| `agents` | `create/resume/fork/get/list`. **Creation is a TRANSACTION** (`core/loop/factory.ts`): built unpublished, `world` before `setup`, published last; any failure rolls back and frees the id. `configure` is the durable route switch (§4); `resume` = `load` (refusing `damaged`) → `repairTail` (§4) → seed → the same transaction; a continuation needs the header's preset and a child's opening stamps; `fork` may `salvage` (§7) | driver |
+| `agents` | `create/resume/fork/get/list`. **Creation is a TRANSACTION** (`core/loop/factory.ts`): built unpublished, `world` before `setup`, published last; any failure rolls back and frees the id. `configure` is the durable route switch (§4); `resume` = `load` (refusing `damaged`) → `repairTail` (§4) → seed → that transaction; a continuation needs the header's preset and a child's opening stamps (§7); `fork` may `salvage` a damaged prefix (§4) | driver |
 | `invariants` | `register(owner, name, installer)`: deployment-global, config-selected, validating pre-commit via `observe` | product logic |
 | `loop` | the driver and its durability checkpoints (§6); registers itself as the agent factory, which writes each lifecycle's `session/lifecycle` first (§4) | anything extensions do |
 
@@ -73,7 +73,7 @@ The log is the single source of truth: `{type, seq, time, data}`, `seq === log.l
 - **The route is one fact in two records.** `agent/options` is the BASE (`configure` writes `change`); `request/context` the EFFECTIVE route, window and modalities per step (§6); a role rewrites header and context, never the base. Both `request/*` are written only on change; a field added to such a record reads as absent where never rewritten (`core/loop/driver.ts`).
 - **The header** (`SessionHeader`) is immutable identity and lineage: fork, `delegatedByCallId`, `agentPreset`. **Opening facts** land before publication: `agent/options{initial}`, `approval/policy{initial}`, `sandbox/mode{initial}`, `composition/applied` (a delegated child's are §7's).
 - **Arrival versus rewrite.** An arriving `user/message` sits in an open turn; a range REPLACE may land between turns (`core/session/invariant.ts`).
-- **The durable inbox** is `inbox/spliced`, op-shaped (`core/agent/events.ts`): a claim commits after the messages it entered, so a crash re-delivers, never loses; disposal records late step input, a person's cancel keeps a job's end notice, both quiet; the Inbox holds an open claim, so a clear records it first and a rejected or filtered step requeues its notices (`core/loop/driver.ts`, `Inbox`). A resume wakes iff a WAKING insert was restored, a fork never (`core/loop/factory.ts`).
+- **The durable inbox** is `inbox/spliced`, op-shaped (`core/agent/events.ts`): a claim commits after the messages it entered, so a crash re-delivers, never loses; disposal records late step input, a person's cancel keeps a job's end notice, both quiet; the Inbox holds an open claim, so a clear records it first; a rejected step requeues its notices, and a narrowing one holds them for the next turn (`Inbox.hold`). A resume wakes iff a WAKING insert was restored, a fork never (`core/loop/factory.ts`).
 - **A job is a bracket outside every step** (`core/jobs/events.ts`): `job/start` once spawned, ONE `job/end`; its notice follows the end in one JS turn, only through the inbox.
 - **Crash repair closes everything the log left open** (`repairTail`, `core/agent/repair.ts`). Resume and cold fork run a STATIC list, innermost first: `subagent/end{interrupted}`; `compaction/end{declined: unclosed}`; `repairInterruptedTail` (`core/session/repair.ts`); jobs LAST: `job/end{lost}` plus a QUIET notice, or the notice an end never got. Closers are pure (a cold read predicts a repair byte for byte) and state only what the log proves.
 - **A synthetic result states the evidence** (`classify`, `core/session/repair.ts`): no `tool/call` ⇒ `TOOL_NOT_STARTED`; a `tool/dispatch` or a recorded effect ⇒ `TOOL_OUTCOME_UNKNOWN`; neither ⇒ not started only where the open turn's lifecycle claims `dispatch` and `synced`, else unknown. Under salvage, or in a log a live writer holds (`heldByWriter`), every owed call is unknown; an unknown result names the call's effects recorded in the step.
@@ -305,7 +305,7 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 
 **Authority**
 
-- Windows has no confinement backend, by decision (DSH's is `partial`: a hard-link escape, standing ACL changes). Until a session accepts `none` (§7) each shell command costs an escalation; a delegated child (pinned `never`) runs none.
+- Windows has no confinement backend, by decision (DSH's is `partial`: a hard-link escape, standing ACL changes). Until a session accepts `none` (§7) each shell command costs an escalation to `danger-full-access`, a mode that also drops the fs fence; a delegated child (pinned `never`) runs none.
 - A tree kill misses a program a job leaves past its command on Windows (S21) and, on POSIX, a timed-out or backgrounded command's descendants under an unwrapped persistent child (`core/process.ts`).
 - A job's process outlives a killed host (SIGKILL, an unhandled `serve`/`web` stop) except under bwrap; it reads `lost`, and nothing re-adopts or kills it.
 - An acceptance is inert where a backend exists; a session carried onto one is told only that it is confined again.
@@ -348,6 +348,7 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 
 - `session/events` has no host ceiling (any range, every tier); no RPC deadline or client timeout; the backpressure limits are unmeasured.
 - `session.view`'s `status` goes stale; a reconnect loses the paging position and, for a sole watcher, a pending approval; only `control.summary` announces disposal.
+- Detaching one session narrows an un-narrowed client to nothing (`protocol/connection.ts`).
 - `minidsh web` has no graceful stop: the next process repairs and reclaims the lease.
 - `workspaceRoots` is always `[cwd]` and bounds only NEW sessions: a wire client may resume one outside it, and a resumed session its restored inbox wakes may begin its first request before the host's authority flags land.
 - One principal, no accounts: the browser authenticates nobody (§8) and cannot switch a session's route.

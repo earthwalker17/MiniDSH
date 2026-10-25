@@ -136,7 +136,8 @@ If an earlier summary appears above, merge its content rather than copying it ve
  *
  * The recall sentence appears only when this deployment actually mounted a tool
  * tagged `RECALL_TOOL`: a durable node must not promise an affordance the
- * composition does not have.
+ * composition does not have. It is the DEPLOYMENT's registry that is asked, so
+ * a child denied the tool is still told of it (ARCHITECTURE §13).
  */
 function frame(summary: string, shadowed: { readonly from: number; readonly to: number; readonly count: number }, recallTool: string | undefined): string {
   const recall =

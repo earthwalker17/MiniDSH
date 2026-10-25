@@ -72,11 +72,11 @@ If a change needs state that must survive a restart, a resume or a fork, it is a
 
 ## Releases
 
-A release is a tag. Bump `package.json`, cut the CHANGELOG section, merge to `main`, and push `v<version>`: `release.yml` runs the whole gate, packs, drafts the GitHub release from that section, publishes the packed bytes through npm trusted publishing (no token exists anywhere in the repository or its secrets), installs the public package and verifies its provenance attestation, then publishes the draft. A tag that is not on `main`, that disagrees with `package.json`, or whose commit has no green `check.yml` and `live.yml` run, publishes nothing. The trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com.
+A release is a tag. Bump `package.json`, cut the CHANGELOG section, merge to `main`, and push `v<version>`: `release.yml` runs the whole gate, packs, drafts the GitHub release from that section, publishes the packed bytes through npm trusted publishing (no token exists anywhere in the repository or its secrets), installs the public package and verifies its provenance attestation, then publishes the draft. A tag that is not on `main`, that disagrees with `package.json`, or whose commit has no green `check.yml` run and no green unfiltered `live.yml` run, publishes nothing. The trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com.
 
 ## Scope
 
-BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (continuable children, parallel tool calls, a desktop launcher); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
+BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (continuable children, Windows job containment, a desktop launcher); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
 
 ## License and attribution
 
