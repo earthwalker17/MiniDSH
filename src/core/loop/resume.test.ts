@@ -329,6 +329,29 @@ describe('durable inbox', () => {
     await agent.whenIdle()
     expect(foldInbox(agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
   })
+
+  // The S20.5 review: a narrowed-out notice went straight back into the step
+  // queue, which kept the turn stepping — 25 model calls for one question.
+  it('owes a notice a listener narrowed out to a later turn, without stepping this one again', async () => {
+    const { harness: h } = await persistedHarness()
+    const { foldInbox, AGENT_PRE_STEP } = await import('../agent/index.ts')
+    const { isJobNotice, jobNotice } = await import('../jobs/events.ts')
+    h.root.on(AGENT_PRE_STEP, async (_context, next) => {
+      const decision = await next()
+      return decision.kind === 'enter' ? { kind: 'enter', messages: decision.messages.filter((message) => !isJobNotice(message)) } : decision
+    }, { global: true })
+    for (let i = 0; i < 5; i++) h.adapter.script(assistantText(`answer ${i}`))
+    const { agent } = await h.create({ maxSteps: 5 })
+    const notice = jobNotice({ jobId: 'job-3', kind: 'shell', label: 'sleep', mode: 'workspace-write', enforcement: 'full' }, { jobId: 'job-3', cause: 'exited', exitCode: 0 })
+    agent.inject(notice)
+    agent.followup(createUserMessage('one question'))
+    await agent.whenIdle()
+    expect(h.adapter.calls).toHaveLength(1)
+    expect(agent.session.events.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)).toEqual(['completed'])
+    // Still owed, live and durably.
+    expect((agent as unknown as { inbox: { hasStepPending: boolean } }).inbox.hasStepPending).toBe(true)
+    expect(foldInbox(agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
+  })
 })
 
 describe('agents.fork', () => {

@@ -306,8 +306,9 @@ export class ReactLoopAgent implements Agent {
           this.requeueNotices(dropped)
           break
         }
-        // A listener may narrow a batch; a notice it left out is owed, not consumed.
-        if (dropped.length > 0) this.requeueNotices(dropped)
+        // A listener may narrow a batch; a notice it left out is owed, not
+        // consumed — owed to a later turn, or it would keep this one stepping.
+        for (const message of dropped) if (isJobNotice(message)) this.inbox.hold(message)
         this.session.append(STEP_START, { turn, step })
         let result: StepResult
         try {
@@ -353,6 +354,7 @@ export class ReactLoopAgent implements Agent {
         this.ctx.emit(AGENT_ERROR, this, error)
       }
     } finally {
+      this.inbox.releaseHeld()
       this.session.append(TURN_END, { turn, reason })
       // A turn that already ended on a lost write reported it once; the
       // provider keeps refusing every flush, and that is not a second failure.

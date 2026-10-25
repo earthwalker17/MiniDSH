@@ -153,6 +153,26 @@ export class Inbox {
     return this.stepQueue.length > 0
   }
 
+  /**
+   * Notices owed, but not to THIS turn: a pre-step listener narrowed them out
+   * of a batch. Recorded as quiet next-step inserts like any requeue, so a
+   * crash still re-delivers them, but out of `hasStepPending` until the turn
+   * ends (`releaseHeld`): back in the step queue they kept the turn stepping,
+   * one paid request a step, to max-steps (S20.5 review).
+   */
+  private readonly heldQueue: Message[] = []
+
+  hold(message: Message): void {
+    this.heldQueue.push(message)
+    this.record({ op: 'insert', queue: 'next-step', message, waking: false })
+    this.dispatch('inserted', message, 'next-step')
+  }
+
+  /** The turn ended: what it held is next-step input again. */
+  releaseHeld(): void {
+    for (const message of this.heldQueue.splice(0)) this.stepQueue.push({ message, waking: false })
+  }
+
   append(message: Message, target: InboxTarget, waking: boolean): void {
     if (target === 'next-turn') this.turnQueue.push(message)
     else this.stepQueue.push({ message, waking })
@@ -199,8 +219,11 @@ export class Inbox {
    * nothing either way.
    */
   clear(durable: boolean): void {
-    const queued = [...this.stepQueue.map((entry) => entry.message), ...this.turnQueue]
+    // Held notices too: the log recorded them as next-step inserts, so the
+    // clear record drains them in a fold, and the kept ones are re-recorded below.
+    const queued = [...this.stepQueue.map((entry) => entry.message), ...this.heldQueue, ...this.turnQueue]
     this.stepQueue.length = 0
+    this.heldQueue.length = 0
     this.turnQueue.length = 0
     if (!durable) {
       for (const message of queued) this.dispatch('discarded', message)
