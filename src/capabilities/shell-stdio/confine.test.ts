@@ -20,11 +20,11 @@ import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, release, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { canonicalPath, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
 import { bwrapArgs } from './confine/bwrap.ts'
 import { seatbeltArgs } from './confine/seatbelt.ts'
-import { NO_CONFINEMENT, selectConfinement } from './confine/index.ts'
+import { NO_CONFINEMENT, selectConfinement, type ProbeRun } from './confine/index.ts'
 import { ShellProcess } from './process.ts'
 
 // ---- the profiles, everywhere ---------------------------------------------
@@ -33,6 +33,61 @@ import { ShellProcess } from './process.ts'
 // a silently weakened one is the failure this file exists to prevent.
 
 const policyFor = (mode: SandboxMode, workspaceRoot: string): SandboxExecutionPolicy => ({ mode, workspaceRoot })
+
+// ---- what the probe remembers, everywhere -----------------------------------
+// The probe's own spawn is staged, so these hold on every host, and each test
+// takes a fresh copy of the module: the memo is the process's.
+
+describe('what the confinement probe remembers', () => {
+  type Answer = ReturnType<ProbeRun>
+  const staged = (answers: Answer[]): { run: ProbeRun; calls: () => number } => {
+    let calls = 0
+    return { run: () => answers[Math.min(calls++, answers.length - 1)]!, calls: () => calls }
+  }
+  const errno = (code: string): Error => Object.assign(new Error(`spawnSync probe ${code}`), { code })
+  const ENFORCES: Answer = { status: 0, signal: null }
+  const freshSelect = async (): Promise<typeof selectConfinement> => {
+    vi.resetModules()
+    return (await import('./confine/index.ts')).selectConfinement
+  }
+
+  it('forgets a probe that could not run — out of descriptors, or its bound — and remembers the one that then proved the host', async () => {
+    const select = await freshSelect()
+    const busy = staged([
+      { status: null, signal: null, error: errno('EMFILE') },
+      { status: null, signal: null, error: errno('EAGAIN') },
+      { status: null, signal: 'SIGTERM', error: errno('ETIMEDOUT') },
+      { status: null, signal: 'SIGKILL' },
+      ENFORCES,
+      { status: 1, signal: null },
+    ])
+    // Each moment answers `none` to the mount that asked — nothing proved the
+    // backend works — and the next mount asks again.
+    for (let i = 1; i <= 4; i++) {
+      expect(select('bwrap', busy.run)).toMatchObject({ id: 'none', enforcement: 'none' })
+      expect(busy.calls()).toBe(i)
+    }
+    const proved = select('bwrap', busy.run)
+    expect(proved).toMatchObject({ id: 'bwrap', enforcement: 'full' })
+    // The host fact, once known, is not asked again.
+    expect(select('bwrap', busy.run)).toBe(proved)
+    expect(busy.calls()).toBe(5)
+  })
+
+  for (const [what, answer] of [
+    ['a backend that ran and refused', { status: 1, signal: null }],
+    ['a binary that is not there', { status: null, signal: null, error: errno('ENOENT') }],
+    ['a binary that may not run', { status: null, signal: null, error: errno('EACCES') }],
+  ] as const) {
+    it(`remembers ${what}: a fact about this host, not a moment`, async () => {
+      const select = await freshSelect()
+      const host = staged([answer, ENFORCES])
+      expect(select('bwrap', host.run)).toMatchObject({ id: 'none', enforcement: 'none' })
+      expect(select('bwrap', host.run)).toMatchObject({ id: 'none', enforcement: 'none' })
+      expect(host.calls()).toBe(1)
+    })
+  }
+})
 
 describe('the bwrap profile', () => {
   it('binds the host root read-only and unshares the PID namespace, in that order', () => {

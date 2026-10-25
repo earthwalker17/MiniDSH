@@ -71,6 +71,8 @@ const DOWNLOAD_ANNOUNCE_MS = 2_000
 const RETRY_MS = 250
 /** Commands outside any call's budget: opening, reporting, closing, answering the page. */
 const PLAIN_TIMEOUT_MS = 10_000
+/** A termination after the deadline already passed: answered in milliseconds even mid-loop (`send`), so this bounds only a dead renderer. */
+const TERMINATE_TIMEOUT_MS = 1_000
 /** What a dev server that is not listening yet looks like from the browser. */
 const NOT_LISTENING = new Set(['net::ERR_CONNECTION_REFUSED', 'net::ERR_CONNECTION_RESET', 'net::ERR_EMPTY_RESPONSE', 'net::ERR_CONNECTION_CLOSED'])
 
@@ -369,9 +371,12 @@ class Page implements BrowserPage, PageSession {
     try {
       // V8 terminates a script still running at `timeout`: measured, a
       // `while (true) {}` ends with a protocol error at that moment and the page
-      // answers again — without it a runaway expression would wedge the
-      // renderer for every later call. It fires just before the deadline, so the
-      // termination, not the transport's timer, is what ends a busy expression.
+      // answers again. It fires just before the deadline, so for the EXPRESSION
+      // it is V8's own timer, not the transport's, that ends a busy one — and
+      // the answer can say so. It covers this first step only: the by-value read
+      // below runs page code too (a getter), and that is stopped by `send`'s
+      // termination when the deadline passes, the one recovery every command
+      // shares.
       const terminateAfter = Math.max(1, options.deadline - Date.now() - 100)
       const terminatesAt = Date.now() + terminateAfter
       let answer: { result?: unknown; exceptionDetails?: unknown }
@@ -402,6 +407,11 @@ class Page implements BrowserPage, PageSession {
       try {
         byValue = await this.send('Runtime.callFunctionOn', { objectId, functionDeclaration: 'function () { return this }', returnByValue: true }, options)
       } catch (error) {
+        if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') {
+          throw new BrowserError('BROWSER_TIMEOUT', "reading the value back ran the page's own code (a getter), which was still running at the call's deadline and was stopped", {
+            unanswered: error.unanswered,
+          })
+        }
         if (!(error instanceof BrowserError) || error.code !== 'BROWSER_PROTOCOL') throw error
         // "Object reference chain is too long" (`window`), an answer past the size cap.
         return { unreturnable: `${described(result)}, which the browser could not return as JSON: ${protocolReason(error)}` }
@@ -484,6 +494,29 @@ class Page implements BrowserPage, PageSession {
   // -------------------------------------------------------------------------
   // PageSession
 
+  /**
+   * Every command a call sends the page, and the ONE recovery when the page
+   * leaves one unanswered: `Runtime.terminateExecution` on this page's session,
+   * then the `unanswered` mark that makes the next call probe the page.
+   *
+   * Whatever holds the main thread is page code — evaluate's by-value read
+   * calling a looping getter, a helper meeting a patched prototype, the page's
+   * own timer stuck in a loop — and only V8 can stop it; abandoning the request
+   * leaves it running. Measured on Chrome 155 and Edge 156 (2026-10-26, Windows,
+   * headless): a by-value `callFunctionOn` stuck in `{ get x() { for (;;) {} } }`
+   * was still wedged at 500 ms, and the termination ended it in 1–6 ms (3/3 on
+   * each), as it ended a page timer's loop in 2–3 ms. It is the command that
+   * runs off the main thread, so it is answered while the loop runs.
+   *
+   * "Current or next", the protocol says, and the next was measured too: with
+   * nothing running — a pending promise, an idle page — the termination killed
+   * neither our next evaluate (`2+2` answered 4, both browsers) nor the page's
+   * own next callback (a 2 ms `setTimeout` chain kept ticking, 5/5 on each).
+   * So it is sent unconditionally. What it cannot end is a loop that re-arms
+   * itself (`setInterval(() => { for (;;) {} })`: every probe after stayed
+   * unanswered), and that page is replaced by the next call's probe
+   * (`index.ts`), as before.
+   */
   async send<T>(method: string, params: Record<string, unknown>, budget: CallBudget): Promise<T> {
     if (this.closedReason !== undefined) throw this.closedError()
     if (budget.signal.aborted) throw budget.signal.reason
@@ -493,7 +526,8 @@ class Page implements BrowserPage, PageSession {
       return await this.cdp.send<T>(method, params, { sessionId: this.sessionId, timeoutMs: remaining, signal: budget.signal })
     } catch (error) {
       if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') {
-        throw new BrowserError('BROWSER_TIMEOUT', `the call's deadline passed while the page was answering ${method}`, { unanswered: true })
+        await this.cdp.send('Runtime.terminateExecution', {}, { sessionId: this.sessionId, timeoutMs: TERMINATE_TIMEOUT_MS }).catch(() => undefined)
+        throw new BrowserError('BROWSER_TIMEOUT', `the call's deadline passed while the page was answering ${method}; any script still running on the page was stopped`, { unanswered: true })
       }
       throw error
     }

@@ -40,8 +40,9 @@ const DOS_DATE = (0 << 9) | (1 << 5) | 1
 const MAX_MEMBER_BYTES = 256 * 1024 * 1024
 /**
  * What a package may declare in all, and how many members it may have. Each
- * member inflates to at most its declared size, so the sum bounds what opening
- * one costs; a ZIP whose directory points several names at one compressed body
+ * member inflates to at most its declared size, so the sum bounds the BYTES
+ * opening one costs (the DOM they parse into is `MAX_PACKAGE_NODES`'s); a ZIP
+ * whose directory points several names at one compressed body
  * (65 KB inflating to N x 64 MiB) is refused before anything inflates.
  */
 const MAX_PACKAGE_BYTES = 512 * 1024 * 1024
@@ -226,11 +227,44 @@ export function decodeXml(bytes, part) {
   }
 }
 
+/**
+ * How deep a part may nest. Every reader of a parsed part recurses (the
+ * package check's namespace walk, read's text walkers), so the cap sits here,
+ * where every part passes, and they are safe by construction: 20,000 nested
+ * `<w:customXml>` overflowed the stack into an internal error (S20.5).
+ */
+const MAX_DEPTH = 256
+/**
+ * Elements, attributes and text runs one pass over a package may build. The
+ * ZIP caps bound inflated bytes, not the DOM: `<w:p/>` is six bytes and a JS
+ * object, and 128 MiB of them (a 199 KB .docx) exhausted the heap (S20.5).
+ * Measured at the cap: 2M empty elements read in 2.4 s within a 256 MB heap,
+ * 1M one-attribute elements (the costliest unit: a Map each) in 3.2 s within
+ * 384 MB. Estimated, not measured: a document of some 5,000 pages, or a
+ * sheet of some 300,000 cells, reaches it.
+ */
+export const MAX_PACKAGE_NODES = 2_000_000
+
+/** One pass's share of `MAX_PACKAGE_NODES`: every part a pass parses draws on the same account. */
+export const nodeAccount = () => ({ left: MAX_PACKAGE_NODES })
+
+/**
+ * What an element without attributes or children holds: one shared, empty
+ * value, replaced on the first write. Only `parse` writes; a Map and an array
+ * per empty element were most of its ~250 bytes (S20.5).
+ */
+const NO_ATTRS = new Map()
+const NO_CHILDREN = Object.freeze([])
+const adopt = (parent, child) => {
+  if (parent.children === NO_CHILDREN) parent.children = []
+  parent.children.push(child)
+}
+
 /** Parses a part into `{ name, attrs: Map, children: (element | string)[] }`, or throws with part, line and column. */
-export function parseXml(input, part = 'xml') {
+export function parseXml(input, part = 'xml', account = nodeAccount()) {
   const text = typeof input === 'string' ? (input.charCodeAt(0) === 0xfeff ? input.slice(1) : input) : decodeXml(input, part)
   try {
-    return parse(text)
+    return parse(text, account)
   } catch (error) {
     if (!(error instanceof XmlError)) throw error
     const { line, column } = locate(text, error.index)
@@ -275,7 +309,7 @@ function decodeEntities(raw, at) {
   }
 }
 
-function parse(text) {
+function parse(text, account) {
   checkCharacters(text)
   const n = text.length
   const stack = []
@@ -290,6 +324,9 @@ function parse(text) {
   let i = 0
   const err = (message, at = i) => {
     throw new XmlError(message, at)
+  }
+  const spend = (at) => {
+    if (--account.left < 0) err(`more than ${MAX_PACKAGE_NODES} elements, attributes and text runs in this package: too large for this helper to open`, at)
   }
   if (text.startsWith('<?xml') && isSpace(text.charCodeAt(5))) {
     const end = text.indexOf('?>')
@@ -307,7 +344,8 @@ function parse(text) {
       } else {
         const bad = raw.indexOf(']]>')
         if (bad >= 0) err("']]>' is not allowed in text", i + bad)
-        stack.at(-1).el.children.push(decodeEntities(raw, i))
+        spend(i)
+        adopt(stack.at(-1).el, decodeEntities(raw, i))
       }
       i = textEnd
       if (lt < 0) break
@@ -324,7 +362,8 @@ function parse(text) {
       if (stack.length === 0) err('CDATA outside the root element')
       const end = text.indexOf(']]>', i + 9)
       if (end < 0) err('unterminated CDATA section')
-      stack.at(-1).el.children.push(text.slice(i + 9, end))
+      spend(i)
+      adopt(stack.at(-1).el, text.slice(i + 9, end))
       i = end + 3
       continue
     }
@@ -357,7 +396,9 @@ function parse(text) {
     const m = NAME.exec(text)
     if (!m) err("'<' is not followed by a name (escape a literal '<' as &lt;)")
     if (stack.length === 0 && root) err('a second root element')
-    const el = { name: m[0], attrs: new Map(), children: [] }
+    if (stack.length >= MAX_DEPTH) err(`elements nested more than ${MAX_DEPTH} deep`)
+    spend(i)
+    const el = { name: m[0], attrs: NO_ATTRS, children: NO_CHILDREN }
     let j = i + 1 + m[0].length
     let selfClosing = false
     for (;;) {
@@ -391,6 +432,8 @@ function parse(text) {
       const lessThan = raw.indexOf('<')
       if (lessThan >= 0) err(`'<' inside the value of ${name} (write &lt;)`, j + 1 + lessThan)
       if (el.attrs.has(name)) err(`duplicate attribute ${name} on <${el.name}>`, j)
+      spend(j)
+      if (el.attrs === NO_ATTRS) el.attrs = new Map()
       el.attrs.set(name, decodeEntities(raw.replace(/[\t\n\r]/g, ' '), j + 1))
       j = close + 1
     }
@@ -414,7 +457,7 @@ function parse(text) {
     }
     bound(el.name, `<${el.name}>`)
     for (const key of el.attrs.keys()) if (key !== 'xmlns' && !key.startsWith('xmlns:')) bound(key, `attribute ${key} of <${el.name}>`)
-    if (stack.length > 0) stack.at(-1).el.children.push(el)
+    if (stack.length > 0) adopt(stack.at(-1).el, el)
     else root = el
     if (selfClosing) unbind(declared)
     else stack.push({ el, index: i, declared })
@@ -672,10 +715,11 @@ export function checkPackage(members, ext) {
   }
   const exists = (part) => byLower.has(part.toLowerCase())
   // Only XML parts are opened: a lazily inflated package never inflates its media here.
+  const account = nodeAccount()
   for (const name of members.keys()) {
     if (!isXmlPart(name)) continue
     try {
-      parsed.set(name, parseXml(members.get(name), name))
+      parsed.set(name, parseXml(members.get(name), name, account))
     } catch (error) {
       if (error instanceof CliError) problems.push(error.message)
       else throw error
@@ -733,6 +777,19 @@ export function checkPackage(members, ext) {
     for (const ref of relationshipRefs(root)) if (!ids?.has(ref.id)) missing.add(`${ref.attr} ${ref.id}`)
     for (const ref of [...missing].slice(0, 5)) problems.push(`${name}: ${ref} has no relationship in ${relsFor(name)}`)
     if (missing.size > 5) problems.push(`${name}: ${missing.size - 5} more ids with no relationship`)
+  }
+  // One slide or sheet per relationship. Two entries naming one part pass the
+  // check above, and `read` rendered that part once per entry: 2,000 entries
+  // over one slide took 14.5 s from a 19.7 KB file (S20.5).
+  const mainRoot = main === undefined ? undefined : parsed.get(byLower.get(main.toLowerCase()) ?? main)
+  for (const [list, entry] of [['sldIdLst', 'sldId'], ['sheets', 'sheet']]) {
+    const named = new Set()
+    for (const el of kids(kid(mainRoot, list), entry)) {
+      const rid = [...el.attrs].find(([key]) => key.includes(':') && localName(key) === 'id')?.[1]
+      if (rid === undefined) continue
+      if (named.has(rid)) problems.push(`${main}: two <${entry}> entries name relationship ${rid} (one part listed twice)`)
+      named.add(rid)
+    }
   }
   return { problems, parsed, main, types }
 }

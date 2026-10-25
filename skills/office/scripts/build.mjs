@@ -191,8 +191,10 @@ export function buildDocx(spec) {
   if (!isObject(spec)) throw bad('', 'expected an object {"title"?, "body": [...]}')
   onlyKeys(spec, '', ['title', 'body', 'pageSize'])
   const title = spec.title === undefined ? undefined : stringAt(spec.title, '.title')
-  const page = PAGE[spec.pageSize ?? 'A4']
-  if (!page) throw bad('.pageSize', 'expected "A4" or "Letter"')
+  // An own key only: "toString" is a property of every object, and it reached the page geometry.
+  const sizeName = spec.pageSize ?? 'A4'
+  if (typeof sizeName !== 'string' || !Object.hasOwn(PAGE, sizeName)) throw bad('.pageSize', 'expected "A4" or "Letter"')
+  const page = PAGE[sizeName]
   if (!Array.isArray(spec.body)) throw bad('.body', 'expected an array of blocks')
   const textWidth = page.w - 2 * MARGIN
   const blocks = []

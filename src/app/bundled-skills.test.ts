@@ -51,6 +51,30 @@ function run(script: string, args: readonly string[], cwd: string, timeout = 60_
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
 }
 
+/**
+ * Work that grows in proportion to its input, judged by a RATIO and not a
+ * wall clock: the same run at n and at 4n, each less a run at a trivial size
+ * (Node's own start-up). Linear work grows 4x, a quadratic 16x, a cubic 64x,
+ * so the bound is 8x — half the quadratic's, twice the linear's. An absolute
+ * bound cannot say this: the older linearity tests here sat about 3x from the
+ * quadratic case, so a faster runner could pass the regression they exist for
+ * (review, S20.5). Under `floorMs` the work is start-up noise and passes; the
+ * defects these pin cost seconds at these sizes, never that.
+ */
+function expectLinear(label: string, runAt: (scale: 0 | 1 | 4) => Run, floorMs = 500): void {
+  const time = (scale: 0 | 1 | 4): number => {
+    const started = performance.now()
+    const result = runAt(scale)
+    const ms = performance.now() - started
+    expect(result.status, `${label} at ${scale}n: ${result.stderr.slice(0, 400)}`).toBe(0)
+    return ms
+  }
+  const startup = Math.min(time(0), time(0))
+  const one = Math.max(0, time(1) - startup)
+  const four = Math.max(0, time(4) - startup)
+  expect(four, `${label}: ${one.toFixed(0)} ms of work at n, ${four.toFixed(0)} ms at 4n (start-up ${startup.toFixed(0)} ms)`).toBeLessThan(Math.max(floorMs, 8 * one))
+}
+
 function ok(result: Run): string {
   if (result.status !== 0) throw new Error(`helper exited ${result.status}: ${result.stderr}`)
   return result.stdout
@@ -334,7 +358,8 @@ describe('the bundled skills, as data', () => {
       expect(scripts.length).toBeGreaterThan(0)
       for (const script of scripts) {
         const source = readFileSync(join(skillDir, 'scripts', script), 'utf8')
-        const specifiers = [...source.matchAll(/\bimport\s[^'"]*?from\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\bimport\s*['"]([^'"]+)['"]|\brequire\s*\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? '')
+        // A re-export (export … from) imports too: the S20.5 audit found the check blind to it.
+        const specifiers = [...source.matchAll(/\b(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]|\bimport\s*['"]([^'"]+)['"]|\brequire\s*\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? '')
         expect(specifiers.length, script).toBeGreaterThan(0)
         for (const spec of specifiers) {
           if (spec.startsWith('node:')) continue
@@ -573,6 +598,57 @@ describe('office.mjs', () => {
     expect(many.stderr).toContain('10001 members; this helper opens packages of at most 10000')
   })
 
+  // S20.5: parse() is iterative, but everything that reads a parsed part
+  // recursed, and 20,000 nested elements overflowed the stack into exit 1.
+  it('refuses a part nested past its cap with the part, line and column, in read and in pack', () => {
+    ok(run(OFFICE, ['unpack', 'doc.docx', 'deep'], work))
+    const depth = 20_000
+    writeFileSync(join(work, 'deep', 'word', 'document.xml'), `<w:document xmlns:w="${W}"><w:body>${'<w:customXml>'.repeat(depth)}${'</w:customXml>'.repeat(depth)}</w:body></w:document>`)
+    writeFileSync(join(work, 'deep.docx'), zipDirectory(join(work, 'deep')))
+    for (const result of [run(OFFICE, ['read', 'deep.docx'], work), run(OFFICE, ['pack', 'deep', 'deep-packed.docx'], work)]) {
+      expect(result.status, result.stderr.slice(0, 400)).toBe(4)
+      expect(result.stderr).toMatch(/word\/document\.xml: line 1, column \d+: elements nested more than 256 deep/)
+    }
+  })
+
+  // S20.5: the ZIP caps bound bytes, not the DOM they parse into, and a
+  // 199 KB .docx of empty paragraphs exhausted the helper's heap.
+  it('refuses a package that would build more nodes than one pass may hold', () => {
+    ok(run(OFFICE, ['unpack', 'doc.docx', 'wide'], work))
+    writeFileSync(join(work, 'wide', 'word', 'document.xml'), `<w:document xmlns:w="${W}"><w:body>${'<w:p/>'.repeat(2_000_001)}</w:body></w:document>`)
+    writeFileSync(join(work, 'wide.docx'), zipDirectory(join(work, 'wide')))
+    const result = run(OFFICE, ['read', 'wide.docx'], work)
+    expect(result.status, result.stderr.slice(0, 400)).toBe(4)
+    expect(result.stderr).toMatch(/word\/document\.xml: line 1, column \d+: more than 2000000 elements, attributes and text runs/)
+  })
+
+  // S20.5: --max-chars bounded what read printed, not what it rendered,
+  // except in a workbook.
+  it('stops rendering a document past what --max-chars prints, and marks its counts partial', () => {
+    ok(run(OFFICE, ['unpack', 'doc.docx', 'long'], work))
+    writeFileSync(join(work, 'long', 'word', 'document.xml'), `<w:document xmlns:w="${W}"><w:body>${'<w:p><w:r><w:t>words</w:t></w:r></w:p>'.repeat(5_000)}</w:body></w:document>`)
+    writeFileSync(join(work, 'long.docx'), zipDirectory(join(work, 'long')))
+    expect(ok(run(OFFICE, ['read', 'long.docx', '--max-chars', '200'], work))).toMatch(/^docx: \d{1,2}\+ paragraphs, 0\+ tables/m)
+    expect(ok(run(OFFICE, ['read', 'long.docx', '--max-chars', '1000000'], work))).toMatch(/^docx: 5000 paragraphs, 0 tables/m)
+  })
+
+  // S20.5: two entries naming one slide passed pack's id check, and read
+  // rendered that slide once per entry (2,000 of them took 14.5 s).
+  it('refuses a deck that lists one slide twice, and reads such a deck rendering the part once', () => {
+    ok(run(OFFICE, ['unpack', 'deck.pptx', 'twice'], work))
+    const presentation = join(work, 'twice', 'ppt', 'presentation.xml')
+    const listed = readFileSync(presentation, 'utf8')
+    expect(listed).toContain('<p:sldId id="257" r:id="rId3"/>')
+    writeFileSync(presentation, listed.replace('<p:sldId id="257" r:id="rId3"/>', '<p:sldId id="257" r:id="rId2"/>'))
+    const packed = run(OFFICE, ['pack', 'twice', 'twice.pptx'], work)
+    expect(packed.status).toBe(4)
+    expect(packed.stderr).toContain('ppt/presentation.xml: two <sldId> entries name relationship rId2')
+    writeFileSync(join(work, 'twice-zipped.pptx'), zipDirectory(join(work, 'twice')))
+    const read = ok(run(OFFICE, ['read', 'twice-zipped.pptx'], work))
+    expect(read).toContain('== slide 2 (ppt/slides/slide1.xml, the same part as slide 1)')
+    expect(read.match(/title: Hello/g)).toHaveLength(1)
+  })
+
   it('inflates only what read shows: a damaged media member does not stop read, and unpack still refuses it', () => {
     ok(run(OFFICE, ['unpack', 'doc.docx', 'lazy'], work))
     writeFileSync(join(work, 'lazy.docx'), storedZip([...directoryEntries(join(work, 'lazy')), ['word/media/broken.png', Buffer.from('not a png'), { crc: 1 }]]))
@@ -595,7 +671,8 @@ describe('office.mjs', () => {
     writeFileSync(join(work, 'ns-doc', 'word', 'document.xml'), `<w:document xmlns:w="${W}"${declarations}><w:body>${'<w:p/>'.repeat(30000)}</w:body></w:document>`)
     writeFileSync(join(work, 'ns-doc.docx'), zipDirectory(join(work, 'ns-doc')))
     // Every element used to copy its parent's 5,000 bindings: about a minute here, where linear work takes well under a second.
-    const result = run(OFFICE, ['read', 'ns-doc.docx'], work, 20_000)
+    // A --max-chars past the whole dump, so the count below says read walked every paragraph.
+    const result = run(OFFICE, ['read', 'ns-doc.docx', '--max-chars', '1000000'], work, 20_000)
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('docx: 30000 paragraphs')
   })
@@ -1004,6 +1081,122 @@ describe('pdf.mjs', () => {
     const result = run(PDF, ['read', 'no-endstream.pdf', '--json'], work, 15_000)
     expect(result.status).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({ repaired: true, text: [{ page: 1, text: 'SCAN-OK' }] })
+  })
+
+  /**
+   * A base64 badge or a minified line is one unbroken word, which `wrap`
+   * splits by measuring. It measured every candidate cut from the start,
+   * cubic in the word: 16,000 characters took 80 s, and about 20,000 outran
+   * the shell's 120 s deadline (review, S20.5).
+   */
+  it('wraps one unbroken word in time linear in its length, and keeps every character of it', () => {
+    const sizes = { 0: 10, 1: 4_000, 4: 16_000 } as const
+    expectLinear('pdf build of one long word', (scale) => {
+      writeFileSync(join(work, `word-${scale}.md`), `# Notes\n\nSee data:image/png;base64,${'A'.repeat(sizes[scale])} for the badge.\n`)
+      return run(PDF, ['build', `word-${scale}.md`, `word-${scale}.pdf`, '--force'], work, 60_000)
+    })
+    const text = readPages('word-4.pdf', work)
+      .text.map((page) => page.text)
+      .join('\n')
+    expect(text.replace(/\s/g, '').match(/A+/g)?.join('').length, 'a character of the word was lost at a cut').toBe(16_000)
+  })
+
+  /** One `'` per line, far inside every per-page count, used to cost the whole page's text per line: 2 KB of file, 45 s (review, S20.5). */
+  it('reads a page of many short lines in time linear in their number', () => {
+    const sizes = { 0: 10, 1: 25_000, 4: 100_000 } as const
+    expectLinear('pdf read of many lines', (scale) => {
+      writeFileSync(join(work, `lines-${scale}.pdf`), onePage('<< /Font << /F1 5 0 R >> >>', `BT /F1 12 Tf 14 TL 72 700 Td ${"(ab) ' ".repeat(sizes[scale])}ET`, HELVETICA_FONT))
+      return run(PDF, ['read', `lines-${scale}.pdf`, '--max-chars', '100'], work, 60_000)
+    })
+  })
+
+  /**
+   * The repair scan's `(\d+)\s+(\d+)\s+obj` backtracked through every length
+   * of a digit run at every start inside it: 80,000 digits took 15 s, from
+   * `info` as well as `read` (review, S20.5).
+   */
+  it('scans a damaged file of long digit runs in time linear in its size', () => {
+    const sizes = { 0: 10, 1: 20_000, 4: 80_000 } as const
+    expectLinear('pdf info over digits', (scale) => {
+      writeFileSync(join(work, `digits-${scale}.pdf`), `%PDF-1.4\n${'7'.repeat(sizes[scale])}\n`, 'latin1')
+      return run(PDF, ['info', `digits-${scale}.pdf`], work, 60_000)
+    })
+  })
+
+  /**
+   * An xref stream whose three field widths are 0 never advances through its
+   * data, so `/Index` alone sets the loop count: a 135-byte file spun for 17 s,
+   * then died of `Map maximum size exceeded` (review, S20.5). Such a section is
+   * refused, and the file is read by the repair scan like any broken index.
+   */
+  it('refuses an xref stream that cannot advance, or names more objects than a PDF may hold, and repairs instead', () => {
+    for (const [name, widths, count] of [
+      ['zero-widths', '[0 0 0]', 20_000_000],
+      ['huge-width', '[1 1000000000 1]', 4],
+      ['over-index', '[1 1 1]', 2_000_000_000],
+    ] as const) {
+      let pdf = '%PDF-1.5\n'
+      const at = pdf.length
+      pdf += `1 0 obj\n<< /Type /XRef /Size ${count} /W ${widths} /Index [0 ${count}] /Length 1 >>\nstream\nx\nendstream\nendobj\nstartxref\n${at}\n%%EOF\n`
+      writeFileSync(join(work, `${name}.pdf`), pdf, 'latin1')
+      const info = run(PDF, ['info', `${name}.pdf`], work, 15_000)
+      expect({ name, status: info.status, internal: /internal error|RangeError/.test(info.stderr) }).toEqual({ name, status: 0, internal: false })
+      expect(JSON.parse(info.stdout), name).toMatchObject({ repaired: true })
+    }
+  })
+
+  /**
+   * The drawing bounds were per page only, and a form is decoded once and
+   * cached, so every page could spend the full per-page bound again: a
+   * 12.7 KB file of 16 pages took 88 s (review, S20.5). The document now keeps
+   * one account across pages, and a page past it says so.
+   */
+  it('keeps one drawing account across pages: a page past the document budget is not read, and says so', () => {
+    // Six forms, each drawing the next ten times: every page reaches its own
+    // 100,000-form bound in well under a second, and the pages share one cache.
+    const forms = Array.from({ length: 6 }, (_, k) => pdfStream(`/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /XObject << /N ${6 + k} 0 R >> >>`, k < 5 ? '/N Do '.repeat(10) : 'q Q'))
+    const pages = 12
+    const kids = Array.from({ length: pages }, (_, i) => `${11 + i} 0 R`).join(' ')
+    const page = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /N 5 0 R >> >> /Contents 4 0 R >>'
+    // Object 3 is a placeholder the page tree never names; 4 is the content, 5-10 the forms, the pages from 11.
+    writeFileSync(join(work, 'many-pages.pdf'), simplePdf([CATALOG, `<< /Type /Pages /Kids [${kids}] /Count ${pages} >>`, '<< >>', pdfStream('', '/N Do'), ...forms, ...Array.from({ length: pages }, () => page)]))
+    const read = run(PDF, ['read', 'many-pages.pdf', '--json'], work, 60_000)
+    expect(read.status, read.stderr).toBe(0)
+    const notes = (JSON.parse(read.stdout) as { text: PageText[] }).text.map((p) => p.note ?? '')
+    expect(notes[0]).toContain('drawing stopped after 100,000 form XObjects')
+    expect(notes.at(-1), 'the last page was drawn in full again').toContain("the document's drawing budget is spent")
+    expect(notes.filter((note) => note.includes("the document's drawing budget is spent")).length).toBeGreaterThanOrEqual(pages - 6)
+  })
+
+  /** `Math.min(...ranges)` spread every codespace range as an argument: 200,000 threw a RangeError, an internal error (review, S20.5). */
+  it('reads a font whose CMap declares more codespace ranges than a call can spread', () => {
+    const codespace = `begincodespacerange\n${'<0000> <ffff>\n'.repeat(200_000)}endcodespacerange`
+    const toUnicode = 'begincodespacerange\n<0000> <ffff>\nendcodespacerange\n2 beginbfchar\n<0041> <0041>\n<0042> <0042>\nendbfchar'
+    writeFileSync(
+      join(work, 'codespace.pdf'),
+      onePage(
+        '<< /Font << /F1 5 0 R >> >>',
+        'BT /F1 12 Tf 72 700 Td <00410042> Tj ET',
+        '<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding 6 0 R /DescendantFonts [7 0 R] /ToUnicode 8 0 R >>',
+        pdfStream('', codespace),
+        '<< /Type /Font /Subtype /CIDFontType2 /BaseFont /X /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>',
+        pdfStream('', toUnicode),
+      ),
+    )
+    const result = run(PDF, ['read', 'codespace.pdf', '--json'], work, 30_000)
+    expect(result.stderr).not.toMatch(/internal error|RangeError/)
+    expect(result.status).toBe(0)
+    expect((JSON.parse(result.stdout) as { text: PageText[] }).text[0]?.text).toBe('AB')
+  })
+
+  /** `PAGE[spec.pageSize]` read inherited properties: "toString" reached the page geometry, an internal error here and NaN in the office builder's output. */
+  it('refuses a page size that is not its own, in both builders', () => {
+    writeFileSync(join(work, 'proto.json'), JSON.stringify({ pageSize: 'toString', blocks: [{ paragraph: 'x' }] }))
+    const pdf = run(PDF, ['build', 'proto.json', 'proto.pdf', '--force'], work)
+    expect({ status: pdf.status, says: pdf.stderr.includes('expected "A4" or "Letter"') }).toEqual({ status: 4, says: true })
+    writeFileSync(join(work, 'proto-doc.json'), JSON.stringify({ pageSize: 'constructor', body: [{ paragraph: 'x' }] }))
+    const office = run(OFFICE, ['build', 'proto-doc.json', 'proto.docx', '--force'], work)
+    expect({ status: office.status, says: office.stderr.includes('expected "A4" or "Letter"') }).toEqual({ status: 4, says: true })
   })
 
   it('builds numbered Markdown items with their numbers, drops emphasis markers, and prints a link as text (url)', () => {

@@ -120,6 +120,32 @@ describe.runIf(available)('a job process', () => {
     await until(() => !alive(pid))
   })
 
+  /**
+   * The producer half of `selfEnded`, which the registry's tests can only
+   * stage (`core/jobs`' FakeProcess passes it in). The root ends on its own at
+   * once, a backgrounded descendant keeps the pipe, and the stop lands INSIDE
+   * the pipes' grace: the job had already finished, so the stop did not end
+   * it. Decided at 'exit', before the grace — computing it in `settle` (the
+   * S17 bug's shape) records this job as cancelled, and this test fails.
+   */
+  it.runIf(process.platform !== 'win32')('ended on its own when a stop lands in the pipes\' grace after its root exited', { timeout: TIMEOUT_MS }, async () => {
+    const { shell, policy, root } = setup()
+    writeFileSync(join(root, 'bg.cjs'), "require('fs').writeFileSync('bg.pid', String(process.pid)); setInterval(() => {}, 1000)\n")
+    const chunks: string[] = []
+    const job = await shell.start({ command: 'node bg.cjs & echo x', policy, output: (chunk) => chunks.push(chunk) })
+    await until(() => chunks.join('').includes('x'))
+    // The root is reaped (its pid no longer answers) while the descendant
+    // holds the pipe: the 1.5 s grace has begun.
+    await until(() => !alive(job.pid!), 1_000)
+    job.kill()
+    const exit = await job.exited
+    expect(exit.selfEnded, 'a stop asked for after the root had exited did not end the job').toBe(true)
+    expect(exit.exitCode).toBe(0)
+    await until(() => existsSync(join(root, 'bg.pid')))
+    const pid = Number(readFileSync(join(root, 'bg.pid'), 'utf8'))
+    await until(() => !alive(pid))
+  })
+
   it('is reaped by the shell\'s disposal, and says so in its exit', { timeout: TIMEOUT_MS }, async () => {
     const { shell, policy, root } = setup()
     const job = await shell.start({ command: grandchild(root), policy, output: () => {} })

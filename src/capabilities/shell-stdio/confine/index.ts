@@ -13,6 +13,7 @@
  * is allowed to answer the middle one only because it PROBES the third.
  */
 import { spawnSync } from 'node:child_process'
+import { spawnRefusal } from '../../../core/process.ts'
 import type { SandboxEnforcement, SandboxExecutionPolicy } from '../../../core/sandbox/index.ts'
 import { BWRAP_BIN, BWRAP_DENIALS, BWRAP_RUNNER_FAILURES, bwrapArgs, bwrapTempDir } from './bwrap.ts'
 import { SEATBELT_BIN, SEATBELT_DENIALS, SEATBELT_RUNNER_FAILURES, seatbeltArgs } from './seatbelt.ts'
@@ -109,16 +110,42 @@ const PROBE_TIMEOUT_MS = 5_000
  * creation, before any command exists to fail. A stamp that says `full`
  * because a binary was named would be exactly the claim this session exists to
  * refuse.
+ *
+ * Three answers, not two, because only two of them are about the HOST:
+ *   - `enforces` — the profile ran and exited 0;
+ *   - `cannot` — the backend ran and refused (a nonzero status, no spawn error,
+ *     no signal), or its binary is not there or not runnable (ENOENT, EACCES).
+ *     A missing binary and an unenforcing kernel are deliberately the same
+ *     answer: one degradation path, and the refusal names the remedy;
+ *   - `unproved` — the probe could not run at all: out of descriptors or
+ *     processes (EMFILE, ENFILE, EAGAIN, ENOMEM), its 5 s bound (ETIMEDOUT, or
+ *     any signal), or anything else. That is a fact about a MOMENT. It still
+ *     answers `none` — nothing proved the backend works — but it is never
+ *     remembered (`selectConfinement`). Before S20.5 it was, so one busy
+ *     moment at mount made a bwrap host refuse every command with "install
+ *     bubblewrap", and let a session accepting `none` run unconfined where a
+ *     backend existed (reproduced under WSL by exhausting descriptors at mount).
  */
-function probe(dialect: Dialect): boolean {
+type Verdict = 'enforces' | 'cannot' | 'unproved'
+
+/** `spawnSync`'s one use here, injectable so a test can stage what a busy host returns. */
+export type ProbeRun = (command: string, args: readonly string[], options: { timeout: number; stdio: 'ignore' }) => {
+  readonly status: number | null
+  readonly signal: NodeJS.Signals | null
+  readonly error?: Error | undefined
+}
+
+function probe(dialect: Dialect, run: ProbeRun): Verdict {
+  let result: ReturnType<ProbeRun>
   try {
     const args = [...dialect.profile({ mode: 'read-only', workspaceRoot: '/' }), '--', 'true']
-    return spawnSync(dialect.bin, args, { timeout: PROBE_TIMEOUT_MS, stdio: 'ignore' }).status === 0
+    result = run(dialect.bin, args, { timeout: PROBE_TIMEOUT_MS, stdio: 'ignore' })
   } catch {
-    // A missing binary and an unenforcing kernel are deliberately the same
-    // answer: one degradation path, and the refusal names the remedy.
-    return false
+    return 'unproved'
   }
+  if (result.error !== undefined) return spawnRefusal(result.error) === 'missing' ? 'cannot' : 'unproved'
+  if (result.signal !== null) return 'unproved'
+  return result.status === 0 ? 'enforces' : 'cannot'
 }
 
 function build(dialect: Dialect): Confinement {
@@ -143,26 +170,30 @@ function build(dialect: Dialect): Confinement {
 }
 
 /**
- * A host fact, so it cannot change inside a process: memoized per choice.
- * Every mount of the shell row in one process asks the same question and gets
- * the same answer without paying for the probe again.
+ * Only a HOST fact is memoized, per choice: a backend that enforces, one that
+ * cannot, a platform with none. Those cannot change inside a process, so every
+ * later mount of the shell row gets the same answer without paying for the
+ * probe again. A probe that proved nothing (`unproved`) answers `none` to the
+ * mount that asked and is forgotten, so the next mount probes again — the
+ * browser's rule (`tool-browser`): only a host fault is remembered.
  */
 const selected = new Map<ConfinementChoice, Confinement>()
 
-export function selectConfinement(choice: ConfinementChoice = 'auto'): Confinement {
+export function selectConfinement(choice: ConfinementChoice = 'auto', run: ProbeRun = spawnSync): Confinement {
   const cached = selected.get(choice)
   if (cached) return cached
-  const result = resolve(choice)
-  selected.set(choice, result)
-  return result
+  const { confinement, fact } = resolve(choice, run)
+  if (fact) selected.set(choice, confinement)
+  return confinement
 }
 
-function resolve(choice: ConfinementChoice): Confinement {
-  if (choice === 'none') return NO_CONFINEMENT
+function resolve(choice: ConfinementChoice, run: ProbeRun): { readonly confinement: Confinement; readonly fact: boolean } {
+  if (choice === 'none') return { confinement: NO_CONFINEMENT, fact: true }
   const id = choice === 'auto' ? PLATFORM_CANDIDATE[process.platform] : choice
-  if (id === undefined) return NO_CONFINEMENT
+  if (id === undefined) return { confinement: NO_CONFINEMENT, fact: true }
   const dialect = DIALECTS[id]
-  return probe(dialect) ? build(dialect) : NO_CONFINEMENT
+  const verdict = probe(dialect, run)
+  return { confinement: verdict === 'enforces' ? build(dialect) : NO_CONFINEMENT, fact: verdict !== 'unproved' }
 }
 
 /** What a host with no backend should be told to install, named per platform. */

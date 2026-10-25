@@ -298,16 +298,26 @@ describe.runIf(testBrowser !== undefined)('the browser tools in a real compositi
     const w = await world({ vision: false })
     const first = await w.create()
     const second = await w.create()
-    await turn(w, first, assistantToolCall('c1', 'browser_navigate', { url: `${site.origin}/counter` }))
-    const [mine] = await turn(w, first, callFrom('c2', 'browser_act', (previous) => ({ action: 'click', ref: refIn(previous, 'button "Add one"') })))
+    const [opened] = await turn(w, first, assistantToolCall('c1', 'browser_navigate', { url: `${site.origin}/counter` }))
+    const firstAgentsRef = refIn(opened!.text, 'button "Add one"')
+    const [, mine] = await turn(w, first, assistantToolCall('c2', 'browser_act', { action: 'click', ref: firstAgentsRef }))
     expect(mine?.code).toBeUndefined()
     expect(profiles(w.profileRoot)).toHaveLength(1)
-    // Another agent: its own browser, with its own refs (numbered from e1 again,
-    // per agent), so a ref only the first agent's later snapshots reached means
-    // nothing here.
-    const theirs = await turn(w, second, assistantToolCall('c3', 'browser_navigate', { url: `${site.origin}/counter` }), assistantToolCall('c4', 'browser_act', { action: 'click', ref: 'e999' }))
+    // Another agent: its own browser. A ref the FIRST agent's browser really
+    // minted, used before this agent has a page of its own, names nothing here:
+    // a shared browser would click the first agent's button with it. (Before,
+    // the ref was `e999`, which nobody minted, and a navigation came first —
+    // a new document — so it was stale under any implementation.)
+    const theirs = await turn(
+      w,
+      second,
+      assistantToolCall('c3', 'browser_act', { action: 'click', ref: firstAgentsRef }),
+      assistantToolCall('c4', 'browser_navigate', { url: `${site.origin}/counter` }),
+    )
     expect(profiles(w.profileRoot)).toHaveLength(2)
-    expect(theirs[1]!.code, 'a ref this agent’s browser never minted').toBe('BROWSER_STALE_REF')
+    expect(theirs[0]!.code, 'a ref only the other agent’s browser minted').toBe('BROWSER_STALE_REF')
+    // …and its own refs are numbered from e1 again, per agent: the same page mints the same ref here.
+    expect(refIn(theirs[1]!.text, 'button "Add one"')).toBe(firstAgentsRef)
     await first.dispose()
     expect(profiles(w.profileRoot)).toHaveLength(1)
     await second.dispose()
@@ -379,8 +389,10 @@ describe.runIf(testBrowser !== undefined)('the browser tools in a real compositi
       // Only slow: a promise that settles after the call's own bound. The page answers the probe and stays.
       assistantToolCall('c2', 'browser_evaluate', { expression: 'new Promise((done) => setTimeout(done, 3000))', timeout_ms: 500 }),
       assistantToolCall('c3', 'browser_evaluate', { expression: 'document.title' }),
-      // Stuck: its own script holds the main thread from now on.
-      assistantToolCall('c4', 'browser_evaluate', { expression: "setTimeout(() => { for (;;) {} }, 50); 'armed'" }),
+      // Stuck: its own script holds the main thread from now on, and re-arms
+      // itself, so the termination that ends a single loop cannot free it
+      // (measured: every probe after stays unanswered) — only replacement can.
+      assistantToolCall('c4', 'browser_evaluate', { expression: "setInterval(() => { for (;;) {} }, 50); 'armed'" }),
       // Whether this starts before the loop or after it, its timer never fires: the loop holds the thread.
       assistantToolCall('c5', 'browser_evaluate', { expression: 'new Promise((done) => setTimeout(() => done(2), 300))', timeout_ms: 1500 }),
       assistantToolCall('c6', 'browser_navigate', { url: `${site.origin}/counter` }),
@@ -397,6 +409,44 @@ describe.runIf(testBrowser !== undefined)('the browser tools in a real compositi
     expect(replaced?.text).toContain('The page stopped answering')
     expect(replaced?.text).toContain('button "Add one"')
     expect(after?.text).not.toContain('stopped answering')
+  })
+
+  /**
+   * Returning `{ get x() { for (;;) {} } }` is evaluate's second step running
+   * PAGE code: the by-value read calls the getter, and V8's own `timeout`
+   * covers only the first step. Before S20.5 nothing stopped it, so the
+   * renderer looped past the call, the next call's probe found it stuck, and
+   * the page — with all the state the model was debugging — was replaced. The
+   * unanswered command is now followed by `Runtime.terminateExecution`, so the
+   * loop ends at the deadline and the SAME page answers the next call.
+   */
+  it('stops page code that outruns the call — a looping getter in the returned value — and keeps the page', LONG, async () => {
+    const site = await pages()
+    const w = await world({ vision: false })
+    const handle = await w.create()
+    await turn(
+      w,
+      handle,
+      assistantToolCall('c1', 'browser_navigate', { url: `${site.origin}/counter` }),
+      assistantToolCall('c2', 'browser_evaluate', { expression: "window.kept = 'the same page'" }),
+    )
+    const started = Date.now()
+    const [looped] = (await turn(w, handle, assistantToolCall('c3', 'browser_evaluate', { expression: '({ get x() { for (;;) {} } })', timeout_ms: 1_500 }))).slice(-1)
+    const took = Date.now() - started
+    expect(looped?.code).toBe('BROWSER_TIMEOUT')
+    expect(took, 'the call ended long after its deadline').toBeLessThan(1_500 + 3_000)
+    // A termination never poisons the next call, and the page it stopped is the page the model had.
+    const after = await turn(
+      w,
+      handle,
+      assistantToolCall('c4', 'browser_evaluate', { expression: '6 * 7' }),
+      assistantToolCall('c5', 'browser_evaluate', { expression: 'window.kept' }),
+    )
+    const [answer, kept] = after.slice(-2)
+    expect(answer?.code).toBeUndefined()
+    expect(answer?.text).toContain('42')
+    expect(answer?.text, 'the stopped page was replaced instead').not.toContain('stopped answering')
+    expect(kept?.text).toContain('the same page')
   })
 
   it('remembers a fact about the host, not a moment: a fence it cannot prove is refused fast and said so, a start that died is tried again', LONG, async () => {

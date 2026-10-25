@@ -8,17 +8,18 @@
  * "reopen the file and check the requested content" is the verification this
  * skill can always do, on any host. How the page LOOKS needs a renderer.
  */
-import { attr, descendants, elements, kid, kids, localName, parseXml, relationships, relsFor, resolveTarget, textOf } from './ooxml.mjs'
+import { attr, descendants, elements, kid, kids, localName, nodeAccount, parseXml, relationships, relsFor, resolveTarget, textOf } from './ooxml.mjs'
 
 /** Opens a part through the package; undefined when it is absent or not XML. */
 function loader(members) {
   const byLower = new Map([...members.keys()].map((name) => [name.toLowerCase(), name]))
   const cache = new Map()
+  const account = nodeAccount()
   return (part) => {
     if (part === undefined) return undefined
     const name = byLower.get(part.toLowerCase())
     if (name === undefined) return undefined
-    if (!cache.has(name)) cache.set(name, parseXml(members.get(name), name))
+    if (!cache.has(name)) cache.set(name, parseXml(members.get(name), name, account))
     return cache.get(name)
   }
 }
@@ -165,7 +166,7 @@ function docxTable(tbl, depth) {
   return out
 }
 
-function readDocx(load, main) {
+function readDocx(load, main, maxChars) {
   const document = load(main)
   const rels = relsOf(load, main)
   const stylesPart = [...rels.values()].find((r) => r.type.endsWith('/styles'))?.part
@@ -176,8 +177,17 @@ function readDocx(load, main) {
   const lines = []
   let paragraphs = 0
   let tables = 0
+  let used = 0
+  let stopped = false
   const walk = (container) => {
     for (const child of elements(container)) {
+      // Past twice what `read` prints, the rest is work nobody sees: the
+      // rule readXlsx keeps, which --max-chars promised all three (S20.5).
+      if (used > maxChars * 2) {
+        stopped = true
+        return
+      }
+      const before = lines.length
       const local = localName(child.name)
       if (local === 'p') {
         paragraphs++
@@ -187,12 +197,14 @@ function readDocx(load, main) {
         lines.push(...docxTable(child, 0))
       } else if (local === 'sdt') walk(kid(child, 'sdtContent'))
       else if (local === 'customXml') walk(child)
+      for (let k = before; k < lines.length; k++) used += lines[k].length + 1
     }
   }
   walk(body)
   const sections = descendants(body, 'sectPr').length
   const extras = [...rels.values()].filter((r) => /\/(header|footer|footnotes|endnotes|comments)$/.test(r.type)).map((r) => r.type.split('/').at(-1))
-  const head = `docx: ${paragraphs} paragraphs, ${tables} tables, ${sections} section(s)${extras.length ? `; also has ${[...new Set(extras)].join(', ')} (not shown)` : ''}\nmarks: **bold** *italic* <u>underline</u> ~~deleted~~; [Style, list numId level N] precedes each paragraph`
+  const more = stopped ? '+' : ''
+  const head = `docx: ${paragraphs}${more} paragraphs, ${tables}${more} tables, ${sections} section(s)${extras.length ? `; also has ${[...new Set(extras)].join(', ')} (not shown)` : ''}\nmarks: **bold** *italic* <u>underline</u> ~~deleted~~; [Style, list numId level N] precedes each paragraph`
   return `${head}\n\n${lines.join('\n')}`
 }
 
@@ -350,7 +362,7 @@ function slideShapes(tree, out, depth = 0) {
   }
 }
 
-function readPptx(load, main) {
+function readPptx(load, main, maxChars) {
   const presentation = load(main)
   const rels = relsOf(load, main)
   const size = kid(presentation, 'sldSz')
@@ -359,16 +371,27 @@ function readPptx(load, main) {
   const ratio = cx && cy ? (Math.abs(cx / cy - 16 / 9) < 0.01 ? '16:9' : Math.abs(cx / cy - 4 / 3) < 0.01 ? '4:3' : `${(cx / cy).toFixed(2)}:1`) : '?'
   const ids = kids(kid(presentation, 'sldIdLst'), 'sldId')
   const out = [`pptx: ${ids.length} slide(s), ${ratio} (${cx}x${cy} EMU)`]
-  ids.forEach((sldId, index) => {
+  // A part two entries name is rendered once: `pack` refuses such a deck,
+  // and `read` rendered it once per entry (S20.5).
+  const shown = new Map()
+  let used = 0
+  for (const [index, sldId] of ids.entries()) {
+    if (used > maxChars * 2) break
+    const before = out.length
     const rid = [...sldId.attrs].find(([k]) => k.includes(':') && localName(k) === 'id')?.[1]
     const part = rels.get(rid)?.part
+    if (part !== undefined && shown.has(part)) {
+      out.push('', `== slide ${index + 1} (${part}, the same part as slide ${shown.get(part)})`)
+      continue
+    }
+    if (part !== undefined) shown.set(part, index + 1)
     const slide = load(part)
     const slideRels = part ? relsOf(load, part) : new Map()
     const layoutPart = [...slideRels.values()].find((r) => r.type.endsWith('/slideLayout'))?.part
     const layoutName = attr(kid(load(layoutPart), 'cSld'), 'name')
     const hidden = attr(slide, 'show') === '0'
     out.push('', `== slide ${index + 1} (${part ?? 'missing part'}${layoutName ? `, layout "${layoutName}"` : ''}${hidden ? ', hidden' : ''})`)
-    if (!slide) return
+    if (!slide) continue
     const shapes = []
     slideShapes(kid(kid(slide, 'cSld'), 'spTree'), shapes)
     if (shapes.length === 0) out.push('(no text)')
@@ -391,14 +414,15 @@ function readPptx(load, main) {
       const joined = text.join('\n').trim()
       if (joined) out.push(`notes: ${joined.replace(/\n/g, '\n       ')}`)
     }
-  })
+    for (let k = before; k < out.length; k++) used += out[k].length + 1
+  }
   return out.join('\n')
 }
 
 /** The dump for a package whose main part and family the caller already checked. */
 export function readPackage(members, main, family, maxChars) {
   const load = loader(members)
-  if (family === 'docx') return readDocx(load, main)
+  if (family === 'docx') return readDocx(load, main, maxChars)
   if (family === 'xlsx') return readXlsx(load, main, maxChars)
-  return readPptx(load, main)
+  return readPptx(load, main, maxChars)
 }

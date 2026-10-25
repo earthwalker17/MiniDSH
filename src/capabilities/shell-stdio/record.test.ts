@@ -116,6 +116,22 @@ describe.runIf(available)('the shell effect record', () => {
     expect(record!.durationMs, 'the shell teardown after the deadline is not part of the run').toBeLessThan(2_000)
   })
 
+  /**
+   * A first command that ends the shell RAN: the shell printed its ready
+   * marker, read the command, and the command exited it. Before the handshake
+   * this was refused SHELL_UNAVAILABLE ("install bash") and recorded nothing,
+   * so the log showed a dispatch with no effect for a command that did work.
+   */
+  it('records a first command that ended the shell, as the command it was', { timeout: SHELL_TEST_TIMEOUT_MS }, async () => {
+    const { agent, shell, policy } = await setup()
+    const result = await shell.exec({ command: dialect === 'pwsh' ? 'Write-Output bye; exit 4' : 'echo bye; exit 4', policy, callId: asCallId('c1') })
+    expect(result).toMatchObject({ reset: true, timedOut: false })
+    expect(result.output).toContain('bye')
+    const [record, ...rest] = effects(agent)
+    expect(rest).toHaveLength(0)
+    expect(record).toMatchObject({ callId: 'c1', effect: 'shell-command', mode: 'danger-full-access', enforcement: 'none' })
+  })
+
   it('records nothing without a call to key it to', { timeout: SHELL_TEST_TIMEOUT_MS }, async () => {
     const { agent, shell, policy } = await setup()
     await shell.exec({ command: 'echo anonymous', policy })

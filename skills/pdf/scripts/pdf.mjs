@@ -340,8 +340,18 @@ function textWidth(bytes, size, bold) {
   return (w / 1000) * size
 }
 
-/** Greedy word wrap on WinAnsi bytes; a word wider than the line is split. */
+/**
+ * Greedy word wrap on WinAnsi bytes; a word wider than the line is split.
+ *
+ * A word too wide for a line is measured ONCE — the running sum of its glyph
+ * widths — and each cut is a binary search over that sum: the longest piece
+ * that fits, never less than one character. Measuring every candidate cut
+ * from the start was cubic in the word, and a base64 data URI is one word:
+ * 16,000 characters took 80 s (review, S20.5).
+ */
 function wrap(bytes, size, bold, width) {
+  const table = bold ? HELVETICA.bold : HELVETICA.regular
+  const fits = (units) => (units / 1000) * size <= width
   const lines = []
   let line = ''
   for (const word of bytes.split(' ').filter((w) => w.length > 0)) {
@@ -351,15 +361,25 @@ function wrap(bytes, size, bold, width) {
       continue
     }
     if (line) lines.push(line)
-    line = ''
-    let rest = word
-    while (textWidth(rest, size, bold) > width) {
-      let cut = rest.length - 1
-      while (cut > 1 && textWidth(rest.slice(0, cut), size, bold) > width) cut--
-      lines.push(rest.slice(0, cut))
-      rest = rest.slice(cut)
+    // units[i]: the width of word[0, i) in glyph units, textWidth's own sum.
+    const units = new Float64Array(word.length + 1)
+    for (let i = 0; i < word.length; i++) units[i + 1] = units[i] + (table[word.charCodeAt(i) - 32] ?? 556)
+    let start = 0
+    while (!fits(units[word.length] - units[start])) {
+      let cut = start + 1
+      let low = start + 2
+      let high = word.length - 1
+      while (low <= high) {
+        const mid = (low + high) >>> 1
+        if (fits(units[mid] - units[start])) {
+          cut = mid
+          low = mid + 1
+        } else high = mid - 1
+      }
+      lines.push(word.slice(start, cut))
+      start = cut
     }
-    line = rest
+    line = word.slice(start)
   }
   if (line || lines.length === 0) lines.push(line)
   return lines
@@ -446,8 +466,10 @@ function infoString(text) {
 function build(specPath, out, force) {
   if (extname(out).toLowerCase() !== '.pdf') throw fail(EXIT.usage, `build writes a .pdf; got "${out}"`)
   const spec = loadSpec(specPath)
-  const pageSize = PAGE[spec.pageSize ?? 'A4']
-  if (!pageSize) throw fail(EXIT.invalid, 'spec.pageSize: expected "A4" or "Letter"')
+  // An own key only: "toString" is a property of every object, and it reached the page geometry.
+  const sizeName = spec.pageSize ?? 'A4'
+  if (typeof sizeName !== 'string' || !Object.hasOwn(PAGE, sizeName)) throw fail(EXIT.invalid, 'spec.pageSize: expected "A4" or "Letter"')
+  const pageSize = PAGE[sizeName]
   const [pageW, pageH] = pageSize
   const width = pageW - 2 * MARGIN
   // Lay out every line first: page numbers need the page count.

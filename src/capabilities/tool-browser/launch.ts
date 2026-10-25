@@ -26,13 +26,12 @@
  * Chrome's own renderer sandbox stays on: `--no-sandbox` is never passed. A
  * host whose sandbox cannot start fails here, and says why.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
-import { childEnvironment, killAndWait } from '../../core/process.ts'
+import { childEnvironment, killAndWait, spawnChild, spawnRefusal, transientSpawnText, type Spawner } from '../../core/process.ts'
 import { CdpConnection } from './cdp.ts'
 import { BrowserError } from './errors.ts'
 import { bypassList, CANARY_HOST, CANARY_TLS_HOST, Fence, hostResolverRules } from './fence.ts'
@@ -56,6 +55,8 @@ export interface LaunchOptions {
    * pass it), and it adds a file, not a reach.
    */
   readonly netLogPath?: string
+  /** `spawn` itself, except in a TEST that stages what Node does when this process is out of descriptors. */
+  readonly spawner?: Spawner
 }
 
 export interface LaunchedBrowser {
@@ -152,9 +153,17 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     ...(options.netLogPath === undefined ? [] : [`--log-net-log=${options.netLogPath}`, '--net-log-capture-mode=Everything']),
     'about:blank',
   ]
-  let child: ChildProcess
-  try {
-    child = spawn(options.executablePath, args, {
+  // The one start rule every harness spawner shares (`core/process.ts`): the
+  // child is not read until it is known to exist. A spawn the OS refused —
+  // ENOENT, EACCES, or EMFILE when this process is out of descriptors, which
+  // hands back a child with NO pipes at all — rejects `spawned`, and every
+  // refusal leaves through the one exit below that closes the fence and
+  // removes the profile. Before S20.5 the EMFILE child's missing `stdio`
+  // threw an uncoded TypeError past that exit, leaking both on every call.
+  const { child, spawned } = spawnChild(
+    options.executablePath,
+    args,
+    {
       // stdout is ignored, never inherited: a `minidsh serve` speaks JSON-RPC
       // on its own stdout, and a browser line there would corrupt the wire.
       stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
@@ -162,35 +171,26 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
       // POSIX: its own process group, so a tree kill reaches its children.
       detached: process.platform !== 'win32',
       windowsHide: true,
-    })
+    },
+    options.spawner,
+  )
+  try {
+    await spawned
   } catch (error) {
     await fence.close()
     await removeProfile(profile)
-    throw new BrowserError('BROWSER_UNAVAILABLE', `could not start ${options.executablePath}: ${messageOf(error)}`, { hostFault: isMissing(error) })
+    // A moment (out of descriptors or processes) is never a host fault, so
+    // `index.ts` does not remember it and the next call launches again.
+    const why = spawnRefusal(error) === 'transient' ? transientSpawnText(error) : messageOf(error)
+    throw new BrowserError('BROWSER_UNAVAILABLE', `could not start ${options.executablePath}: ${why}`, { hostFault: isMissing(error) })
   }
-  // FIRST, before anything reads the child: a spawn the OS refused (ENOENT,
-  // EACCES, and EMFILE when this process is out of descriptors) returns a child
-  // with no pipes and emits 'error' on the next tick, and an unheard 'error'
-  // takes the whole host down (measured under `ulimit -n`, the review).
-  let spawnError: Error | undefined
-  child.on('error', (error) => {
-    spawnError ??= error
-  })
-  const toBrowser = child.stdio[3]
-  const fromBrowser = child.stdio[4]
-  if (toBrowser === null || toBrowser === undefined || fromBrowser === null || fromBrowser === undefined) {
-    await new Promise<void>((resolve) => setImmediate(resolve))
-    await fence.close()
-    await removeProfile(profile)
-    throw new BrowserError('BROWSER_UNAVAILABLE', `could not start ${options.executablePath}: ${spawnError?.message ?? 'the process has no pipes'}`, { hostFault: isMissing(spawnError) })
-  }
+  const [, , errors, toBrowser, fromBrowser] = child.stdio as [null, null, Readable, Writable, Readable]
 
   let stderr = ''
-  child.stderr?.on('data', (chunk: Buffer) => {
+  errors.on('data', (chunk: Buffer) => {
     stderr = (stderr + chunk.toString('utf8')).slice(-16_384)
   })
-  child.stderr?.on('error', () => {})
-  const cdp = new CdpConnection(toBrowser as Writable, fromBrowser as Readable)
+  const cdp = new CdpConnection(toBrowser, fromBrowser)
   let exited = false
   const gone = new Promise<void>((resolve) => {
     const done = (reason: string): void => {
@@ -247,11 +247,7 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     await close()
     if (error instanceof BrowserError && error.code === 'BROWSER_FENCE_UNAVAILABLE') throw error
     const known = remedy(tail)
-    // On Windows a missing executable still gets its pipes, and the spawn's
-    // 'error' arrives while the first command waits: that error is the cause.
-    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${spawnError?.message ?? messageOf(error)}${known.text}`, {
-      hostFault: known.hostFault || isMissing(spawnError),
-    })
+    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${messageOf(error)}${known.text}`, { hostFault: known.hostFault })
   }
 }
 

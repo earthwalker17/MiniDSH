@@ -18,7 +18,7 @@ import { basename, delimiter, dirname, extname, join, relative, resolve, sep } f
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { buildDocx, buildPptx, buildXlsx, GENERATOR } from './build.mjs'
-import { checkPackage, CliError, EXIT, fail, familyOf, indentXml, MAIN_TYPES, PackageMembers, parseXml, readZip, unsafeMemberName, writeZip } from './ooxml.mjs'
+import { checkPackage, CliError, EXIT, fail, familyOf, indentXml, MAIN_TYPES, nodeAccount, PackageMembers, parseXml, readZip, unsafeMemberName, writeZip } from './ooxml.mjs'
 import { readPackage } from './read.mjs'
 
 const SCRIPT = fileURLToPath(import.meta.url)
@@ -296,6 +296,7 @@ function unpack(file, dir, raw) {
   const abs = guardOutput(dir, { force: false, directory: true })
   mkdirSync(abs, { recursive: true })
   const warnings = []
+  const account = nodeAccount()
   for (const [name, bytes] of members) {
     const target = resolve(abs, ...name.split('/'))
     if (!inside(target, abs) || target === abs) throw fail(EXIT.invalid, `refusing member "${name}": it resolves outside ${dir}`)
@@ -303,7 +304,7 @@ function unpack(file, dir, raw) {
     // UTF-16 parts (rare) keep their bytes: re-encoding would contradict their XML declaration.
     if (!raw && /\.(xml|rels)$/i.test(name) && bytes[0] !== 0xff && bytes[0] !== 0xfe) {
       try {
-        parseXml(bytes, name)
+        parseXml(bytes, name, account)
         data = Buffer.from(indentXml(bytes.toString('utf8').replace(/^\u{FEFF}/u, '')), 'utf8')
       } catch (error) {
         if (!(error instanceof CliError)) throw error

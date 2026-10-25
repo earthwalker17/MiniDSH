@@ -1,10 +1,10 @@
-import { spawnSync } from 'node:child_process'
+import { ChildProcess, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SandboxExecutionPolicy } from '../../core/sandbox/index.ts'
-import { childEnvironment } from '../../core/process.ts'
+import { childEnvironment, type Spawner } from '../../core/process.ts'
 import { ShellProcess, type ShellDialect } from './process.ts'
 import { NO_CONFINEMENT, type Confinement } from './confine/index.ts'
 
@@ -337,6 +337,34 @@ describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
     await new Promise((resolve) => setTimeout(resolve, 4_500))
     expect(existsSync(marker), 'a backgrounded descendant of an escalated command outlived the scope that granted it').toBe(false)
   }, SHELL_TEST_TIMEOUT_MS)
+
+  /**
+   * The reap's limit is pid reuse: a group that is entirely gone has given its
+   * number back, and macOS hands numbers out again after 99,999. So disposal
+   * never signals a group it can prove empty — before, every pgid a one-shot
+   * ever led got a SIGKILL at disposal, days later, whoever held it by then.
+   */
+  it.skipIf(process.platform === 'win32' || !bashAvailable)('never signals at disposal a group that had already emptied', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-prune-'))
+    const shell = new ShellProcess('bash', dir)
+    const kills: [number, string | number | undefined][] = []
+    const real = process.kill.bind(process)
+    const spy = vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+      kills.push([pid, signal])
+      return real(pid, signal)
+    })
+    try {
+      for (let i = 0; i < 3; i++) {
+        const done = await shell.exec({ command: 'true', policy: unconfined(dir), oneShot: true, timeoutMs: 30_000 })
+        expect(done.exitCode).toBe(0)
+      }
+      await shell.dispose()
+    } finally {
+      spy.mockRestore()
+    }
+    const sigkilledGroups = kills.filter(([pid, signal]) => pid < 0 && signal === 'SIGKILL')
+    expect(sigkilledGroups, 'disposal signalled groups that were already empty, whose numbers anyone may hold by now').toEqual([])
+  }, SHELL_TEST_TIMEOUT_MS)
 })
 
 describe('a shell binary that is not there', () => {
@@ -361,7 +389,113 @@ describe('a shell binary that starts and dies at once', () => {
     proc = new ShellProcess(dialect, dir, { shellPath: process.execPath })
     await expect(proc.exec({ command: echoCmd('hello'), policy: unconfined(dir), timeoutMs: 30_000 })).rejects.toMatchObject({
       code: 'SHELL_UNAVAILABLE',
-      message: expect.stringContaining('before it answered its first command'),
+      message: expect.stringContaining('before it answered'),
     })
   })
+
+  /**
+   * The same child, handed a command larger than a pipe buffer (its base64 is
+   * ~1.3 MB against a 64 KB pipe), so the write is still QUEUED when the child
+   * dies. Its stdin then raises EPIPE (POSIX) or `write EOF` (Windows), and
+   * with nobody listening that error took the whole host down — this test's
+   * worker, before the fix. The same crash met a person cancelling a ~48 KB
+   * command while pwsh was still starting.
+   */
+  it('takes a command larger than the pipe buffer without an error escaping into the host', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess(dialect, dir, { shellPath: process.execPath })
+    await expect(proc.exec({ command: echoCmd('x'.repeat(1_000_000)), policy: unconfined(dir), timeoutMs: 30_000 })).rejects.toMatchObject({
+      code: 'SHELL_UNAVAILABLE',
+    })
+  })
+})
+
+/**
+ * Node 24's own answer to a spawn when this process is out of descriptors,
+ * staged exactly: `spawn` RETURNS a child with no pid and no pipes (Node bails
+ * before building `stdio`), and the EMFILE `'error'` follows on the next tick.
+ * Never a `stdout: null` stand-in — that is not what Node does, and a fix
+ * tested against it was a fix for a case that does not exist. The real
+ * exhaustion is `core/process.test.ts`'s, on POSIX.
+ */
+const outOfDescriptors = (spawned: string[]): Spawner => (command) => {
+  spawned.push(command)
+  const child = new ChildProcess()
+  process.nextTick(() => child.emit('error', Object.assign(new Error(`spawn ${command} EMFILE`), { code: 'EMFILE', errno: -24, syscall: `spawn ${command}` })))
+  return child
+}
+
+describe('a host out of descriptors', () => {
+  const policyIn = (root: string): SandboxExecutionPolicy => unconfined(root)
+  for (const shape of ['the persistent shell', 'a one-shot escalation', 'a job'] as const) {
+    it(`refuses ${shape} with a code that says the moment, never "install", and nothing escapes into the host`, async () => {
+      dir = mkdtempSync(join(tmpdir(), 'minidsh-emfile-'))
+      const spawned: string[] = []
+      proc = new ShellProcess(dialect, dir, { spawner: outOfDescriptors(spawned) })
+      const run =
+        shape === 'a job'
+          ? proc.start({ command: echoCmd('hi'), policy: policyIn(dir), output: () => {} })
+          : proc.exec({ command: echoCmd('hi'), policy: policyIn(dir), timeoutMs: 30_000, ...(shape === 'a one-shot escalation' ? { oneShot: true } : {}) })
+      const refusal = await run.then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(spawned).toHaveLength(1)
+      expect(refusal).toMatchObject({ code: 'SHELL_UNAVAILABLE', message: expect.stringContaining('EMFILE') })
+      expect((refusal as Error).message).toContain('out of file descriptors or processes')
+      expect((refusal as Error).message).not.toMatch(/install/i)
+      // And the shell is still usable for what comes after: a later spawn tries again.
+      await expect(proc.exec({ command: echoCmd('again'), policy: policyIn(dir), timeoutMs: 30_000 })).rejects.toMatchObject({ code: 'SHELL_UNAVAILABLE' })
+      expect(spawned).toHaveLength(2)
+    })
+  }
+
+  it('keeps the sandbox code under a wrapper, without telling the model to install the backend', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-emfile-'))
+    const wrapping: Confinement = { ...NO_CONFINEMENT, id: 'bwrap', enforcement: 'full', wrap: (cmd, args) => ({ cmd: 'bwrap', args: ['--', cmd, ...args] }) }
+    proc = new ShellProcess(dialect, dir, { confinement: wrapping, spawner: outOfDescriptors([]) })
+    const confined: SandboxExecutionPolicy = { mode: 'workspace-write', workspaceRoot: dir }
+    const refusal = await proc.exec({ command: echoCmd('hi'), policy: confined, timeoutMs: 30_000 }).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    expect(refusal).toMatchObject({ code: 'SANDBOX_UNAVAILABLE', message: expect.stringContaining('out of file descriptors or processes') })
+    expect((refusal as Error).message).not.toMatch(/install/i)
+  })
+})
+
+/**
+ * SHELL_UNAVAILABLE means the child never answered the HARNESS — never that
+ * the model's own command ended it. The init line ends with a ready marker, so
+ * a first command that exits the shell (`exit`, or `set -e` meeting a failing
+ * step, which models lead with) is the command's: `reset`, with its output.
+ * Before the handshake both read as "install bash", and the command that ran
+ * got no effect record.
+ */
+const dialects = (['pwsh', 'bash'] as const).filter((each) => (each === 'pwsh' ? dialect === 'pwsh' && available : bashAvailable))
+describe.runIf(dialects.length > 0)('a first command that ends the shell', () => {
+  for (const each of dialects) {
+    const say = (text: string): string => (each === 'pwsh' ? `Write-Output '${text}'` : `echo '${text}'`)
+    const endings = [
+      { name: '`exit`', command: `${say('bye')}; exit`, printed: 'bye' },
+      each === 'bash'
+        ? { name: '`set -e` meeting a failing step', command: `set -e; ${say('testing')}; false; ${say('unreachable')}`, printed: 'testing' }
+        : { name: 'a script that exits part-way', command: `${say('testing')}; exit 1; ${say('unreachable')}`, printed: 'testing' },
+    ]
+    for (const ending of endings) {
+      it(`${each}: ${ending.name} is the command's, reported as a reset with its output`, async () => {
+        dir = mkdtempSync(join(tmpdir(), 'minidsh-first-'))
+        proc = new ShellProcess(each, dir)
+        const result = await proc.exec({ command: ending.command, policy: unconfined(dir), timeoutMs: 60_000 })
+        expect(result.reset).toBe(true)
+        expect(result.timedOut).toBe(false)
+        expect(result.output).toContain(ending.printed)
+        expect(result.output).not.toContain('unreachable')
+        // The world is fine: the next command runs in a fresh shell.
+        const after = await proc.exec({ command: say('next'), policy: unconfined(dir), timeoutMs: 60_000 })
+        expect(after.output).toContain('next')
+        expect(after.exitCode).toBe(0)
+      }, SHELL_TEST_TIMEOUT_MS)
+    }
+  }
 })

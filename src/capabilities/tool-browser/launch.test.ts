@@ -6,14 +6,17 @@
  * Self-skips where no Chrome, Edge or Chromium is installed; under
  * `MINIDSH_EXPECT_BROWSER=1` that is a failure (`expectBrowserSuite`).
  */
-import { spawn } from 'node:child_process'
+import { ChildProcess, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
+import type { Spawner } from '../../core/process.ts'
 import { browsersUsing, everyTestBrowser, expectBrowserSuite, fixtureServer, testBrowser, type FixtureServer } from '../../test-support/browser-fixture.ts'
 import type { CdpConnection } from './cdp.ts'
+import { BrowserError } from './errors.ts'
 import { CANARY_HOST, FENCE_HEADER } from './fence.ts'
 import { launchBrowser, remedy, sweepProfiles, type LaunchedBrowser } from './launch.ts'
 import { candidates, locateBrowser } from './locate.ts'
@@ -118,6 +121,45 @@ describe('locating a browser', () => {
   })
 })
 
+/**
+ * Node 24's own answer to a spawn when this process is out of descriptors,
+ * staged exactly (no browser needed): `spawn` RETURNS a child whose pid and
+ * stdio are undefined, and the EMFILE `'error'` follows on the next tick. The
+ * launch read `child.stdio[3]` first and threw an uncoded TypeError past the
+ * guard meant for this, leaking the fence's listener — another descriptor —
+ * and the profile, on every later call. The real exhaustion is
+ * `core/process.test.ts`'s, on POSIX.
+ */
+describe('a launch on a host out of descriptors', () => {
+  it('refuses with a code, as a moment and never a host fault, leaving no profile and no listener behind', async () => {
+    const root = tempDir('minidsh-profiles-')
+    let fencePort: number | undefined
+    const outOfDescriptors: Spawner = (command, args) => {
+      fencePort = Number(/--proxy-server=http:\/\/127\.0\.0\.1:(\d+)/.exec(args.join(' '))?.[1])
+      const child = new ChildProcess()
+      process.nextTick(() => child.emit('error', Object.assign(new Error(`spawn ${command} EMFILE`), { code: 'EMFILE', errno: -24, syscall: `spawn ${command}` })))
+      return child
+    }
+    const error = await launchBrowser({ executablePath: process.execPath, profileRoot: root, headless: true, allowHosts: [], declared: [], window: { width: 800, height: 600 }, spawner: outOfDescriptors }).catch(
+      (caught: unknown) => caught,
+    )
+    expect(error).toBeInstanceOf(BrowserError)
+    // Not remembered (`index.ts` keeps only a host fault), so the next call tries again.
+    expect(error).toMatchObject({ code: 'BROWSER_UNAVAILABLE', hostFault: false, message: expect.stringContaining('out of file descriptors or processes') })
+    expect(readdirSync(root)).toEqual([])
+    expect(fencePort, 'the staged spawn never saw the fence port').toBeGreaterThan(0)
+    const refused = await new Promise<boolean>((resolve) => {
+      const probe = connect(fencePort!, '127.0.0.1')
+      probe.once('connect', () => {
+        probe.destroy()
+        resolve(false)
+      })
+      probe.once('error', () => resolve(true))
+    })
+    expect(refused, "the fence's listener outlived the refused launch").toBe(true)
+  })
+})
+
 describe.runIf(testBrowser !== undefined)('a launched browser', () => {
   it('speaks over the pipe: no port file, a private owned profile, gone with its profile at close', LONG, async () => {
     const browser = await launch(testBrowser!.path)
@@ -212,6 +254,51 @@ describe.runIf(testBrowser !== undefined)('a launched browser', () => {
     // …and the attempt met the proxy, never a resolver (measured: without
     // --host-resolver-rules a DNS transaction carries this name off the machine).
     expect(naming.filter((name) => /DNS|HOST_RESOLVER_.*TASK/.test(name)), `the TURN host reached a resolver: ${[...new Set(naming)].join(', ')}`).toEqual([])
+  })
+
+  /**
+   * The other half of the resolver rules: an allowed host goes DIRECT, so it
+   * must get a real answer — and a `*.` entry is a glob Chrome has to honour
+   * in `EXCLUDE`, or every subdomain it allows resolves to nothing. Measured on
+   * Chrome 155 and Edge 156 (Windows, 2026-10-26) by navigation and by TURN:
+   * honoured. A TURN host is the clean A/B, because it never meets the proxy:
+   * the subdomain the wildcard covers is looked up, its sibling is not.
+   */
+  it('honours a `*.` allowHosts entry in the resolver rules: the subdomain it covers is looked up, a sibling is not', LONG, async () => {
+    const tag = `wild-${process.pid}-${Date.now() % 100_000}`
+    const covered = `turn.${tag}.invalid`
+    const sibling = `turn.not-${tag}.invalid`
+    const site = await fixtureServer({
+      '/': `<title>turn</title><script>(async()=>{for(const host of ['${covered}','${sibling}']){const pc=new RTCPeerConnection({iceServers:[{urls:'turn:'+host+':3478?transport=tcp',username:'u',credential:'c'}]});pc.createDataChannel('x');await pc.setLocalDescription(await pc.createOffer())}})()</script>`,
+    })
+    const netLogPath = join(tempDir('minidsh-netlog-'), 'net.json')
+    const browser = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: tempDir('minidsh-profiles-'), headless: true, allowHosts: [`*.${tag}.invalid`], declared: [], window: { width: 800, height: 600 }, netLogPath })
+    const tried = (host: string) => (): boolean => {
+      try {
+        return readFileSync(netLogPath, 'utf8').includes(host)
+      } catch {
+        return false
+      }
+    }
+    try {
+      await browser.cdp.send('Target.createTarget', { url: `${site.origin}/` })
+      await until(() => tried(covered)() && tried(sibling)(), 20_000)
+      await new Promise((resolve) => setTimeout(resolve, 2_000))
+    } finally {
+      await browser.close()
+      await site.close()
+    }
+    const raw = readFileSync(netLogPath, 'utf8')
+    const log = JSON.parse(raw.trimEnd().endsWith('}') ? raw : raw.replace(/,?\s*$/, ']}')) as { constants: { logEventTypes: Record<string, number> }; events: { type: number; params?: unknown }[] }
+    const names = new Map(Object.entries(log.constants.logEventTypes).map(([name, id]) => [id, name]))
+    const lookups = (host: string): string[] =>
+      log.events
+        .filter((event) => JSON.stringify(event.params ?? {}).includes(host))
+        .map((event) => names.get(event.type) ?? '')
+        .filter((name) => /DNS|HOST_RESOLVER_.*TASK/.test(name))
+    expect(log.events.some((event) => JSON.stringify(event.params ?? {}).includes(sibling)), 'the page never tried the sibling, so this proves nothing').toBe(true)
+    expect(lookups(covered).length, `the subdomain a "*." entry allows was never looked up: Chrome ignored the wildcard in EXCLUDE`).toBeGreaterThan(0)
+    expect(lookups(sibling), 'a host no entry allows reached a resolver').toEqual([])
   })
 
   it('rejects a pending call when the browser is killed out of band, and the host lives on', LONG, async () => {

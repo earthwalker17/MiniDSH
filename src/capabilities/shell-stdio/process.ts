@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcess, type ChildProcessByStdio, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import {
   DEFAULT_ACCEPTANCE,
   meetsAcceptance,
@@ -17,7 +18,7 @@ import {
   type ShellRunResult,
   type ShellSession,
 } from '../../core/shell/index.ts'
-import { childEnvironment, killAndWait, killTree } from '../../core/process.ts'
+import { childEnvironment, killAndWait, killTree, spawnChild, spawnRefusal, transientSpawnText, type Spawner } from '../../core/process.ts'
 import { confinementRemedy, NO_CONFINEMENT, type Confinement } from './confine/index.ts'
 
 export type ShellDialect = 'bash' | 'pwsh'
@@ -46,11 +47,18 @@ function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, co
   return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc', '-c', command] }
 }
 
-function initLine(dialect: ShellDialect): string {
+/**
+ * The child's first line, which ends by printing `ready`: the handshake that
+ * tells "the shell never answered the harness" from "the model's command
+ * ended the shell". The shell reads its pipe a line at a time, so the marker
+ * is printed before the first command is even read — a child that dies
+ * without it never worked, and one that dies after it died of a command.
+ */
+function initLine(dialect: ShellDialect, ready: string): string {
   if (dialect === 'pwsh') {
-    return `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Continue'\n`
+    return `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Continue'; Write-Output '${ready}'\n`
   }
-  return `export LC_ALL=C.UTF-8 2>/dev/null; true\n`
+  return `export LC_ALL=C.UTF-8 2>/dev/null; printf '%s\\n' '${ready}'\n`
 }
 
 function wrapper(dialect: ShellDialect, base64: string, marker: string): string {
@@ -69,6 +77,15 @@ function wrapper(dialect: ShellDialect, base64: string, marker: string): string 
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * How long a dead child's pipes get to deliver what it wrote. Node may report
+ * the exit before the last 'data' (its docs say so), and the ready marker a
+ * shell printed just before a first-command `exit` is exactly such a last
+ * write; 'close' normally comes within a loop turn, and only a backgrounded
+ * descendant still holding a pipe makes the bound the answer.
+ */
+const DRAIN_MS = 500
 
 /** Spread into `spawn` options. Always an explicit env: inheriting wholesale is what this stopped doing. */
 function envOption(declared: readonly string[], overlay: Readonly<Record<string, string>> | undefined): { env: NodeJS.ProcessEnv } {
@@ -114,11 +131,12 @@ function worldSignature(confinement: Confinement, policy: SandboxExecutionPolicy
 
 /** One persistent shell child. Commands are serialized and framed by a per-session marker. */
 export class ShellProcess implements ShellSession {
-  private child: ChildProcessWithoutNullStreams | undefined
+  /** Registered the tick it is spawned, before it is known to have become a process, so a disposal racing the start finds it. */
+  private child: ChildProcess | undefined
+  /** Settles when the live child's pipes have closed, or never while a descendant holds one. */
+  private childClosed: Promise<void> | undefined
   /** The world the live child was spawned into; `undefined` when there is none. */
   private childWorld: string | undefined
-  /** A world that has already answered a command here, so a restart into it is not a broken host. */
-  private provenWorld: string | undefined
   /** In-flight one-shot children, which disposal must reap: each runs under the WIDEST authority a session ever granted. */
   private readonly oneShotChildren = new Set<ChildProcess>()
   /** Running job processes, and how to tell each that THIS shell's disposal is what killed it. */
@@ -136,20 +154,25 @@ export class ShellProcess implements ShellSession {
    * that is still in use as a pgid — which is what makes reaping at disposal
    * possible at all.
    *
-   * The stated edge: once a group is entirely gone its pid is free again, so a
-   * pid-space wraparound inside one agent's lifetime could in principle put an
-   * unrelated leader on a number still in this set. That needs millions of
-   * process creations between an escalation and a disposal; it is the same
-   * unreachable edge the write lease documents for pid reuse, and it is named
-   * rather than papered over.
+   * Which is also its limit: once a group is entirely gone its pid is free
+   * again, and an unrelated leader can be given it. That is not remote — macOS
+   * wraps its pids at 99,999 (Linux at its `pid_max`: 4,194,304 under WSL 2's
+   * Ubuntu, but the kernel's own default is 32,768), which a busy machine
+   * passes in hours, and a web session lives for days. So a group
+   * is dropped the moment it is provably empty (`kill(-g, 0)` answers ESRCH):
+   * before every addition and before the reap. A group with any member alive
+   * still holds its number, so pruning loses no reap; what remains is the
+   * window between a prune and the signal, never the session's whole life.
    */
   private readonly reapGroups = new Set<number>()
-  /** True from a spawn until its first command answered: a child that dies before that never worked at all. */
+  /** True from a spawn until the child printed its ready marker: a child that dies before that never worked at all. */
   private fresh = false
   /** True when the live child was spawned through the confinement wrapper. */
   private childWrapped = false
   private buffer = ''
   private readonly markerBase = `__DSH_${crypto.randomUUID().replace(/-/g, '')}__`
+  /** The init line's handshake: sequence 0, which no command is ever given. */
+  private readonly readyMarker = `${this.markerBase}0`
   /** Per-command nonce: a stale marker from a killed command can never match the next one. */
   private commandSeq = 0
   private queue: Promise<unknown> = Promise.resolve()
@@ -161,11 +184,13 @@ export class ShellProcess implements ShellSession {
   private readonly confinement: Confinement
   /** Credential names this deployment declared, asked at EVERY spawn: a row may declare after this shell exists. */
   private readonly withheld: () => readonly string[]
+  /** `spawn` itself, except in a test that stages what Node does when the host is out of descriptors. */
+  private readonly spawner: Spawner
 
   constructor(
     dialect: ShellDialect,
     cwd: string,
-    options: { shellPath?: string; maxCaptureChars?: number; confinement?: Confinement; withheld?: () => readonly string[] } = {},
+    options: { shellPath?: string; maxCaptureChars?: number; confinement?: Confinement; withheld?: () => readonly string[]; spawner?: Spawner } = {},
   ) {
     this.dialect = dialect
     this.cwd = cwd
@@ -175,6 +200,7 @@ export class ShellProcess implements ShellSession {
     // A piped child shell confines nothing on its own; a backend that wraps the
     // spawn in an OS sandbox supplies a truthful probe here instead.
     this.confinement = options.confinement ?? NO_CONFINEMENT
+    this.spawner = options.spawner ?? spawn
   }
 
   exec(request: ShellExecRequest): Promise<ShellRunResult> {
@@ -234,46 +260,83 @@ export class ShellProcess implements ShellSession {
    * is a failure to confine and gets the sandbox's code rather than the
    * shell's — the model needs the escalation path on exactly the host that
    * has a backend.
+   *
+   * Every pipe is read only once the child is known to exist (`spawnChild`:
+   * out of descriptors, Node hands back a child with none).
    */
   private async ensureChild(policy: SandboxExecutionPolicy, world: string): Promise<ChildProcessWithoutNullStreams> {
-    if (this.child && this.child.exitCode === null && !this.child.killed) return this.child
+    if (this.child && this.child.exitCode === null && !this.child.killed) return this.child as ChildProcessWithoutNullStreams
     const base = shellCommand(this.dialect, this.shellPath)
     const { cmd, args } = this.confinement.wrap(base.cmd, base.args, policy)
     const wrapped = cmd !== base.cmd
-    const child = spawn(cmd, args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], ...envOption(this.withheld(),this.confinement.envFor(policy)), ...sessionOption(wrapped) })
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
+    const { child, spawned } = spawnChild(
+      cmd,
+      args,
+      // `windowsHide`: no console of the harness's, so a Ctrl+C aimed at the
+      // terminal does not reach this shell and silently take its state (the
+      // job's reason, below).
+      { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...envOption(this.withheld(), this.confinement.envFor(policy)), ...sessionOption(wrapped) },
+      this.spawner,
+    )
+    this.child = child
+    try {
+      await spawned
+    } catch (error) {
+      if (this.child === child) this.child = undefined
+      throw this.spawnFailure(cmd, wrapped, error)
+    }
+    const piped = child as ChildProcessWithoutNullStreams
+    piped.stdout.setEncoding('utf8')
+    piped.stderr.setEncoding('utf8')
     // Identity-guarded: output from a killed child never lands in the live buffer.
     const append = (data: string): void => {
       if (this.child === child) this.buffer += data
     }
-    child.stdout.on('data', append)
-    child.stderr.on('data', append)
-    this.child = child
-    try {
-      await new Promise<void>((resolve, reject) => {
-        child.once('spawn', () => resolve())
-        child.once('error', (error: NodeJS.ErrnoException) => {
-          reject(this.startupFailure(cmd, wrapped, `could not be started (${error.code ?? error.message})`))
-        })
-      })
-    } catch (error) {
-      if (this.child === child) this.child = undefined
-      throw error
-    }
-    // A later error (a child dying mid-command) is what the poll loop reads
-    // as an exit; it must not surface as an unhandled event.
-    child.on('error', () => {})
-    child.stdin.write(initLine(this.dialect))
-    // "Never answered" is a fact about the WORLD, not about this child object.
-    // A restart back into a world that has already served a command is not a
-    // host that cannot start a shell, and reporting one as the other turned a
-    // command that legitimately ends the shell (`exit`) into a hard
-    // SHELL_UNAVAILABLE telling the user to install bash.
-    this.fresh = world !== this.provenWorld
+    piped.stdout.on('data', append)
+    piped.stderr.on('data', append)
+    this.childClosed = new Promise((resolve) => child.once('close', () => resolve()))
+    piped.stdin.write(initLine(this.dialect, this.readyMarker))
+    // Fresh until the ready marker arrives, in EVERY world. S11's review
+    // exempted a world that had answered once, because a command that ends the
+    // shell (`exit`, `set -e` meeting `false`) read as "install bash" there —
+    // but the first command of a session is a fresh world too, and still read
+    // that way (S20.5). The handshake answers both: the marker is printed
+    // before the command is even read.
+    this.fresh = true
     this.childWrapped = wrapped
     this.childWorld = world
-    return child
+    return piped
+  }
+
+  /**
+   * A spawn the OS refused, in the words its kind deserves. A transient one
+   * (EMFILE, EAGAIN: `spawnRefusal`) is the host's moment, so it keeps its code
+   * — SANDBOX_UNAVAILABLE under a wrapper, which is where the tool routes a
+   * refusal — but never tells anyone to install what is installed, and steers
+   * the model to the retry rather than to spending someone's consent on a
+   * wider mode that would meet the same limit.
+   */
+  private spawnFailure(cmd: string, wrapped: boolean, error: unknown): Error {
+    if (spawnRefusal(error) === 'transient') {
+      const what = transientSpawnText(error)
+      return wrapped
+        ? new SandboxError('SANDBOX_UNAVAILABLE', `the confinement wrapper "${cmd}" ${what} (a wider mode would meet the same limit)`)
+        : new ShellError('SHELL_UNAVAILABLE', `the shell "${cmd}" ${what}`)
+    }
+    const code = (error as NodeJS.ErrnoException | undefined)?.code
+    return this.startupFailure(cmd, wrapped, `could not be started (${code ?? (error instanceof Error ? error.message : String(error))})`)
+  }
+
+  /**
+   * Consume the ready marker once its whole line has arrived: what precedes it
+   * is the child's start-up noise, and what follows is the first command's.
+   */
+  private takeReady(): void {
+    const at = this.buffer.indexOf(this.readyMarker)
+    const end = at === -1 ? -1 : this.buffer.indexOf('\n', at + this.readyMarker.length)
+    if (end === -1) return
+    this.buffer = this.buffer.slice(end + 1)
+    this.fresh = false
   }
 
   /** One coded refusal for "the thing we spawned never worked", named for what it was. */
@@ -317,6 +380,7 @@ export class ShellProcess implements ShellSession {
       restarted = true
     }
     const child = await this.ensureChild(request.policy, world)
+    const closed = this.childClosed
     this.buffer = ''
     const marker = `${this.markerBase}${++this.commandSeq}`
     const base64 = Buffer.from(request.command, 'utf8').toString('base64')
@@ -326,31 +390,35 @@ export class ShellProcess implements ShellSession {
     const pattern = new RegExp(`${marker}:(-?\\d+)`)
     const deadline = Date.now() + (request.timeoutMs ?? DEFAULT_TIMEOUT_MS)
     for (;;) {
-      const match = pattern.exec(this.buffer)
+      if (this.fresh) this.takeReady()
+      const match = this.fresh ? null : pattern.exec(this.buffer)
       if (match) {
         const output = this.buffer.slice(0, this.buffer.indexOf(marker))
         this.buffer = ''
-        this.fresh = false
-        this.provenWorld = world
         const exitCode = Number(match[1])
         return this.finalize(output, { exitCode, timedOut: false, reset: false, restarted, startedAt }, sandbox)
       }
       // The shell itself died (e.g. the command was `exit`): report immediately
-      // instead of polling until the deadline.
+      // instead of polling until the deadline — once its pipes have delivered
+      // what it wrote, which the exit can outrun.
       if (child.exitCode !== null || child.killed) {
+        await Promise.race([closed, sleep(DRAIN_MS)])
+        if (this.fresh) this.takeReady()
         const output = this.buffer
         const code = child.exitCode
         const wrapped = this.childWrapped
         this.child = undefined
         this.childWorld = undefined
         this.buffer = ''
-        // A child that spawned and died before answering its FIRST command
-        // never worked: a broken shim, a wrapper that exits at startup, a
-        // build that rejects `-Command -`. That is the same fact as a failed
-        // spawn and gets the same coded refusal — never an empty output. A
-        // wrapper that printed its own failure line is the sandbox's fault
-        // and not the shell's, and only that conjunction says so: a nonzero
-        // exit alone is an ordinary command failing.
+        // A child that died before its ready marker never answered the
+        // harness: a broken shim, a wrapper that exits at startup, a build
+        // that rejects `-Command -`. That is the same fact as a failed spawn
+        // and gets the same coded refusal — never an empty output. One that
+        // died AFTER it died of the command, which ran: a reset, with what it
+        // printed, and recorded as a command that ran. A wrapper that printed
+        // its own failure line is the sandbox's fault and not the shell's, and
+        // only that conjunction says so: a nonzero exit alone is an ordinary
+        // command failing.
         if (this.fresh) {
           this.fresh = false
           const trimmed = output.trim()
@@ -358,7 +426,7 @@ export class ShellProcess implements ShellSession {
           throw this.startupFailure(
             runnerFailed ? this.confinement.id : (this.shellPath ?? this.dialect),
             runnerFailed,
-            `exited (code ${code ?? 'unknown'}) before it answered its first command${trimmed.length > 0 ? `: ${trimmed.slice(0, 200)}` : ''}`,
+            `exited (code ${code ?? 'unknown'}) before it answered${trimmed.length > 0 ? `: ${trimmed.slice(0, 200)}` : ''}`,
           )
         }
         return this.finalize(output, { timedOut: false, reset: true, restarted, startedAt }, sandbox)
@@ -397,42 +465,42 @@ export class ShellProcess implements ShellSession {
     // lets the kill below reap what it started — without it a backgrounded
     // command survived the grant, the tool call and the agent scope, which is
     // the opposite of what the comment under this line has always promised.
-    const child = spawn(cmd, args, {
-      cwd: this.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...envOption(this.withheld(),this.confinement.envFor(request.policy)),
-      ...sessionOption(true),
-    })
+    const { child, spawned } = spawnChild(
+      cmd,
+      args,
+      // `windowsHide` for the job's reason (below): a Ctrl+C at the terminal
+      // must not end an approved command in flight.
+      { cwd: this.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...envOption(this.withheld(), this.confinement.envFor(request.policy)), ...sessionOption(true) },
+      this.spawner,
+    )
     // Reachable from `dispose`: an escalated command runs under the widest
     // authority the session ever granted, so it is the LAST thing that may
     // outlive the agent scope that was supposed to end it.
     const startedAt = Date.now()
     this.oneShotChildren.add(child)
-    if (child.pid !== undefined && process.platform !== 'win32') this.reapGroups.add(child.pid)
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    let output = ''
-    const append = (data: string): void => void (output += data)
-    child.stdout.on('data', append)
-    child.stderr.on('data', append)
-
-    const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    const ended = new Promise<{ code: number | null; failed?: Error }>((resolve) => {
-      child.once('error', (error: NodeJS.ErrnoException) =>
-        resolve({ code: null, failed: this.startupFailure(cmd, wrapped, `could not be started (${error.code ?? error.message})`) }),
-      )
-      child.once('exit', (code) => resolve({ code }))
-    })
+    this.addGroup(child)
+    const ended = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)))
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
       void killTree(child)
-    }, timeoutMs)
+    }, request.timeoutMs ?? DEFAULT_TIMEOUT_MS)
     const onAbort = (): void => void killTree(child)
     request.signal?.addEventListener('abort', onAbort, { once: true })
     try {
-      const { code, failed } = await ended
-      if (failed) throw failed
+      try {
+        await spawned
+      } catch (error) {
+        throw this.spawnFailure(cmd, wrapped, error)
+      }
+      const { stdout, stderr } = child as ChildProcessByStdio<null, Readable, Readable>
+      stdout.setEncoding('utf8')
+      stderr.setEncoding('utf8')
+      let output = ''
+      const append = (data: string): void => void (output += data)
+      stdout.on('data', append)
+      stderr.on('data', append)
+      const code = await ended
       // A wrapper that could not start printed its own line and never ran the
       // command; the shell's own failures are not this refusal's business.
       if (wrapped && code !== 0 && this.isRunnerFailure(output.trim())) {
@@ -467,25 +535,44 @@ export class ShellProcess implements ShellSession {
     const base = oneShotCommand(this.dialect, this.shellPath, request.command)
     const { cmd, args } = this.confinement.wrap(base.cmd, base.args, request.policy)
     const wrapped = cmd !== base.cmd
-    const child = spawn(cmd, args, {
-      cwd: this.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...envOption(this.withheld(), this.confinement.envFor(request.policy)),
-      // Its own process group on POSIX, wrapped or not, so a kill reaches what
-      // it started — the one-shot's reason, and a server's children are the
-      // commonest thing a job leaves behind.
-      ...sessionOption(true),
-      // No console of the harness's on Windows (CREATE_NO_WINDOW, every stdio
-      // piped or ignored): a Ctrl+C a person aims at the terminal is delivered
-      // to every process on its console, and would otherwise end the job too.
-      windowsHide: true,
-    })
+    const { child, spawned } = spawnChild(
+      cmd,
+      args,
+      {
+        cwd: this.cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        ...envOption(this.withheld(), this.confinement.envFor(request.policy)),
+        // Its own process group on POSIX, wrapped or not, so a kill reaches what
+        // it started — the one-shot's reason, and a server's children are the
+        // commonest thing a job leaves behind.
+        ...sessionOption(true),
+        // No console of the harness's on Windows (CREATE_NO_WINDOW, every stdio
+        // piped or ignored): a Ctrl+C a person aims at the terminal is delivered
+        // to every process on its console, and would otherwise end the job too.
+        windowsHide: true,
+      },
+      this.spawner,
+    )
+    // Registered in the spawn's own tick, before it is known to have worked:
+    // the await below is the only one, and a disposal landing in it must find
+    // the child (a pipeless one, out of descriptors, has no pid to kill).
     let disposedHere = false
     let stopRequested = false
     this.jobChildren.set(child, () => (disposedHere = true))
-    if (child.pid !== undefined && process.platform !== 'win32') this.reapGroups.add(child.pid)
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
+    this.addGroup(child)
+    const forget = (): void => {
+      this.jobChildren.delete(child)
+      if (child.pid !== undefined) this.reapGroups.delete(child.pid)
+    }
+    try {
+      await spawned
+    } catch (error) {
+      forget()
+      throw this.spawnFailure(cmd, wrapped, error)
+    }
+    const { stdout, stderr } = child as ChildProcessByStdio<null, Readable, Readable>
+    stdout.setEncoding('utf8')
+    stderr.setEncoding('utf8')
     // The first lines, kept only to tell a runner that never started from a
     // command that failed; the output itself goes straight to the caller.
     let opening = ''
@@ -493,22 +580,8 @@ export class ShellProcess implements ShellSession {
       if (opening.length < 2_000) opening += chunk.slice(0, 2_000 - opening.length)
       request.output(chunk)
     }
-    child.stdout.on('data', forward)
-    child.stderr.on('data', forward)
-    const forget = (): void => {
-      this.jobChildren.delete(child)
-      if (child.pid !== undefined) this.reapGroups.delete(child.pid)
-    }
-    try {
-      await new Promise<void>((resolve, reject) => {
-        child.once('spawn', () => resolve())
-        child.once('error', (error: NodeJS.ErrnoException) => reject(this.startupFailure(cmd, wrapped, `could not be started (${error.code ?? error.message})`)))
-      })
-    } catch (error) {
-      forget()
-      throw error
-    }
-    child.on('error', () => {})
+    stdout.on('data', forward)
+    stderr.on('data', forward)
     let closed = false
     child.once('close', () => (closed = true))
     const exited = new Promise<ShellJobExit>((resolve) => {
@@ -541,8 +614,8 @@ export class ShellProcess implements ShellSession {
         // pipes get a short grace, then the job ends with what it wrote.
         if (closed) return settle()
         const grace = setTimeout(() => {
-          child.stdout.destroy()
-          child.stderr.destroy()
+          stdout.destroy()
+          stderr.destroy()
           settle()
         }, 1_500)
         child.once('close', () => {
@@ -634,13 +707,39 @@ export class ShellProcess implements ShellSession {
     await Promise.all([killAndWait(child), ...oneShots.map(killAndWait), ...jobs.map(([job]) => killAndWait(job))])
     // …and everything an escalation or a job left behind, including what
     // outlived the child that started it. Nothing may outlive the scope.
+    // Pruned first: a group already empty has given its number back, and
+    // signalling that number now could reach whoever holds it.
+    this.pruneGroups()
     for (const group of this.reapGroups.values()) {
       try {
         process.kill(-group, 'SIGKILL')
       } catch {
-        // Already gone, which is the ordinary case.
+        // Gone since the prune, which is the ordinary case.
       }
     }
     this.reapGroups.clear()
+  }
+
+  /** A child's own process group (POSIX), entered after dropping every group that is provably empty. */
+  private addGroup(child: ChildProcess): void {
+    if (child.pid === undefined || process.platform === 'win32') return
+    this.pruneGroups()
+    this.reapGroups.add(child.pid)
+  }
+
+  /**
+   * Drop every group with no member left. Signal 0 delivers nothing and asks
+   * only whether the group exists: ESRCH is "no process has this pgid", the
+   * one answer that frees the number. EPERM is a live member this user may not
+   * signal — still a member, so the number is still held and kept.
+   */
+  private pruneGroups(): void {
+    for (const group of this.reapGroups) {
+      try {
+        process.kill(-group, 0)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') this.reapGroups.delete(group)
+      }
+    }
   }
 }

@@ -314,6 +314,11 @@ function unpredict(data, parms) {
   }
   // PNG: each row carries its own filter byte.
   const rows = Math.floor(data.length / (rowLength + 1))
+  // No whole row: nothing to undo. Checked before anything is sized by
+  // /Columns, which the file chose — a row buffer allocated from it alone was
+  // a multi-gigabyte zero-fill per stream (review, S20.5). From here a row is
+  // no longer than the data.
+  if (!(rows >= 1)) return Buffer.alloc(0)
   const out = Buffer.alloc(rows * rowLength)
   let previous = Buffer.alloc(rowLength)
   for (let r = 0; r < rows; r++) {
@@ -455,6 +460,11 @@ function runLength(data, limit) {
 // ---------------------------------------------------------------------------
 // The document
 
+/** PDF's own implementation limit on indirect objects (ISO 32000-1, Annex C): no index entry past it is kept. */
+const MAX_OBJECTS = 8_388_607
+/** An xref stream field wider than this names no offset a file can have (2^64), and each byte is a loop step. */
+const MAX_XREF_FIELD_BYTES = 8
+
 export class PdfDoc {
   constructor(buffer) {
     this.buf = buffer
@@ -470,6 +480,8 @@ export class PdfDoc {
     this.repaired = false
     /** Decoded bytes this document may still produce; see MAX_DOCUMENT_BYTES. */
     this.budget = MAX_DOCUMENT_BYTES
+    /** What drawing has cost across every page so far; see MAX_DOCUMENT_OPERATORS. */
+    this.drawn = { operators: 0, forms: 0, bytes: 0 }
     /** What was skipped and why, in order; `pageText` reports the ones its page raised. */
     this.notes = []
     const header = /%PDF-(\d\.\d)/.exec(this.s.slice(0, 1024))
@@ -540,17 +552,26 @@ export class PdfDoc {
           const kind = lx.next()
           if (off.t !== 'num' || kind.t !== 'op') return undefined
           const num = tok.v + i
-          if (kind.v === 'n' && off.v > 0 && !this.entries.has(num)) this.entries.set(num, { type: 1, offset: off.v })
+          if (kind.v === 'n' && off.v > 0 && !this.entries.has(num) && this.entries.size < MAX_OBJECTS) this.entries.set(num, { type: 1, offset: off.v })
         }
       }
     }
     const stream = this.readObjectAt(offset)
     if (!(stream instanceof Stream) || stream.dict.get('Type') !== 'XRef') return undefined
-    const widths = (this.resolve(stream.dict.get('W')) ?? []).map(Number)
+    const rawWidths = this.resolve(stream.dict.get('W'))
+    const widths = (Array.isArray(rawWidths) ? rawWidths : []).map(Number)
     const size = Number(stream.dict.get('Size') ?? 0)
-    const index = this.resolve(stream.dict.get('Index')) ?? [0, size]
+    const rawIndex = this.resolve(stream.dict.get('Index')) ?? [0, size]
+    const index = (Array.isArray(rawIndex) ? rawIndex : []).map(Number)
+    // Each entry must ADVANCE through the data, by a sane number of bytes per
+    // field: widths that sum to 0 consumed nothing, so `/Index` alone set the
+    // loop count — 135 bytes spun for 17 s into `Map maximum size exceeded`
+    // (review, S20.5). Such a section is refused, and the scan repairs.
+    const entryBytes = widths.slice(0, 3).reduce((sum, w) => sum + w, 0)
+    if (widths.length < 3 || widths.slice(0, 3).some((w) => !Number.isInteger(w) || w < 0 || w > MAX_XREF_FIELD_BYTES) || entryBytes === 0) return undefined
+    if (index.some((n) => !Number.isSafeInteger(n) || n < 0)) return undefined
     const data = this.decode(stream)
-    if (!data || widths.length < 3) return undefined
+    if (!data) return undefined
     let p = 0
     const field = (w) => {
       let v = 0
@@ -558,8 +579,10 @@ export class PdfDoc {
       return v
     }
     for (let k = 0; k + 1 < index.length; k += 2) {
-      for (let i = 0; i < index[k + 1]; i++) {
-        if (p >= data.length) break
+      // No more entries than the data holds, and no more objects than a PDF may.
+      const count = Math.min(index[k + 1], Math.floor((data.length - p) / entryBytes))
+      for (let i = 0; i < count; i++) {
+        if (this.entries.size >= MAX_OBJECTS) return { kind: 'stream', trailer: stream.dict }
         const type = widths[0] ? field(widths[0]) : 1
         const f2 = field(widths[1])
         const f3 = field(widths[2])
@@ -576,8 +599,13 @@ export class PdfDoc {
   scan() {
     if (this.scanned) return this.scanned
     const table = new Map()
-    const re = /(\d+)\s+(\d+)\s+obj\b/g
-    for (let m = re.exec(this.s); m; m = re.exec(this.s)) table.set(Number(m[1]), { type: 1, offset: m.index })
+    // Bounded counts: an object number has at most 7 digits (MAX_OBJECTS) and
+    // a generation 5, so ten and five are generous. Unbounded, `(\d+)` tried
+    // every length of a digit run at every start inside it — quadratic, 15 s
+    // for an 80,000-digit run (review, S20.5); bounded, each start costs at
+    // most ten steps.
+    const re = /(\d{1,10})\s+(\d{1,5})\s+obj\b/g
+    for (let m = re.exec(this.s); m; m = re.exec(this.s)) if (table.size < MAX_OBJECTS || table.has(Number(m[1]))) table.set(Number(m[1]), { type: 1, offset: m.index })
     this.scanned = table
     // A copy: object streams found below add entries to the table being walked.
     for (const [num, entry] of Array.from(table)) {
@@ -953,6 +981,13 @@ const codeOf = (bytes) => {
   return v
 }
 
+/**
+ * How many codespace ranges a CMap keeps. Every shown code is tried against
+ * each range in turn (`splitBySpace`), so their number is a per-glyph cost;
+ * Adobe's CMap format allows 100 per block, and real CMaps carry a handful.
+ */
+const MAX_CODESPACE_RANGES = 256
+
 /** codespacerange, bfchar and bfrange (both forms) of a CMap. */
 function parseCMap(text) {
   const lx = new Lexer(text, 0)
@@ -974,6 +1009,7 @@ function parseCMap(text) {
       for (let i = 0; i + 1 < items.length; i += 2) {
         const lo = items[i]
         const hi = items[i + 1]
+        if (cmap.codespace.length >= MAX_CODESPACE_RANGES) break
         if (lo instanceof Str && hi instanceof Str && lo.bytes.length === hi.bytes.length && lo.bytes.length > 0 && lo.bytes.length <= 4) cmap.codespace.push({ length: lo.bytes.length, lo: [...lo.bytes].map((c) => c.charCodeAt(0)), hi: [...hi.bytes].map((c) => c.charCodeAt(0)) })
       }
     } else if (tok.v === 'beginbfchar') {
@@ -1014,7 +1050,8 @@ function cmapLookup(cmap, code, length) {
 function splitBySpace(bytes, codespace) {
   const codes = []
   let i = 0
-  const shortest = Math.min(...codespace.map((r) => r.length))
+  // A loop, not `Math.min(...ranges)`: spreading 200,000 ranges as arguments threw a RangeError (review, S20.5).
+  const shortest = codespace.reduce((least, range) => Math.min(least, range.length), Number.POSITIVE_INFINITY)
   while (i < bytes.length) {
     let taken = 0
     for (const range of codespace) {
@@ -1160,12 +1197,49 @@ const multiply = (m, n) => [m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3]
 const IDENTITY = [1, 0, 0, 1, 0, 0]
 
 /** Lays glyphs out as lines: a new line when the baseline moves, a space when the pen jumps further than a glyph gap. */
+/**
+ * A page's text as it is laid out, glyph by glyph.
+ *
+ * Kept as PIECES, never as one growing string: each glyph's text, each space
+ * and each line break is a piece, joined once when the page is done. Trimming
+ * at a line break pops whitespace pieces from the end and trims the last one
+ * left, and "does the text end in a space" asks the last piece. The single
+ * string cost the WHOLE page's text per line (`trimEnd` flattened and copied
+ * it) and per spaced glyph (a `\s$` test scanned it): quadratic inside every
+ * per-page count, 45 s from a 2 KB file of one-operator lines (review, S20.5).
+ */
 class TextSink {
   constructor() {
-    this.out = ''
+    /** Non-empty strings, in order; `out` is their concatenation. */
+    this.pieces = []
     this.last = undefined
     this.glyphs = 0
     this.unmapped = 0
+  }
+
+  get out() {
+    return this.pieces.join('')
+  }
+
+  push(text) {
+    if (text !== '') this.pieces.push(text)
+  }
+
+  /** `out.trimEnd()`, from the end: whitespace is trimmed piece by piece, and no piece is visited twice. */
+  trimEnd() {
+    while (this.pieces.length > 0) {
+      const trimmed = this.pieces[this.pieces.length - 1].trimEnd()
+      if (trimmed !== '') {
+        this.pieces[this.pieces.length - 1] = trimmed
+        return
+      }
+      this.pieces.pop()
+    }
+  }
+
+  endsInSpace() {
+    const tail = this.pieces.at(-1)
+    return tail !== undefined && /\s$/.test(tail)
   }
 
   add(text, start, end, size, direction) {
@@ -1182,15 +1256,15 @@ class TextSink {
       const lineGap = Math.abs(across(start) - last.across)
       const height = Math.max(size, last.size, 0.0001)
       if (!sameDirection || lineGap > height * 0.5) {
-        this.out = this.out.trimEnd()
-        this.out += lineGap > height * 2.2 ? '\n\n' : '\n'
+        this.trimEnd()
+        this.push(lineGap > height * 2.2 ? '\n\n' : '\n')
       } else {
         // 0.12 em: pdfTeX shrinks inter-word glue to about 0.19 em on a tight line, and a kern that widens a pair rarely reaches 0.1.
         const gap = along(start) - last.along
-        if ((gap > height * 0.12 || gap < -height * 1.5) && !/\s$/.test(this.out) && !/^\s/.test(text)) this.out += ' '
+        if ((gap > height * 0.12 || gap < -height * 1.5) && !this.endsInSpace() && !/^\s/.test(text)) this.push(' ')
       }
     }
-    this.out += text
+    this.push(text)
     this.last = { along: along(end), across: across(start), size, direction }
   }
 }
@@ -1199,17 +1273,45 @@ class TextSink {
  * What one page may cost. A form XObject that draws another several times,
  * twelve levels deep, turns a few hundred bytes into billions of operators, so
  * a page stops at these counts (a form's bytes counted each time it is drawn)
- * with a note, and a form never draws itself while it is being drawn.
+ * with a note, and a form never draws itself while it is being drawn. The
+ * counts bound the work only because each operator's own cost is bounded:
+ * `TextSink` keeps its text in pieces for exactly that reason.
  */
 const MAX_PAGE_OPERATORS = 10_000_000
 const MAX_PAGE_FORMS = 100_000
 const MAX_PAGE_BYTES = 256 * MIB
+
+/**
+ * What the whole DOCUMENT may cost, across its pages. The page counts alone
+ * bound a page, not a file: a form is decoded once and cached, so every page
+ * that draws it could spend the full page bound again — 16 pages of a 12.7 KB
+ * file took 88 s (review, S20.5). One account on the document (`PdfDoc.drawn`)
+ * takes every page's operators, form drawings and content bytes: five pages'
+ * worth of each (the operators about 27 s at the review's measured 5.5 s per
+ * 10 million), and a page past it is not read and says so. `--max-chars`
+ * bounds what is SHOWN, so a page with no text never stopped the work; this
+ * does.
+ */
+const MAX_DOCUMENT_OPERATORS = 5 * MAX_PAGE_OPERATORS
+const MAX_DOCUMENT_FORMS = 5 * MAX_PAGE_FORMS
+const MAX_DOCUMENT_DRAWN_BYTES = 4 * MAX_PAGE_BYTES
+const DOCUMENT_SPENT = `the document's drawing budget is spent (${(MAX_DOCUMENT_OPERATORS / 1e6).toLocaleString('en-US')} million operators, ${MAX_DOCUMENT_FORMS.toLocaleString('en-US')} form XObjects or ${MAX_DOCUMENT_DRAWN_BYTES / MIB} MiB of content across its pages); the rest of the document was not read`
+
+/** True once any of the document's drawing accounts has run out. */
+function documentSpent(doc) {
+  return doc.drawn.operators > MAX_DOCUMENT_OPERATORS || doc.drawn.forms > MAX_DOCUMENT_FORMS || doc.drawn.bytes > MAX_DOCUMENT_DRAWN_BYTES
+}
 
 /** Runs a content stream; `ctm` is where it starts (a form's matrix times its caller's). */
 function contentText(doc, data, resources, sink, depth, fontCache, work, initialCtm = IDENTITY) {
   work.bytes += data.length
   if (work.bytes > MAX_PAGE_BYTES) {
     work.stopped = `this page's content and forms exceed ${MAX_PAGE_BYTES / MIB} MiB; the rest was not read`
+    return
+  }
+  doc.drawn.bytes += data.length
+  if (documentSpent(doc)) {
+    work.stopped = DOCUMENT_SPENT
     return
   }
   const s = data.toString('latin1')
@@ -1263,6 +1365,10 @@ function contentText(doc, data, resources, sink, depth, fontCache, work, initial
     }
     if (++work.operators > MAX_PAGE_OPERATORS) {
       work.stopped = `drawing stopped after ${MAX_PAGE_OPERATORS.toLocaleString('en-US')} operators (forms that repeat each other?); the rest of this page was not read`
+      break
+    }
+    if (++doc.drawn.operators > MAX_DOCUMENT_OPERATORS) {
+      work.stopped = DOCUMENT_SPENT
       break
     }
     const op = tok.v
@@ -1345,6 +1451,10 @@ function contentText(doc, data, resources, sink, depth, fontCache, work, initial
             work.stopped = `drawing stopped after ${MAX_PAGE_FORMS.toLocaleString('en-US')} form XObjects (forms that repeat each other?); the rest of this page was not read`
             break
           }
+          if (++doc.drawn.forms > MAX_DOCUMENT_FORMS) {
+            work.stopped = DOCUMENT_SPENT
+            break
+          }
           const formData = doc.decode(xobject)
           const matrix = doc.resolve(xobject.dict.get('Matrix'))
           const formCtm = Array.isArray(matrix) && matrix.length === 6 ? multiply(matrix.map(Number), ctm) : ctm
@@ -1372,6 +1482,7 @@ function contentText(doc, data, resources, sink, depth, fontCache, work, initial
 
 /** The text of one page, how many glyphs had no Unicode mapping, and notes on what was skipped. */
 export function pageText(doc, page) {
+  if (documentSpent(doc)) return { text: '', glyphs: 0, unmapped: 0, notes: [DOCUMENT_SPENT] }
   const raised = doc.notes.length
   const work = { operators: 0, forms: 0, bytes: 0, drawing: new Set(), notes: new Set(), stopped: undefined }
   const contents = doc.resolve(page.dict.get('Contents'))
