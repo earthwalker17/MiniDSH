@@ -421,7 +421,13 @@ describe('a shell binary that starts and dies at once', () => {
 const outOfDescriptors = (spawned: string[]): Spawner => (command) => {
   spawned.push(command)
   const child = new ChildProcess()
-  process.nextTick(() => child.emit('error', Object.assign(new Error(`spawn ${command} EMFILE`), { code: 'EMFILE', errno: -24, syscall: `spawn ${command}` })))
+  // As Node does it (onErrorNT, then onexit): the negative errno as the exit
+  // code, then 'error', then 'close'.
+  process.nextTick(() => {
+    ;(child as { exitCode: number | null }).exitCode = -24
+    child.emit('error', Object.assign(new Error(`spawn ${command} EMFILE`), { code: 'EMFILE', errno: -24, syscall: `spawn ${command}` }))
+    child.emit('close', -24, null)
+  })
   return child
 }
 

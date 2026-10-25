@@ -239,15 +239,25 @@ describe('kernel: temporal composability', () => {
     await scope.dispose()
     let heard = 0
     let ran = 0
+    let observed = 0
+    const instances = (root as unknown as { root: { instances: Set<unknown> } }).root.instances
+    const before = instances.size
     expect(() => scope.on(event, () => void heard++, { global: true })).toThrowError(KernelError)
     expect(() => scope.provide(key, 1)).toThrowError(KernelError)
     expect(() => scope.plugin({ name: 'orphan', apply: () => void ran++ })).toThrowError(KernelError)
     expect(() => scope.effect(() => void ran++)).toThrowError(KernelError)
+    expect(() => scope.observe(() => void observed++)).toThrowError(KernelError)
     root.emit(event)
     await root.settle()
     expect(heard).toBe(0)
     expect(ran).toBe(0)
+    expect(observed).toBe(0)
     expect(root.tryGet(key)).toBeUndefined()
+    // Where a refused provide or plugin USED to land (S20.5 review: these
+    // halves could not fail when only the root's view was asked): the scope's
+    // own realm, and the root's set of plugin instances.
+    expect(scope.tryGet(key)).toBeUndefined()
+    expect(instances.size).toBe(before)
   })
 
   it('disposing the root unwinds every mounted plugin', async () => {

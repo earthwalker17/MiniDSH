@@ -13,7 +13,7 @@ import { defineConfig } from 'vitest/config'
  *   a confining host   the authority arc takes its UNCONFINED branch, silently
  *   MINIDSH_SKILLS_NEUTRAL / _BASELINE  the skills arc's two reported legs
  *
- * Four flags turn a skip into a failure: MINIDSH_EXPECT_KEYS (a comma list of
+ * Five flags turn a skip into a failure: MINIDSH_EXPECT_KEYS (a comma list of
  * the key names above, checked by expect-keys.e2e.test.ts),
  * MINIDSH_EXPECT_CONFINEMENT, MINIDSH_EXPECT_BROWSER, and — for the bundled
  * skills' Python reader and the shell suites under `pnpm check` —

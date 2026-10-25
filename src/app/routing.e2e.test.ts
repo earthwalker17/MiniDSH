@@ -239,15 +239,17 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     )
     const signed = anthropicMessages.find((event) => (signatureOf(event) ?? '').length > 0)
     expect(signed, `none of ${anthropicMessages.length} Anthropic message(s) carried a signed thinking block`).toBeDefined()
-    // ...and the NEXT Anthropic request carries it back: the history that
-    // request was built from, through the adapter's own serializer, echoes the
-    // signature verbatim (a tool-use loop that drops it is a provider 400).
+    // ...and the history the NEXT Anthropic request was built from still
+    // serializes it, through the adapter's own serializer. A reconstruction,
+    // not the bytes sent: the runtime's own stripping (core/llm/runtime.ts) is
+    // not in it, so what holds it to the wire is Anthropic itself, which
+    // answers 400 to a tool-use continuation that drops the block.
     const next = anthropicMessages.find((event) => event.seq > signed!.seq)
     expect(next, 'no Anthropic request followed the signed message').toBeDefined()
     const history = foldSurfaceSeqs(events.filter((event) => event.seq < next!.seq))
       .map((seq) => deriveEventMessage(events[seq]!))
       .filter((message): message is Message => message !== null)
-    expect(JSON.stringify(serializeAnthropic(history)), 'the next Anthropic request did not carry the signed thinking block').toContain(signatureOf(signed!)!)
+    expect(JSON.stringify(serializeAnthropic(history)), 'the stored history no longer serializes the signed thinking block').toContain(signatureOf(signed!)!)
     // The Anthropic turns worked over history a DeepSeek turn produced, tool call and all.
     expect(events.some((event) => event.type === 'tool/call')).toBe(true)
     const answers = assistantTexts(events).join('\n')

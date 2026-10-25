@@ -4,47 +4,59 @@
 # Trusted publishing (OIDC): no npm token exists anywhere in this repository
 # or its secrets. npm mints a short-lived credential for THIS workflow file in
 # THIS repository and attaches provenance to the package on its own. That
-# needs the `id-token: write` permission below, an npm CLI of 11.5.1 or newer,
-# and — once, by a person — this file named as the package's trusted publisher
-# on npmjs.com (package settings → Publishing access → GitHub Actions:
-# `earthwalker17` / `MiniDSH` / `release.yml`, with `npm publish` among its
-# allowed actions — without it the exchange succeeds and the publish answers
-# 403). A tag pushed before that is configured fails at the publish step with
-# nothing published.
+# needs the `id-token: write` permission of the publish job below, an npm CLI
+# of 11.5.1 or newer, and — once, by a person — this file named as the
+# package's trusted publisher on npmjs.com (package settings → Publishing
+# access → GitHub Actions: `earthwalker17` / `MiniDSH` / `release.yml`, with
+# `npm publish` among its allowed actions — without it the exchange succeeds
+# and the publish answers 403). A tag pushed before that is configured fails
+# at the publish step with nothing published.
+#
+# TWO jobs, because a credential exists for every step of a job that may mint
+# one: with `id-token: write` on the whole run, `pnpm check` and the install
+# smoke — repository and dependency code, lifecycle scripts included — could
+# each have minted a publish credential (S20.5 review). The `gate` job runs
+# all of that with read access alone and hands over the packed bytes; the
+# `publish` job installs no dependency, runs no repository code before the
+# publish, and holds the two write permissions.
 #
 # The ORDER is what makes a failed run leave a state a person can read:
 # guards (the tag is on main, agrees with package.json, and its commit already
-# passed check.yml on all three platforms AND live.yml on both legs) → the
-# whole gate → pack → smoke-install the packed bytes → a DRAFT
-# release holding those bytes → publish those same bytes → install from the
-# public registry and verify the attestation → the draft goes public. A
-# failure before the draft leaves nothing; one between the draft and the
-# publish leaves a draft and no package; one after it, a published package and
-# a visible draft; never a package no release names or a release no package
-# backs. npm refuses to publish an existing version, so
-# a re-run after a successful publish skips that step and finishes the rest.
+# passed check.yml on all three platforms AND an unfiltered live.yml on both
+# legs) → the whole gate → pack → smoke-install the packed bytes → [publish
+# job] a DRAFT release holding those bytes → publish those same bytes →
+# install from the public registry, verify the attestation, then smoke it →
+# the draft goes public. A failure before the draft leaves nothing; one
+# between the draft and the publish leaves a draft and no package; one after
+# it, a published package and a visible draft; never a package no release
+# names or a release no package backs. npm refuses to publish an existing
+# version, so a re-run after a successful publish skips that step and
+# finishes the rest.
 name: release
 
 on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write # the GitHub release
-  id-token: write # the OIDC exchange npm trusted publishing needs
-  actions: read # the runs of check.yml and live.yml the tag must already have passed
+# Each job asks for what it needs, and nothing is granted by default.
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: publish ${{ github.ref_name }}
+  gate:
+    name: gate ${{ github.ref_name }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # the runs of check.yml and live.yml the tag must already have passed
     env:
       GH_TOKEN: ${{ github.token }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,6 +66,7 @@ jobs:
       # proves it names a commit main already carries — a tag on a stray commit
       # publishes nothing — and that it agrees with the version the code says.
       - name: Refuse a tag that is not on main, or that disagrees with package.json
+        id: version
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -66,28 +79,26 @@ jobs:
             echo "tag $TAG points at $GITHUB_SHA, which is not on main: nothing is published from a stray commit"; exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # This job runs on Ubuntu alone, so the macOS and Windows legs — and the
       # live arcs, which no push starts — must ALREADY be green for this exact
       # commit. Being on main proved neither: a main commit can carry a red
       # macOS leg, or a check.yml run cancelled by `cancel-in-progress` when the
       # next push landed. A conclusion of success means every job of that run
-      # passed. Each missing proof is named, with the way to supply it.
-      - name: Refuse a commit that check.yml and live.yml have not both passed
+      # passed. A live.yml run counts only UNFILTERED: its run name records the
+      # filter, and one re-run of a single arc proves nothing about the rest
+      # (S20.5 review). Each missing proof is named, with the way to supply it.
+      - name: Refuse a commit that check.yml and an unfiltered live.yml have not both passed
         run: |
           set -euo pipefail
-          missing=()
-          for workflow in check.yml live.yml; do
-            count="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$GITHUB_SHA&status=success&per_page=1" --jq '.total_count')"
-            echo "$workflow: $count successful run(s) for $GITHUB_SHA"
-            if [ "$count" = "0" ]; then missing+=("$workflow"); fi
-          done
-          if [ "${#missing[@]}" -gt 0 ]; then
-            for workflow in "${missing[@]}"; do
-              echo "no successful $workflow run for $GITHUB_SHA: run it on main at this commit (live.yml: Actions → live → Run workflow), then re-run this release"
-            done
-            exit 1
-          fi
+          check="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=1" --jq '.total_count')"
+          live="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/live.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=100" --jq '[.workflow_runs[] | select(.display_title == "live: all")] | length')"
+          echo "check.yml: $check successful run(s) for $GITHUB_SHA; live.yml: $live successful unfiltered run(s)"
+          missing=0
+          if [ "$check" = "0" ]; then echo "no successful check.yml run for $GITHUB_SHA: push this commit to main (or dispatch check), then re-run this release"; missing=1; fi
+          if [ "$live" = "0" ]; then echo "no successful UNFILTERED live.yml run for $GITHUB_SHA: Actions → live → Run workflow with a blank filter, then re-run this release"; missing=1; fi
+          exit "$missing"
 
       # The same functional probe check.yml makes: this leg proves confinement,
       # and a gate that skipped it would be a green lie about the release.
@@ -107,21 +118,6 @@ jobs:
           runtime: node@24.19.0
           cache: true
 
-      # Trusted publishing needs npm 11.5.1 or newer. The `npm` PATH resolves
-      # first is the runner image's own (10.x from its Node), and `npm install
-      # -g` upgrades whichever prefix that npm owns — the first release run
-      # printed 10.9.8 right after "added 1 package". So npm 11 goes into a
-      # prefix of our own, and every step that publishes, reads the registry or
-      # verifies the attestation calls it by path.
-      - name: An npm that can publish through OIDC
-        run: |
-          set -euo pipefail
-          npm install -g --prefix "$RUNNER_TEMP/npm11" npm@^11.5.1
-          NPM="$RUNNER_TEMP/npm11/bin/npm"
-          echo "node $(node --version) at $(command -v node); npm $("$NPM" --version) at $NPM (PATH's npm: $(npm --version))"
-          "$NPM" --version | node -e "const [a,b,c]=require('fs').readFileSync(0,'utf8').trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm ' + [a,b,c].join('.') + ' cannot publish through trusted publishing'); process.exit(1) }"
-          echo "NPM=$NPM" >> "$GITHUB_ENV"
-
       # The gate on the commit being released, on this runner — its own step,
       # not `prepublishOnly`, whose failure would arrive as npm noise around an
       # exit code — with every flag check.yml's Linux leg sets, so no suite
@@ -139,9 +135,7 @@ jobs:
         run: |
           set -euo pipefail
           pnpm pack --pack-destination "$RUNNER_TEMP"
-          TARBALL="$RUNNER_TEMP/minidsh-$VERSION.tgz"
-          test -f "$TARBALL"
-          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          test -f "$RUNNER_TEMP/minidsh-$VERSION.tgz"
 
       # The install path, as check.yml proves it — the SAME script — but on the
       # bytes about to ship.
@@ -150,8 +144,62 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/packed" && cd "$RUNNER_TEMP/packed"
           npm init -y > /dev/null
-          npm install --no-audit --no-fund "$TARBALL"
+          npm install --no-audit --no-fund "$RUNNER_TEMP/minidsh-$VERSION.tgz"
           bash "$GITHUB_WORKSPACE/scripts/smoke-installed.sh" "$PWD" "$VERSION"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tarball
+          path: ${{ runner.temp }}/minidsh-${{ steps.version.outputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish ${{ github.ref_name }}
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # the OIDC exchange npm trusted publishing needs
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      # The CHANGELOG and the smoke script only: no dependency is installed in
+      # this job, and nothing from the checkout runs before the publish.
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tarball
+          path: ${{ runner.temp }}/release
+
+      - name: The bytes the gate packed
+        run: |
+          set -euo pipefail
+          TARBALL="$RUNNER_TEMP/release/minidsh-$VERSION.tgz"
+          test -f "$TARBALL"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24.19.0
+
+      # Trusted publishing needs npm 11.5.1 or newer. The `npm` PATH resolves
+      # first is the runner image's own (10.x from its Node), and `npm install
+      # -g` upgrades whichever prefix that npm owns — the first release run
+      # printed 10.9.8 right after "added 1 package". So npm 11 goes into a
+      # prefix of our own, and every step that publishes, reads the registry or
+      # verifies the attestation calls it by path.
+      - name: An npm that can publish through OIDC
+        run: |
+          set -euo pipefail
+          npm install -g --prefix "$RUNNER_TEMP/npm11" npm@^11.5.1
+          NPM="$RUNNER_TEMP/npm11/bin/npm"
+          echo "node $(node --version) at $(command -v node); npm $("$NPM" --version) at $NPM (PATH's npm: $(npm --version))"
+          "$NPM" --version | node -e "const [a,b,c]=require('fs').readFileSync(0,'utf8').trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm ' + [a,b,c].join('.') + ' cannot publish through trusted publishing'); process.exit(1) }"
+          echo "NPM=$NPM" >> "$GITHUB_ENV"
 
       # A DRAFT first, holding the packed bytes and the CHANGELOG section, so a
       # failure from here on leaves something a person can see and finish.
@@ -182,8 +230,7 @@ jobs:
       # never the token; on a failed exchange the registry's answer is printed
       # and the job stops with the draft in place and nothing published. A 2xx
       # answer IS a minted publish credential, so it lives in a file this step
-      # deletes on every exit: it used to stay in $RUNNER_TEMP for every later
-      # step, the smoke installs and their lifecycle scripts included.
+      # deletes on every exit.
       - name: The identity npm's exchange is shown
         run: |
           set -euo pipefail
@@ -202,7 +249,7 @@ jobs:
       # No token: the OIDC exchange is the credential, and provenance is
       # attached by npm itself. The TARBALL, not the checkout, so the published
       # bytes are the ones the smoke ran and the release holds; `--ignore-scripts`
-      # because the gate and the build already ran above, once, on those bytes.
+      # because the gate and the build already ran, once, on those bytes.
       - name: Publish to npm through trusted publishing
         run: |
           set -euo pipefail
@@ -213,8 +260,9 @@ jobs:
           fi
 
       # The artifact a stranger gets, from the public registry, with its
-      # attestation verified: the claim the release makes, checked, not assumed.
-      - name: Install from the public registry and verify the attestation
+      # attestation verified BEFORE anything it carries runs: the claim the
+      # release makes, checked, not assumed.
+      - name: Install from the public registry, verify the attestation, then smoke it
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/public" && cd "$RUNNER_TEMP/public"
@@ -223,21 +271,20 @@ jobs:
           # npm cached at the first (Cache-Control max-age=300) and never see the
           # version propagate. Up to ten minutes: the 1.1.0 publish took longer
           # than the one minute this first allowed, and a re-run then had to
-          # finish the release.
-          # `--ignore-scripts`: what the registry serves is being VERIFIED here,
-          # not trusted, so nothing it carries runs before the checks below.
+          # finish the release. `--ignore-scripts`: nothing it carries runs
+          # before its attestation is checked.
           for attempt in $(seq 1 60); do
             if "$NPM" install --no-audit --no-fund --prefer-online --ignore-scripts "minidsh@$VERSION"; then break; fi
             if [ "$attempt" = 60 ]; then echo "minidsh@$VERSION did not become installable within ten minutes"; exit 1; fi
             sleep 10
           done
-          # Every check the branch gate makes, on what a stranger now gets.
-          bash "$GITHUB_WORKSPACE/scripts/smoke-installed.sh" "$PWD" "$VERSION"
           # The attestation THIS package carries, named: the dependency ships
           # provenance too, so a grep for "verified attestation" over the whole
           # tree would pass with minidsh unattested.
           "$NPM" audit signatures --json --include-attestations > "$RUNNER_TEMP/signatures.json"
           node -e "const r=require(process.argv[1]);const p=(r.verified||[]).find(x=>x.name==='minidsh'&&x.version===process.argv[2]);if(!p||!p.attestations){console.error('minidsh@'+process.argv[2]+' has no verified attestation');process.exit(1)}console.log('minidsh@'+process.argv[2]+': verified attestation')" "$RUNNER_TEMP/signatures.json" "$VERSION"
+          # Only then, every check the branch gate makes, on what a stranger now gets.
+          bash "$GITHUB_WORKSPACE/scripts/smoke-installed.sh" "$PWD" "$VERSION"
 
       - name: Publish the draft release
         run: gh release edit "v$VERSION" --draft=false

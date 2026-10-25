@@ -68,7 +68,13 @@ describe('starting a child (spawnChild)', () => {
   /** Node 24 out of descriptors, exactly: a returned child with no pid and no pipes, and EMFILE a tick later. */
   const outOfDescriptors: Spawner = (command) => {
     const child = new ChildProcess()
-    process.nextTick(() => child.emit('error', Object.assign(new Error(`spawn ${command} EMFILE`), { code: 'EMFILE', errno: -24, syscall: `spawn ${command}` })))
+    // As Node does it (onErrorNT, then onexit): the negative errno as the exit
+    // code, then 'error', then 'close'.
+    process.nextTick(() => {
+      ;(child as { exitCode: number | null }).exitCode = -24
+      child.emit('error', Object.assign(new Error(`spawn ${command} EMFILE`), { code: 'EMFILE', errno: -24, syscall: `spawn ${command}` }))
+      child.emit('close', -24, null)
+    })
     return child
   }
 

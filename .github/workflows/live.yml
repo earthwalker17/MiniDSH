@@ -12,6 +12,9 @@
 # this project: the macOS leg is the only evidence that branch has on that OS.
 # Both legs report (`fail-fast: false`); neither stands in for the other.
 name: live
+# The filter is in the run's name, so the release guard can tell an
+# unfiltered run (every arc) from one re-run arc (S20.5 review).
+run-name: "live: ${{ inputs.filter || 'all' }}"
 
 on:
   workflow_dispatch:
