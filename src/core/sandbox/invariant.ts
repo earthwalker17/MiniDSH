@@ -7,7 +7,7 @@
  * mode/policy vocabularies would otherwise fold into a boundary nobody chose.
  */
 import type { Plugin } from '../../kernel/index.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, isApprovalDecider, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
+import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY, GrantFold, isApprovalDecider, isApprovalOutcome, isApprovalPolicy } from '../approval/index.ts'
 import { credentialRef } from '../credentials/index.ts'
 import { intentKey, type EffectIntent } from '../effects/events.ts'
 import { firstViolation, INVARIANTS, type InvariantFailure, type InvariantInstaller, type LogViolation } from '../invariants/index.ts'
@@ -39,6 +39,8 @@ interface Trace {
   /** Every open ask's subject key, so a grant can be held to one that provably happened. */
   openSubjects: Map<string, string>
   grantIds: Set<string>
+  /** The grant rule itself (`GrantFold`), advanced past every validated event. */
+  grants: GrantFold
   ceiling: SandboxMode | undefined
   pin: ApprovalPolicy | undefined
   /** The seq of this session's delegation `sandbox/mode`: the one place its acceptance pin may follow. */
@@ -56,6 +58,7 @@ function freshTrace(): Trace {
     acceptancePinned: false,
     openSubjects: new Map(),
     grantIds: new Set(),
+    grants: new GrantFold(),
     ceiling: undefined,
     pin: undefined,
     delegationModeSeq: undefined,
@@ -121,7 +124,13 @@ function isCredentialName(text: string): boolean {
   }
 }
 
+/** Every check, then the grant fold advanced past the event: a decision is judged by the grants that stood before it. */
 function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): void {
+  check(trace, event, fail)
+  trace.grants.push(event)
+}
+
+function check(trace: Trace, event: EventEnvelope, fail: InvariantFailure): void {
   trace.lastSeq = event.seq
 
   if (matches(event, SANDBOX_MODE)) {
@@ -221,6 +230,16 @@ function validate(trace: Trace, event: EventEnvelope, fail: InvariantFailure): v
     if (decidedBy !== undefined && !isApprovalDecider(decidedBy)) fail(`approval/decided for "${id}" names an unknown decider ${JSON.stringify(decidedBy)}`)
     if (grantId !== undefined && (typeof grantId !== 'string' || !trace.grantIds.has(grantId))) fail(`approval/decided for "${id}" names a grant this session never minted`)
     if (decidedBy === 'grant' && (grantId === undefined || outcome !== 'allowed-once')) fail(`approval/decided for "${id}" credits a grant without naming the grant it allowed under`)
+    // Minted is not enough (S20.5 review: a REVOKED grant minted for `ls` was
+    // admitted as the decider of an ask for `rm -rf ~/work`). A grant decides
+    // only while live, and only an ask with its exact subject; an answer that
+    // names one names the grant ITS consent minted.
+    if (typeof grantId === 'string' && decidedBy === 'grant' && (trace.grants.keyOfLive(grantId) === undefined || trace.grants.keyOfLive(grantId) !== trace.openSubjects.get(id))) {
+      fail(`approval/decided for "${id}" credits grant "${grantId}", which is not live for this exact subject`)
+    }
+    if (typeof grantId === 'string' && decidedBy !== 'grant' && trace.grants.born.get(id)?.grant.id !== grantId) {
+      fail(`approval/decided for "${id}" names grant "${grantId}", which this answer did not mint`)
+    }
     if (decidedBy === 'policy' && outcome !== 'rejected') fail(`approval/decided for "${id}" credits the policy with an outcome only an answer can give`)
     trace.decided.add(id)
     trace.openSubjects.delete(id)
@@ -289,6 +308,7 @@ const installAuthorityInvariant: InvariantInstaller = (ctx, fail) => {
       decided: new Set(trace.decided),
       openSubjects: new Map(trace.openSubjects),
       grantIds: new Set(trace.grantIds),
+      grants: trace.grants.clone(),
     }
     validate(next, event, fail)
     staged.set(session, next)

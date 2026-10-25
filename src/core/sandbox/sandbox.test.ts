@@ -612,6 +612,33 @@ describe('what enforcement a session accepts', () => {
     agent.session.append(APPROVAL_DECIDED, { id: 'approval-x3', outcome: 'rejected', decidedBy: 'policy' })
   })
 
+  // The S20.5 review: "minted" was the whole check, so a REVOKED grant for `ls`
+  // was admitted as the decider of an ask for another command, live and cold.
+  it('credits a decision only to a grant live for that exact subject, and an answer only with the grant it minted', async () => {
+    harness = await coreHarness()
+    const { agent } = await harness.create()
+    const session = agent.session
+    const subject = (command: string) => ({ effect: 'shell-command' as const, command, mode: 'workspace-write' as const, enforcement: 'none' as const })
+    session.append(APPROVAL_ASKED, { id: 'approval-a', toolName: 'bash', subject: subject('ls') })
+    session.append(APPROVAL_GRANT, { op: 'grant', id: 'grant-a', toolName: 'bash', subject: subject('ls'), fromApproval: 'approval-a' })
+    session.append(APPROVAL_DECIDED, { id: 'approval-a', outcome: 'allowed-once', decidedBy: 'user', grantId: 'grant-a' })
+    // Live, but for another subject.
+    session.append(APPROVAL_ASKED, { id: 'approval-b', toolName: 'bash', subject: subject('rm -rf ~/work') })
+    expect(() => session.append(APPROVAL_DECIDED, { id: 'approval-b', outcome: 'allowed-once', decidedBy: 'grant', grantId: 'grant-a' })).toThrowError(/not live for this exact subject/)
+    // An answer naming a grant another answer minted.
+    expect(() => session.append(APPROVAL_DECIDED, { id: 'approval-b', outcome: 'allowed-once', decidedBy: 'user', grantId: 'grant-a' })).toThrowError(/did not mint/)
+    // The same subject, while live, is the grant's to decide…
+    session.append(APPROVAL_ASKED, { id: 'approval-c', toolName: 'bash', subject: subject('ls') })
+    session.append(APPROVAL_DECIDED, { id: 'approval-c', outcome: 'allowed-once', decidedBy: 'grant', grantId: 'grant-a' })
+    // …and not once revoked.
+    session.append(APPROVAL_GRANT, { op: 'revoke', id: 'grant-a' })
+    session.append(APPROVAL_ASKED, { id: 'approval-d', toolName: 'bash', subject: subject('ls') })
+    expect(() => session.append(APPROVAL_DECIDED, { id: 'approval-d', outcome: 'allowed-once', decidedBy: 'grant', grantId: 'grant-a' })).toThrowError(/not live/)
+    // The cold check reads a forged log the same way.
+    const forged = [...session.facts, { type: APPROVAL_DECIDED.type, seq: session.facts.length, time: 0, data: { id: 'approval-d', outcome: 'allowed-once', decidedBy: 'grant', grantId: 'grant-a' } }]
+    expect(checkAuthorityLog(forged)?.message).toMatch(/not live/)
+  })
+
   it('refuses to be renegotiated inside a delegated session, and refuses a forged one pre-commit', async () => {
     harness = await coreHarness()
     const sandbox = harness.root.get(SANDBOX)

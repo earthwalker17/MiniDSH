@@ -119,42 +119,65 @@ export interface ApprovalGrant {
 const AUTHORITY_KINDS: ReadonlySet<string> = new Set([APPROVAL_POLICY.type, 'sandbox/mode', 'sandbox/acceptance', 'authority/preset', 'session/end-seed'])
 
 /**
- * Every live grant, keyed by `intentKey`. A grant is live only if it was not
- * revoked and NO authority event follows it.
+ * The grant rule, one event at a time: what `liveGrants` folds, and what the
+ * authority invariant holds a decision against (core/sandbox/invariant.ts),
+ * so the two cannot drift. A grant is live only if it was not revoked and NO
+ * authority event follows it.
+ *
+ * A grant is written BEFORE the decision it came from (so the decision can
+ * name it), with no checkpoint between the two, so a crash can keep the
+ * grant and lose the decision. Repair then closes that ask `cancelled` — nobody
+ * consented — while the grant would go on answering for the rest of the
+ * session. A consent is only live once its own ask is recorded as allowed.
  */
-export function liveGrants(events: readonly EventEnvelope[]): Map<string, ApprovalGrant> {
-  const live = new Map<string, ApprovalGrant>()
-  // A grant is written BEFORE the decision it came from (so the decision can
-  // name it), with no checkpoint between the two, so a crash can keep the
-  // grant and lose the decision. Repair then closes that ask `cancelled` — nobody
-  // consented — while the grant would go on answering for the rest of the
-  // session. A consent is only live once its own ask is recorded as allowed,
-  // which is the same rule the pre-commit invariant states from the other side.
-  const born = new Map<string, { key: string; grant: ApprovalGrant }>()
-  for (const event of events) {
+export class GrantFold {
+  readonly live = new Map<string, ApprovalGrant>()
+  /** Grants written and awaiting their own ask's decision, by that ask's id. */
+  readonly born = new Map<string, { readonly key: string; readonly grant: ApprovalGrant }>()
+
+  push(event: EventEnvelope): void {
     if (AUTHORITY_KINDS.has(event.type)) {
-      live.clear()
-      born.clear()
-      continue
+      this.live.clear()
+      this.born.clear()
+      return
     }
     if (matches(event, APPROVAL_DECIDED)) {
-      const pending = born.get(event.data.id)
-      if (pending === undefined) continue
-      born.delete(event.data.id)
-      if (event.data.outcome === 'allowed-once') live.set(pending.key, pending.grant)
-      continue
+      const pending = this.born.get(event.data.id)
+      if (pending === undefined) return
+      this.born.delete(event.data.id)
+      if (event.data.outcome === 'allowed-once') this.live.set(pending.key, pending.grant)
+      return
     }
-    if (!matches(event, APPROVAL_GRANT)) continue
+    if (!matches(event, APPROVAL_GRANT)) return
     if (event.data.op === 'revoke') {
       const id = event.data.id
-      for (const [key, grant] of live) if (grant.id === id) live.delete(key)
-      for (const [askId, pending] of born) if (pending.grant.id === id) born.delete(askId)
-      continue
+      for (const [key, grant] of this.live) if (grant.id === id) this.live.delete(key)
+      for (const [askId, pending] of this.born) if (pending.grant.id === id) this.born.delete(askId)
+      return
     }
     const key = intentKey(event.data.toolName, event.data.subject)
-    if (key !== undefined) born.set(event.data.fromApproval, { key, grant: { id: event.data.id, toolName: event.data.toolName, subject: event.data.subject } })
+    if (key !== undefined) this.born.set(event.data.fromApproval, { key, grant: { id: event.data.id, toolName: event.data.toolName, subject: event.data.subject } })
   }
-  return live
+
+  /** The intent key a LIVE grant covers, or undefined when `id` names none. */
+  keyOfLive(id: string): string | undefined {
+    for (const [key, grant] of this.live) if (grant.id === id) return key
+    return undefined
+  }
+
+  clone(): GrantFold {
+    const copy = new GrantFold()
+    for (const [key, grant] of this.live) copy.live.set(key, grant)
+    for (const [askId, pending] of this.born) copy.born.set(askId, pending)
+    return copy
+  }
+}
+
+/** Every live grant, keyed by `intentKey`. */
+export function liveGrants(events: readonly EventEnvelope[]): Map<string, ApprovalGrant> {
+  const fold = new GrantFold()
+  for (const event of events) fold.push(event)
+  return fold.live
 }
 
 /** The live grant covering this exact action, if one stands. */
