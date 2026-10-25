@@ -227,15 +227,27 @@ describe.skipIf(!KEY || testBrowser === undefined)('S20 live E2E: a frontend che
     expect(turnEnd.reason.kind, `turn 1 did not complete — ${shape}`).toBe('completed')
 
     // ---- the premise: the model SAW the runtime error before it edited -------
-    const edits = events.filter((event) => event.type === 'tool/call' && data<{ name: string }>(event).name === 'str_replace_editor' && /"command"\s*:\s*"(str_replace|create|insert)"/.test(data<{ arguments: string }>(event).arguments))
-    expect(edits.length, `the model never edited the source — ${shape}`).toBeGreaterThan(0)
+    // A change is an editor edit, or a shell command: the task names the
+    // editor, and a model on CI's macOS leg fixed the file with `bash` anyway
+    // (S20.5). A shell call that only READ comes no later than the change it
+    // precedes, so bounding the first change by it keeps the premise strict.
+    const edits = events.filter((event) => {
+      if (event.type !== 'tool/call') return false
+      const { name, arguments: args } = data<{ name: string; arguments: string }>(event)
+      return (name === 'str_replace_editor' && /"command"\s*:\s*"(str_replace|create|insert)"/.test(args)) || name === 'bash' || name === 'pwsh'
+    })
+    expect(edits.length, `the model never changed the source, by the editor or the shell — ${shape}`).toBeGreaterThan(0)
     const firstEdit = edits[0]!.seq
     const acts = toolTexts(events, 'browser_act')
     const navigations = toolTexts(events, 'browser_navigate')
     const sawError = [...acts, ...navigations].find((result) => result.seq < firstEdit && /TypeError|Cannot set properties of null/.test(result.text))
     expect(sawError, `no browser result before the first edit (seq ${firstEdit}) named the TypeError; the model fixed it without looking — ${shape}`).toBeDefined()
     // And it verified AFTER the last edit, in the browser, with a clean header.
-    const lastEdit = edits.at(-1)!.seq
+    // The last change is the editor's when it edited at all: a shell call after
+    // it (a `cat`, a syntax check) is not one, and would move the bound past
+    // the verification. Only a shell-made fix bounds it by the shell.
+    const editorEdits = edits.filter((event) => data<{ name: string }>(event).name === 'str_replace_editor')
+    const lastEdit = (editorEdits.length > 0 ? editorEdits : edits).at(-1)!.seq
     const verified = acts.find((result) => result.seq > lastEdit && result.error === undefined && /no console errors/.test(result.text))
     expect(verified, `no clean browser_act after the last edit (seq ${lastEdit}) — ${shape}`).toBeDefined()
     const shots = toolTexts(events, 'browser_screenshot')

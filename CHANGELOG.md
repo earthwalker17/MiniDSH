@@ -63,7 +63,7 @@ Found by the 1.2 checkpoint's review; each fix has a test that failed before it.
 - **A browser call stuck in page code** (a looping getter in a returned value) is stopped at its deadline instead of wedging the page until it was replaced.
 - **A cancel at the wrong moment could lose a job's end notice**, and a step that rejected or filtered its input dropped the notices it had claimed. Both now keep them.
 - **A tool result of the wrong shape** left a call with no result, which crash repair later had to close; it is now an error result.
-- **A compaction summary cut off at its length limit** replaced the history anyway; it is declined. Compaction no longer fires on pressure the system prompt and tool list alone create, which it could not relieve.
+- **A compaction summary cut off at its length limit** replaced the history anyway; it is declined. And a summarizer could spend its whole answer calling a tool, so compaction declined an empty summary again and again: the request now shows the tools and forbids calling them. Compaction no longer fires on pressure the system prompt and tool list alone create, which it could not relieve.
 - **`exit` as the first shell command** was reported as a broken shell (`SHELL_UNAVAILABLE`); it is the command's own end, reported with its output. A shell session disposed while it restarted into another sandbox mode could leave a shell running.
 - **`str_replace` treated `$&` and `$$` in the replacement as patterns**, corrupting the text it wrote.
 - **A refused agent creation leaked the session**, so every later attempt in the same host failed "already exists".
