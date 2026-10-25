@@ -58,13 +58,13 @@
     "check": "pnpm typecheck && pnpm lint && pnpm check:deps && pnpm check:docs && pnpm test"
   },
   "dependencies": {
-    "zod": "^4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "@vitest/coverage-v8": "^4.1.11",
-    "oxlint": "^1.79.0",
+    "@types/node": "^24.19.2",
+    "@vitest/coverage-v8": "^5.0.5",
+    "oxlint": "^1.88.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.5"
   }
 }

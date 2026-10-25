@@ -1,6 +1,12 @@
 # Keep the one runtime dependency, the dev toolchain and the Actions pinned
-# here current. Grouped so a week's updates are one pull request, not five,
-# and each one still has to pass check.yml on three platforms.
+# here current. The dev toolchain is grouped so a week's updates are one pull
+# request, and each one still has to pass check.yml on three platforms.
+#
+# zod is the one RUNTIME dependency and is pinned exactly (an installed
+# tarball resolves no range, so users run the version CI tested): it gets a
+# pull request of its own, reviewed alone, never folded into a tooling bump.
+# @types/node follows `engines` (Node 24): a major would type APIs the
+# supported runtime lacks, so only patches and minors are proposed.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -8,9 +14,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
     groups:
-      dependencies:
+      toolchain:
         patterns: ['*']
+        exclude-patterns: ['zod']
   - package-ecosystem: github-actions
     directory: /
     schedule:
