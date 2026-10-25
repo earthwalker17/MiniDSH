@@ -9,7 +9,7 @@
  * `*_BASE_URL`) that ends lines with CRLF was buffered whole and failed
  * MALFORMED_RESPONSE, while OpenAI's parser had long handled it.
  */
-import { LlmError } from './types.ts'
+import { LlmError, type StreamChunk } from './types.ts'
 
 /** One server-sent event. `event` defaults to `message`, as the grammar says. */
 export interface SseEvent {
@@ -47,38 +47,61 @@ export async function* parseSseEvents(
   const max = options.maxEventChars ?? MAX_SSE_EVENT_CHARS
   const reader = body.getReader()
   const decoder = new TextDecoder()
-  let buffer = ''
   // A CR that ends one read may be the first half of a CRLF split across two:
   // normalizing it alone would turn one line end into two, and two line ends
   // are an event boundary.
   let carry = ''
-  const append = (text: string): void => {
+  const normalize = (text: string): string => {
     let next = carry + text
     carry = ''
     if (next.endsWith('\r')) {
       carry = '\r'
       next = next.slice(0, -1)
     }
-    buffer += next.replace(/\r\n?/g, '\n')
+    return next.replace(/\r\n?/g, '\n')
+  }
+  // The unfinished event, as the pieces it arrived in. Each read is searched
+  // alone, plus the one character before it where a boundary can straddle, and
+  // the pieces join only when a boundary closes the event: rescanning one
+  // growing string re-flattened all of it at every read, quadratic inside the
+  // cap (S20.5 review: 47 s to reach 8 MiB in 256-byte reads).
+  let pieces: string[] = []
+  let pendingChars = 0
+  let lastChar = ''
+  const take = (raw: string): SseEvent | undefined => {
+    pieces = []
+    pendingChars = 0
+    lastChar = ''
+    return eventOf(raw)
   }
   try {
     for (;;) {
       const { value, done } = await reader.read()
       if (done) break
       onActivity()
-      append(decoder.decode(value, { stream: true }))
-      let boundary = buffer.indexOf('\n\n')
-      while (boundary >= 0) {
-        const parsed = eventOf(buffer.slice(0, boundary))
-        buffer = buffer.slice(boundary + 2)
+      let rest = normalize(decoder.decode(value, { stream: true }))
+      while (rest.length > 0) {
+        if (lastChar === '\n' && rest.startsWith('\n')) {
+          const parsed = take(pieces.join('').slice(0, -1))
+          rest = rest.slice(1)
+          if (parsed) yield parsed
+          continue
+        }
+        const boundary = rest.indexOf('\n\n')
+        if (boundary < 0) {
+          pieces.push(rest)
+          pendingChars += rest.length
+          lastChar = rest.at(-1)!
+          break
+        }
+        const parsed = take(pieces.join('') + rest.slice(0, boundary))
+        rest = rest.slice(boundary + 2)
         if (parsed) yield parsed
-        boundary = buffer.indexOf('\n\n')
       }
-      if (buffer.length > max) throw new LlmError('MALFORMED_RESPONSE', `${options.provider} stream event exceeded ${max} characters without ending`)
+      if (pendingChars > max) throw new LlmError('MALFORMED_RESPONSE', `${options.provider} stream event exceeded ${max} characters without ending`)
     }
-    append(decoder.decode())
-    buffer += carry.replace(/\r/g, '\n')
-    for (const raw of buffer.split('\n\n')) {
+    const tail = pieces.join('') + normalize(decoder.decode()) + carry.replace(/\r/g, '\n')
+    for (const raw of tail.split('\n\n')) {
       const parsed = eventOf(raw)
       if (parsed) yield { ...parsed, tail: true }
     }
@@ -171,6 +194,27 @@ export function baseURLFromEnv(name: string): string | undefined {
  */
 export function redactSecret(text: string, secret: string | undefined): string {
   return secret === undefined || secret.length === 0 ? text : text.split(secret).join('[redacted]')
+}
+
+/**
+ * A stream chunk whose failure no longer carries `secret`. A failure an adapter
+ * YIELDS — a stream's own error event (OpenAI's `response.failed`), an
+ * unexpected finish — never passes the catch that redacts what it throws, so
+ * each yield goes through this (S20.5 review).
+ */
+export function redactChunk(chunk: StreamChunk, secret: string | undefined): StreamChunk {
+  if (chunk.type !== 'finish' || (chunk.reason.kind !== 'error' && chunk.reason.kind !== 'aborted')) return chunk
+  const message = redactSecret(chunk.reason.failure.message, secret)
+  return message === chunk.reason.failure.message ? chunk : { ...chunk, reason: { ...chunk.reason, failure: { ...chunk.reason.failure, message } } }
+}
+
+/**
+ * What a failure says of the wait its provider asked for: `llm-retry` gives
+ * up past its ceiling, and the turn's failure is then all a person or the
+ * model reads of why (S20.5 review).
+ */
+export function retryAfterNote(retryAfterMs: number | undefined): string {
+  return retryAfterMs === undefined ? '' : ` (the provider asks to wait ${Math.ceil(retryAfterMs / 1000)} s before a retry)`
 }
 
 /** An `LlmError` whose message no longer carries `secret`; the same instance when it never did. */

@@ -2,7 +2,7 @@ import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type Mod
 import { isHeaderSafe } from '../../core/credentials/index.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
 import { resolveRequestImages } from '../../core/llm/content.ts'
-import { readErrorBody, redactLlmError } from '../../core/llm/wire.ts'
+import { readErrorBody, redactChunk, redactLlmError, retryAfterNote } from '../../core/llm/wire.ts'
 import { catalogEntry, factsFor, OPENAI_CATALOG, type OpenAICatalogModel } from './catalog.ts'
 import { serializeInput, serializeTools, type ImageBytes } from './serialize.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
@@ -227,7 +227,7 @@ export class OpenAIAdapter implements LlmAdapter {
       for await (const event of parseNamedSse(response.body, resetIdle)) {
         const data = parseTail(event)
         // Every event names itself in its own `type`; the SSE name is the fallback.
-        for (const chunk of translator.push(typeof data.type === 'string' ? data : { ...data, type: event.event })) yield chunk
+        for (const chunk of translator.push(typeof data.type === 'string' ? data : { ...data, type: event.event })) yield redactChunk(chunk, apiKey)
         if (translator.complete) break
       }
     } catch (error) {
@@ -294,7 +294,7 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   else if (status === 429) result = isQuotaCode(code) || isQuotaCode(type) ? 'QUOTA' : 'RATE_LIMIT'
   else if (status >= 500) result = 'SERVER'
   else result = 'INVALID_REQUEST'
-  return new LlmError(result, `OpenAI ${status}: ${message}`, options)
+  return new LlmError(result, `OpenAI ${status}: ${message}${retryAfterNote(retryAfterMs)}`, options)
 }
 
 function parseRetryAfterMs(value: string | null): number | undefined {

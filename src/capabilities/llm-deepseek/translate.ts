@@ -70,17 +70,21 @@ export class DeepSeekTranslator {
     }
     for (const call of delta.tool_calls ?? []) {
       let block = this.tools.get(call.index)
+      // Only a non-empty string is an id: an OpenAI-compatible proxy may send
+      // `""` or `null` on a continuation delta, which is more of the same call
+      // (S20.5 review: each such delta had opened a call of its own).
+      const id = typeof call.id === 'string' && call.id.length > 0 ? call.id : undefined
       // A fresh id on an index already in use is a second call, not more of
       // the first: folding it in overwrote the first id and spliced the two
       // argument strings into one invalid JSON text.
-      if (block && call.id !== undefined && block.id !== undefined && call.id !== block.id) block = undefined
+      if (block && id !== undefined && block.id !== undefined && id !== block.id) block = undefined
       if (!block) {
         block = { index: this.nextIndex++, type: 'tool-call', text: '', args: '' }
         this.tools.set(call.index, block)
         this.order.push(block)
         out.push({ type: 'block-start', index: block.index, blockType: 'tool-call' })
       }
-      if (call.id !== undefined) block.id = call.id
+      if (id !== undefined) block.id = id
       if (call.function?.name !== undefined) block.name = call.function.name
       const argsDelta = call.function?.arguments ?? ''
       block.args += argsDelta

@@ -923,6 +923,31 @@ describe('OpenAI wire bounds (S20.5)', () => {
     expect(failure.message).not.toContain(key)
   })
 
+  // The S20.5 review: a failure the stream itself carries (response.failed)
+  // is YIELDED, and only thrown errors passed the redaction.
+  it('never quotes the key in a failure the stream itself reports', async () => {
+    const key = 'sk-proj-ECHOED-IN-STREAM-42'
+    const api = await loopback((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end(sse([created('gpt-6-luna'), { type: 'response.failed', response: { id: 'resp_01', status: 'failed', error: { code: 'server_error', message: `upstream rejected ${key}` } } }]))
+    })
+    closers.push(api.close)
+    const adapter = new OpenAIAdapter({ apiKeyRef: 'OPENAI_API_KEY', resolveKey: () => key, baseURL: api.baseURL, defaultMaxTokens: 1024 })
+    const chunks = await collect(adapter.stream(base))
+    const finish = chunks.find((chunk) => chunk.type === 'finish')
+    expect(finish).toMatchObject({ reason: { kind: 'error' } })
+    expect(JSON.stringify(finish)).not.toContain(key)
+    expect(JSON.stringify(finish)).toContain('[redacted]')
+  })
+
+  // The S20.5 review: past llm-retry's ceiling the turn ends on this message,
+  // and it did not say how long the provider had asked to wait.
+  it('names the wait a provider asked for in the failure itself', () => {
+    const body = JSON.stringify({ error: { message: 'Rate limit reached.', type: 'requests', param: null, code: 'rate_limit_exceeded' } })
+    expect(classifyHttp(429, body, new Headers({ 'retry-after': '3600' })).message).toContain('wait 3600 s')
+    expect(classifyHttp(429, body, new Headers()).message).not.toContain('wait')
+  })
+
   it('reads the retry-after-ms header, which OpenAI sends beside retry-after, and prefers it', () => {
     const body = JSON.stringify({ error: { message: 'Rate limit reached.', type: 'requests', param: null, code: 'rate_limit_exceeded' } })
     expect(classifyHttp(429, body, new Headers({ 'retry-after-ms': '1500', 'retry-after': '2' }))).toMatchObject({ failure: { retryAfterMs: 1500 } })

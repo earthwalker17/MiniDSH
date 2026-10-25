@@ -1,6 +1,6 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
 import { isHeaderSafe } from '../../core/credentials/index.ts'
-import { readErrorBody, redactLlmError } from '../../core/llm/wire.ts'
+import { readErrorBody, redactChunk, redactLlmError, retryAfterNote } from '../../core/llm/wire.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
 import { AnthropicTranslator, ANTHROPIC_PROVIDER, errorCode } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
@@ -371,7 +371,7 @@ export class AnthropicAdapter implements LlmAdapter {
     const translator = new AnthropicTranslator()
     try {
       for await (const event of parseNamedSse(response.body, resetIdle)) {
-        for (const chunk of translator.push(event.event, parseWireEvent(event.data))) yield chunk
+        for (const chunk of translator.push(event.event, parseWireEvent(event.data))) yield redactChunk(chunk, apiKey)
         if (translator.complete) break
       }
     } catch (error) {
@@ -380,7 +380,7 @@ export class AnthropicAdapter implements LlmAdapter {
       if (timer) clearTimeout(timer)
     }
     if (!translator.complete) throw new LlmError('STREAM_CLOSED', 'Anthropic stream ended without message_stop')
-    for (const chunk of translator.finalize()) yield chunk
+    for (const chunk of translator.finalize()) yield redactChunk(chunk, apiKey)
   }
 }
 
@@ -437,7 +437,7 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   else if (status === 504) code = 'TIMEOUT'
   else if (status >= 500) code = 'SERVER'
   else code = type === undefined ? 'INVALID_REQUEST' : errorCode(type) === 'SERVER' ? 'INVALID_REQUEST' : errorCode(type)
-  return new LlmError(code, `Anthropic ${status}: ${message}`, options)
+  return new LlmError(code, `Anthropic ${status}: ${message}${retryAfterNote(retryAfterMs)}`, options)
 }
 
 function parseRetryAfter(value: string | null): number | undefined {

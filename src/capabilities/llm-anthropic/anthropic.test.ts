@@ -299,6 +299,8 @@ describe('Anthropic adapter', () => {
     expect(classifyHttp(400, body('invalid_request_error', '`temperature` is deprecated for this model.'), headers())).toMatchObject({ code: 'UNSUPPORTED_OPTION' })
     expect(classifyHttp(400, body('invalid_request_error', 'messages: roles must alternate'), headers())).toMatchObject({ code: 'INVALID_REQUEST' })
     expect(classifyHttp(401, body('authentication_error', 'bad key'), headers())).toMatchObject({ code: 'AUTH' })
+    // The wait it asked for is in the message a turn ends on (S20.5 review).
+    expect(classifyHttp(429, body('rate_limit_error', 'slow down'), headers({ 'retry-after': '90' })).message).toContain('wait 90 s')
     expect(classifyHttp(404, body('not_found_error', 'model: nope'), headers())).toMatchObject({ code: 'UNKNOWN_MODEL' })
     expect(classifyHttp(429, body('rate_limit_error', 'slow'), headers({ 'retry-after': '7' }))).toMatchObject({ code: 'RATE_LIMIT', failure: { retryAfterMs: 7000 } })
     expect(classifyHttp(429, body('rate_limit_error', 'cap', { error_code: 'enforced_spend_limit_reached' }), headers())).toMatchObject({ code: 'QUOTA' })

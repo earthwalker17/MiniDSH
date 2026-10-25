@@ -352,6 +352,21 @@ describe('DeepSeek finish reasons and tool-call indices', () => {
       { type: 'tool-call', id: asCallId('c2'), name: 'read', arguments: '{"p":2}' },
     ])
   })
+
+  // The S20.5 review: a proxy that sends an empty or null id on continuation
+  // deltas had each delta opened as a call of its own, then dropped nameless.
+  it('reads an empty or null id on a continuation delta as more of the same call', () => {
+    const translator = new DeepSeekTranslator()
+    const chunks: StreamChunk[] = []
+    chunks.push(...translator.push({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'read', arguments: '{"p":' } }] } }] }))
+    chunks.push(...translator.push({ choices: [{ delta: { tool_calls: [{ index: 0, id: '', function: { arguments: '1' } }] } }] }))
+    chunks.push(...translator.push({ choices: [{ delta: { tool_calls: [{ index: 0, id: null as unknown as string, function: { arguments: '}' } }] } }] }))
+    chunks.push(...translator.push({ choices: [{ finish_reason: 'tool_calls' }] }))
+    chunks.push(...translator.finalize())
+    const assembler = new BlockAssembler()
+    for (const chunk of chunks) assembler.push(chunk)
+    expect(assembler.blocks()).toEqual([{ type: 'tool-call', id: asCallId('c1'), name: 'read', arguments: '{"p":1}' }])
+  })
 })
 
 describe('DeepSeek row contract', () => {

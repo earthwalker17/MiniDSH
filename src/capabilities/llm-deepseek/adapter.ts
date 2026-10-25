@@ -4,7 +4,7 @@ import { parseSse } from './sse.ts'
 import { DeepSeekTranslator, parseWireChunk } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
 import { resolveRequestImages } from '../../core/llm/content.ts'
-import { readErrorBody, redactLlmError } from '../../core/llm/wire.ts'
+import { readErrorBody, redactChunk, redactLlmError, retryAfterNote } from '../../core/llm/wire.ts'
 import { serializeMessages, serializeTools } from './serialize.ts'
 
 export const DEEPSEEK_PROVIDER = 'deepseek'
@@ -237,10 +237,10 @@ export class DeepSeekAdapter implements LlmAdapter {
     try {
       for await (const data of parseSse(response.body, resetIdle)) {
         if (data === '[DONE]') {
-          for (const chunk of translator.finalize()) yield chunk
+          for (const chunk of translator.finalize()) yield redactChunk(chunk, apiKey)
           return
         }
-        for (const chunk of translator.push(parseWireChunk(data))) yield chunk
+        for (const chunk of translator.push(parseWireChunk(data))) yield redactChunk(chunk, apiKey)
       }
     } catch (error) {
       throw redactLlmError(mapAbort(error, request.signal, idle.signal), apiKey)
@@ -303,7 +303,7 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   // OpenAI-compatible wire's, and it is the whole phrase or nothing.
   else if (status === 400 && (providerCode === 'context_length_exceeded' || /maximum context length/i.test(message))) code = 'CONTEXT_WINDOW_EXCEEDED'
   else code = 'INVALID_REQUEST'
-  return new LlmError(code, `DeepSeek ${status}: ${message}`, options)
+  return new LlmError(code, `DeepSeek ${status}: ${message}${retryAfterNote(retryAfterMs)}`, options)
 }
 
 function parseRetryAfter(value: string | null): number | undefined {
