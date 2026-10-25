@@ -91,12 +91,16 @@ const heard = (): void => {}
  * refusal is the host's MOMENT — out of descriptors or processes, out of
  * memory — so the same spawn may work a second later, and nothing may be
  * remembered or told to install anything. A MISSING one is the host's FACT:
- * the binary is not there, or not runnable.
+ * the binary is not there, or not runnable. A COMMAND one is the arguments':
+ * too long for one argv (E2BIG, ENAMETOOLONG on Windows past 32,767
+ * characters) or carrying a NUL Node will not pass — the same spawn fails the
+ * same way under any mode, so nothing about the host may be said of it.
  */
-export function spawnRefusal(error: unknown): 'transient' | 'missing' | 'other' {
+export function spawnRefusal(error: unknown): 'transient' | 'missing' | 'command' | 'other' {
   const code = (error as NodeJS.ErrnoException | undefined)?.code
   if (code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN' || code === 'ENOMEM') return 'transient'
   if (code === 'ENOENT' || code === 'EACCES') return 'missing'
+  if (code === 'E2BIG' || code === 'ENAMETOOLONG' || code === 'ERR_INVALID_ARG_VALUE' || code === 'ERR_INVALID_ARG_TYPE') return 'command'
   return 'other'
 }
 

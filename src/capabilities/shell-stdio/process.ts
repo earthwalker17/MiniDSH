@@ -159,12 +159,16 @@ export class ShellProcess implements ShellSession {
    * wraps its pids at 99,999 (Linux at its `pid_max`: 4,194,304 under WSL 2's
    * Ubuntu, but the kernel's own default is 32,768), which a busy machine
    * passes in hours, and a web session lives for days. So a group
-   * is dropped the moment it is provably empty (`kill(-g, 0)` answers ESRCH):
-   * before every addition and before the reap. A group with any member alive
-   * still holds its number, so pruning loses no reap; what remains is the
-   * window between a prune and the signal, never the session's whole life.
+   * is dropped once it is provably empty (`kill(-g, 0)` answers ESRCH):
+   * before every addition, when a one-shot ends, before the reap, and on a
+   * one-minute timer while any group is held. A group with any member alive
+   * still holds its number, so pruning loses no reap; what remains is the time
+   * from a group emptying to the next prune — at most that minute, never the
+   * session's whole life, which is what pruning only at additions left
+   * (S20.5 review).
    */
   private readonly reapGroups = new Set<number>()
+  private pruneTimer: NodeJS.Timeout | undefined
   /** True from a spawn until the child printed its ready marker: a child that dies before that never worked at all. */
   private fresh = false
   /** True when the live child was spawned through the confinement wrapper. */
@@ -317,7 +321,18 @@ export class ShellProcess implements ShellSession {
    * wider mode that would meet the same limit.
    */
   private spawnFailure(cmd: string, wrapped: boolean, error: unknown): Error {
-    if (spawnRefusal(error) === 'transient') {
+    const kind = spawnRefusal(error)
+    // The command's own, under any wrapper too: SANDBOX_UNAVAILABLE would steer
+    // the model to spend a consent on a wider mode that meets the same limit,
+    // and "install bash" was simply false (S20.5 review).
+    if (kind === 'command') {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code
+      return new ShellError(
+        'SHELL_COMMAND_INVALID',
+        `this command cannot be passed to a process (${code}): it is too long for one argument here or contains a NUL byte, so nothing ran; a one-shot or a job carries its command as an argument, so put a long command in a script file in the workspace and run that`,
+      )
+    }
+    if (kind === 'transient') {
       const what = transientSpawnText(error)
       return wrapped
         ? new SandboxError('SANDBOX_UNAVAILABLE', `the confinement wrapper "${cmd}" ${what} (a wider mode would meet the same limit)`)
@@ -512,6 +527,7 @@ export class ShellProcess implements ShellSession {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', onAbort)
       this.oneShotChildren.delete(child)
+      this.pruneGroups()
     }
   }
 
@@ -718,6 +734,8 @@ export class ShellProcess implements ShellSession {
       }
     }
     this.reapGroups.clear()
+    if (this.pruneTimer !== undefined) clearInterval(this.pruneTimer)
+    this.pruneTimer = undefined
   }
 
   /** A child's own process group (POSIX), entered after dropping every group that is provably empty. */
@@ -725,6 +743,7 @@ export class ShellProcess implements ShellSession {
     if (child.pid === undefined || process.platform === 'win32') return
     this.pruneGroups()
     this.reapGroups.add(child.pid)
+    this.pruneTimer ??= setInterval(() => this.pruneGroups(), 60_000).unref()
   }
 
   /**
@@ -740,6 +759,10 @@ export class ShellProcess implements ShellSession {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ESRCH') this.reapGroups.delete(group)
       }
+    }
+    if (this.reapGroups.size === 0 && this.pruneTimer !== undefined) {
+      clearInterval(this.pruneTimer)
+      this.pruneTimer = undefined
     }
   }
 }

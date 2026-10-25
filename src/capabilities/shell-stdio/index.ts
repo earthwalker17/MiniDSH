@@ -14,7 +14,7 @@ import { EFFECT_RECORDED } from '../../core/effects/index.ts'
 import { CREDENTIALS } from '../../core/credentials/index.ts'
 import { canonicalPath, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL, type Shell, type ShellSession } from '../../core/shell/index.ts'
-import { CONFINEMENT_CHOICES, selectConfinement, type Confinement, type ConfinementChoice } from './confine/index.ts'
+import { CONFINEMENT_CHOICES, selectConfinementVerdict, type Confinement, type ConfinementChoice } from './confine/index.ts'
 import { ShellProcess, type ShellDialect } from './process.ts'
 
 export interface ShellStdioConfig {
@@ -51,7 +51,13 @@ class ShellStdioProvider implements Shell {
     this.config = config
     // Probed once, at mount, and then a synchronous fact: `enforcementFor` is
     // asked while a stamp is being recorded, inside event delivery.
-    this.confinement = selectConfinement(config.confinement ?? 'auto')
+    const verdict = selectConfinementVerdict(config.confinement ?? 'auto')
+    this.confinement = verdict.confinement
+    if (!verdict.fact) {
+      ctx.logger.warn(
+        'shell-stdio: the confinement probe could not run (the host was out of descriptors or processes, or the probe hit its bound), so this process serves every session as a host without a backend; restart it once the load passes',
+      )
+    }
   }
 
   get denialSignatures(): readonly string[] {

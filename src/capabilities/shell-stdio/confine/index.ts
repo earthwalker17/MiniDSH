@@ -174,17 +174,28 @@ function build(dialect: Dialect): Confinement {
  * cannot, a platform with none. Those cannot change inside a process, so every
  * later mount of the shell row gets the same answer without paying for the
  * probe again. A probe that proved nothing (`unproved`) answers `none` to the
- * mount that asked and is forgotten, so the next mount probes again — the
+ * mount that asked and is forgotten, so a later mount probes again — the
  * browser's rule (`tool-browser`): only a host fault is remembered.
+ *
+ * A mount is once per PROCESS, though: the row's answer stands for every
+ * session that process serves, because a session's stamp and its shell must
+ * describe one world, and a re-probe landing between them would part them.
+ * So an unproved answer is `fact: false`, and the provider warns the
+ * operator that this process runs as a host without a backend until it
+ * restarts (S20.5 review: the comment had promised a re-probe).
  */
 const selected = new Map<ConfinementChoice, Confinement>()
 
-export function selectConfinement(choice: ConfinementChoice = 'auto', run: ProbeRun = spawnSync): Confinement {
+export function selectConfinementVerdict(choice: ConfinementChoice = 'auto', run: ProbeRun = spawnSync): { readonly confinement: Confinement; readonly fact: boolean } {
   const cached = selected.get(choice)
-  if (cached) return cached
-  const { confinement, fact } = resolve(choice, run)
-  if (fact) selected.set(choice, confinement)
-  return confinement
+  if (cached) return { confinement: cached, fact: true }
+  const result = resolve(choice, run)
+  if (result.fact) selected.set(choice, result.confinement)
+  return result
+}
+
+export function selectConfinement(choice: ConfinementChoice = 'auto', run: ProbeRun = spawnSync): Confinement {
+  return selectConfinementVerdict(choice, run).confinement
 }
 
 function resolve(choice: ConfinementChoice, run: ProbeRun): { readonly confinement: Confinement; readonly fact: boolean } {

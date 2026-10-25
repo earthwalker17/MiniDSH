@@ -44,7 +44,13 @@ import type { Agent } from '../agent/types.ts'
 import type { CallId } from '../ids.ts'
 import type { SandboxEnforcement, SandboxExecutionPolicy, SandboxMode } from '../sandbox/index.ts'
 
-export type ShellErrorCode = 'SHELL_UNAVAILABLE'
+/**
+ * `SHELL_UNAVAILABLE`: the shell world could not run anything (below).
+ * `SHELL_COMMAND_INVALID`: THIS command cannot be handed to a process (too
+ * long for one argument, or a NUL byte) — a one-shot or a job carries its
+ * command as an argument — and no other mode or install would change that.
+ */
+export type ShellErrorCode = 'SHELL_UNAVAILABLE' | 'SHELL_COMMAND_INVALID'
 
 /**
  * The shell world could not do what was asked of it at all — its binary is

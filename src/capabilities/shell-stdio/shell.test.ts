@@ -465,6 +465,34 @@ describe('a host out of descriptors', () => {
 })
 
 /**
+ * A one-shot and a job carry the command as an ARGUMENT, so the OS can refuse
+ * the spawn for the command itself: too long for one argv, or a NUL byte Node
+ * will not pass. That was reported as "install bash", or under a wrapper as
+ * SANDBOX_UNAVAILABLE, which steers the model to spend a consent on a wider
+ * mode that meets the same limit (S20.5 review). A NUL is refused before any
+ * binary is looked up, so the real spawner shows it on every host.
+ */
+describe('a command no process can be given', () => {
+  for (const wrapped of [false, true]) {
+    it(`refuses it as the command's own, never "install"${wrapped ? ', under a wrapper too' : ''}`, async () => {
+      dir = mkdtempSync(join(tmpdir(), 'minidsh-argv-'))
+      const wrapping: Confinement = { ...NO_CONFINEMENT, id: 'bwrap', enforcement: 'full', wrap: (cmd, args) => ({ cmd: 'bwrap', args: ['--', cmd, ...args] }) }
+      proc = new ShellProcess(dialect, dir, wrapped ? { confinement: wrapping } : {})
+      const policy: SandboxExecutionPolicy = wrapped ? { mode: 'workspace-write', workspaceRoot: dir } : unconfined(dir)
+      const command = echoCmd('a\u0000b')
+      for (const run of [() => proc!.exec({ command, policy, timeoutMs: 30_000, oneShot: true }), () => proc!.start({ command, policy, output: () => {} })]) {
+        const refusal = await run().then(
+          () => undefined,
+          (error: unknown) => error,
+        )
+        expect(refusal).toMatchObject({ code: 'SHELL_COMMAND_INVALID', message: expect.stringContaining('ERR_INVALID_ARG_VALUE') })
+        expect((refusal as Error).message).not.toMatch(/install/i)
+      }
+    })
+  }
+})
+
+/**
  * SHELL_UNAVAILABLE means the child never answered the HARNESS — never that
  * the model's own command ended it. The init line ends with a ready marker, so
  * a first command that exits the shell (`exit`, or `set -e` meeting a failing

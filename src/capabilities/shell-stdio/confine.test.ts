@@ -74,6 +74,16 @@ describe('what the confinement probe remembers', () => {
     expect(busy.calls()).toBe(5)
   })
 
+  // The verdict says which it was, so a provider that mounts once per
+  // process can tell its operator the answer is a moment's (S20.5 review).
+  it('says whether its answer is a host fact or a moment', async () => {
+    vi.resetModules()
+    const { selectConfinementVerdict } = await import('./confine/index.ts')
+    const busy = staged([{ status: null, signal: null, error: errno('EMFILE') }, ENFORCES])
+    expect(selectConfinementVerdict('bwrap', busy.run)).toMatchObject({ fact: false, confinement: { id: 'none' } })
+    expect(selectConfinementVerdict('bwrap', busy.run)).toMatchObject({ fact: true, confinement: { id: 'bwrap' } })
+  })
+
   for (const [what, answer] of [
     ['a backend that ran and refused', { status: 1, signal: null }],
     ['a binary that is not there', { status: null, signal: null, error: errno('ENOENT') }],
