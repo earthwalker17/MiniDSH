@@ -46,31 +46,35 @@ const ANTHROPIC = process.env.ANTHROPIC_API_KEY
 const OPENAI = process.env.OPENAI_API_KEY
 const silent: Logger = { warn: () => {}, error: () => {} }
 /**
- * Low enough that one note read crosses it for real, and high enough that the
- * fixed prefix does not.
+ * Crossed by the reads together, first after the switch, and never by the
+ * fixed prefix.
  *
  * Recalibrated at S20.5 against the measured prefix. The estimator puts the
  * header — system, eleven tool schemas with the browser row's five, the skill
  * list — at 3,347 tokens, and the S11 budget of 6,400 put the threshold at
  * 3,200: the prefix ALONE was over it, so the first compaction landed in turn
  * 1 or 2, on DeepSeek, before the switch, and the role assertion could not
- * fail. Now the threshold is 5,500 (11,000 × 0.5):
+ * fail. A first recalibration (threshold 5,500) made EVERY read cross: four
+ * compactions a run, so turn 1's marker reached turn 4 only through a chain of
+ * re-summaries, and the first live run lost it (2 of 7 summary nodes had
+ * carried it, the live one had not). The threshold is now 11,000 (22,000 ×
+ * 0.5), placed by the reads' sum:
  *
- *   - step 1 (prefix + one prompt, ~3.5–3.7K priced) sits near 65% of it, and
- *     the arc asserts it is below, so the premise fails by name when it decays;
- *   - one note read (161 lines, ~2,800 tokens as the editor numbers them) takes
- *     the next step to ~120%: a crossing is a READ;
- *   - after a compaction the floor is the prefix + a summary (≤ 1,024) + a
- *     short tail, ~3.9–4.5K, so pressure does not re-fire at every step;
- *   - `retainRatio` 0.25 keeps under ~1K of tail, less than one note, so a
- *     turn-boundary plan shadows the read it follows — including the first one
- *     after the switch, which is the compaction the role assertion reads.
+ *   - step 1 (prefix + one prompt, ~3.5–3.7K priced) sits near a third of it,
+ *     and the arc asserts it is below, so the premise fails by name;
+ *   - a note read (161 lines, ~2,800 tokens as the editor numbers them) adds
+ *     ~2.9K: after turn 2's read ~9.6K, under it by ~1.4K;
+ *   - turn 3's read, on Anthropic, takes its second step to ~13K: the one
+ *     crossing, after the switch, on the role's route — the compaction the
+ *     role assertion reads — and turn 1's marker is summarized once;
+ *   - a second read of one note before the switch would cross early, and the
+ *     after-the-switch assertion then fails by name.
  *
  * Compaction is this arc's vehicle, not its subject: what it exists to prove
  * is that a route switch is one durable fact, that a role can send the summary
  * somewhere else, and that the mixed log replays.
  */
-const BUDGET = 11_000
+const BUDGET = 22_000
 const THRESHOLD = 0.5
 /**
  * The compaction role's route: one the LOOP never takes. It was
@@ -263,6 +267,12 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
       .filter((event) => event.type === 'user/message' && JSON.stringify(event.data).includes('system-reminder'))
       .map((event) => JSON.stringify(event.data))
     const carried = summaries.filter((text) => text.includes('ALPHA-11')).length
+    // What the LAST answer could see: the newest applied compaction's replacing
+    // message, not every summary the session ever wrote — a token an earlier
+    // summary held and a later one dropped is a marker drop, not the model's.
+    const lastApplied = events.findLast((event) => event.type === COMPACTION_APPLIED.type)
+    const liveSummary = lastApplied === undefined ? undefined : events.find((event) => event.seq > lastApplied.seq && event.type === 'user/message')
+    const liveCarried = liveSummary === undefined || JSON.stringify(liveSummary.data).includes('ALPHA-11')
     const offered = events.some(
       (event) => event.type === 'request/header' && ((event.data as { header: { tools?: { name: string }[] } }).header.tools ?? []).some((tool) => tool.name === 'history_read'),
     )
@@ -272,11 +282,11 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
     // was never called) is about compaction; `off-instruction` (the token was
     // reachable — carried, or recalled — and the answer still lacks it) is about
     // the model. A passing run says which way it passed.
-    const reachable = carried > 0 || recalls > 0
+    const reachable = liveCarried || recalls > 0
     const shape = last.includes('ALPHA-11') ? (recalls > 0 ? 'recalled' : 'carried') : reachable ? 'off-instruction' : 'marker-drop'
     const why =
       `shape: ${shape}; after ${compactionTrace.length} applied compaction(s) shadowing [${compactionTrace.join(', ')}] node(s); ` +
-      `${carried} of ${summaries.length} summary node(s) carried ALPHA-11; history_read ${offered ? 'offered' : 'NOT offered'}, called ${recalls}x`
+      `${carried} of ${summaries.length} summary node(s) carried ALPHA-11, the live one ${liveCarried ? 'did' : 'did NOT'}; history_read ${offered ? 'offered' : 'NOT offered'}, called ${recalls}x`
     // Printed on every run, not only on a failing one. This arc's flake rate is
     // a number the route to V1 reports rather than hides, and a passing run is
     // where you learn whether it passed because the summary carried the token or

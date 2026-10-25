@@ -16,7 +16,12 @@ const IDLE_TIMEOUT_MS = 300_000
 const USER_AGENT = 'minidsh (+https://github.com/earthwalker17/MiniDSH)'
 
 /** A `thinking.type` the API accepts, as `capabilities.thinking.types` lists them. */
-export type ThinkingType = 'enabled' | 'adaptive' | 'disabled'
+/**
+ * The listing's `capabilities.thinking.types`. `between_tools` is recorded
+ * because the listing names it (Sonnet 5.5, first seen 2026-10-26) and the
+ * drift probe holds the row to the listing; this adapter never sends it.
+ */
+export type ThinkingType = 'enabled' | 'adaptive' | 'disabled' | 'between_tools'
 
 /**
  * One model's facts. The first five fields are the `GET /v1/models` listing's
@@ -69,7 +74,8 @@ const MANUAL_BUDGETS: Readonly<Record<string, number>> = { low: 2048, medium: 40
 const BUDGET_EFFORTS = ['low', 'high', 'max'] as const
 
 /**
- * Verified against the live `GET /v1/models` on 2026-10-25, reading each
+ * Verified against the live `GET /v1/models` on 2026-10-25 (re-read on
+ * 2026-10-26, when Sonnet 5.5 gained `between_tools`), reading each
  * model's own `max_input_tokens`, `max_tokens`, `capabilities.effort`,
  * `.thinking.types` and `.image_input`; the default efforts are the API
  * reference's (high, except `medium` on Opus 5.5 and Haiku 5.5). Other
@@ -80,7 +86,7 @@ const BUDGET_EFFORTS = ['low', 'high', 'max'] as const
 const CATALOG: readonly CatalogModel[] = [
   { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'medium', sampling: false, modalities: TEXT_AND_IMAGE },
-  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
+  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ['adaptive', 'between_tools'], thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: true, defaultEffort: 'medium', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-fable-5', name: 'Claude Fable 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_OR_OFF, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
