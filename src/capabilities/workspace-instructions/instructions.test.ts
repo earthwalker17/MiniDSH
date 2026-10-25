@@ -153,6 +153,35 @@ describe('discovery', () => {
     expect((await collectInstructions(strangers, child, { maxBytes: 32_000 })).map((source) => source.text)).toEqual(['child rule'])
     expect((await collectInstructions(real, child, { maxBytes: 32_000 })).map((source) => source.text)).toEqual(['a stranger\'s rule', 'child rule'])
   })
+
+  // The S20.5 review: the marker was judged through its links, so a `.git`
+  // planted as a link into the victim's own home passed. The directory that
+  // holds it must be this user's as well, and the operator is told.
+  it('trusts no marker whose directory another user owns, and says so', async () => {
+    const parent = tempDir()
+    const child = join(parent, 'child')
+    mkdirSync(child)
+    mkdirSync(join(parent, '.git'))
+    writeFileSync(join(parent, 'AGENTS.md'), 'a stranger\'s rule', 'utf8')
+    writeFileSync(join(child, 'AGENTS.md'), 'child rule', 'utf8')
+    await mount({ maxBytes: 32_000 })
+    const real = root!.get(FS)
+    const holder = real.resolve(parent, parent).path
+    const strangers: typeof real = {
+      resolve: (path, cwd) => real.resolve(path, cwd),
+      stat: async (target) => {
+        const info = await real.stat(target)
+        return info !== undefined && target.path === holder ? { ...info, ownedByMe: false } : info
+      },
+      readText: (target, actor, options) => real.readText(target, actor, options),
+      readBytes: (target, actor, options) => real.readBytes(target, actor, options),
+      writeText: (target, text, intent, actor) => real.writeText(target, text, intent, actor),
+      listDir: (target) => real.listDir(target),
+    }
+    const warned: string[] = []
+    expect((await collectInstructions(strangers, child, { maxBytes: 32_000 }, (message) => warned.push(message))).map((source) => source.text)).toEqual(['child rule'])
+    expect(warned).toEqual([expect.stringContaining('is not this user\'s project marker')])
+  })
 })
 
 describe('the budget', () => {

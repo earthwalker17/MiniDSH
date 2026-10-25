@@ -23,9 +23,10 @@ import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENT_PRE_STEP, type Agent, type PreStepDecision } from '../../core/agent/index.ts'
-import { FS, type Fs } from '../../core/fs/index.ts'
+import { FS, type Fs, type FsInfo } from '../../core/fs/index.ts'
 import { createPluginMessage } from '../../core/llm/message.ts'
 import { matches, USER_MESSAGE } from '../../core/session/index.ts'
+import { printableText } from '../../core/text.ts'
 
 export interface WorkspaceInstructionsConfig {
   /**
@@ -146,8 +147,23 @@ function alreadyEntered(agent: Agent): boolean {
   return false
 }
 
-/** Directories from the project root down to `cwd`, inclusive. */
-async function scopeChain(fs: Fs, cwd: string, markers: readonly string[]): Promise<string[]> {
+/**
+ * Whether a marker found ABOVE the cwd makes `dir` this user's project root
+ * (the same rule as `skills`' `ownProjectRoot`). Above the cwd, a directory is
+ * anyone's, so both the marker and the directory holding it must be this
+ * user's: a marker is resolved through links, and a `/tmp/.git` another user
+ * planted as a link into the victim's own home passed by its TARGET's owner
+ * (S20.5 review). A marker directly in a filesystem root is never one: any
+ * user may create folders in `C:\\`, and Windows reports no owner here.
+ */
+async function ownProjectRoot(fs: Fs, dir: string, marker: FsInfo): Promise<boolean> {
+  if (dirname(dir) === dir) return false
+  if (marker.ownedByMe === false) return false
+  return (await fs.stat(fs.resolve(dir, dir)))?.ownedByMe !== false
+}
+
+/** Directories from the project root down to `cwd`, inclusive; `warn` hears a marker `ownProjectRoot` refused. */
+async function scopeChain(fs: Fs, cwd: string, markers: readonly string[], warn?: (message: string) => void): Promise<string[]> {
   const chain: string[] = []
   let current = cwd
   let root = cwd
@@ -157,11 +173,12 @@ async function scopeChain(fs: Fs, cwd: string, markers: readonly string[]): Prom
     for (const marker of markers) {
       const found = await fs.stat(fs.resolve(join(current, marker), current))
       if (!found) continue
-      // Above the cwd, a marker another user owns is not this user's
-      // repository, and its instructions are not this user's either: a `.git`
-      // planted in a shared `/tmp` would otherwise enter the AGENTS.md beside
-      // it into every session below (S20.5 review). The cwd stands alone.
-      if (depth > 0 && found.ownedByMe === false) return [cwd]
+      // Above the cwd, a marker that is not this user's leaves the cwd
+      // standing alone: its instructions are not this user's either.
+      if (depth > 0 && !(await ownProjectRoot(fs, current, found))) {
+        warn?.(`${join(current, marker)} is not this user's project marker (or sits in a filesystem root): instructions above ${cwd} are not read`)
+        return [cwd]
+      }
       isRoot = true
       break
     }
@@ -192,7 +209,7 @@ async function readIfPresent(fs: Fs, path: string, cwd: string, maxSourceBytes: 
   }
 }
 
-export async function collectInstructions(fs: Fs, cwd: string, config: WorkspaceInstructionsConfig): Promise<Source[]> {
+export async function collectInstructions(fs: Fs, cwd: string, config: WorkspaceInstructionsConfig, warn?: (message: string) => void): Promise<Source[]> {
   const candidates = config.candidates ?? DEFAULT_CANDIDATES
   const maxSourceBytes = config.maxSourceBytes ?? DEFAULT_MAX_SOURCE_BYTES
   const sources: Source[] = []
@@ -209,7 +226,7 @@ export async function collectInstructions(fs: Fs, cwd: string, config: Workspace
   }
 
   if (config.globalPath) add(await readIfPresent(fs, config.globalPath, cwd, maxSourceBytes))
-  for (const dir of await scopeChain(fs, cwd, config.projectRootMarkers ?? DEFAULT_ROOT_MARKERS)) {
+  for (const dir of await scopeChain(fs, cwd, config.projectRootMarkers ?? DEFAULT_ROOT_MARKERS, warn)) {
     for (const name of candidates) add(await readIfPresent(fs, join(dir, name), dir, maxSourceBytes))
   }
   return sources
@@ -239,7 +256,7 @@ export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = 
         if (!fs) return decision
         let text: string | undefined
         try {
-          text = renderInstructions(await collectInstructions(fs, context.agent.session.header.cwd, config), config.maxBytes)
+          text = renderInstructions(await collectInstructions(fs, context.agent.session.header.cwd, config, (message) => ctx.logger.warn(`workspace-instructions: ${printableText(message)}`)), config.maxBytes)
         } catch {
           /**
            * Discovery degrades to "no instructions"; it must never fail the

@@ -376,6 +376,32 @@ describe('the workspace walk', () => {
     const mine = await discoverSkills(stagedFs({ ...listing, [join(tmp, '.git')]: [] }, files), cwd, { roots: [] })
     expect(mine.listed.map((skill) => skill.name)).toEqual(['evil'])
   })
+
+  // The S20.5 review: a marker is resolved through links, so a `/tmp/.git`
+  // planted as a link into the victim's own home passed by its target's owner.
+  // The directory holding the marker must be this user's too.
+  it('trusts no marker in a directory another user owns, even one that is this user\'s', async () => {
+    const tmp = P('/staged/tmp')
+    const cwd = join(tmp, 'work')
+    const planted = join(tmp, '.agents', 'skills')
+    const listing = { [join(tmp, '.git')]: [], [planted]: [{ name: 'evil', type: 'directory' as const }], [join(planted, 'evil')]: [{ name: 'SKILL.md', type: 'file' as const }] }
+    const files = { [join(planted, 'evil', 'SKILL.md')]: SKILL_TEXT.replace('alpha', 'evil') }
+    const scan = await discoverSkills(stagedFs(listing, files, {}, [], [tmp]), cwd, { roots: [] })
+    expect(scan.listed).toEqual([])
+    expect(scan.skipped).toEqual([{ path: join(tmp, '.git'), reason: expect.stringContaining('not this user') }])
+  })
+
+  // Windows reports no owner, and any user may create folders in `C:\\`.
+  it('trusts no marker in a filesystem root', async () => {
+    const top = P('/')
+    const cwd = join(top, 'work')
+    const planted = join(top, '.agents', 'skills')
+    const listing = { [join(top, '.git')]: [], [planted]: [{ name: 'evil', type: 'directory' as const }], [join(planted, 'evil')]: [{ name: 'SKILL.md', type: 'file' as const }] }
+    const files = { [join(planted, 'evil', 'SKILL.md')]: SKILL_TEXT.replace('alpha', 'evil') }
+    const scan = await discoverSkills(stagedFs(listing, files), cwd, { roots: [] })
+    expect(scan.listed).toEqual([])
+    expect(scan.skipped.map((skip) => skip.path)).toEqual([join(top, '.git')])
+  })
 })
 
 describe('the failure rule', () => {

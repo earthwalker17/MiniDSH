@@ -45,7 +45,7 @@
  * not hand out a read-before-edit token for it.
  */
 import { join, dirname } from 'node:path'
-import { FsError, type DirEntry, type Fs, type FsTarget } from '../../core/fs/index.ts'
+import { FsError, type DirEntry, type Fs, type FsInfo, type FsTarget } from '../../core/fs/index.ts'
 import { isSkillName, parseSkillFile } from './frontmatter.ts'
 
 export type SkillOrigin = 'user' | 'bundled' | 'workspace'
@@ -121,11 +121,28 @@ function byName(a: { readonly name: string }, b: { readonly name: string }): num
 }
 
 /**
+ * Whether a marker found ABOVE the cwd makes `dir` this user's project root
+ * (the same rule as `workspace-instructions`' `ownProjectRoot`). Above the cwd, a directory is
+ * anyone's, so both the marker and the directory holding it must be this
+ * user's: a marker is resolved through links, and a `/tmp/.git` another user
+ * planted as a link into the victim's own home passed by its TARGET's owner
+ * (S20.5 review). A marker directly in a filesystem root is never one: any
+ * user may create folders in `C:\\`, and Windows reports no owner here.
+ */
+async function ownProjectRoot(fs: Fs, dir: string, marker: FsInfo): Promise<boolean> {
+  if (dirname(dir) === dir) return false
+  if (marker.ownedByMe === false) return false
+  return (await fs.stat(fs.resolve(dir, dir)))?.ownedByMe !== false
+}
+
+/**
  * Directories from `cwd` up to the project root, NEAREST first — the same walk
  * as `workspace-instructions`' `scopeChain`, read the other way round, because
- * here the nearest wins outright instead of reading last.
+ * here the nearest wins outright instead of reading last. A marker that is
+ * not this user's (`ownProjectRoot`) leaves the cwd standing alone, and says
+ * where (`ignored`), so the operator is told rather than left guessing.
  */
-async function nearestFirst(fs: Fs, cwd: string, markers: readonly string[]): Promise<string[]> {
+async function nearestFirst(fs: Fs, cwd: string, markers: readonly string[]): Promise<{ chain: string[]; ignored?: string }> {
   const chain: string[] = []
   let current = cwd
   for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
@@ -133,19 +150,15 @@ async function nearestFirst(fs: Fs, cwd: string, markers: readonly string[]): Pr
     for (const marker of markers) {
       const found = await fs.stat(fs.resolve(join(current, marker), current))
       if (!found) continue
-      // Above the cwd, a marker another user owns is not this user's
-      // repository: a `.git` planted in a shared `/tmp` made every session in a
-      // directory below it list that user's skills (S20.5 review). The cwd
-      // stands alone instead.
-      if (depth > 0 && found.ownedByMe === false) return [cwd]
-      return chain
+      if (depth > 0 && !(await ownProjectRoot(fs, current, found))) return { chain: [cwd], ignored: join(current, marker) }
+      return { chain }
     }
     const parent = dirname(current)
     if (parent === current) break
     current = parent
   }
   // No marker found: the cwd is its own root, and nothing above it is searched.
-  return [cwd]
+  return { chain: [cwd] }
 }
 
 interface Candidate {
@@ -177,7 +190,11 @@ export async function discoverSkills(fs: Fs, cwd: string, config: DiscoveryConfi
   // order a patch wrote them in.
   const ordered: { path: string; origin: SkillOrigin }[] = [...(config.roots ?? [])].toSorted((a, b) => ORIGIN_RANK[a.origin] - ORIGIN_RANK[b.origin])
   try {
-    for (const dir of await nearestFirst(fs, cwd, config.projectRootMarkers ?? DEFAULT_ROOT_MARKERS)) {
+    const walk = await nearestFirst(fs, cwd, config.projectRootMarkers ?? DEFAULT_ROOT_MARKERS)
+    if (walk.ignored !== undefined) {
+      skipped.push({ path: walk.ignored, reason: 'a project marker that is not this user\'s (or sits in a filesystem root): the skills above the working directory are not read' })
+    }
+    for (const dir of walk.chain) {
       for (const sub of config.workspaceDirs ?? DEFAULT_WORKSPACE_DIRS) ordered.push({ path: join(dir, sub), origin: 'workspace' })
     }
   } catch (error) {

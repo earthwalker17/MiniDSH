@@ -118,7 +118,9 @@ class LocalFs implements Fs {
         type: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
         version: versionOf(info),
         size: info.size,
-        ...(uid === undefined ? {} : { ownedByMe: info.uid === uid }),
+        // Root owns every file in effect: a container's root working on a
+        // repository bind-mounted from its host must still find that root.
+        ...(uid === undefined ? {} : { ownedByMe: uid === 0 || info.uid === uid }),
       }
     } catch {
       return undefined

@@ -56,9 +56,10 @@ export interface FsInfo {
   readonly version: string
   readonly size: number
   /**
-   * Whether this process's own user owns the entry; absent where the platform
-   * has no such notion to ask (win32). What a walk above the workspace asks
-   * before it trusts a marker it finds there (skills, workspace instructions).
+   * Whether this process's own user owns the entry (always, for root); absent
+   * where the platform has no such notion to ask (win32). What a walk above
+   * the workspace asks of a marker AND the directory holding it before it
+   * trusts them (skills, workspace instructions).
    */
   readonly ownedByMe?: boolean
 }
