@@ -40,7 +40,13 @@ export function printableText(text: string): string {
  */
 const INVISIBLE = /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u
 
-/** True for one code point `printableText` blanks and a consent subject escapes. */
+/**
+ * True for one code point `printableText` blanks and a consent subject escapes.
+ * Untrusted text a model reads (a page, a search result) passes through
+ * `printableText` too, so a joiner there becomes a space and a word joined by
+ * ZWNJ splits — by choice: joiners are a known way to hide text, and the
+ * transcript a person reads must be what the model was shown.
+ */
 export function isInvisible(ch: string): boolean {
   return INVISIBLE.test(ch)
 }

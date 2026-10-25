@@ -161,7 +161,7 @@ function escapeControls(text: string): string {
     const code = ch.codePointAt(0)!
     if (named[ch] !== undefined) out += named[ch]
     else if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) out += `\\x${code.toString(16).padStart(2, '0')}`
-    else if (INVISIBLE.test(ch)) out += `\\u{${code.toString(16)}}`
+    else if (INVISIBLE.test(ch) || BLANK.test(ch)) out += `\\u{${code.toString(16)}}`
     else out += ch
   }
   return out
@@ -176,11 +176,21 @@ function escapeControls(text: string): string {
  */
 const INVISIBLE = { test: isInvisible }
 
+/**
+ * A character that renders as an ordinary SPACE and is not one: every other
+ * `White_Space` character (no-break, en, em, ideographic …) and the Braille
+ * blank. The S20.5 review sent 32 hidden bits as EN and EM spaces after a
+ * visible query, and the consent line showed a run of blanks a monospace
+ * terminal renders exactly like spaces. Escaped too, so U+0020 is the only
+ * blank a person approves.
+ */
+const BLANK = /(?! )[\p{White_Space}\u2800]/u
+
 /** True iff `escapeControls` would change anything but a backslash. */
 function hasControls(text: string): boolean {
   for (const ch of text) {
     const code = ch.codePointAt(0)!
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || INVISIBLE.test(ch)) return true
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || INVISIBLE.test(ch) || BLANK.test(ch)) return true
   }
   return false
 }

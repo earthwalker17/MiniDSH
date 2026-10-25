@@ -192,6 +192,19 @@ describe('the network family', () => {
     expect(clampIntent(plain)).toBe(plain)
   })
 
+  // The S20.5 review: EN and EM spaces after a visible query carried 32
+  // hidden bits, and the consent line showed blanks no terminal tells from
+  // ordinary spaces.
+  it('escapes every blank that is not U+0020, so a run of spaces cannot hide bits', () => {
+    const hidden = [0x2002, 0x2003, 0x00a0, 0x3000, 0x2800].map((code) => String.fromCodePoint(code)).join('')
+    const clamped = clampIntent(request({ payload: `node 24 release date${hidden}` }))
+    expect(clamped.escaped).toBe(true)
+    expect(clamped.payload).toBe('node 24 release date\\u{2002}\\u{2003}\\u{a0}\\u{3000}\\u{2800}')
+    // An ordinary space is still an ordinary space.
+    const plain = request({ payload: 'node 24 release date' })
+    expect(clampIntent(plain)).toBe(plain)
+  })
+
   it('cuts an over-long payload or destination, says so, and leaves it ungrantable', () => {
     const long = clampIntent(request({ payload: 'q'.repeat(5000) }))
     expect(long.payload).toHaveLength(4000)
