@@ -71,16 +71,20 @@ async function boundedRead(target: FsTarget, options: FsReadOptions): Promise<{ 
     // Whole chunks, so a read may pass the bound by at most one: a procfs file
     // such as `pagemap` refuses (EINVAL) a read whose length is not a multiple
     // of its record size, and a bound-sized last read would hit exactly that.
+    // One scratch buffer, and only what each read returned copied out: a view
+    // into a fresh chunk per read pinned 1 MiB for every short read, and a
+    // seq_file such as `/proc/kallsyms` answers ~4 KiB at a time (2 GB held
+    // for an 8 MiB bound, S20.5 review).
+    const scratch = Buffer.allocUnsafe(READ_CHUNK_BYTES)
     while (total <= maxBytes) {
-      const chunk = Buffer.allocUnsafe(READ_CHUNK_BYTES)
       let bytesRead: number
       try {
-        ;({ bytesRead } = await handle.read(chunk, 0, READ_CHUNK_BYTES, null))
+        ;({ bytesRead } = await handle.read(scratch, 0, READ_CHUNK_BYTES, null))
       } catch (error) {
         throw new FsError('FS_IO', `cannot read "${target.displayPath}" (${(error as NodeJS.ErrnoException).code ?? 'unknown error'})`)
       }
       if (bytesRead === 0) break
-      chunks.push(chunk.subarray(0, bytesRead))
+      chunks.push(Buffer.from(scratch.subarray(0, bytesRead)))
       total += bytesRead
     }
     const bytes = Buffer.concat(chunks, total)
@@ -124,8 +128,10 @@ class LocalFs implements Fs {
   async readText(target: FsTarget, actor: FsActor, options: FsReadOptions = {}): Promise<{ text: string; version: string; complete: boolean }> {
     const { bytes, version, complete } = await boundedRead(target, options)
     // `stream: true` holds back a multi-byte character the bound cut in half
-    // instead of rendering half of it as U+FFFD.
-    const text = new TextDecoder().decode(bytes, { stream: !complete })
+    // instead of rendering half of it as U+FFFD; `ignoreBOM` keeps a BOM as
+    // the text's first character, as `toString('utf8')` did, so an edit
+    // writes it back (S20.5 review: edits were stripping it).
+    const text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes, { stream: !complete })
     this.scopeOf(actor).emit(FS_OBSERVED, target, { kind: 'present', version }, actor)
     return { text, version, complete }
   }
@@ -217,8 +223,13 @@ class LocalFs implements Fs {
   private async verifyHeld(handle: FileHandle, held: BigIntStats, fenced: FsTarget, actor: FsActor): Promise<FsTarget> {
     const real = process.platform === 'linux' ? await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined) : undefined
     if (real !== undefined) {
-      if (real.endsWith(' (deleted)') || !allowsWrite(this.policyFor(actor), real)) throw this.moved(fenced)
-      return { ...fenced, path: real }
+      // Unlinked is a fact of the inode, not of the name: `/proc` appends
+      // " (deleted)" to an unlinked file's path, and a file may really be
+      // named that (S20.5 review).
+      const now = await handle.stat({ bigint: true })
+      const path = now.nlink === 0n ? undefined : real
+      if (path === undefined || !allowsWrite(this.policyFor(actor), path)) throw this.moved(fenced)
+      return { ...fenced, path }
     }
     const first = this.fence(fenced, actor)
     const named = await stat(first.path, { bigint: true }).catch(() => undefined)
@@ -250,7 +261,7 @@ class LocalFs implements Fs {
   }
 
   private moved(target: FsTarget): FsError {
-    return new FsError('FS_SANDBOX_DENIED', `"${target.displayPath}" changed while it was being written (a directory or link was swapped under it), so nothing was written`)
+    return new FsError('FS_SANDBOX_DENIED', `"${target.displayPath}" changed while it was being written (a directory or link was swapped under it), so no content was written; an empty file may remain where it was opened`)
   }
 
   /**

@@ -190,7 +190,8 @@ async function insert(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor
 async function readForEdit(fs: Fs, target: FsTarget, actor: FsActor): Promise<{ text: string; version: string }> {
   try {
     const { bytes, version } = await fs.readBytes(target, actor, { maxBytes: EDIT_MAX_BYTES })
-    return { text: new TextDecoder().decode(bytes), version }
+    // A BOM stays the text's first character, so the edit writes it back.
+    return { text: new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes), version }
   } catch (error) {
     if (error instanceof FsError && error.code === 'FS_TOO_LARGE') {
       throw new FsError('FS_TOO_LARGE', `${target.displayPath} is larger than ${EDIT_MAX_BYTES.toLocaleString('en-US')} bytes, more than this tool edits; change it with the shell`)

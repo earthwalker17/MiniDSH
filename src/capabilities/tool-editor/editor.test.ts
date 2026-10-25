@@ -67,6 +67,20 @@ describe('str_replace_editor', () => {
     expect(readFileSync(join(dir, 'c.txt'), 'utf8')).toBe('alpha gamma\n')
   })
 
+  // S20.5 review: the bounded read decoded with a TextDecoder, which drops a
+  // BOM, so every edit rewrote a BOM file without one (a .ps1 then reads as ANSI).
+  it('keeps a UTF-8 BOM through a replacement and an insert', async () => {
+    const { run, dir } = await setup()
+    const file = join(dir, 'build.ps1')
+    writeFileSync(file, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('$x = 1\n', 'utf8')]))
+    await run({ command: 'view', path: file })
+    expect((await run({ command: 'str_replace', path: file, old_str: '$x = 1', new_str: '$x = 2' })).isError).toBe(false)
+    expect((await run({ command: 'insert', path: file, insert_line: 1, new_str: '$y = 3' })).isError).toBe(false)
+    const bytes = readFileSync(file)
+    expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf])
+    expect(bytes.subarray(3).toString('utf8')).toBe('$x = 2\n$y = 3\n')
+  })
+
   it('rejects an ambiguous replacement', async () => {
     const { run, dir } = await setup()
     writeFileSync(join(dir, 'd.txt'), 'x x x\n')

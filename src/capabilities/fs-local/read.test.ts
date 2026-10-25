@@ -5,7 +5,7 @@
  * `/proc/self/pagemap`: a regular file of size 0 whose read never ends.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -88,5 +88,28 @@ describe('fs-local reads are bounded by the bytes they read', () => {
     const fs = await localFs(workspace)
     const scan = await discoverSkills(fs, workspace, { roots: [] })
     expect(scan.skipped.map((skip) => skip.reason)).toContain(`larger than ${256 * 1024} bytes`)
+  })
+
+  // S20.5 review: each read kept a view into a fresh 1 MiB chunk, and a
+  // seq_file answers ~4 KiB at a time: /proc/kallsyms held 2 GB for an 8 MiB bound.
+  it.runIf(process.platform === 'linux' && existsSync('/proc/kallsyms'))('holds what it read, not a chunk per read, from a file that answers a little at a time', async () => {
+    const workspace = tempDir()
+    const fs = await localFs(workspace)
+    const before = process.memoryUsage().arrayBuffers
+    const read = await fs.readBytes(fs.resolve('/proc/kallsyms', workspace), {}, { maxBytes: 8 * 1024 * 1024, partial: true })
+    const held = process.memoryUsage().arrayBuffers - before
+    expect(read.bytes.length).toBeGreaterThan(256 * 1024)
+    expect(held, `${read.bytes.length} bytes read, ${held} bytes of ArrayBuffer held`).toBeLessThan(64 * 1024 * 1024)
+  })
+})
+
+describe('fs-local writes judge the file they hold, not its name', () => {
+  // S20.5 review: "deleted" was read from the /proc name's suffix, so a file
+  // really named so was refused, and its create left an empty file behind.
+  it('writes a file whose name ends in " (deleted)"', async () => {
+    const workspace = tempDir()
+    const fs = await localFs(workspace)
+    await fs.writeText(fs.resolve('notes (deleted)', workspace), 'kept', { kind: 'createIfAbsent' }, {})
+    expect(readFileSync(join(workspace, 'notes (deleted)'), 'utf8')).toBe('kept')
   })
 })

@@ -99,8 +99,8 @@ export interface FsActor {
  * repository symlink to `/proc/self/pagemap` OOM-killed the host through the
  * skill scan (S20.5, measured at 3.46 GB). So a provider opens the target
  * (a FIFO without blocking), refuses one that is not a regular file once open
- * (`FS_NOT_A_FILE`), and reads at most `maxBytes + 1` bytes — its own ceiling
- * when none is given. Past the bound it refuses `FS_TOO_LARGE`, or with
+ * (`FS_NOT_A_FILE`), and reads past `maxBytes` by at most one of its own read
+ * chunks — the bound is its own ceiling when none is given. Past the bound it refuses `FS_TOO_LARGE`, or with
  * `partial` returns the first `maxBytes` and `complete: false`.
  */
 export interface FsReadOptions {
