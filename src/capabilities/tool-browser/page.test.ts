@@ -92,7 +92,9 @@ const ROUTES: Record<string, Route> = {
   '/tall': `<body style="margin:0"><div style="height:5000px;background:linear-gradient(red, blue)">tall</div></body>`,
   '/box': `<body style="margin:0;background:rgb(0,0,255)"><div style="height:1200px"></div>
     <div role="img" aria-label="red box" style="width:123px;height:45px;background:rgb(255,0,0)"></div><div style="height:1200px"></div></body>`,
-  '/late': `<p>before</p><script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<p>arrived late</p>'), 1500)</script>`,
+  // Armed by the TEST, not a clock: a 1.5 s timer from load raced the first
+  // snapshot, and a slow macOS runner snapshotted after it fired (S20.5).
+  '/late': `<p>before</p><script>window.releaseLate = () => void setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<p>arrived late</p>'), 1000)</script>`,
   '/keys': `<input id="a" aria-label="First" value="abc"><input id="b" aria-label="Second"><p id="mirror"></p><script>
     a.addEventListener('input', () => { mirror.textContent = 'value:' + a.value })
   </script>`,
@@ -241,6 +243,7 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
 
       const before = await go('/late')
       expect(before).not.toContain('arrived late')
+      await evaluate('releaseLate()')
       expect(await page.snapshot({ ...budget(), waitForText: 'arrived late' })).toContain('arrived late')
       const started = Date.now()
       await expect(page.snapshot({ ...budget(1_000), waitForText: 'never here' })).rejects.toMatchObject({ code: 'BROWSER_TIMEOUT', message: expect.stringContaining('never here') })
