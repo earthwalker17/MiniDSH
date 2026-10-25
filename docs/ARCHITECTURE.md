@@ -219,7 +219,7 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | `live` | a SIGKILL inside a dispatched call: a second process repairs as a cold `verify` predicts, the call `TOOL_OUTCOME_UNKNOWN` |
 | `authority` | an edit lands, recorded, one outside refused; the shell escalates unconfined, writes no host file confined; `read-only` refuses |
 | `composition` | a disk composition loads a module tool; `settings.json` picks the route |
-| `context` | a crossing made by reading compacts, citing exactly the shadowed seqs, a note read among them; AGENTS.md obeyed; a spilled value read back |
+| `context` | a crossing made by reading compacts, citing exactly the shadowed seqs, and a note read is shadowed; AGENTS.md obeyed; a spilled value read back |
 | `routing` | DeepSeek → Anthropic, one route fact; a `compaction` role off the base route after the switch; Anthropic's signature replayed; OpenAI encrypted reasoning and a tool-result image; three routes replayed |
 | `delegation` | a child's demanded escalation decided by its pin, not widenable |
 | `verification` | a text-only parent's `view_image` refused; a role-routed child reads a test-drawn PNG |

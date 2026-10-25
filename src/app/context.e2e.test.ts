@@ -72,7 +72,10 @@ const pwsh = process.platform === 'win32'
  *     + tail: the planner does not subtract the header (A5-9), so it is ~4–5.5K,
  *     well under the threshold, and pressure does not re-fire at every step;
  *   - `retainRatio` 0.25 caps the kept tail at a quarter of the live surface,
- *     below one note, so a turn-boundary plan always shadows the read it follows;
+ *     below one note. A crossing found at a turn boundary shadows the read it
+ *     follows; one found at the pre-step right after the read keeps that open
+ *     turn and shadows only earlier ones, so the read goes at the NEXT
+ *     compaction (the second Windows run of S20.5 compacted turn 1 alone first);
  *   - the peak a compaction cannot avoid (the floor plus one note) is ~10–12K,
  *     under the 16,000 budget the arc's last assertion holds it to.
  */
@@ -276,9 +279,12 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
     const noteReads = events.filter((event) => event.type === 'tool/result' && JSON.stringify(event.data).includes(MARKER_PHRASE))
     expect(noteReads.length, 'no tool result ever carried a note: the model never read one').toBeGreaterThan(0)
     expect(applied[0]!.seq, 'the first compaction came before any note was read').toBeGreaterThan(noteReads[0]!.seq)
+    // A note's bulk is what compaction relieved — by the first compaction at a
+    // turn boundary, or by the next one when the first came mid-turn.
+    const shadowed = applied.flatMap((event) => (event.data as { shadowedSeqs: number[] }).shadowedSeqs)
     expect(
-      noteReads.some((read) => record.shadowedSeqs.includes(read.seq)),
-      `the first compaction shadowed ${record.shadowedSeqs.join(', ')} and no note read (${noteReads.map((read) => read.seq).join(', ')})`,
+      noteReads.some((read) => shadowed.includes(read.seq)),
+      `${applied.length} compaction(s) shadowed ${shadowed.join(', ')} and no note read (${noteReads.map((read) => read.seq).join(', ')})`,
     ).toBe(true)
 
     // The replace cites every node it shadowed, and the log still holds them all.
