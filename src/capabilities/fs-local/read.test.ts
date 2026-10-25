@@ -104,6 +104,15 @@ describe('fs-local reads are bounded by the bytes they read', () => {
 })
 
 describe('fs-local writes judge the file they hold, not its name', () => {
+  // The S20.5 review: the write's open blocked on a FIFO with no reader, a
+  // libuv thread held for as long as nobody read it.
+  it.runIf(process.platform !== 'win32')('refuses a FIFO at once instead of waiting for a reader', { timeout: 10_000 }, async () => {
+    const workspace = tempDir()
+    execFileSync('mkfifo', [join(workspace, 'pipe')])
+    const fs = await localFs(workspace)
+    await expect(fs.writeText(fs.resolve('pipe', workspace), 'x', { kind: 'unconditional' }, {})).rejects.toMatchObject({ code: expect.stringMatching(/^FS_/) })
+  })
+
   // S20.5 review: "deleted" was read from the /proc name's suffix, so a file
   // really named so was refused, and its create left an empty file behind.
   it('writes a file whose name ends in " (deleted)"', async () => {

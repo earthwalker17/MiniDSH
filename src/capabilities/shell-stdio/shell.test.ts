@@ -478,6 +478,23 @@ describe('a host out of descriptors', () => {
  * mode that meets the same limit (S20.5 review). A NUL is refused before any
  * binary is looked up, so the real spawner shows it on every host.
  */
+// The S20.5 review: a disposal that landed while the shell restarted into
+// another world found no child to kill, and the restart then spawned one
+// nothing would reap. Windows' tree kill (~0.26 s) is the window this lands in.
+describe('a disposal during a restart', () => {
+  it('spawns nothing after it', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-restart-'))
+    const identity: Confinement = { ...NO_CONFINEMENT, id: 'bwrap', enforcement: 'full', wrap: (cmd, args) => ({ cmd, args: [...args] }) }
+    proc = new ShellProcess(dialect, dir, { confinement: identity })
+    await proc.exec({ command: echoCmd('first'), policy: { mode: 'workspace-write', workspaceRoot: dir }, timeoutMs: 60_000 })
+    const run = proc.exec({ command: echoCmd('second'), policy: { mode: 'read-only', workspaceRoot: dir }, timeoutMs: 60_000 })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await proc.dispose()
+    await run.catch(() => undefined)
+    expect((proc as unknown as { child?: unknown }).child).toBeUndefined()
+  }, SHELL_TEST_TIMEOUT_MS)
+})
+
 describe('a command no process can be given', () => {
   for (const wrapped of [false, true]) {
     it(`refuses it as the command's own, never "install"${wrapped ? ', under a wrapper too' : ''}`, async () => {

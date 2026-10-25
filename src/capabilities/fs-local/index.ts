@@ -174,7 +174,11 @@ class LocalFs implements Fs {
     const fenced = this.fence(target, actor)
     if (intent.kind === 'replaceIfVersion' && !(await this.stat(fenced))) throw new FsError('FS_NOT_FOUND', `"${target.displayPath}" no longer exists`)
     await this.makeParents(fenced, actor)
+    // O_NONBLOCK as the read path has it: a FIFO swapped in for the file
+    // between the read and this open would otherwise block a threadpool
+    // thread until a reader came (S20.5 review); a regular file ignores it.
     const flags =
+      (process.platform === 'win32' ? 0 : constants.O_NONBLOCK) |
       constants.O_WRONLY |
       (intent.kind === 'replaceIfVersion' ? 0 : constants.O_CREAT) |
       (intent.kind === 'createIfAbsent' ? constants.O_EXCL : 0) |

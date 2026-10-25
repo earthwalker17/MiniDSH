@@ -270,6 +270,7 @@ export class ShellProcess implements ShellSession {
    */
   private async ensureChild(policy: SandboxExecutionPolicy, world: string): Promise<ChildProcessWithoutNullStreams> {
     if (this.child && this.child.exitCode === null && !this.child.killed) return this.child as ChildProcessWithoutNullStreams
+    if (this.disposed) throw new ShellError('SHELL_UNAVAILABLE', 'this shell session has ended')
     const base = shellCommand(this.dialect, this.shellPath)
     const { cmd, args } = this.confinement.wrap(base.cmd, base.args, policy)
     const wrapped = cmd !== base.cmd
@@ -393,6 +394,10 @@ export class ShellProcess implements ShellSession {
     if (this.child !== undefined && this.childWorld !== world) {
       await this.restart()
       restarted = true
+      // A disposal that landed inside the restart found no child to kill (the
+      // restart had already let go of it); spawning now would leave a shell
+      // nothing reaps (S20.5 review).
+      if (this.disposed) return { output: '', timedOut: false, truncated: false, reset: false, aborted: true, sandbox }
     }
     const child = await this.ensureChild(request.policy, world)
     const closed = this.childClosed
