@@ -167,8 +167,14 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
 
     // ---- replay, bound by delegation, children handed over in reverse -----------
     const parentTurnOne = events.slice(0, events.findIndex((event) => event.type === 'turn/end') + 1)
-    const replayWorkspace = tempDir('minidsh-e2e21-replay-ws-')
-    seedWorkspace(replayWorkspace)
+    // The replay runs in the SAME workspace, the children's files removed: a
+    // child that named a path absolutely (the prompt asks it not to; one WSL
+    // run in three did anyway, S21) replays inside the fence of the root its
+    // recording named, so the world check tests the runtime, not the model's
+    // path style. A fresh root would refuse every such write.
+    const replayWorkspace = workspace
+    for (const team of Object.keys(TEAMS)) rmSync(join(replayWorkspace, team, 'CODENAME.txt'), { force: true })
+    for (const team of Object.keys(TEAMS)) expect(existsSync(join(replayWorkspace, team, 'CODENAME.txt'))).toBe(false)
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     const replayFrames: { sessionId: string; event: EventEnvelope }[] = []
     const replayed = await runTask(
