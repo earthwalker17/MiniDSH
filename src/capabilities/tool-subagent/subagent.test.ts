@@ -868,7 +868,13 @@ describe('S21: delegations in one message run at once, joined at the parent\'s s
         .filter((record) => record.type === 'tool/result' && (record.data as { callId: string }).callId.startsWith('edit-'))
         .map((record) => (record.data as { error?: { code: string } }).error?.code ?? 'ok'),
     )
-    expect(outcomes.toSorted()).toEqual(['FS_STALE_VERSION', 'ok'])
+    // Exactly one edit lands; the other is refused, never silently lost. WHICH
+    // refusal is a race the test does not own: a loser that reads the file
+    // after the winner wrote no longer finds its `old_str` (FS_EDIT_NOT_FOUND);
+    // one that read it before is refused at the write (FS_STALE_VERSION). Both
+    // were seen: the second only on CI's Windows runner (S21).
+    expect(outcomes.filter((code) => code === 'ok')).toHaveLength(1)
+    expect(outcomes.filter((code) => code !== 'ok')).toEqual([expect.stringMatching(/^(FS_STALE_VERSION|FS_EDIT_NOT_FOUND)$/)])
     expect(['value = 1\n', 'value = 2\n']).toContain(readFileSync(join(w.cwd, 'shared.txt'), 'utf8'))
     await handle.dispose()
   })
