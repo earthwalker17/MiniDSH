@@ -209,13 +209,14 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
         logger: silent,
         patches: [{ id: 'llm-deepseek', disabled: true }],
         prepare: (context) => {
-          replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [childEvents] })
+          replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [{ id: childId, events: childEvents }] })
         },
       },
       undefined,
     )
-    // Both sessions replayed their own recording, in the order the recording
-    // delegated in, and both were drained.
+    // Both sessions replayed their own recording — the child's found through
+    // the call that delegated it, never by when it first asked — and both
+    // were drained.
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
   })

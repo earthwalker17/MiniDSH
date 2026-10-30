@@ -41,8 +41,9 @@
  * ever runs when the delegating call's result is served.
  */
 import type { Context, Disposer } from '../kernel/index.ts'
-import { AGENT_OPTIONS, AGENTS, INBOX_SPLICED, SUBAGENT_END } from '../core/agent/index.ts'
+import { AGENT_OPTIONS, AGENTS, INBOX_SPLICED, SUBAGENT_END, SUBAGENT_START, type Agent } from '../core/agent/index.ts'
 import { COMPACTION_END } from '../core/compaction/events.ts'
+import type { SessionId } from '../core/ids.ts'
 import { JOB_END, JOB_START, noticeJobId } from '../core/jobs/events.ts'
 import { restoreMessage } from '../core/llm/message.ts'
 import type { Message } from '../core/llm/types.ts'
@@ -339,6 +340,27 @@ export function recordedAnswers(events: readonly EventEnvelope[]): Map<string, R
 }
 
 /**
+ * Every delegation a log recorded: the child ids its `subagent/start`s name,
+ * by the (turn, step, callId) of the delegating call. The step is the
+ * ENCLOSING one — the last `step/start` before the record, which the
+ * delegation tool appends inside its call's body — because a call id is unique
+ * only within a step. A list, so a key two records share is refused as
+ * ambiguous rather than settled by position.
+ */
+function recordedDelegations(events: readonly EventEnvelope[]): Map<string, string[]> {
+  const delegations = new Map<string, string[]>()
+  let at = { turn: 0, step: 0 }
+  for (const event of events) {
+    if (matches(event, STEP_START)) at = { turn: event.data.turn, step: event.data.step }
+    else if (matches(event, SUBAGENT_START)) {
+      const key = answerKey(at.turn, at.step, event.data.callId)
+      delegations.set(key, [...(delegations.get(key) ?? []), event.data.childId])
+    }
+  }
+  return delegations
+}
+
+/**
  * A log that repair answered is not an oracle: its synthetic results say what
  * nobody's body did. Every closer repair (or a fork of a held log) writes
  * counts — a conservative tool result, `turn/end{interrupted}`, and the three
@@ -370,19 +392,36 @@ class ReplayScript {
   private readonly auxScript: AuxGroup[]
   private cursor = 0
   private auxCursor = 0
+  /** The session id a child's log was recorded under; the root's is never needed, because the root is bound by having no parent. */
+  readonly id: string | undefined
   /** The recording's tool answers, and which of them the effect-free middleware has served. */
   readonly answers: Map<string, RecordedAnswer>
   readonly served = new Set<string>()
+  /** The children this log delegated to, by the delegating call's (turn, step, callId). */
+  readonly delegations: ReadonlyMap<string, readonly string[]>
   /** The recording's job notices still owed to the replayed session. */
   readonly notices: RecordedNotice[]
   /** Hands a notice to the replayed session bound to this script. */
   deliver: (sessionId: string, notice: RecordedNotice) => void = () => {}
-  constructor(keyed: { script: StreamChunk[][]; keys: string[] }, auxScript: AuxGroup[], answers: Map<string, RecordedAnswer>, notices: RecordedNotice[] = []) {
+  constructor(
+    id: string | undefined,
+    keyed: { script: StreamChunk[][]; keys: string[] },
+    auxScript: AuxGroup[],
+    answers: Map<string, RecordedAnswer>,
+    delegations: ReadonlyMap<string, readonly string[]>,
+    notices: RecordedNotice[] = [],
+  ) {
+    this.id = id
     this.script = keyed.script
     this.keys = keyed.keys
     this.auxScript = auxScript
     this.answers = answers
+    this.delegations = delegations
     this.notices = notices
+  }
+
+  get label(): string {
+    return this.id === undefined ? 'the root log' : `child log "${this.id}"`
   }
 
   /** The notices a step after the first took: owed once the previous step's model call is served, before that step's claim. */
@@ -458,40 +497,104 @@ class ReplayScript {
  * only compares a cursor to a length. The delegation arc's own comment recorded
  * that as intent.
  *
- * Sessions are matched to logs in FIRST-REQUEST order — a replayed child gets a
- * fresh id, so nothing can be keyed on the recorded one, but the order in which
- * agents first ask is exactly the order the recording delegated in. A session
- * that asks with no log left is a loud failure, not a silent reassignment.
+ * A session is bound to a log by its DELEGATION, never by the order it first
+ * asks in. First-request order was the rule until S21, and it held only while
+ * one child ran at a time: once a step's children run concurrently, which of
+ * them asks first is a race, a child served its sibling's log replays another
+ * conversation, and `assertConsumed` passes on arithmetic, because the cursors
+ * still add up. The key is the join both sides already write durably (§4): the
+ * live child's header names its parent (`delegatedBy`) and the call
+ * (`delegatedByCallId`); the live parent's `tool/call` for that call gives its
+ * (turn, step), which a replayed parent reproduces; and the parent's RECORDED
+ * `subagent/start` at that (turn, step, callId) — a call id is unique only
+ * within a step — names the recorded child, whose log was installed under that
+ * id. A replayed child gets a fresh id, so its recorded one is reachable only
+ * through its parent; a grandchild is found the same way, through its own
+ * parent's log. The one session with no `delegatedBy` is the root, and binds to
+ * the replay's own log.
+ *
+ * Every way the key can fail is a loud refusal naming the session and the key,
+ * never a fallback to order. The seam turns the throw into a failed step, which
+ * a replay could survive, so the refusal is also kept for `assertConsumed`.
  */
 class ReplayDispatch {
-  private readonly sources: readonly ReplayScript[]
+  private readonly root: ReplayScript
+  /** The installed child logs, by the session id each was recorded under. */
+  private readonly children: ReadonlyMap<string, ReplayScript>
+  private readonly live: (id: SessionId) => Agent | undefined
   private readonly bySession = new Map<string, ReplayScript>()
-  private assigned = 0
-  constructor(sources: readonly ReplayScript[]) {
-    this.sources = sources
+  /** The session each bound log answers: a log is one session's oracle, so it is bound once. */
+  private readonly holders = new Map<ReplayScript, string>()
+  /** Every child id some installed log's `subagent/start` names, to say why a log was never bound. */
+  private readonly delegated: ReadonlySet<string>
+  constructor(root: ReplayScript, children: ReadonlyMap<string, ReplayScript>, live: (id: SessionId) => Agent | undefined) {
+    this.root = root
+    this.children = children
+    this.live = live
+    this.delegated = new Set([root, ...children.values()].flatMap((script) => [...script.delegations.values()].flat()))
   }
 
   for(request: LlmRequest): ReplayScript {
+    // A request with no session (a direct seam call) can only be the root's.
     const key = request.sessionId ?? '<no session>'
     const known = this.bySession.get(key)
     if (known) return known
-    const source = this.sources[this.assigned]
-    if (!source) {
-      throw new Error(
-        `llm-replay: ${this.assigned + 1} sessions have asked for a model, but only ${this.sources.length} recorded log(s) were installed — ` +
-          `session "${key}" has none, and a delegated child makes its own calls and needs its own log`,
-      )
+    const script = request.sessionId === undefined ? this.rootFor(key) : this.resolve(request.sessionId)
+    this.bySession.set(key, script)
+    this.holders.set(script, key)
+    return script
+  }
+
+  private resolve(sessionId: SessionId): ReplayScript {
+    const agent = this.live(sessionId)
+    if (!agent) return this.refuse(`session "${sessionId}" asked for a model and is not a live agent, so its lineage cannot be read`)
+    const { delegatedBy, delegatedByCallId } = agent.session.header
+    if (delegatedBy === undefined) return this.rootFor(sessionId)
+    const parent = this.bySession.get(delegatedBy)
+    if (!parent) return this.refuse(`child session "${sessionId}" was delegated by "${delegatedBy}", which never asked for a model here, so no recording holds its delegation`)
+    if (delegatedByCallId === undefined) return this.refuse(`child session "${sessionId}" names no delegating call (delegatedByCallId), so its delegation cannot be keyed`)
+    const delegator = this.live(delegatedBy)
+    if (!delegator) return this.refuse(`child session "${sessionId}" was delegated by call ${delegatedByCallId} of "${delegatedBy}", which is not live`)
+    // The parent's own record of the call, as `answerFromRecording` finds one.
+    let at: { turn: number; step: number } | undefined
+    const facts = delegator.session.facts
+    for (let i = facts.length - 1; i >= 0 && at === undefined; i--) {
+      const event = facts[i]!
+      if (matches(event, TOOL_CALL) && event.data.callId === delegatedByCallId) at = { turn: event.data.turn, step: event.data.step }
     }
-    this.assigned += 1
-    this.bySession.set(key, source)
-    return source
+    if (!at) return this.refuse(`child session "${sessionId}" was delegated by call ${delegatedByCallId}, which its parent "${delegatedBy}" has no tool/call for`)
+    const key = answerKey(at.turn, at.step, delegatedByCallId)
+    const recorded = parent.delegations.get(key) ?? []
+    if (recorded.length !== 1) {
+      const found = recorded.length === 0 ? 'no subagent/start' : `${recorded.length} subagent/starts (${recorded.join(', ')})`
+      return this.refuse(`child session "${sessionId}" was delegated by call ${key}, and ${parent.label} records ${found} for that call`)
+    }
+    const childId = recorded[0]!
+    const script = this.children.get(childId)
+    if (!script) return this.refuse(`child session "${sessionId}" was delegated by call ${key}, which the recording delegated to "${childId}", and no child log with that id was installed`)
+    const holder = this.holders.get(script)
+    if (holder !== undefined) return this.refuse(`child session "${sessionId}" (call ${key}) keys to ${script.label}, which already answers session "${holder}"`)
+    return script
+  }
+
+  private rootFor(key: string): ReplayScript {
+    const holder = this.holders.get(this.root)
+    if (holder !== undefined) {
+      return this.refuse(`session "${key}" is a second top-level session asking for a model, and the root log already answers "${holder}"; only a delegated child can have a log of its own`)
+    }
+    return this.root
+  }
+
+  private refuse(why: string): never {
+    this.mismatch ??= why
+    throw new Error(`llm-replay: ${why}`)
   }
 
   stream(request: LlmRequest): AsyncIterable<StreamChunk> {
     return this.for(request).stream(request)
   }
 
-  /** The recording a session was bound to by its first model request, if it has made one. */
+  /** The recording a session was bound to at its first model request, if it has made one. */
   bound(sessionId: string): ReplayScript | undefined {
     return this.bySession.get(sessionId)
   }
@@ -507,8 +610,15 @@ class ReplayDispatch {
 
   assertConsumed(): void {
     if (this.mismatch !== undefined) throw new Error(`llm-replay: the replay left its recording: ${this.mismatch}`)
-    this.sources.forEach((source, index) => {
-      const which = this.sources.length === 1 ? '' : ` (log ${index})`
+    for (const source of [this.root, ...this.children.values()]) {
+      const which = this.children.size === 0 ? '' : ` (${source.label})`
+      // A child log no replayed delegation reached. One with no steps owes
+      // nothing: a delegation whose call was cancelled before its child started
+      // records the bracket, and the child never asks (`tool-subagent`).
+      if (source !== this.root && !this.holders.has(source) && (source.total() > 0 || source.auxTotal() > 0)) {
+        const why = this.delegated.has(source.id!) ? 'the recording delegated to it, and no replayed child was delegated by that call' : 'no installed log records a subagent/start for it'
+        throw new Error(`llm-replay: ${source.label} was never bound to a session — ${why} — and holds ${source.total()} recorded step(s)`)
+      }
       if (source.consumed() !== source.total()) {
         throw new Error(`llm-replay: replayed ${source.consumed()} of ${source.total()} recorded steps${which}`)
       }
@@ -522,7 +632,7 @@ class ReplayDispatch {
         const owed = [...source.answers].filter(([key, answer]) => answer.bodied === 'yes' && !source.served.has(key)).map(([key]) => key)
         if (owed.length > 0) throw new Error(`llm-replay: ${owed.length} recorded tool answer(s) were never asked for${which}: ${owed.join(', ')}`)
       }
-    })
+    }
   }
 }
 
@@ -632,11 +742,13 @@ export function installLlmReplay(
   options: {
     events: readonly EventEnvelope[]
     /**
-     * The logs of the sessions this one DELEGATED to, in the order it started
-     * them — a child makes its own model calls, and without its own log it
-     * would eat its parent's next recorded step.
+     * The logs of the sessions this one DELEGATED to, and theirs to theirs,
+     * each under the session id it was recorded with: a set, in no order. A
+     * child makes its own model calls, and without its own log it would eat its
+     * parent's next recorded step; it is bound to that log by the call that
+     * delegated it (`ReplayDispatch`), never by when it first asks.
      */
-    children?: readonly (readonly EventEnvelope[])[]
+    children?: readonly { readonly id: string; readonly events: readonly EventEnvelope[] }[]
     provider?: string
     providers?: readonly string[]
     contextWindow?: number
@@ -646,28 +758,36 @@ export function installLlmReplay(
   },
 ): ReplayHandle {
   const effects = options.effects ?? 'run'
+  const children = options.children ?? []
   if (effects === 'recorded') {
-    if ((options.children ?? []).length > 0) {
+    if (children.length > 0) {
       throw new Error("llm-replay: an effect-free replay never runs a child — the delegating call's recorded result answers for it; pass no children")
     }
     if (repairedInterruption(options.events)) {
       throw new Error("llm-replay: this log holds a repaired interruption, so its recorded results are not all a body's; it is no oracle")
     }
   }
-  const logs = [options.events, ...(options.children ?? [])]
+  const logs = [options.events, ...children.map((child) => child.events)]
   if (effects === 'run' && logs.some((events) => events.some((event) => matches(event, JOB_START)))) {
     throw new Error("llm-replay: this log ran background jobs, whose completions arrived when the clock said; replay it with effects: 'recorded', which re-delivers them where the recording took them")
   }
-  const sources = logs.map(
-    (events) =>
-      new ReplayScript(
-        keyedReplayScript(events, options.attempts ?? 'every'),
-        foldAuxCalls(events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) })),
-        recordedAnswers(events),
-        effects === 'recorded' ? recordedNotices(events) : [],
-      ),
-  )
-  const shared = new ReplayDispatch(sources)
+  const scriptOf = (id: string | undefined, events: readonly EventEnvelope[]): ReplayScript =>
+    new ReplayScript(
+      id,
+      keyedReplayScript(events, options.attempts ?? 'every'),
+      foldAuxCalls(events).map((record) => ({ purpose: record.purpose, chunks: auxCallChunks(record) })),
+      recordedAnswers(events),
+      recordedDelegations(events),
+      effects === 'recorded' ? recordedNotices(events) : [],
+    )
+  const root = scriptOf(undefined, options.events)
+  const byId = new Map<string, ReplayScript>()
+  for (const child of children) {
+    if (byId.has(child.id)) throw new Error(`llm-replay: two child logs were installed under the session id "${child.id}"`)
+    byId.set(child.id, scriptOf(child.id, child.events))
+  }
+  const sources = [root, ...byId.values()]
+  const shared = new ReplayDispatch(root, byId, (id) => owner.tryGet(AGENTS)?.get(id))
   shared.effects = effects
   // A re-delivered notice goes through the replayed agent's own inbox, with
   // the recorded waking flag: the one queue, exactly as a registry delivers.

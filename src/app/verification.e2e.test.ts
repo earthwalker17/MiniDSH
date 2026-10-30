@@ -297,7 +297,7 @@ describe.skipIf(!KEY)('S8 live E2E: a vision verifier sees what its parent canno
         patches: [{ id: 'llm-deepseek', disabled: true }],
         configLayers: [{ name: 'home', patches: await toPatches(file, replayHome) }],
         prepare: (context) => {
-          replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [childEvents] })
+          replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [{ id: childId, events: childEvents }] })
         },
       },
       undefined,

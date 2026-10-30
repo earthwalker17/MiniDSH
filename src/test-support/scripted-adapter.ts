@@ -1,7 +1,8 @@
 /**
  * A scripted LLM adapter for tests: a queue of chunk scripts, one consumed per
- * `stream()` call, plus builders for the common turn shapes. Only the model is
- * scripted; everything downstream (loop, tools, session) stays real.
+ * `stream()` call (or per matching call, `scriptWhen`), plus builders for the
+ * common turn shapes. Only the model is scripted; everything downstream (loop,
+ * tools, session) stays real.
  */
 import { asCallId } from '../core/ids.ts'
 import type { LlmAdapter, LlmRequest, ModelInfo, ResolvedModel, StreamChunk, TokenUsage } from '../core/llm/types.ts'
@@ -14,6 +15,7 @@ export class ScriptedAdapter implements LlmAdapter {
   readonly provider: string
   readonly calls: LlmRequest[] = []
   private readonly queue: ScriptedResponse[] = []
+  private readonly keyed: { readonly match: (request: LlmRequest) => boolean; readonly queue: ScriptedResponse[] }[] = []
 
   constructor(options: { provider?: string } = {}) {
     this.provider = options.provider ?? 'scripted'
@@ -25,9 +27,21 @@ export class ScriptedAdapter implements LlmAdapter {
     return this
   }
 
+  /**
+   * Enqueues responses served only to a request `match` accepts, ahead of the
+   * shared queue; the first registered queue that matches and still has one
+   * answers. Sessions that run at once (sibling children of one step) ask in an
+   * order no test controls, so one shared FIFO would hand each the other's
+   * script: key each by what only its requests carry, such as a child's task.
+   */
+  scriptWhen(match: (request: LlmRequest) => boolean, ...responses: ScriptedResponse[]): this {
+    this.keyed.push({ match, queue: [...responses] })
+    return this
+  }
+
   async *stream(request: LlmRequest): AsyncIterable<StreamChunk> {
     this.calls.push(request)
-    const response = this.queue.shift()
+    const response = this.keyed.find((entry) => entry.queue.length > 0 && entry.match(request))?.queue.shift() ?? this.queue.shift()
     if (response === undefined) throw new Error('ScriptedAdapter: no scripted response remaining')
     const chunks = typeof response === 'function' ? await response(request) : response
     for (const chunk of chunks) {

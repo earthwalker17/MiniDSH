@@ -362,7 +362,7 @@ describe.skipIf(!KEY || testBrowser === undefined)('S20 live E2E: a frontend che
         patches: [{ id: 'llm-deepseek', disabled: true }],
         configLayers: [{ name: 'home', patches: await toPatches(file, replayHome) }],
         prepare: (context) => {
-          replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [childEvents] })
+          replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [{ id: childId, events: childEvents }] })
         },
       },
       undefined,
