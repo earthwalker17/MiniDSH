@@ -34,8 +34,6 @@ A Cordis plugin tree with "no privileged core" (`docs/architecture.md`): 52 grou
 
 ## Open for the route
 
-- **S21, parallel calls are composition.** An executor row per deployment or preset; the loop forwards `agent-loop.maxParallelToolCalls` (default 10) to each `ctx.tools.execute()` batch. `docs/upgrade-guide/v0.2.1-rc.2/tool-executor-plugins/guide.md`
-- **S21, a child's capability set.** Its parent's exact preset revision, never the current definition. `packages/preset/agent-preset-registry/src/index.ts`
 - **S22, one launcher.** `scripts/verify-application-entrypoints.ts` rejects a bin bypassing `dsh`; Desktop boots through `@deepseek-ai/dsh/profile-boot`. `apps/cli/README.md`
 
 ## Sources

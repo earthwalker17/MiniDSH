@@ -1,6 +1,6 @@
 # What MiniDSH believes about DSH: the ledger
 
-> Every row rerun at `deepseek-ai/deepseek-harness@22ddee37` (master, 2026-10-23, `dsh-v0.2.1-rc.3`) in S20.5 (2026-10-25). See [the reading rules](README.md).
+> Every row rerun at `deepseek-ai/deepseek-harness@22ddee37` (master, 2026-10-23, `dsh-v0.2.1-rc.3`) in S20.5 (2026-10-25); S21 reran the execution rows and the four it added at `ce7073d5` (2026-10-29, `dsh-0.2.1-rc.5`). See [the reading rules](README.md).
 
 Each claim a MiniDSH document leans on is a row with its verdict when last checked. After a `falsified` or `partly`, the document in the last column says the corrected thing or stops saying it; a row that no document, or only the BP §4 record, leans on is deleted. Verdicts: `confirmed`, `partly` (true, with a correction that matters), `falsified`, `unverifiable`. ARCH, BP, PROJ = `docs/ARCHITECTURE.md`, `docs/BLUEPRINT.md`, `docs/PROJECT.md`; a bare source path is under `packages/`.
 
@@ -29,6 +29,7 @@ Each claim a MiniDSH document leans on is a row with its verdict when last check
 | Upstream records no effect of a call | partly | A log-only `workspace/changes {turn}` marker per top-level turn; nothing per call | `deliverables/workspace-changes/README.md` | ARCH §12 |
 | Upstream repair reaches the whole unfinished log | falsified | ONE tail step; turn, step and tool events only; a job bracket is never closed | `core/session/src/repair.ts` | ARCH §12 |
 | A child can be joined back to its delegating CALL | falsified | No structured join: `subagent/catalog` carries no call id; only the call's result text names the child | `subagent/subagent/src/catalog.ts` | ARCH §12 |
+| Replay binds a child by first-call order upstream | confirmed | Keying deferred "until such a scenario exists"; the one parallel snapshot is ordered by barriers | `test-support/llm-replay/README.md` | ARCH §12 |
 | DSH formats are additive like MiniDSH's version 0, and a log names its writer | falsified | Immutable generations v0..v4, frozen migrations, checksummed zstd frames, an unknown kind refused unless `ignorable`; no writer named | `docs/session-format-status.md` | ARCH §12 |
 | DSH mounts a projection store by default | confirmed | A registry plus a rebuildable cache in base | `bundle/base/cordis.patch.yml` | BP §3 |
 
@@ -36,14 +37,16 @@ Each claim a MiniDSH document leans on is a row with its verdict when last check
 
 | Assumption | Verdict | What is true at the pin | Source | Leaned on in |
 |---|---|---|---|---|
-| The inbox is the only queue; a producer never starts work its owner cannot collect | confirmed | The registry "neither queues nor preempts"; `start` refuses without a live owner | `docs/subsystems/jobs.md` | ARCH §3 |
-| Per-call `isConcurrencySafe`, results committed in model order | confirmed | Only an exact `true` joins a rolling pool (10); policy, asks and results stay in model order | `core/tools/src/batch.ts` | BP §2 |
-| The one-shot foreground child is upstream's default delegation | falsified | Every child is an activation that returns an id at once and settles into the parent's inbox | `docs/upgrade-guide/v0.2.1-alpha.1/subagent-activations/guide.md` | ARCH §12, BP §2 |
-| A continuable child upstream is a durable session with its own inbox, never a job | confirmed | A Session plus at most one resident activation; settles as an unbudgeted notice; past 8 live children admission refuses | `subagent/subagent/README.md` | BP §2 |
+| The inbox is the only queue; a producer never starts work its owner cannot collect | confirmed | The registry "neither queues nor preempts"; `start` refuses without a live owner; no second message queue anywhere | `docs/subsystems/jobs.md` | ARCH §3 |
+| Upstream's parallel batch is the one scheduler, everything else refuses rather than queues | confirmed | No run queue, fairness or priority; jobs (10 per owner) and activations (8 per tree) refuse | `core/tools/src/batch.ts` | ARCH §12 |
+| Per-call `isConcurrencySafe`, results committed in model order | confirmed | Only an exact `true` joins a rolling pool (10), every shipped one `() => true`; policy, asks and results stay in model order | `core/tools/src/batch.ts` | ARCH §12 |
+| The one-shot foreground child is upstream's default delegation | falsified | Every child is an activation that returns an id at once and settles into the parent's inbox | `docs/upgrade-guide/v0.2.1-alpha.1/subagent-activations/guide.md` | ARCH §12 |
+| A continuable child upstream is a durable session with its own inbox, never a job | confirmed | A Session plus at most one resident activation; settles as an unbudgeted notice; past 8 live children admission refuses; job-backed children were dropped for it | `subagent/subagent/README.md` | BP §3 |
+| DSH re-applies a child's descriptor on cold resume, from the parent's CURRENT composition unless a preset was selected | confirmed | A new descriptor holds provider, label and route; persona and tools come from the preset | `subagent/subagent/src/manager.ts` | BP §1 |
 | Upstream jobs leave no record, and a resume learns what was lost | falsified | `job/registered`/`job/settled` persist; a missing settlement "remains incomplete": no `lost`, no notice | `jobs/jobs-local/README.md` | ARCH §12, README |
 | Upstream brackets a child in the parent's log | partly | `subagent/start`/`end` are live only and `subagent/catalog` unpaired; workflow runs and jobs are bracketed | `docs/persistence-catalog.md` | ARCH §12 |
-| Waking is budgeted and the jobs idle race is fixed | falsified | Unbounded by default since 2026-09-22; the retirement-window race is still open | `jobs/tool-jobs/README.md` | ARCH §12, README |
-| A user interrupt parks work rather than killing it | partly | Web Stop keeps the inbox; `interrupt_agent` ends only a child's turn; claimed work is gone; jobs survive | `subagent/tool-subagent-control/README.md` | BP §2 |
+| Waking is budgeted and the jobs idle race is fixed | falsified | Unbounded by default since 2026-09-22; the retirement-window race is still open; a child's settlement is never budgeted | `jobs/tool-jobs/README.md` | ARCH §12, README |
+| A parent's Stop does not reach its running children upstream | confirmed | Web Stop is `agent.cancel({kind:'user'},{keepInbox:true})` on the parent only; children run on and later wake it | `api/session-controller/src/commands.ts` | ARCH §12 |
 
 ## Authority
 

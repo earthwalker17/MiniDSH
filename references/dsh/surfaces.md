@@ -23,12 +23,12 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 
 ## Open for the route
 
-- **S21, following a child.** Only through its direct-parent address: header `origin: 'subagent'` and `parentSession` must match, and the `subagent` projection must lie in the child's own range. `packages/api/session-controller/src/history.ts`
+- **S22, following a child.** Only through its direct-parent address: header `origin: 'subagent'` and `parentSession` must match, and the `subagent` projection must lie in the child's own range. `packages/api/session-controller/src/history.ts`
 - **S22, fork on the wire.** An explicit `atSeq` copies the exact inclusive prefix, even inside an open turn; omitted, the latest completed turn and its tail. Since rc.3 an ordinary fork records no source (no `parentSession`); subagents keep their creator. `docs/upgrade-guide/v0.2.1-rc.3/independent-session-forks/guide.md`
 - **S22, resume without a prompt.** SDK `session/resume` restores a persisted session without input, refusing a missing, incompatible or occupied one. `packages/sdk/protocol/README.md`
 - **S22, prompt retries.** Idempotent on a client-minted `requestId`, echoed as the user source's `rpcId`, which also binds the prompt's upload receipts. `packages/api/session-controller/src/commands.ts`
 - **S22, uploads.** One streaming request per file, not resumable; an image is bounded by the per-image and per-message limits and stored via `ctx.attachments` before any prompt. `packages/client/file-upload/README.md`
-- **S22, tool KIND.** `ToolCallKind` (`read`, `edit`, `delete`, `move`, `search`, `execute`, `fetch`, `other`): a per-call render category from the tool's `presentCall`, UI-only. `packages/core/tools/src/presentation.ts`
+- **S22, tool KIND.** `ToolCallKind` (`read`, `edit`, `delete`, `move`, `search`, `execute`, `fetch`, `other`): a per-call render category from the tool's `presentCall` (`web_search` is `search`), UI-only, on a `Generic | Terminal | Diff` view; the approval panel parses only `args.command`. `packages/core/tools/src/presentation.ts`
 - **S22, paging and the wire's bounds.** `turnWindow` asks 50 messages and two `turn/start` minima; the cap is the CLIENT's `maxMessages` (Web 500; Host default 50, no maximum); the uplink overflows at `streamInboxBytes` (`gateway/uplink-overflow`); the downlink awaits each socket write. `packages/api/gateway/src/stream-server.ts`
 - **S22, display facts.** `command/run` and `command/done` bracket the handler; `command/done.sourceEventSeq` joins a projection without parsing text. `docs/subsystems/commands.md`
 - **S22, an unseen approval.** It waits in the Gateway's Host-wide pending map, reaches each owner client that connects, and ends only on an answer, a cancel or the Agent's release: no timeout. `packages/api/gateway/src/index.ts`

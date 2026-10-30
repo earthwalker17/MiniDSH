@@ -1,6 +1,6 @@
 # DSH reference: Session log and durable execution
 
-> Where to research DSH's session log, repair, format generations, forks and replay: pinned to `deepseek-ai/deepseek-harness@22ddee37` (master, 2026-10-23, dsh-v0.2.1-rc.3), checked 2026-10-25 ([reading rules](../README.md)).
+> Where to research DSH's session log, repair, format generations, forks and replay: pinned to `deepseek-ai/deepseek-harness@ce7073d5` (master, 2026-10-29, dsh-0.2.1-rc.5), checked 2026-10-31 in S21: its repair, catalog, descriptor, batch and replay sources are byte-identical to `22ddee37` (`llm-replay` but for badges; `session.md` gained surface APIs only) ([reading rules](../README.md)).
 
 ## What exists (at the pin)
 
@@ -14,17 +14,15 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalo
 | JSONL backend | `packages/session/session-persistence-jsonl` | default-mounted | The only backend: 200 ms write-behind batches, fsync per batch, checksummed zstd frames (raw under `compression: 'none'`) |
 | Write lease | `session-persistence-jsonl/src/{lease,win32}.ts` | default-mounted | A KERNEL lock (`flock` addon on POSIX, koffi named semaphore on Windows): dies with its holder, never probed |
 | Checkpoint policy | `packages/session/session-checkpoint-policy` | default-mounted | Fail-closed flush before a model request, a top-level tool body and a step |
-| Format chain | `packages/session/session-format` (`-v0-to-v1` … `-v3-to-v4`, `-catalog`) | default-mounted | Immutable generations, frozen adjacent migrations; v4 writer, finalized and released |
+| Format chain | `packages/session/session-format` (`-v0-to-v1` … `-v3-to-v4`, `-catalog`) | default-mounted | Immutable generations, frozen adjacent migrations; v4 writer, finalized and released; a V3→V4 parent restore reads its direct children's files (the parent-side catalog join, added late, cost a cross-file migration) |
 | Plugin records | `appendPluginRecord`, `packages/core/session/README.md` | experimental only | `plugin:<owner>/<record>`, `ignorable`, outside released schemas |
 | Projections | `packages/session/session-projection`, `-cache` | default-mounted | Pure folds; `register()` yields a `ProjectionHandle` (rc.2); fail-soft cache, no eviction |
 | Session query | `packages/session-query/session-query-sqlite` | default-mounted | Exact reads, traces, lineage; search off (`openAt: never`); model tools in `experimental/tool-session-query` |
-| Replay harness | `packages/test-support/llm-replay` | opt-in | Test-only model streams; tools really run |
+| Replay harness | `packages/test-support/llm-replay` | opt-in | Test-only model streams; tools really run; child scripts bound by first-call order, harvested by `createdAt` |
 
 ## Open for the route
 
-- **S21, parallel calls.** Each call's `tool/call` is appended when it starts, before policy and the ask; results commit in model order, so a crash mid-batch closes every started call `TOOL_OUTCOME_UNKNOWN`, in assistant order. `packages/core/tools/src/batch.ts`, `packages/core/session/src/repair.ts`
-- **S21, continuable children.** Identity is the child's OWN `subagent/descriptor` (once, before its first request; a continuable one carries persona, `toolFilter` and route) plus the parent's `subagent/catalog`; an inherited descriptor proves nothing, only a direct child cold-resumes, a missing selected preset refuses. Only the call's result text `started subagent <id>` joins child to call. `packages/subagent/subagent/README.md`, `packages/subagent/tool-subagent/src/index.ts`
-- **S21, replay.** First-call-order binding, deferred "until such a scenario exists" (concurrent siblings); jobs really run, snapshots normalize job ids. `packages/test-support/llm-replay/README.md`, `packages/test-support/session-snapshot/src/normalize.ts`
+- **later, a child joined to its call.** Only the call's result text `started subagent <id>` names the child; a job carries `toolCall {callId, rootCallId}`, a workflow member `{runId, seq}`: delegation is the one multi-actor producer with no structured join. Repair is per Session: a parent dying with resident children records nothing about them. `packages/subagent/subagent/src/catalog.ts`, `packages/jobs/jobs/src/types.ts`
 - **S22, fork on the wire.** `session.fork {sessionId, atSeq?, allowMigration?}`: omitted = latest completed-turn prefix; an open cut gets `forked` closers (`core/session/src/fork.ts`; `session.md`'s "rejects" is stale). Since rc.3 an ordinary fork records no source; `parentSession` is a subagent's creator, `origin: 'subagent'` the classifier; older V4 readers may refuse such a fork. `packages/api/session-controller/src/types.ts`, `docs/upgrade-guide/v0.2.1-rc.3/independent-session-forks/guide.md`
 - **Unscheduled since S16.** A provider idempotency key off `exec.callId` (`packages/session/session-checkpoint-policy/README.md:114`); raw mode detects damage by a `turn/end` heuristic, not a checksum (`session-persistence-jsonl/src/format.ts`).
 
@@ -39,12 +37,12 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalo
 | `packages/session/session-checkpoint-policy/README.md` | Barriers; intent, not exactly-once | 2026-10-25 |
 | `packages/bundle/{base,sdk-minimal}/cordis.patch.yml` | Default rows; sdk-minimal's own tree | 2026-10-25 |
 | `docs/session-format-status.md`, `docs/persistence-changes/README.md` | Writer, finalized and released 4 (`dsh-v0.2.0-rc.2`); same-version rules | 2026-10-25 |
-| `docs/persistence-catalog.md` | What persists: THE authority; 62 kinds, as at `57190202` | 2026-10-25 |
+| `docs/persistence-catalog.md` | What persists: THE authority; 62 kinds, as at `57190202` | 2026-10-31 |
 | `packages/deliverables/workspace-changes/README.md` | `workspace/changes {turn}` persisted, summary Host-only | 2026-10-25 |
 | `docs/subsystems/session-projection.md`, `packages/session/session-projection-cache/README.md` | Handles, cache checkpoints, no eviction | 2026-10-25 |
 | `packages/api/session-controller/src/archived-session-gate.ts` | Archive stops and gates work; nothing deletes | 2026-10-25 |
 | `docs/upgrade-guide/v0.2.1-rc.2/{session-store-writes,session-projection-handles,sdk-minimal-checkpoints}`, `v0.2.1-rc.3/independent-session-forks` | The four changes since the last pin | 2026-10-25 |
-| `packages/test-support/llm-replay/README.md` | Test-only; first-call order | 2026-10-25 |
+| `packages/test-support/llm-replay/{README.md,src/index.ts}`, `snapshots/session/subagent-parallel` | First-call order; the one parallel scenario is ordered by barriers, its two child scripts identical | 2026-10-31 |
 
 ## Likely to go stale
 
@@ -54,5 +52,5 @@ Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalo
 
 ## Not read
 
-- `.agents/notes/implemented/architecture/2026-10-23-independent-session-forks.md`, `.agents/notes/implemented/process/2026-10-08-session-reader-compatibility-review.md`: `.agents/` is outside the snapshot.
+- `.agents/notes/implemented/architecture/2026-10-23-independent-session-forks.md`, `.agents/notes/implemented/process/2026-10-08-session-reader-compatibility-review.md`.
 - `session-persistence-jsonl/src/{generation,catalog-migration,migration-verifier}.ts` and `scripts/migrate-sessions-to-v4.ts`: module heads only.

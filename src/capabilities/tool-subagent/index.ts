@@ -462,7 +462,7 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
         // Siblings overlap in the parent's step: a child asks nobody (pinned
         // `never`), adds no image to the parent's surface and touches no parent
         // shell; keeping their files apart is the caller's job (the description
-        // says so), fenced by the editor's version check (§6).
+        // says so), fenced by the editor's version check (§13).
         concurrencySafe: true,
         // Not model-facing: how the depth cap recognises every delegation tool
         // in this deployment, including a second row of this same plugin.
