@@ -26,9 +26,9 @@
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise.
  */
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
@@ -121,7 +121,10 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
     // ---- the children, one session each, all completed -----------------------
     const starts = events.filter((event) => event.type === 'subagent/start').map((event) => event.data as { callId: string; childId: string })
     const ends = events.filter((event) => event.type === 'subagent/end').map((event) => event.data as { callId: string; reason: { kind: string } })
-    expect(starts.map((start) => start.callId).toSorted()).toEqual([...delegated].toSorted())
+    expect(
+      starts.map((start) => start.callId).toSorted(),
+      'the children started are not exactly the batch: the model delegated outside its one message, or a batched call never reached its body',
+    ).toEqual([...delegated].toSorted())
     expect(ends.map((end) => end.reason.kind)).toEqual(ends.map(() => 'completed'))
     const children = starts.map((start) => ({ ...start, events: storedEvents(home, start.childId) }))
 
@@ -145,6 +148,13 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
       expect(existsSync(file), `${team}/CODENAME.txt was never written`).toBe(true)
       expect(readFileSync(file, 'utf8').trim()).toBe(codename)
     }
+    // ... and only that: the replay below removes exactly these files, so a
+    // child that wrote anything else would make the replay start from another world.
+    const seeded = Object.keys(TEAMS).flatMap((team) => [`${team}/notes.md`, `${team}/plan.txt`, `${team}/CODENAME.txt`])
+    const present = (readdirSync(workspace, { recursive: true }) as string[])
+      .filter((entry) => statSync(join(workspace, entry)).isFile())
+      .map((entry) => entry.split(sep).join('/'))
+    expect(present.toSorted(), 'a child wrote outside its own CODENAME.txt').toEqual(seeded.toSorted())
 
     // ---- measured: the step against what a serial executor would have cost ----
     const stepEnd = events.find((event) => event.type === 'step/end' && (event.data as { turn: number; step: number }).turn === turn && (event.data as { step: number }).step === step)!
@@ -153,8 +163,9 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
     const serialMs = childMs.reduce((sum, ms) => sum + ms, 0)
     expect(joinedMs, 'the step took as long as its children run one by one').toBeLessThan(serialMs)
     const finished = events.filter((event) => event.type === 'subagent/end').map((event) => (event.data as { callId: string }).callId)
-    // A recorded absolute path cannot land in the replay's fresh root (§13): counted, so a replay failure names its cause.
-    // Arguments are JSON text, so the workspace appears there in its JSON-escaped spelling.
+    // The prompt pins relative paths and a child may ignore it (one WSL run in three did, S21): counted. The replay runs
+    // in this workspace, so such a path replays where it was recorded. Arguments are JSON text, so the workspace
+    // appears there in its JSON-escaped spelling.
     const escapedRoot = JSON.stringify(workspace).slice(1, -1)
     const absolute = children.flatMap((child) => child.events.filter((event) => event.type === 'tool/call' && (event.data as { arguments: string }).arguments.includes(escapedRoot))).length
     const line = `[parallel arc] ${delegated.length} children in one message; the delegating step took ${joinedMs} ms against ${serialMs} ms serial (children ${childMs.join(', ')} ms); finished ${finished.join(' ')} for model order ${modelOrder.join(' ')}; ${absolute} child call(s) named an absolute path`
@@ -196,8 +207,10 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
     )
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
-    // Each replayed call answered with its OWN child's result: a mis-bound child replays a sibling's log, writes the
-    // same files, drains every cursor, and differs only here.
+    // Each replayed call was served by its OWN child's recording. A mis-bound child replays a sibling's log, writes the
+    // same files and drains every cursor, so the world cannot tell; the answer text can only when siblings answered
+    // differently. The children's own tool calls can: each child names its own directory, so a mis-bound child's
+    // calls are its sibling's (S21 final review).
     const replayedResults = new Map(
       replayFrames.filter((frame) => frame.sessionId === replayed.sessionId && frame.event.type === 'tool/result').map((frame) => [(frame.event.data as { callId: string }).callId, resultText(frame.event)]),
     )
@@ -205,7 +218,20 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
       const callId = (recorded.data as { callId: string }).callId
       expect(replayedResults.get(callId), `call ${callId} replayed another child's answer`).toBe(resultText(recorded))
     }
-    // The replay reproduced the world: each child, served its OWN recording, wrote its own file again.
+    const replayedChild = new Map(
+      replayFrames
+        .filter((frame) => frame.sessionId === replayed.sessionId && frame.event.type === 'subagent/start')
+        .map((frame) => [(frame.event.data as { callId: string }).callId, (frame.event.data as { childId: string }).childId]),
+    )
+    const callsOf = (list: readonly EventEnvelope[]): string[] => list.filter((event) => event.type === 'tool/call').map((event) => (event.data as { arguments: string }).arguments)
+    for (const child of children) {
+      const replayedId = replayedChild.get(child.callId)
+      expect(replayedId, `call ${child.callId} started no child in the replay`).toBeDefined()
+      const replayedCalls = callsOf(replayFrames.filter((frame) => frame.sessionId === replayedId).map((frame) => frame.event))
+      expect(replayedCalls.length, `call ${child.callId}'s child made no tool call, so its binding is unproved`).toBeGreaterThan(0)
+      expect(replayedCalls, `call ${child.callId}'s child replayed a sibling's recording`).toEqual(callsOf(child.events))
+    }
+    // The replay reproduced the world: each child wrote its own file again.
     for (const [team, codename] of Object.entries(TEAMS)) expect(readFileSync(join(replayWorkspace, team, 'CODENAME.txt'), 'utf8').trim()).toBe(codename)
   })
 })
