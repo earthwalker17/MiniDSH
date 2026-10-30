@@ -18,6 +18,16 @@
  * somehow arrived. So the child cannot buy authority its parent did not
  * have, and nothing in the composition can grant it.
  *
+ * The tool is `concurrencySafe` (S21, ARCHITECTURE §6): several delegations in
+ * one assistant message run at once, each child in its own session, and the
+ * parent's step joins them, its results in model order. The child is still a
+ * foreground call — created, awaited and disposed inside it, so "done" stays
+ * "the parent is idle", a cancel of the parent's turn reaches every child,
+ * and nothing it started outlives the step. Its own width is its row's
+ * `childParallelCalls` (default 1), written into its opening `agent/options`:
+ * the tree stays bounded at the parent's width plus one grandchild per child,
+ * by a log fact a continuation keeps, never by a counter.
+ *
  * What the parent's log records is the call and its result, plus two log-only
  * facts naming the child (`subagent/start|end`) — the child's own steps live
  * in the child's own log, where `sessions show <child>` reads them. That is a
@@ -68,6 +78,13 @@ export interface SubagentConfig {
   readonly persona?: string | undefined
   /** Step ceiling for a child's single turn (default 12). */
   readonly maxSteps?: number | undefined
+  /**
+   * How many concurrency-safe calls a CHILD's own step may run at once
+   * (default 1: a child delegates one grandchild at a time). Recorded in the
+   * child's opening `agent/options`, so it bounds the tree durably: a resumed
+   * or forked child keeps it.
+   */
+  readonly childParallelCalls?: number | undefined
   /** Model-facing name (default `subagent`). */
   readonly toolName?: string | undefined
   /**
@@ -108,6 +125,7 @@ const configSchema = z
     toolFilter: z.strictObject({ allow: z.array(z.string().min(1)).optional(), deny: z.array(z.string().min(1)).optional() }).optional(),
     persona: z.string().min(1).optional(),
     maxSteps: z.number().int().positive().optional(),
+    childParallelCalls: z.number().int().positive().optional(),
     toolName: z.string().min(1).optional(),
     description: z.string().min(1).optional(),
     purpose: z.string().min(1).optional(),
@@ -121,8 +139,10 @@ const DEFAULT_TOOL_NAME = 'subagent'
 
 const DESCRIPTION = `Delegate one bounded, self-contained task to a subagent and wait for its answer.
 
+* Independent tasks: call this tool several times in ONE message. They run at the same time, and you get every answer before your next step.
 * The subagent starts fresh: it sees NONE of this conversation. Its prompt must carry everything it needs — paths, names, constraints, and what to report back.
 * It runs under this session's authority or narrower, with approvals disabled: it cannot ask the user for anything, and an action needing approval is refused. Do not delegate work that needs an escalation.
+* Parallel subagents share this workspace: give each its own files, and never let two of them install, build, test or commit at the same time.
 * It answers once, in text. Use it to scope, search, read or summarise; keep decisions and edits that need this conversation's context here.`
 
 const InputSchema = z.object({
@@ -138,6 +158,7 @@ type Input = z.infer<typeof InputSchema>
 interface ResolvedConfig {
   readonly maxDepth: number
   readonly maxSteps: number
+  readonly childParallelCalls: number
   readonly purpose: string
   readonly sandbox?: SandboxMode | undefined
   readonly accepts?: SandboxEnforcement | undefined
@@ -254,7 +275,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   // Captured before the first await: a parent switch after this belongs to the parent's future.
   const inherited = captureAuthority(parent, deps.sandbox, deps.config.sandbox, deps.config.accepts)
   const route = await resolveCallConfig(parent, { purpose: deps.config.purpose, signal: exec.callSignal })
-  const agentOptions: AgentOptions = { ...route, maxSteps: deps.config.maxSteps }
+  const agentOptions: AgentOptions = { ...route, maxSteps: deps.config.maxSteps, maxParallelToolCalls: deps.config.childParallelCalls }
   // The child keeps this tool only if it could still use it: at the cap it is
   // hidden AND unknown, so a depth limit is a fact about the child's world
   // rather than an error it discovers by trying.
@@ -419,6 +440,7 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
       config: {
         maxDepth: config?.maxDepth ?? 2,
         maxSteps: config?.maxSteps ?? 12,
+        childParallelCalls: config?.childParallelCalls ?? 1,
         purpose: config?.purpose ?? DEFAULT_PURPOSE,
         ...(config?.sandbox === undefined ? {} : { sandbox: config.sandbox }),
         ...(config?.accepts === undefined ? {} : { accepts: config.accepts }),
@@ -437,6 +459,11 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
         // registry deadline here would kill a child mid-effect and leave its
         // log open, and the caller's cancellation already reaches it.
         timeoutMs: null,
+        // Siblings overlap in the parent's step: a child asks nobody (pinned
+        // `never`), adds no image to the parent's surface and touches no parent
+        // shell; keeping their files apart is the caller's job (the description
+        // says so), fenced by the editor's version check (§6).
+        concurrencySafe: true,
         // Not model-facing: how the depth cap recognises every delegation tool
         // in this deployment, including a second row of this same plugin.
         tags: [DELEGATION_TOOL],

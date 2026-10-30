@@ -464,12 +464,18 @@ function cwdFlag(args: ParsedArgs): string {
 
 function eventPrinter(json: boolean): EventListener {
   // --json emits the wire frame: one {sessionId, event} per line.
-  return json
-    ? (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`)
-    : (frame) => {
-        const line = describeEvent(frame.event)
-        if (line) process.stderr.write(`  ${line}\n`)
-      }
+  if (json) return (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`)
+  // Parallel children's lines interleave with each other and the parent's
+  // (S21), and a line no longer says whose it is by where it falls: every
+  // session after the first this run printed is tagged with its id's tail.
+  let root: string | undefined
+  return (frame) => {
+    const line = describeEvent(frame.event)
+    if (!line) return
+    root ??= frame.sessionId
+    const tag = frame.sessionId === root ? '' : `[${printableText(String(frame.sessionId).slice(-6))}] `
+    process.stderr.write(`  ${tag}${line}\n`)
+  }
 }
 
 function finishTask(result: TaskResult, json: boolean): number {

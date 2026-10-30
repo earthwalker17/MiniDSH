@@ -11,10 +11,10 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../../kernel/index.ts'
 import { AGENTS, type AgentHandle } from '../../core/agent/index.ts'
-import { asSessionId } from '../../core/ids.ts'
+import { asCallId, asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
-import type { ContentBlock, Message } from '../../core/llm/index.ts'
+import type { ContentBlock, LlmRequest, Message, StreamChunk } from '../../core/llm/index.ts'
 import { SANDBOX } from '../../core/sandbox/index.ts'
 import { PROMPT } from '../../core/prompt/index.ts'
 import { matches, SESSION_EVENT, TOOL_RESULT, type EventEnvelope, type Session } from '../../core/session/index.ts'
@@ -773,6 +773,102 @@ describe('a delegated child and its background jobs', () => {
     expect(ended).toBeGreaterThanOrEqual(0)
     expect(ended).toBeLessThan(delegationEnded)
     expect((eventsOf(handle.agent.session, SUBAGENT_END.type)[0]!.data as { reason: { kind: string } }).reason.kind).toBe('completed')
+    await handle.dispose()
+  })
+})
+
+describe('S21: delegations in one message run at once, joined at the parent\'s step', () => {
+  /** One assistant message delegating each prompt, in order. */
+  function delegations(...prompts: readonly string[]): StreamChunk[] {
+    return [
+      ...prompts.map((prompt, index) => ({
+        type: 'tool-call-delta' as const,
+        index,
+        id: asCallId(`call-${index + 1}`),
+        name: 'subagent',
+        argumentsDelta: JSON.stringify({ description: `task ${index + 1}`, prompt }),
+      })),
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]
+  }
+
+  /** A child's own task prompt: the first user message of its request. */
+  function taskOf(request: LlmRequest): string {
+    const first = request.messages.find((message) => message.role === 'user')
+    return first?.content.map((block) => (block.type === 'text' ? block.text : '')).join('') ?? ''
+  }
+
+  /** Resolves once `count` arrivals have called it: a child that waits here proves its siblings ran beside it. */
+  function barrier(count: number): (who: string) => Promise<void> {
+    const arrived = new Set<string>()
+    let open!: () => void
+    const opened = new Promise<void>((resolve) => (open = resolve))
+    return async (who) => {
+      arrived.add(who)
+      if (arrived.size >= count) open()
+      await opened
+    }
+  }
+
+  it('overlaps the children, answers in model order, and gives each child the row\'s width', async () => {
+    const w = await world()
+    const together = barrier(2)
+    // Neither child may answer until both have asked: under a serial executor
+    // the first would wait forever for the second.
+    const child = async (request: LlmRequest): Promise<StreamChunk[]> => {
+      const task = taskOf(request)
+      await together(task)
+      return assistantText(`answer for ${task}`)
+    }
+    w.adapter.script(delegations('Find ALPHA.', 'Find BETA.'), child, child, assistantText('both reported'))
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('delegate both'))
+    await handle.agent.whenIdle()
+
+    const results = eventsOf(handle.agent.session, TOOL_RESULT.type).map((event) => event.data as { callId: string; message: Message })
+    expect(results.map((result) => result.callId)).toEqual(['call-1', 'call-2'])
+    expect(resultText(results[0]!.message)).toContain('answer for Find ALPHA.')
+    expect(resultText(results[1]!.message)).toContain('answer for Find BETA.')
+    const starts = eventsOf(handle.agent.session, SUBAGENT_START.type).map((event) => event.data as { callId: string; childId: string })
+    expect(starts.map((start) => start.callId).toSorted()).toEqual(['call-1', 'call-2'])
+    for (const start of starts) {
+      const opening = storedEvents(w.sessionsRoot, start.childId).find((event) => event.type === 'agent/options')
+      expect((opening?.data as { options: { maxParallelToolCalls?: number } }).options.maxParallelToolCalls).toBe(1)
+    }
+    await handle.dispose()
+  })
+
+  it('lets only one of two siblings editing one file land its edit; the other is told the file changed', async () => {
+    const w = await world()
+    writeFileSync(join(w.cwd, 'shared.txt'), 'value = 0\n')
+    const viewed = barrier(2)
+    const steps = new Map<string, number>()
+    // Each child views the file, waits until its sibling has viewed it too,
+    // then replaces the same line: both hold the same version.
+    const child = async (request: LlmRequest): Promise<StreamChunk[]> => {
+      const task = taskOf(request)
+      const step = (steps.get(task) ?? 0) + 1
+      steps.set(task, step)
+      const mark = task.includes('ONE') ? '1' : '2'
+      if (step === 1) return assistantToolCall(`view-${mark}`, 'str_replace_editor', { command: 'view', path: 'shared.txt' })
+      if (step === 2) {
+        await viewed(task)
+        return assistantToolCall(`edit-${mark}`, 'str_replace_editor', { command: 'str_replace', path: 'shared.txt', old_str: 'value = 0', new_str: `value = ${mark}` })
+      }
+      return assistantText(`child ${mark} finished`)
+    }
+    w.adapter.script(delegations('Set the value to ONE.', 'Set the value to TWO.'), child, child, child, child, child, child, assistantText('done'))
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('delegate both edits'))
+    await handle.agent.whenIdle()
+
+    const outcomes = eventsOf(handle.agent.session, SUBAGENT_START.type).flatMap((event) =>
+      storedEvents(w.sessionsRoot, (event.data as { childId: string }).childId)
+        .filter((record) => record.type === 'tool/result' && (record.data as { callId: string }).callId.startsWith('edit-'))
+        .map((record) => (record.data as { error?: { code: string } }).error?.code ?? 'ok'),
+    )
+    expect(outcomes.toSorted()).toEqual(['FS_STALE_VERSION', 'ok'])
+    expect(['value = 1\n', 'value = 2\n']).toContain(readFileSync(join(w.cwd, 'shared.txt'), 'utf8'))
     await handle.dispose()
   })
 })
