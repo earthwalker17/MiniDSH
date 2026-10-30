@@ -833,7 +833,8 @@ describe('S21: delegations in one message run at once, joined at the parent\'s s
     expect(starts.map((start) => start.callId).toSorted()).toEqual(['call-1', 'call-2'])
     for (const start of starts) {
       const opening = storedEvents(w.sessionsRoot, start.childId).find((event) => event.type === 'agent/options')
-      expect((opening?.data as { options: { maxParallelToolCalls?: number } }).options.maxParallelToolCalls).toBe(1)
+      expect(opening, `child ${start.childId} has no opening agent/options`).toBeDefined()
+      expect((opening!.data as { options: { maxParallelToolCalls?: number } }).options.maxParallelToolCalls).toBe(1)
     }
     await handle.dispose()
   })
