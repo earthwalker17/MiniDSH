@@ -1,8 +1,8 @@
 /**
  * Bounded request retry on `agent/request-error`. Failed attempts stay durable
  * (each attempt's chunks carry their own `attempt` number within the same
- * step); only the retryable code set is retried, with exponential backoff
- * honoring a provider `retryAfterMs` — up to a ceiling, past which the failure
+ * step); only the retryable code set is retried, with jittered exponential
+ * backoff honoring a provider `retryAfterMs` — up to a ceiling, past which the failure
  * stands: a provider asking for an hour is not a transient blip, and sleeping
  * the turn for it, with nothing logged, looked like a hang.
  */
@@ -63,7 +63,10 @@ export const retryPlugin: Plugin<RetryConfig | undefined> = {
       if (count >= maxRetries) return undefined
       attempts.set(context.agent, { key, count: count + 1 })
 
-      const backoff = Math.min(maxDelayMs, initialDelayMs * 2 ** count)
+      // Full jitter: parallel children on one provider meet a rate limit
+      // together, and a deterministic backoff sent them back together, three
+      // times, into the same limit (S21). A provider's own wait is the floor.
+      const backoff = Math.random() * Math.min(maxDelayMs, initialDelayMs * 2 ** count)
       await sleep(Math.max(backoff, retryAfterMs), context.signal)
       if (context.signal.aborted) return undefined
       return { kind: 'retry' } satisfies RequestErrorAction

@@ -100,9 +100,36 @@ async function boundedRead(target: FsTarget, options: FsReadOptions): Promise<{ 
 class LocalFs implements Fs {
   private readonly ctx: Context
   private readonly sandbox: Sandbox
+  /**
+   * One read or write of a file at a time, per canonical path, in this
+   * process. The version check, the truncate and the write are separate
+   * awaits, so two agents of one host — parallel children of one step (S21) —
+   * could otherwise both pass a check against the same version and the second
+   * write erase the first, each reporting success; a read overlapping a write
+   * could see the truncated file and record its version. Under the lock the
+   * check is a real compare-and-set and `mtime:size` suffices. It orders only
+   * this provider's callers: a shell or a job writing the same file is not
+   * fenced by it (§13).
+   */
+  private readonly pathLocks = new Map<string, Promise<void>>()
   constructor(ctx: Context, sandbox: Sandbox) {
     this.ctx = ctx
     this.sandbox = sandbox
+  }
+
+  private async exclusive<T>(path: string, body: () => Promise<T>): Promise<T> {
+    const previous = this.pathLocks.get(path) ?? Promise.resolve()
+    let release!: () => void
+    const mine = new Promise<void>((resolve) => (release = resolve))
+    const tail = previous.then(() => mine)
+    this.pathLocks.set(path, tail)
+    await previous
+    try {
+      return await body()
+    } finally {
+      release()
+      if (this.pathLocks.get(path) === tail) this.pathLocks.delete(path)
+    }
   }
 
   resolve(path: string, cwd: string): FsTarget {
@@ -128,7 +155,7 @@ class LocalFs implements Fs {
   }
 
   async readText(target: FsTarget, actor: FsActor, options: FsReadOptions = {}): Promise<{ text: string; version: string; complete: boolean }> {
-    const { bytes, version, complete } = await boundedRead(target, options)
+    const { bytes, version, complete } = await this.exclusive(target.path, () => boundedRead(target, options))
     // `stream: true` holds back a multi-byte character the bound cut in half
     // instead of rendering half of it as U+FFFD; `ignoreBOM` keeps a BOM as
     // the text's first character, as `toString('utf8')` did, so an edit
@@ -140,7 +167,7 @@ class LocalFs implements Fs {
 
   /** Bytes, and deliberately no `fs/observed` — see the Definition. */
   async readBytes(target: FsTarget, _actor: FsActor, options: FsReadOptions = {}): Promise<{ bytes: Uint8Array; version: string; complete: boolean }> {
-    return boundedRead(target, options)
+    return this.exclusive(target.path, () => boundedRead(target, options))
   }
 
   /** `fs/*` events about an agent's operation are dispatched in that agent's scope. */
@@ -174,6 +201,11 @@ class LocalFs implements Fs {
   async writeText(target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }> {
     // Fenced before ANY effect — creating parent directories is already one.
     const fenced = this.fence(target, actor)
+    return this.exclusive(fenced.path, () => this.writeFenced(fenced, target, text, intent, actor))
+  }
+
+  /** `writeText` under its path's lock: the version check and the write are one step to every other caller of this provider. */
+  private async writeFenced(fenced: FsTarget, target: FsTarget, text: string, intent: FsWriteIntent, actor: FsActor): Promise<{ version: string }> {
     if (intent.kind === 'replaceIfVersion' && !(await this.stat(fenced))) throw new FsError('FS_NOT_FOUND', `"${target.displayPath}" no longer exists`)
     await this.makeParents(fenced, actor)
     // O_NONBLOCK as the read path has it: a FIFO swapped in for the file
