@@ -29,6 +29,14 @@ export interface CallConfig {
 
 export interface AgentOptions extends CallConfig {
   readonly maxSteps?: number
+  /**
+   * How many concurrency-safe tool bodies one step may run at once (the loop's
+   * default when absent; `1` runs every call alone). The loop's, like
+   * `maxSteps`, so it survives a route switch; a delegated child's opening
+   * record carries its row's width, which is how a delegation tree stays
+   * bounded without a counter (ARCHITECTURE §6).
+   */
+  readonly maxParallelToolCalls?: number
 }
 
 /** Why an `agent/options` record was written: the opening base, a durable switch, or an override at resume. */
@@ -146,8 +154,8 @@ export interface AgentFactory {
  * folded `agent/options` (the BASE route, the log's own config authority) >
  * its folded `request/header` (only for a log from before the base was
  * recorded) > `defaults` (a surface's default model, used only when the log
- * recorded no route at all); `maxSteps` is the one default that survives a
- * recorded fact.
+ * recorded no route at all); `maxSteps` and `maxParallelToolCalls` are the
+ * defaults that survive a recorded fact.
  */
 export interface ResumeAgentOptions {
   readonly agentOptions?: Partial<AgentOptions>

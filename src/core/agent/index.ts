@@ -53,6 +53,7 @@ export function canonicalAgentOptions(options: AgentOptions): AgentOptions {
     ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
     ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
+    ...(options.maxParallelToolCalls === undefined ? {} : { maxParallelToolCalls: options.maxParallelToolCalls }),
   }
 }
 
@@ -68,7 +69,7 @@ export function sameAgentOptions(a: AgentOptions, b: AgentOptions): boolean {
  * `temperature` is the sharper one — an adapter that refuses it (rather than
  * clamping, which this system never does) would refuse every step of a session
  * that switched into it, and no surface can send an undefined to clear it.
- * `maxSteps` is the loop's, not the route's, and survives.
+ * `maxSteps` and `maxParallelToolCalls` are the loop's, not the route's, and survive.
  */
 const ROUTE_SCOPED_OPTIONS = ['reasoningEffort', 'temperature', 'maxTokens'] as const
 
@@ -477,9 +478,9 @@ function resolveSeedAgentOptions(seed: readonly EventEnvelope[], options: Resume
   const base = foldAgentOptions(seed)
   const header = base ? undefined : foldRequestHeader(seed)
   // A folded fact is the whole model-config authority: an optional it omits
-  // was genuinely absent, so a default must not resurrect it. Only `maxSteps`
-  // survives from defaults when the fact does not name one — it is
-  // deliberately not model-visible.
+  // was genuinely absent, so a default must not resurrect it. Only the loop's
+  // two limits survive from defaults when the fact does not name them — they
+  // are deliberately not model-visible.
   const recorded = base ?? header
   if (recorded) {
     merged.provider = recorded.provider
@@ -489,6 +490,9 @@ function resolveSeedAgentOptions(seed: readonly EventEnvelope[], options: Resume
       else delete merged[key]
     }
     if (base?.maxSteps !== undefined) merged.maxSteps = base.maxSteps
+    // A delegated child's width is a narrowing its opening record carries, so
+    // a continuation keeps it exactly as it keeps the step ceiling.
+    if (base?.maxParallelToolCalls !== undefined) merged.maxParallelToolCalls = base.maxParallelToolCalls
   }
   const partial = options.agentOptions ?? {}
   if (typeof merged.provider !== 'string' || typeof merged.model !== 'string') {

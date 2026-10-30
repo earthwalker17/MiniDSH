@@ -62,12 +62,15 @@ export interface LoopDeps {
 }
 
 const DEFAULT_MAX_STEPS = 24
+/** Concurrency-safe bodies one step runs at once when the agent's options name no width (§6). */
+const DEFAULT_MAX_PARALLEL_TOOL_CALLS = 4
 
 /**
  * A durability checkpoint failed: a write the persistence provider remembered
- * losing. The driver takes no further action — no model request, no tool
- * effect — on a session whose durable record has already diverged from what
- * it is about to do.
+ * losing. The driver starts nothing more — no model request, no tool body — on
+ * a session whose durable record has already diverged from what it is about to
+ * do; a concurrency-safe body already in flight is told (its signal aborts with
+ * this cause) and drained, never abandoned.
  */
 class DurabilityLost extends Error {
   readonly code = 'DURABILITY_LOST' as const
@@ -84,6 +87,20 @@ type StepResult =
   | { kind: 'max-tokens' }
   | { kind: 'error'; reason: TurnEndReason }
 
+type ToolCallBlock = Extract<ContentBlock, { type: 'tool-call' }>
+
+/** One logged call of a step: its outcome, once it has one, waits here for its turn to commit. */
+interface CallSlot {
+  readonly call: ToolCallBlock
+  readonly callSeq: number
+  result?: ToolResult
+}
+
+/** An error result for a call no body answered. */
+function refusedResult(text: string, name: string, code: string): ToolResult {
+  return { isError: true, content: [{ type: 'text', text }], error: { message: text, info: { name, code } } }
+}
+
 /** The one concrete agent driver: the turn/step state machine over the session log. */
 export class ReactLoopAgent implements Agent {
   readonly id: SessionId
@@ -96,6 +113,7 @@ export class ReactLoopAgent implements Agent {
   private _status: AgentStatus = 'idle'
   private deps: LoopDeps | undefined
   private maxSteps: number
+  private maxParallel: number
   private turnCount = 0
   private firstLiveTurn = 1
   private abort = new AbortController()
@@ -109,6 +127,7 @@ export class ReactLoopAgent implements Agent {
     this.world = world
     this.base = canonicalAgentOptions(options)
     this.maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS
+    this.maxParallel = options.maxParallelToolCalls ?? DEFAULT_MAX_PARALLEL_TOOL_CALLS
     this.inbox = new Inbox(
       (event, message, target) => this.onInbox(event, message, target),
       (splice) => this.session.append(INBOX_SPLICED, splice),
@@ -152,6 +171,7 @@ export class ReactLoopAgent implements Agent {
     if (sameAgentOptions(merged, this.base)) return this.base
     this.base = merged
     this.maxSteps = merged.maxSteps ?? DEFAULT_MAX_STEPS
+    this.maxParallel = merged.maxParallelToolCalls ?? DEFAULT_MAX_PARALLEL_TOOL_CALLS
     // The switch IS its event; the next step resolves its route from here.
     this.session.append(AGENT_OPTIONS, { options: merged, reason: 'change' })
     return merged
@@ -451,98 +471,227 @@ export class ReactLoopAgent implements Agent {
       )
 
       if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
-      const toolCalls = blocks.filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call')
+      const toolCalls = blocks.filter((block): block is ToolCallBlock => block.type === 'tool-call')
       if (toolCalls.length === 0) return { kind: 'stop' }
       const concluded = await this.executeTools(turn, step, toolCalls, signal)
       return concluded ? { kind: 'concluded' } : { kind: 'continue' }
     }
   }
 
-  private async executeTools(
-    turn: number,
-    step: number,
-    toolCalls: readonly Extract<ContentBlock, { type: 'tool-call' }>[],
-    signal: AbortSignal,
-  ): Promise<boolean> {
+  /**
+   * A step's tool calls: ONE ordered lane, bodies that may overlap, results in
+   * model order (ARCHITECTURE §6, "joined at the step").
+   *
+   * The lane is each call's durable sequence, in model order: `tool/call` →
+   * checkpoint → gate → `tool/dispatch` → checkpoint. A call whose tool declares
+   * `concurrencySafe` hands the lane on once its dispatch is durable — or once it
+   * settled without one (a refusal, a replay's middleware) — so its BODY
+   * overlaps the next call's lane and its siblings' bodies, up to this agent's
+   * width. Any other call is a barrier: it waits until every earlier result has
+   * COMMITTED, then runs alone, exactly as every call ran before S21; with a
+   * width of 1 every call is one.
+   *
+   * Every outcome resolves its call's slot, and only `commitReady` appends a
+   * `tool/result`, strictly in model order, so the surface a later barrier
+   * reads, and every request derived from it, are the same whatever order the
+   * bodies finished in. The lane waits for a free slot BEFORE it logs the next
+   * call, so a crash finds a call still waiting with no `tool/call` at all
+   * (`TOOL_NOT_STARTED`), and one at its gate with no `tool/dispatch`.
+   *
+   * The step never ends with a body running. A cancellation or a lost write
+   * stops the lane, drains what runs, and answers every call it never reached;
+   * a lost write also aborts the bodies in flight (with its own cause, so the
+   * turn still ends `DURABILITY_LOST`, not `cancelled`): nothing STARTS after a
+   * lost write, and what had started is told and drained.
+   */
+  private async executeTools(turn: number, step: number, toolCalls: readonly ToolCallBlock[], signal: AbortSignal): Promise<boolean> {
     const deps = this.deps!
+    const width = Math.max(1, this.maxParallel)
+    const stepAbort = new AbortController()
+    const callSignal = AbortSignal.any([signal, stepAbort.signal])
+    const slots: CallSlot[] = []
+    const running = new Set<Promise<void>>()
+    const seen = new Set<string>()
+    let committed = 0
     let concluded = false
     let lost: DurabilityLost | undefined
-    for (let i = 0; i < toolCalls.length; i++) {
-      const call = toolCalls[i]!
+    let failure: { readonly error: unknown } | undefined
+
+    const markLost = (error: unknown): void => {
+      lost ??= error instanceof DurabilityLost ? error : new DurabilityLost(error)
+      stepAbort.abort(lost)
+    }
+    /** Appends every settled result at the head of the step's order; never throws (a failure is the step's, reported once it drained). */
+    const commitReady = (): void => {
+      while (committed < slots.length && slots[committed]!.result !== undefined) {
+        const slot = slots[committed++]!
+        try {
+          if (this.commitResult(turn, step, slot)) concluded = true
+        } catch (error) {
+          failure ??= { error }
+        }
+      }
+    }
+    const settle = (slot: CallSlot, result: ToolResult): void => {
+      if (slot.result !== undefined) return
+      slot.result = result
+      commitReady()
+    }
+    const drain = async (): Promise<void> => {
+      while (running.size > 0) await Promise.race(running)
+    }
+    /** Logs a call and gives it its slot in ONE synchronous segment: no result can ever precede its call. */
+    const open = (call: ToolCallBlock): CallSlot => {
       const callEvent = this.session.append(TOOL_CALL, { turn, step, callId: call.id, name: call.name, arguments: call.arguments })
-      // Durable before the next effect: the checkpoint sits between the call
-      // record and the dispatch, so a lost write ends the turn with every
-      // remaining call answered and none of them run — the same shape as a
-      // cancellation, and the surface stays balanced for any reader.
-      if (!signal.aborted && !lost) {
+      const slot: CallSlot = { call, callSeq: callEvent.seq }
+      slots.push(slot)
+      return slot
+    }
+
+    try {
+      for (const call of toolCalls) {
+        // A repeated id is a barrier: its first call must be answered before
+        // the second is logged, or the step would hold two pending calls the
+        // log cannot tell apart.
+        const pooled = width > 1 && !seen.has(call.id) && deps.tools.get(call.name, this)?.concurrencySafe === true
+        seen.add(call.id)
+        if (pooled) {
+          while (running.size >= width) await Promise.race(running)
+        } else {
+          await drain()
+        }
+        if (signal.aborted || lost || failure) break
+        const slot = open(call)
+        // Durable before the next effect: the checkpoint sits between the call
+        // record and the gate, so a lost write leaves this call answered and
+        // no later one run, the same shape as a cancellation.
         try {
           await this.checkpoint()
         } catch (error) {
-          lost = error as DurabilityLost
+          markLost(error)
         }
-      }
-      if (signal.aborted || lost) {
-        const why = lost ? { text: 'Error: tool call not dispatched: the session lost durability', name: 'DurabilityLost', code: 'DURABILITY_LOST' } : { text: 'Error: tool call aborted before dispatch', name: 'AbortError', code: 'ABORTED_BEFORE_DISPATCH' }
-        const skipped = createToolResultMessage(call.id, [{ type: 'text', text: why.text }], true)
-        this.session.append(
-          TOOL_RESULT,
-          { turn, step, callId: call.id, message: skipped, error: { name: why.name, code: why.code } },
-          { surfaceOp: { op: 'append' }, sourceEventSeqs: [callEvent.seq] },
+        if (signal.aborted || lost) {
+          settle(slot, lost ? this.notDispatched('lost') : this.notDispatched('aborted'))
+          break
+        }
+        /**
+         * The second checkpoint of a call, and the one that makes the recovery
+         * contract readable: the pipeline runs it once the gate has passed and
+         * immediately before the body, so `tool/dispatch` is durable exactly
+         * when — and only when — an effect could follow. Without it, absence of
+         * the record would not prove absence of the body, and repair would have
+         * to read every logged call as outcome-unknown, which is where it
+         * started. The flush is a real sync under a `synced` store — milliseconds,
+         * inside the call's deadline (`tools/registry.ts`) — and it is what lets a
+         * synced lifecycle read a missing dispatch as "never ran" after a power cut.
+         *
+         * A lost write sets `lost` HERE rather than leaving the pipeline to
+         * return an error result on its own, because the turn must end the way
+         * every lost write ends it. The result alone would let a last call that
+         * concludes the turn, or one that hits `maxSteps`, close it `completed`.
+         *
+         * Its settling, either way, is also where the lane moves on from a
+         * pooled call: the gate is behind it and the dispatch is on the record.
+         */
+        let release!: () => void
+        const released = new Promise<void>((resolve) => (release = resolve))
+        const onDispatch = async (): Promise<void> => {
+          try {
+            this.session.append(TOOL_DISPATCH, { turn, step, callId: call.id })
+            try {
+              await this.checkpoint()
+            } catch (error) {
+              markLost(error)
+              throw error
+            }
+          } finally {
+            release()
+          }
+        }
+        const outcome = deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, callSignal, onDispatch)).then(
+          (result) => settle(slot, result),
+          // The pipeline turns a throw into a result; this is the floor under it.
+          // A logged call with no result is a history every provider refuses, and
+          // no repair heals one inside a closed turn (S20.5 review).
+          (error: unknown) => {
+            const text = error instanceof Error ? error.message : String(error)
+            settle(slot, refusedResult(`Error: ${text}`, 'Error', 'TOOL_FAILED'))
+          },
         )
-        continue
-      }
-      /**
-       * The second checkpoint of a call, and the one that makes the recovery
-       * contract readable: the pipeline runs it once the gate has passed and
-       * immediately before the body, so `tool/dispatch` is durable exactly
-       * when — and only when — an effect could follow. Without it, absence of
-       * the record would not prove absence of the body, and repair would have
-       * to read every logged call as outcome-unknown, which is where it
-       * started. The flush is a real sync under a `synced` store — milliseconds,
-       * inside the call's deadline (`tools/registry.ts`) — and it is what lets a
-       * synced lifecycle read a missing dispatch as "never ran" after a power cut.
-       *
-       * A lost write sets `lost` HERE rather than leaving the pipeline to
-       * return an error result on its own, because the turn must end the way
-       * every lost write ends it. The result alone would let a last call that
-       * concludes the turn, or one that hits `maxSteps`, close it `completed`.
-       */
-      const onDispatch = async (): Promise<void> => {
-        this.session.append(TOOL_DISPATCH, { turn, step, callId: call.id })
-        try {
-          await this.checkpoint()
-        } catch (error) {
-          lost = error as DurabilityLost
-          throw error
+        if (pooled) {
+          const tracked: Promise<void> = outcome.then(() => void running.delete(tracked))
+          running.add(tracked)
+          await Promise.race([released, outcome])
+        } else {
+          await outcome
         }
+        if (lost) break
       }
-      let result: ToolResult
+    } catch (error) {
+      // Nothing in the lane is meant to throw; if something does, nothing more
+      // starts, what runs is told and drained, and the step still ends with
+      // every call answered (S21: `step/end` refuses a pending call).
+      failure ??= { error }
+      stepAbort.abort(error)
+    }
+    await drain()
+    commitReady()
+    // Every call the lane never reached is answered, after every started one
+    // has committed, so the step's results stay in model order to the end.
+    for (const call of toolCalls.slice(slots.length)) {
       try {
-        result = await deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, signal, onDispatch))
+        settle(open(call), lost ? this.notDispatched('lost') : this.notDispatched('aborted'))
       } catch (error) {
-        // The pipeline turns a throw into a result; this is the floor under it.
-        // A logged call with no result is a history every provider refuses, and
-        // no repair heals one inside a closed turn (S20.5 review).
-        const text = error instanceof Error ? error.message : String(error)
-        result = { isError: true, content: [{ type: 'text', text: `Error: ${text}` }], error: { message: text, info: { name: 'Error', code: 'TOOL_FAILED' } } }
+        failure ??= { error }
+        break
       }
-      const message = createToolResultMessage(call.id, [...result.content], result.isError)
+    }
+    if (failure !== undefined) throw failure.error
+    if (lost) throw lost
+    return concluded
+  }
+
+  /** A call answered without a body: cancelled before dispatch, or after a lost write. */
+  private notDispatched(why: 'lost' | 'aborted'): ToolResult {
+    return why === 'lost'
+      ? refusedResult('Error: tool call not dispatched: the session lost durability', 'DurabilityLost', 'DURABILITY_LOST')
+      : refusedResult('Error: tool call aborted before dispatch', 'AbortError', 'ABORTED_BEFORE_DISPATCH')
+  }
+
+  /**
+   * One `tool/result`, citing its call, then the call's quiet next-step
+   * contexts. Returns whether the call concluded the turn. A result the log
+   * refuses (a render it cannot store) is replaced by a minimal text-only
+   * failure for the same call, the live twin of repair: a logged call never
+   * reaches `step/end` unanswered.
+   */
+  private commitResult(turn: number, step: number, slot: CallSlot): boolean {
+    const { call, callSeq } = slot
+    const result = slot.result!
+    const options = { surfaceOp: { op: 'append' as const }, sourceEventSeqs: [callSeq] }
+    try {
       this.session.append(
         TOOL_RESULT,
         {
           turn,
           step,
           callId: call.id,
-          message,
+          message: createToolResultMessage(call.id, [...result.content], result.isError),
           ...(result.error?.info ? { error: { name: result.error.info.name, code: result.error.info.code } } : {}),
         },
-        { surfaceOp: { op: 'append' }, sourceEventSeqs: [callEvent.seq] },
+        options,
       )
-      for (const context of result.additionalContexts ?? []) this.inbox.append(context, 'next-step', false)
-      if (result.concludesTurn) concluded = true
+    } catch (error) {
+      const text = `Error: the tool's result could not be recorded: ${error instanceof Error ? error.message : String(error)}`
+      this.session.append(
+        TOOL_RESULT,
+        { turn, step, callId: call.id, message: createToolResultMessage(call.id, [{ type: 'text', text }], true), error: { name: 'Error', code: 'TOOL_FAILED' } },
+        options,
+      )
+      return false
     }
-    if (lost) throw lost
-    return concluded
+    for (const context of result.additionalContexts ?? []) this.inbox.append(context, 'next-step', false)
+    return result.concludesTurn === true
   }
 
   /**

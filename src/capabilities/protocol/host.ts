@@ -235,7 +235,7 @@ function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: st
   const partial: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(overrides ?? {})) {
     if (value === undefined) continue
-    if (key === 'maxSteps' || key === 'maxTokens') {
+    if (key === 'maxSteps' || key === 'maxTokens' || key === 'maxParallelToolCalls') {
       if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) throw new RpcFailure(INVALID_PARAMS, `${method}: "${key}" must be a positive integer`)
     } else if (key === 'temperature') {
       if (typeof value !== 'number' || !Number.isFinite(value)) throw new RpcFailure(INVALID_PARAMS, `${method}: "temperature" must be a number`)

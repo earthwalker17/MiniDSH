@@ -66,6 +66,7 @@ export async function coreHarness(
         provider: 'scripted',
         model: 'scripted-model',
         ...(over.maxSteps === undefined ? {} : { maxSteps: over.maxSteps }),
+        ...(over.maxParallelToolCalls === undefined ? {} : { maxParallelToolCalls: over.maxParallelToolCalls }),
         ...(over.reasoningEffort === undefined ? {} : { reasoningEffort: over.reasoningEffort }),
       }
       const handle = await root.get(AGENTS).create(root, { cwd: over.cwd ?? process.cwd(), agentOptions })

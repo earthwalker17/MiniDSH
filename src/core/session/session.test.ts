@@ -463,6 +463,23 @@ describe('Session: relational invariant', () => {
     expect(() => session.append(TOOL_DISPATCH, { turn: 1, step: 1, callId: 'ghost' })).toThrowError(/tool\/dispatch for "ghost" has no pending tool\/call/)
   })
 
+  /**
+   * S21: the driver answers every call it logged on every exit path, so a live
+   * step that closes over a pending call is a writer bug — and a history every
+   * provider refuses. A seed or a cold read still folds an older log with one.
+   */
+  it('throws when a live step/end closes over an unanswered tool/call, but still folds one in a seed', async () => {
+    const { sessions } = await harness(true)
+    const session = sessions.create({ cwd: '/w' })
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    session.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'x', arguments: '{}' })
+    expect(() => session.append(STEP_END, { turn: 1, step: 1 })).toThrowError(/step\/end 1 while tool call\(s\) c1 are unanswered/)
+
+    const older = sessions.create({ cwd: '/w', seed: [...session.events, { type: STEP_END.type, seq: session.events.length, time: 0, data: { turn: 1, step: 1 } }] })
+    expect(() => older.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })).not.toThrow()
+  })
+
   it('throws when a tool/dispatch lands outside an open step', async () => {
     const { sessions } = await harness(true)
     const session = sessions.create({ cwd: '/w' })

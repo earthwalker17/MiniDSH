@@ -149,6 +149,13 @@ const installSessionInvariant: InvariantInstaller = (ctx, fail) => {
       }
       traces.set(session, trace)
     }
+    // A LIVE step closes only once every call it logged is answered: the driver
+    // answers each on every exit path (S21, `executeTools`), and a step closed
+    // over a pending call leaves a history every provider refuses. Live appends
+    // only — a seed or a cold read keeps folding an older log that holds one.
+    if (matches(event, STEP_END) && trace.pending.size > 0) {
+      fail(`step/end ${event.data.step} while tool call(s) ${[...trace.pending].join(', ')} are unanswered`)
+    }
     // Observation is pre-commit and any observer may still reject this event, so
     // the advanced trace is only staged here and committed once the event lands.
     const next: Trace = { ...trace, pending: new Set(trace.pending) }

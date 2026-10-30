@@ -21,6 +21,7 @@ const agentLayerSchema = z.strictObject({
   model: z.string().min(1).optional(),
   reasoningEffort: z.string().min(1).optional(),
   maxSteps: z.number().int().positive().optional(),
+  maxParallelToolCalls: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
   temperature: z.number().optional(),
 })
@@ -36,6 +37,7 @@ export const agentSettingsSchema = z.strictObject({
   model: z.string().min(1),
   reasoningEffort: z.string().min(1).optional(),
   maxSteps: z.number().int().positive().optional(),
+  maxParallelToolCalls: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
   temperature: z.number().optional(),
 })
@@ -113,6 +115,7 @@ export function resolveSettings(options: ResolveSettingsOptions = {}): ResolvedS
     model: layer.model ?? builtins.model,
     ...(layer.reasoningEffort === undefined ? {} : { reasoningEffort: layer.reasoningEffort }),
     ...(layer.maxSteps === undefined ? {} : { maxSteps: layer.maxSteps }),
+    ...(layer.maxParallelToolCalls === undefined ? {} : { maxParallelToolCalls: layer.maxParallelToolCalls }),
     ...(layer.maxTokens === undefined ? {} : { maxTokens: layer.maxTokens }),
     ...(layer.temperature === undefined ? {} : { temperature: layer.temperature }),
   }

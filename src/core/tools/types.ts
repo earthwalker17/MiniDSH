@@ -84,6 +84,19 @@ export interface ToolDefinition<Args = unknown, Value extends JsonValue = JsonVa
    */
   readonly timeoutMs?: number | null
   /**
+   * This tool's BODY may overlap its siblings' bodies in one step (ARCHITECTURE
+   * §6, "joined at the step"); absent, every call of it runs alone, in model
+   * order, as every call did before S21. A promise the tool makes, fail-closed:
+   * its body asks nobody (only the ordered lane may ask), reads no budget
+   * folded from the committed surface (image admission, recall), depends on no
+   * sibling's effect having landed, and keeping shared-workspace effects
+   * disjoint is its CALLER's job, fenced only by the editor's version check.
+   * It also owns its clock: `timeoutMs` must be `null` (the registry refuses
+   * anything else), because a deadline abandons a body, and an abandoned body
+   * would leave the pool still running while the step believed it drained.
+   */
+  readonly concurrencySafe?: true
+  /**
    * What KIND of tool this is, for the runtime — never for the model, which
    * only ever sees `{name, description, parameters}`. See `DELEGATION_TOOL` and
    * `RECALL_TOOL`; a tag is read through the registry, so what a tag means is

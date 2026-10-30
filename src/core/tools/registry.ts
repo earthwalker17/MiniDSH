@@ -126,6 +126,12 @@ class ToolRegistry implements Tools {
 
   register<Args, Value extends JsonValue>(owner: Context, definition: ToolDefinition<Args, Value>): Disposer {
     const def = definition as unknown as AnyToolDefinition
+    // Checked on the definition, never on the effective deadline: a deployment
+    // whose default budget is non-positive would otherwise admit here what
+    // another refuses.
+    if (def.concurrencySafe === true && def.timeoutMs !== null) {
+      throw new Error(`tool "${def.name}" is concurrencySafe and must own its clock (timeoutMs: null): a deadline abandons a body the step's pool would still be running`)
+    }
     const layer = this.definitions.layerFor(owner)
     if (layer.has(def.name)) throw new Error(`tool "${def.name}" is already registered in this scope`)
     // The mutation inside the effect, so the owner is admitted before it (kernel `admit`).
