@@ -366,7 +366,10 @@ export class ReactLoopAgent implements Agent {
         }
       }
     } catch (error) {
-      if (signal.aborted) {
+      // A lost write first: since S21 a step drains its bodies before it
+      // throws one, and a cancel landing in that drain must not turn a lost
+      // write into a cancellation (S21 review).
+      if (signal.aborted && !(error instanceof DurabilityLost)) {
         reason = { kind: 'cancelled' }
       } else {
         const code = error instanceof DurabilityLost ? error.code : 'LOOP_FAILED'
@@ -608,16 +611,20 @@ export class ReactLoopAgent implements Agent {
             release()
           }
         }
-        const outcome = deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, callSignal, onDispatch)).then(
-          (result) => settle(slot, result),
-          // The pipeline turns a throw into a result; this is the floor under it.
-          // A logged call with no result is a history every provider refuses, and
-          // no repair heals one inside a closed turn (S20.5 review).
-          (error: unknown) => {
-            const text = error instanceof Error ? error.message : String(error)
-            settle(slot, refusedResult(`Error: ${text}`, 'Error', 'TOOL_FAILED'))
-          },
-        )
+        // Started inside the chain, so a provider that throws synchronously still
+        // settles this call's slot rather than leaving it logged and unanswered.
+        const outcome = Promise.resolve()
+          .then(() => deps.tools.execute(toolCall(call.id, call.name, call.arguments, this, callSignal, onDispatch)))
+          .then(
+            (result) => settle(slot, result),
+            // The pipeline turns a throw into a result; this is the floor under it.
+            // A logged call with no result is a history every provider refuses, and
+            // no repair heals one inside a closed turn (S20.5 review).
+            (error: unknown) => {
+              const text = error instanceof Error ? error.message : String(error)
+              settle(slot, refusedResult(`Error: ${text}`, 'Error', 'TOOL_FAILED'))
+            },
+          )
         if (pooled) {
           const tracked: Promise<void> = outcome.then(() => void running.delete(tracked))
           running.add(tracked)
@@ -635,6 +642,9 @@ export class ReactLoopAgent implements Agent {
       stepAbort.abort(error)
     }
     await drain()
+    // The floor: a call the lane opened and never started (it threw between
+    // the two) is answered too, or `step/end` would close over it.
+    for (const slot of slots) settle(slot, refusedResult('Error: tool call not dispatched: the step failed', 'Error', 'TOOL_FAILED'))
     commitReady()
     // Every call the lane never reached is answered, after every started one
     // has committed, so the step's results stay in model order to the end.

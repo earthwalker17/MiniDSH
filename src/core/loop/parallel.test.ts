@@ -9,7 +9,7 @@
  */
 import { z } from 'zod'
 import { afterEach, describe, expect, it } from 'vitest'
-import { repairTail } from '../agent/index.ts'
+import { AGENT_ERROR, repairTail } from '../agent/index.ts'
 import { asCallId } from '../ids.ts'
 import { createUserMessage } from '../llm/message.ts'
 import type { StreamChunk } from '../llm/index.ts'
@@ -229,6 +229,70 @@ describe('S21: a step\'s concurrency-safe calls overlap, joined at the step', ()
     const turnEnd = agent.session.events.findLast((event) => event.type === 'turn/end')!
     expect((turnEnd.data as { reason: { kind: string; code?: string } }).reason).toMatchObject({ kind: 'error', code: 'DURABILITY_LOST' })
     expect(harness.adapter.calls).toHaveLength(1) // no second request was paid for
+  })
+
+  it('keeps a lost write a lost write when a person cancels while its bodies drain (S21 review)', async () => {
+    harness = await coreHarness()
+    // A body that is slow to wind down: it ignores its signal until released.
+    const windDown = deferred()
+    const started = deferred()
+    harness.root.get(TOOLS).register(
+      harness.root,
+      defineTool({
+        name: 'stubborn',
+        description: 'finishes when released',
+        input: z.object({ n: z.number() }),
+        output: z.object({}),
+        concurrencySafe: true,
+        timeoutMs: null,
+        execute: async () => {
+          started.resolve()
+          await windDown.promise
+          return {}
+        },
+        render: () => [{ type: 'text', text: 'done' }],
+      }),
+    )
+    let lose = false
+    harness.root.on(SESSION_EVENT, (_session, event) => {
+      if (event.type === 'tool/call' && (event.data as { callId: string }).callId === 'b') lose = true
+    })
+    harness.root.on(SESSION_FLUSH, () => {
+      if (lose) throw new Error('disk gone')
+    })
+    const errors: unknown[] = []
+    harness.root.on(AGENT_ERROR, (_agent, error) => void errors.push(error))
+    harness.adapter.script(calls(['a', 'stubborn', 1], ['b', 'stubborn', 2]))
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await started.promise
+    await waitFor(() => results(agent.session.events).length === 0 && lose)
+    agent.cancel({ kind: 'user' }) // lands while the lane drains `a`
+    windDown.resolve()
+    await agent.whenIdle()
+    const turnEnd = agent.session.events.findLast((event) => event.type === 'turn/end')!
+    expect((turnEnd.data as { reason: { kind: string; code?: string } }).reason).toMatchObject({ kind: 'error', code: 'DURABILITY_LOST' })
+    expect(errors, 'the lost write is reported once, never again as a turn-boundary failure').toHaveLength(1)
+  })
+
+  it('answers a call whose Tools provider throws synchronously, and the agent takes its next turn (S21 review)', async () => {
+    harness = await coreHarness()
+    gatedTools(harness, { safe: true })
+    const tools = harness.root.get(TOOLS)
+    const original = tools.execute.bind(tools)
+    tools.execute = (call) => {
+      if (call.callId === 'b') throw new Error('provider fault')
+      return original(call)
+    }
+    harness.adapter.script(calls(['a', 'unknown_tool', 1], ['b', 'safe', 2]), assistantText('after the fault'), assistantText('second turn'))
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    expect(results(agent.session.events)).toEqual(['a:UNKNOWN_TOOL', 'b:TOOL_FAILED'])
+    agent.followup(createUserMessage('again'))
+    await agent.whenIdle()
+    const ends = agent.session.events.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)
+    expect(ends).toEqual(['completed', 'completed'])
   })
 
   it('runs a repeated call id as a barrier, so the step never holds two pending calls it cannot tell apart', async () => {

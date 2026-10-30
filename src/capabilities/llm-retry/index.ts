@@ -63,11 +63,12 @@ export const retryPlugin: Plugin<RetryConfig | undefined> = {
       if (count >= maxRetries) return undefined
       attempts.set(context.agent, { key, count: count + 1 })
 
-      // Full jitter: parallel children on one provider meet a rate limit
-      // together, and a deterministic backoff sent them back together, three
-      // times, into the same limit (S21). A provider's own wait is the floor.
-      const backoff = Math.random() * Math.min(maxDelayMs, initialDelayMs * 2 ** count)
-      await sleep(Math.max(backoff, retryAfterMs), context.signal)
+      // Full jitter, ON TOP of a provider's own wait: parallel children on one
+      // provider meet a rate limit together and get the same `retry-after`, so
+      // a deterministic backoff, or a jitter that wait swallowed, sent them
+      // back together, three times, into the same limit (S21 and its review).
+      const jitter = Math.random() * Math.min(maxDelayMs, initialDelayMs * 2 ** count)
+      await sleep(retryAfterMs + jitter, context.signal)
       if (context.signal.aborted) return undefined
       return { kind: 'retry' } satisfies RequestErrorAction
     })

@@ -105,6 +105,29 @@ describe('llm-retry', () => {
     }
   })
 
+  it('spreads siblings that share one retry-after, never below it (S21 review)', async () => {
+    const h = await mount({ initialDelayMs: 400 })
+    const waits: number[] = []
+    const realSetTimeout = globalThis.setTimeout
+    // Record each retry's wait as the row asks for it, and run it at once.
+    globalThis.setTimeout = ((handler: () => void, ms?: number) => {
+      if ((ms ?? 0) >= 1_000) waits.push(ms ?? 0)
+      return realSetTimeout(handler, 0)
+    }) as typeof setTimeout
+    try {
+      for (let sibling = 0; sibling < 4; sibling++) {
+        h.adapter.script(failing('RATE_LIMIT', 1_000), assistantText('recovered'))
+        const outcome = await run(h)
+        expect(outcome.end.kind).toBe('completed')
+      }
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
+    expect(waits).toHaveLength(4)
+    for (const wait of waits) expect(wait).toBeGreaterThanOrEqual(1_000)
+    expect(new Set(waits).size, `four siblings with one retry-after waited ${waits.join(', ')} ms: in lockstep`).toBeGreaterThan(1)
+  })
+
   it('ends its wait when the turn is cancelled, and retries nothing after', async () => {
     const h = await mount({ initialDelayMs: 0 })
     h.adapter.script(failing('SERVER', 30_000), assistantText('unreached'))

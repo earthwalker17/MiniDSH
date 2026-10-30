@@ -13,10 +13,14 @@
  *                model — a serial executor cannot produce it whatever the
  *                model says
  *   order        the parent's results commit in model order, each citing its call
+ *                (the separating test for order is the unit suite's; this run
+ *                reports whether its children finished out of model order)
  *   the world    each child wrote its own directory's file, and only that
  *   replay       the parent and every child replay, bound by delegation: the
- *                children are handed over in REVERSED order, which a
- *                first-request binding would mis-serve
+ *                children are handed over in REVERSED order, and each replayed
+ *                call's result must be the one its own child gave — the world
+ *                alone cannot tell, since a log replays the same file whoever
+ *                runs it (S21 review)
  *   measured     the delegating step's wall clock against the children's sum
  *                (S21 Phase 0, serial: 24.9 s and 28.9 s, each the sum)
  *
@@ -80,9 +84,17 @@ function span(events: readonly EventEnvelope[]): { start: number; end: number } 
   return { start: Math.min(...starts), end: Math.max(...ends) }
 }
 
+/** The text a tool result carries, inside its `tool-result` block. */
+function resultText(event: EventEnvelope): string {
+  type Block = { type: string; text?: string; content?: Block[] }
+  const flatten = (blocks: readonly Block[]): string => blocks.map((block) => (block.type === 'text' ? (block.text ?? '') : flatten(block.content ?? []))).join('')
+  return flatten((event.data as { message: { content: Block[] } }).message.content)
+}
+
 const PROMPT =
   'Do not read any file yourself. In ONE message, start three subagents at once: one finds the release codename in alpha/, one in beta/, ' +
-  'one in gamma/, and each writes that codename alone into CODENAME.txt in its own directory. Then tell me the three codenames.'
+  'one in gamma/, and each writes that codename alone into CODENAME.txt in its own directory. Name every file by its relative path ' +
+  '(alpha/notes.md, alpha/CODENAME.txt), never an absolute one, in the prompt of each subagent too. Then tell me the three codenames.'
 
 describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joined at the parent\'s step', () => {
   it('overlaps the children, commits their answers in model order, and replays them bound by delegation', { timeout: 900_000 }, async () => {
@@ -140,7 +152,12 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
     const childMs = spans.map((s) => s.end - s.start)
     const serialMs = childMs.reduce((sum, ms) => sum + ms, 0)
     expect(joinedMs, 'the step took as long as its children run one by one').toBeLessThan(serialMs)
-    const line = `[parallel arc] ${delegated.length} children in one message; the delegating step took ${joinedMs} ms against ${serialMs} ms serial (children ${childMs.join(', ')} ms)`
+    const finished = events.filter((event) => event.type === 'subagent/end').map((event) => (event.data as { callId: string }).callId)
+    // A recorded absolute path cannot land in the replay's fresh root (§13): counted, so a replay failure names its cause.
+    // Arguments are JSON text, so the workspace appears there in its JSON-escaped spelling.
+    const escapedRoot = JSON.stringify(workspace).slice(1, -1)
+    const absolute = children.flatMap((child) => child.events.filter((event) => event.type === 'tool/call' && (event.data as { arguments: string }).arguments.includes(escapedRoot))).length
+    const line = `[parallel arc] ${delegated.length} children in one message; the delegating step took ${joinedMs} ms against ${serialMs} ms serial (children ${childMs.join(', ')} ms); finished ${finished.join(' ')} for model order ${modelOrder.join(' ')}; ${absolute} child call(s) named an absolute path`
     console.log(line)
     probe([line])
 
@@ -153,6 +170,7 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
     const replayWorkspace = tempDir('minidsh-e2e21-replay-ws-')
     seedWorkspace(replayWorkspace)
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
+    const replayFrames: { sessionId: string; event: EventEnvelope }[] = []
     const replayed = await runTask(
       {
         task: PROMPT,
@@ -168,10 +186,19 @@ describe.skipIf(!KEY)('S21 live E2E: delegations in one message run at once, joi
           replayHandle = installLlmReplay(context, { events: parentTurnOne, children: children.map((child) => ({ id: child.childId, events: child.events })).toReversed() })
         },
       },
-      undefined,
+      (frame) => void replayFrames.push(frame),
     )
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
+    // Each replayed call answered with its OWN child's result: a mis-bound child replays a sibling's log, writes the
+    // same files, drains every cursor, and differs only here.
+    const replayedResults = new Map(
+      replayFrames.filter((frame) => frame.sessionId === replayed.sessionId && frame.event.type === 'tool/result').map((frame) => [(frame.event.data as { callId: string }).callId, resultText(frame.event)]),
+    )
+    for (const recorded of stepResults) {
+      const callId = (recorded.data as { callId: string }).callId
+      expect(replayedResults.get(callId), `call ${callId} replayed another child's answer`).toBe(resultText(recorded))
+    }
     // The replay reproduced the world: each child, served its OWN recording, wrote its own file again.
     for (const [team, codename] of Object.entries(TEAMS)) expect(readFileSync(join(replayWorkspace, team, 'CODENAME.txt'), 'utf8').trim()).toBe(codename)
   })
