@@ -1,6 +1,6 @@
 # DSH reference: Authority: sandbox, approvals, grants
 
-> Where to research DSH's sandbox, approvals and grants ([the reading rules](../README.md)). Pin: `deepseek-ai/deepseek-harness@22ddee37` (master, 2026-10-23, `dsh-v0.2.1-rc.3`); re-researched in S20.5, 2026-10-25; S21 added the S21.1 continuation bullet and the windows-acl Job binding at `ce7073d5` (2026-10-31).
+> Where to research DSH's sandbox, approvals and grants ([the reading rules](../README.md)). Pin: `deepseek-ai/deepseek-harness@22ddee37` (master, 2026-10-23, `dsh-v0.2.1-rc.3`); re-researched in S20.5, 2026-10-25; S21 added the windows-acl Job binding at `ce7073d5` (2026-10-31); S21.1 built the continuation item (sandbox code byte-identical at `fcc0ad46`).
 
 ## What exists (at the pin)
 
@@ -28,7 +28,6 @@
 
 ## Open for the route
 
-- **S21.1, a child's authority across continuation.** Delegation appends `sandbox/mode{source:'delegation'}`, `approval/policy never` and, from Auto or full access, `permission/preset` once, after any fork seed, capturing only the parent's EXPLICIT sandbox override; later child switches win. A resume reruns the same setup closure; the delegation tool is never hidden at the cap but refuses at call time, so only composition can drift (`execution-jobs-agents.md`). `packages/subagent/subagent/src/{child-agent,manager}.ts`
 - **S22, grants on a surface.** Only computer use lists and revokes grants (saved on a page, session ones in memory); tool approvals stay `allowed-once`. `packages/experimental/cua/README.md`
 - **S22, authority on resume.** A saved Auto session reopens only with its integration, even to switch preset; `--add-dir` must be passed again. `docs/upgrade-guide/v0.2.1-rc.2/auto-review-shutdown/guide.md`
 

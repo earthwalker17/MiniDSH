@@ -2,7 +2,7 @@
 
 A curated local map of DeepSeek Harness (DSH) for MiniDSH sessions: **where an upstream subsystem lives, what MiniDSH leans on about it, and where to research next**. It is a navigation layer, never a mirror: upstream mechanisms are fetched on demand from the paths here, every claim carries a repository path, and the repository itself stays the authority.
 
-**Pin:** `deepseek-ai/deepseek-harness@22ddee37` (`master`, 2026-10-23, `dsh-v0.2.1-rc.3`), every file and ledger row re-researched in S20.5 (2026-10-25). An ordinary session moves the pin only for the area it researched, so each file's header says which commit it describes: S21 moved `dsh/execution-jobs-agents.md`, `dsh/session-durability.md` and the execution rows to `ce7073d5` (2026-10-29, `dsh-0.2.1-rc.5`); the next `.5` moves the rest.
+**Pin:** `deepseek-ai/deepseek-harness@22ddee37` (`master`, 2026-10-23, `dsh-v0.2.1-rc.3`), every file and ledger row re-researched in S20.5 (2026-10-25). An ordinary session moves the pin only for the area it researched, so each file's header says which commit it describes: S21 moved `dsh/session-durability.md` and the execution rows to `ce7073d5` (2026-10-29, `dsh-0.2.1-rc.5`), S21.1 `dsh/execution-jobs-agents.md` and the delegation rows to `fcc0ad46` (2026-11-04, `dsh-v0.2.2-rc.1`); the next `.5` moves the rest.
 
 ## The files
 
@@ -10,8 +10,8 @@ A curated local map of DeepSeek Harness (DSH) for MiniDSH sessions: **where an u
 |---|---|---|
 | [dsh/architecture-map.md](dsh/architecture-map.md) | the two composition planes, the subsystem map, presets | every session: the entry map; S22 |
 | [dsh/session-durability.md](dsh/session-durability.md) | the session log, crash repair, format generations, locking, projections, replay | S22, later |
-| [dsh/execution-jobs-agents.md](dsh/execution-jobs-agents.md) | loop, tool pipeline, jobs, subagents, teams, workflow, schedule | S21.1, S22, later |
-| [dsh/authority.md](dsh/authority.md) | sandbox backends (Windows included), approvals, grants, presets, hooks, the model reviewer | S21.1, S22 |
+| [dsh/execution-jobs-agents.md](dsh/execution-jobs-agents.md) | loop, tool pipeline, jobs, subagents, teams, workflow, schedule | S22, later |
+| [dsh/authority.md](dsh/authority.md) | sandbox backends (Windows included), approvals, grants, presets, hooks, the model reviewer | S22 |
 | [dsh/skills-documents-extensions.md](dsh/skills-documents-extensions.md) | skills, document tooling, deliverables, extensions, MCP, PTC | S22, S22.5 |
 | [dsh/web-browser-attachments.md](dsh/web-browser-attachments.md) | web search and fetch, browser and computer use, the attachment plane | S22 |
 | [dsh/llm-providers.md](dsh/llm-providers.md) | the LLM seam, adapters, the OpenAI path, model facts, retries | a provider session |

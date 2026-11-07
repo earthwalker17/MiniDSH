@@ -2,6 +2,19 @@
 
 All notable changes to MiniDSH are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The session-by-session engineering record, with what each session measured, lives in [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
+## [Unreleased]
+
+### Changed
+
+- **A resumed or forked delegated child keeps what its delegation narrowed:** its tool filter, the tools hidden from every child (network tools, and delegation at the depth cap, a preset's own included) and its persona. A child's log records them once, and every continuation re-applies them; before, only its authority came back. A child delegated by an earlier version continues as it did.
+- **On Windows, what a shell starts ends with it.** Every PowerShell the harness starts — a background job, an approved command, the session's shell — holds its descendants in a Job of its own, so a program it `Start-Process`'d no longer outlives the job's end, its stop, an approved command's end, or a MiniDSH process that is killed. Where Constrained Language Mode forbids that, one warning says so and the command runs as before.
+- **A `/compact` run while the agent is idle is stopped by quitting**, recorded as cancelled, instead of running on and paying for a summary nobody would see.
+
+### Fixed
+
+- A `resume` (CLI, terminal or wire) whose authority flags the session refuses no longer loses the prompt the session had queued; the flags now land before that prompt can start a turn, and the model is told of them in its first request.
+- A prompt sent to a session that is shutting down is refused instead of being accepted and dropped.
+
 ## [1.2.0] — 2026-10-26
 
 Background work, a third provider, web search, skills and a real browser, built across four sessions; then the whole widened runtime was reviewed as one system and what that review found was fixed before release. Read the migration note at the end of this section before upgrading a deployment that sets a temperature, a base URL or an agent preset.

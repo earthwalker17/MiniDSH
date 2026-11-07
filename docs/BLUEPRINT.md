@@ -2,19 +2,18 @@
 
 What comes next, the route there, what is undecided, and a compact record of how the system arrived. `ARCHITECTURE.md` (beside this file) is the current shape and its limitations; this file is direction and the measurements the architecture map does not carry. Its budget is in `scripts/check-docs.ts`; past 90%, compress §4 first (older entries collapse to what a later session reuses).
 
-## 1. Next session — S21.1 Continuations and process hygiene
+## 1. Next session — S22 Surfaces: product pass and the Desktop launcher
 
-S21 found two carried items independent of the execution model, and the user moved them here (plan mode, 2026-10-31):
+The runtime work is done (S21.1, §4): S22 is the clients and the wire methods they need, nothing beneath them. Each new wire method ships with its first client.
 
-- A resumed or forked child keeps its ceiling, pins, depth and S21's width, but loses what `setup` narrowed: tool filter, network denial, persona, the delegation tool hidden at the cap (ARCHITECTURE §13). The shape is S21's width: narrowing as opening facts in the CHILD's log, re-applied by every lifecycle. Not a `ResumeAgentOptions.setup`, which a CLI, terminal or wire resumer cannot reconstruct. DSH re-applies a durable `subagent/descriptor`, but follows the parent's CURRENT composition when no preset was selected; that is the wrong half to copy.
-- On Windows, a program a job leaves running outlives the job. Measured on this host (S21 research):
-  - a job's own pwsh assigning ITSELF to a nested kill-on-close Job (Reflection.Emit P/Invoke) costs ~80 ms on a ~600 ms start, against Add-Type's 0.7–2.2 s;
-  - grandchildren then die at the job's end, at a kill, and at a host kill, and the exit code is kept;
-  - only WMI `Win32_Process.Create` escaped.
-  No native binding, nothing driven from the persistent shell, no CIM sweep. Where Constrained Language Mode blocks the prefix, fall back to taskkill with a warning.
-- Candidate: bind the idle `/compact` to its agent's lifetime (§13). It is the first consumer of an agent-owned-work primitive (§3).
+- **The wire.** `session/fork` and resume-without-prompt (a continuer's own flags already land after publication and before any wake: `ResumeAgentOptions.opening`); the terminal's beside-the-wire bypass deleted; `publishView` on a status change; tool KIND on the wire so no surface hard-codes a tool name, and a pooled result line naming its call; stopping or showing one child among several (a child mid-delegation is read-only on every driving method today, `protocol/host.ts`).
+- **The clients.** A graceful web stop and `web --json`; a terminal line editor and status line; browser markdown, cards, a model picker, uploads and attachment reads; grants listed and revoked in the web UI.
+- **Desktop** as a packaged launcher plus a webview over the existing carrier, and the importable-surface decision it forces (§3).
+- **The remaining visual assets:** a terminal recording, a browser screenshot, a social preview.
 
-**Gate.** A resumed and a forked child proved still narrow; a `Start-Process` grandchild stopped at its job's end on Windows; the delegation and jobs arcs.
+*Not:* a second runtime, surface-held state, a runtime change a surface could do without.
+
+**Gate.** Every new method exercised by its client in a test and live; the `web` and `delegation` arcs; a launcher run on Windows.
 
 ## 2. Macro route (dependency-ordered; sessions are approximate)
 
@@ -32,15 +31,13 @@ S21 found two carried items independent of the execution model, and the user mov
 | ~~**S20** Browser verification (2026-10-19)~~ | ✅ `tool-browser`: our own CDP client over a pipe, one browser per agent, fenced inside Chrome to loopback and the workspace, proved per launch; image admission and process hygiene moved into core. §4. | S15, S17 |
 | ~~**S20.5** Hardening checkpoint B (2026-10-25 → 10-26)~~ | ✅ The widened runtime reviewed as one system: one spawn home, bounded reads, a write judged by its handle, all-or-nothing authority switches, one grant rule, one provider wire, a two-job release; `references/` at `22ddee37`; 1.2.0 from CI. §4. | S17–S20 |
 | ~~**S21** Multi-actor execution (2026-10-31)~~ | ✅ No scheduler: concurrency joined at the step (concurrency-safe bodies behind one ordered lane, results in model order); parallel foreground delegation, bounded by a durable per-agent width; replay keyed by delegation; an atomic editor CAS; jittered retry. §4. | S20.5 |
-| **S21.1** Continuations and process hygiene | a child's narrowing as opening facts every lifecycle re-applies; Windows job self-containment; the idle `/compact` bound to its agent (§1) | S21 |
-| **S22** Surfaces: product pass and the Desktop launcher | fork and resume on the wire; terminal and browser quality; uploads; tool display facts; Desktop = launcher + webview | S17 |
+| ~~**S21.1** Continuations and process hygiene (2026-11-08)~~ | ✅ A child's narrowing as an opening fact every lifecycle re-applies; agent-owned work, the idle `/compact` its first consumer; a continuer's switches before any wake; every Windows pwsh contains what it starts. §4. | S21 |
+| **S22** Surfaces: product pass and the Desktop launcher | fork and resume on the wire; terminal and browser quality; uploads; tool display facts; Desktop = launcher + webview (§1) | S21.1 |
 | **S22.5** Hardening checkpoint C = V2 release candidate | — | S21.1, S22 |
 
 **The ordering principle: deepen the record before widening the runtime.** Every later capability adds a new kind of effect or a new concurrent actor, and each must be expressible as log facts, under recorded authority, with a recovery rule, so those three come first. One concept runs through the first cluster: a core **effect vocabulary** (what a call is about to do and what it did, written by trusted code from validated arguments, never model prose) with three consumers: the crash record (S14), the consent subject and grants (S15), the audit of effects (S16). Authority precedes jobs because on Windows a background job cannot exist while every shell call is a one-shot escalation. **Checkpoints follow clusters of architectural change**, never every session: the record and authority planes; the widened runtime; multi-actor and product. Each `.5` does what CLAUDE.md §6 says.
 
 **After S21: children stay foreground.** Several run at once inside the parent's step. Background or continuable children wait for evidence that a parent must keep working, or be talked to, while its children run. Their recorded home is §3. *Not:* agent teams, mailboxes, schedulers, swarm presets.
-
-**S22 — surfaces.** `session/fork` and resume-without-prompt on the wire (a resume the host's flags refuse, today, may lose the restored prompt its cancelled first turn claimed), the terminal's beside-the-wire bypass deleted; `publishView` on a status change; a graceful web stop and `web --json`; a terminal line editor and status line; browser markdown, cards, a model picker, uploads and attachment reads; tool KIND on the wire so no surface hard-codes a tool name, and a pooled result line naming its call; stopping or showing one child among several; Desktop as a packaged launcher plus a webview over the existing carrier; the importable-surface decision; the remaining visual assets (a terminal recording, a browser screenshot, a social preview). *Not:* a second runtime, surface-held state.
 
 **Still refused, with the reason:** model-written extensions (upstream replaced its own with gated plugin installs; `node:vm` is no boundary); an MCP bridge (no demonstrated need); a Windows confinement backend (native bindings, standing ACL changes, `partial` today) and Landlock (a prebuilt native launcher); session deletion (no authority above the append-only seam, none upstream); PTC; a session search index; per-user identity; agent teams.
 
@@ -52,7 +49,7 @@ S21 found two carried items independent of the execution model, and the user mov
   - root-only;
   - a `job_ids` join on `job_output`.
 
-  DSH left job-backed children over continuation (two FIFOs, two cancel authorities, one terminal fact against a multi-turn residency), not over one-shot children. First, though, comes an agent-owned-work primitive: lifetime-derived cancel, join, bounded stop, end recorded before detach. The driver, jobs, compaction, the host and tool-subagent each rebuild part of it today; its first consumer is the idle `/compact`.
+  DSH left job-backed children over continuation (two FIFOs, two cancel authorities, one terminal fact against a multi-turn residency), not over one-shot children. The agent-owned-work primitive they need exists since S21.1 (`Agent.own`: lifetime-derived cancel, a bounded join, the end recorded before detach), with the idle `/compact` its only consumer; the driver, jobs, the host and tool-subagent still keep their own halves.
 - **A second surface writer.** Only the compaction planner enforces "a replace never separates a call from its result", and the session invariant admits a `replace`-op `user/message` outside a step but not a `tool/result`. A pruner would be that second writer; the rule moves into the session when one exists.
 - **Workspace-lifetime grants.** S15 shipped the session-lifetime shape and the identity any durable grant needs (tool plus exact subject), so what is left open is only the STORE. One that outlives a session cannot live in one log, `settings` may not own authority, and no workspace layer exists: a home-side store keyed by canonical root, COPIED into opening facts, is the only shape that keeps a stored log's audit self-contained.
 - **A document input kind.** A PDF block is a vocabulary change (`AttachmentRef`, `ModelModality`, `ContentBlock`, both serializers, the meter); upstream's generic file kind, projected as one handle line and never bytes, gives every model PDF support for nothing.
