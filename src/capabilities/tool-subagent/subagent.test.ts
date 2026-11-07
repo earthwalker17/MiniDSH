@@ -9,8 +9,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Context, Logger } from '../../kernel/index.ts'
-import { AGENTS, type AgentHandle } from '../../core/agent/index.ts'
+import { serviceKey, type Context, type Logger, type Plugin } from '../../kernel/index.ts'
+import { AGENTS, type Agent, type AgentHandle } from '../../core/agent/index.ts'
 import { asCallId, asSessionId } from '../../core/ids.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
@@ -24,7 +24,7 @@ import { bootComposition } from '../../app/headless.ts'
 import type { Patch } from '../../app/compose.ts'
 import { auditLines, describeEvent } from '../../app/present.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
-import { SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
+import { AGENT_NARROWING, SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
 import { toolSubagentPlugin } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -876,6 +876,196 @@ describe('S21: delegations in one message run at once, joined at the parent\'s s
     expect(outcomes.filter((code) => code === 'ok')).toHaveLength(1)
     expect(outcomes.filter((code) => code !== 'ok')).toEqual([expect.stringMatching(/^(FS_STALE_VERSION|FS_EDIT_NOT_FOUND)$/)])
     expect(['value = 1\n', 'value = 2\n']).toContain(readFileSync(join(w.cwd, 'shared.txt'), 'utf8'))
+    await handle.dispose()
+  })
+})
+
+/**
+ * S21.1: what a delegation narrowed is the child's opening `agent/narrowing`,
+ * and the factory re-applies it at every lifecycle. Asserted on the LIVE world
+ * a continuation composes — its schemas, its assembled prompt, a call to a
+ * denied tool — never on a folded `request/header` alone, which a continuation
+ * that never steps would pass vacuously (the record is written on change).
+ */
+describe('S21.1: a continued child is exactly as narrow as the child that was delegated', () => {
+  const PERSONA = 'You are NARROW-PERSONA-7, a search subagent.'
+  const narrowRow: Patch = { id: 'tool-subagent', config: { maxDepth: 1, persona: PERSONA, toolFilter: { deny: ['job_start'] } } }
+  const networkTool = (name: string): Plugin => ({
+    name: `net-${name}`,
+    inject: [TOOLS],
+    apply: (ctx: Context) =>
+      void ctx.get(TOOLS).register(
+        ctx,
+        defineTool({
+          name,
+          description: 'Sends a query off the machine.',
+          input: z.object({}),
+          output: z.object({ ok: z.boolean() }),
+          tags: [NETWORK_TOOL],
+          render: () => [{ type: 'text', text: 'sent' }],
+          execute: () => ({ ok: true }),
+        }),
+      ),
+  })
+  const networkPatch: Patch = { insert: [{ id: 'net-probe', plugin: networkTool('net_probe') }] }
+
+  async function delegateOnce(w: World, options: { world?: (agentCtx: Context) => void } = {}): Promise<{ parentId: string; childId: string }> {
+    scriptDelegation(w.adapter, 'Find it.', 'found')
+    const handle = await w.root.get(AGENTS).create(w.root, { cwd: w.cwd, agentOptions: SCRIPTED, ...(options.world === undefined ? {} : { world: options.world }) })
+    handle.agent.followup(createUserMessage('delegate'))
+    await handle.agent.whenIdle()
+    const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]
+    expect(start, 'the parent never delegated').toBeDefined()
+    await handle.dispose()
+    return { parentId: handle.agent.id, childId: (start!.data as { childId: string }).childId }
+  }
+
+  async function expectNarrow(w: World, agent: Agent, what: string): Promise<void> {
+    const names = w.root.get(TOOLS).schemas(agent).map((schema) => schema.name)
+    expect(names, what).toContain('str_replace_editor')
+    for (const hidden of ['job_start', 'net_probe', 'subagent']) expect(names, `${what}: ${hidden}`).not.toContain(hidden)
+    const { system } = await w.root.get(PROMPT).assemble(agent)
+    expect(system, what).toContain(PERSONA)
+    expect(system, what).not.toContain('You are MiniDSH')
+  }
+
+  it('re-applies the recorded narrowing on a resume and on a cold fork, and a denied tool stays refused', async () => {
+    const w = await world([networkPatch, narrowRow])
+    // The parent has every tool the child is denied, so the hiding is the narrowing's.
+    const parentTools = w.root.get(TOOLS).schemas().map((schema) => schema.name)
+    for (const name of ['job_start', 'net_probe', 'subagent']) expect(parentTools).toContain(name)
+    const { childId } = await delegateOnce(w)
+    const recorded = storedEvents(w.sessionsRoot, childId).filter((event) => event.type === 'agent/narrowing')
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]!.data).toMatchObject({ tools: [{ deny: ['job_start'], denyTags: [NETWORK_TOOL, 'delegation'] }], sections: [{ name: 'persona', text: PERSONA }] })
+
+    const resumed = await w.root.get(AGENTS).resume(w.root, asSessionId(childId))
+    await expectNarrow(w, resumed.agent, 'the resumed child')
+    // And a call to a denied tool is refused, not run.
+    let saw: string[] = []
+    w.adapter.script(
+      (request) => {
+        saw = (request.tools ?? []).map((tool) => tool.name)
+        return assistantToolCall('call-r', 'job_start', { command: 'echo hi' })
+      },
+      assistantText('could not'),
+    )
+    resumed.agent.followup(createUserMessage('start a job'))
+    await resumed.agent.whenIdle()
+    expect(saw).not.toContain('job_start')
+    const refusal = resumed.agent.session.events.find((event) => matches(event, TOOL_RESULT) && event.data.callId === 'call-r')
+    expect(refusal && matches(refusal, TOOL_RESULT) ? refusal.data.error?.code : undefined).toBe('UNKNOWN_TOOL')
+    // A continuation writes no narrowing of its own.
+    expect(resumed.agent.session.events.filter((event) => event.type === 'agent/narrowing')).toHaveLength(1)
+    await resumed.dispose()
+
+    const forked = await w.root.get(AGENTS).fork(w.root, asSessionId(childId))
+    await expectNarrow(w, forked.agent, 'the forked child')
+    await forked.dispose()
+  })
+
+  it('refuses a fork cut between the narrowing and the delegation stamps', async () => {
+    const w = await world([narrowRow])
+    const { childId } = await delegateOnce(w)
+    const at = storedEvents(w.sessionsRoot, childId).find((event) => event.type === 'agent/narrowing')!.seq
+    await expect(w.root.get(AGENTS).fork(w.root, asSessionId(childId), at)).rejects.toThrow(/delegation opening/)
+  })
+
+  /**
+   * A preset world mounts PLUGINS, which activate asynchronously — one that
+   * waits for a sibling's service activates after `world()` has returned. Its
+   * persona must still be seen as claimed, on the first lifecycle and on a
+   * resume, or the narrowing takes the name and the preset's registration
+   * fails the creation.
+   */
+  it('composes beside a persona the world claims through a plugin that activates late', async () => {
+    const DEP = serviceKey<{ readonly text: string }>('test-persona-dep')
+    const presetWorld = (agentCtx: Context): void => {
+      agentCtx.plugin({ name: 'persona-user', inject: [DEP, PROMPT], apply: (ctx) => void ctx.get(PROMPT).section(ctx, { name: 'persona', order: -50, text: ctx.get(DEP).text }) })
+      agentCtx.plugin({ name: 'persona-dep', apply: (ctx) => void ctx.provide(DEP, { text: 'You are the PRESET-OPERATOR.' }) })
+    }
+    const w = await world([narrowRow])
+    const { childId } = await delegateOnce(w, { world: presetWorld })
+    const resumed = await w.root.get(AGENTS).resume(w.root, asSessionId(childId), { world: presetWorld })
+    const { system } = await w.root.get(PROMPT).assemble(resumed.agent)
+    expect(system).toContain(PERSONA)
+    expect(system).toContain('You are the PRESET-OPERATOR.')
+    expect(system.indexOf(PERSONA), 'the narrowing composes AHEAD of the claimed section').toBeLessThan(system.indexOf('You are the PRESET-OPERATOR.'))
+    await resumed.dispose()
+  })
+
+  it("hides a preset world's OWN network and delegation tools from a child at the cap", async () => {
+    const presetWorld = (agentCtx: Context): void => {
+      agentCtx.plugin(networkTool('own_net'))
+      agentCtx.plugin(toolSubagentPlugin, { toolName: 'inner_subagent', description: 'A preset-mounted delegation row.' })
+    }
+    const w = await world([{ id: 'tool-subagent', config: { maxDepth: 1 } }])
+    let childSaw: string[] = []
+    let parentSaw: string[] = []
+    w.adapter.script(
+      (request) => {
+        parentSaw = (request.tools ?? []).map((tool) => tool.name)
+        return assistantToolCall('call-1', 'subagent', { description: 'a task', prompt: 'look' })
+      },
+      (request) => {
+        childSaw = (request.tools ?? []).map((tool) => tool.name)
+        return assistantText('seen')
+      },
+      assistantText('done'),
+    )
+    const handle = await w.root.get(AGENTS).create(w.root, { cwd: w.cwd, agentOptions: SCRIPTED, world: presetWorld })
+    handle.agent.followup(createUserMessage('delegate'))
+    await handle.agent.whenIdle()
+    expect(parentSaw).toEqual(expect.arrayContaining(['own_net', 'inner_subagent', 'subagent']))
+    for (const name of ['own_net', 'inner_subagent', 'subagent']) expect(childSaw, name).not.toContain(name)
+    await handle.dispose()
+  })
+
+  it("keeps a grandchild delegated through ANOTHER row within its parent's narrowing", async () => {
+    const verify = { id: 'tool-verifier', plugin: toolSubagentPlugin, config: { toolName: 'verify', description: 'Ask a subagent to verify something.' } }
+    const w = await world([{ insert: [verify] }, { id: 'tool-subagent', config: { toolFilter: { deny: ['job_start'] } } }])
+    let grandchildSaw: string[] | undefined
+    w.adapter.script(
+      assistantToolCall('call-1', 'subagent', { description: 'outer', prompt: 'Verify it.' }),
+      assistantToolCall('call-2', 'verify', { description: 'inner', prompt: 'look' }),
+      (request) => {
+        grandchildSaw = (request.tools ?? []).map((tool) => tool.name)
+        return assistantText('verified')
+      },
+      assistantText('child done'),
+      assistantText('parent done'),
+    )
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('go'))
+    await handle.agent.whenIdle()
+    expect(grandchildSaw, 'the grandchild never made a request').toBeDefined()
+    expect(grandchildSaw).toContain('str_replace_editor')
+    expect(grandchildSaw, 'a row the child delegated through may not widen what its own parent denied').not.toContain('job_start')
+    await handle.dispose()
+  })
+  it('refuses to resume a child whose stored narrowing a reader cannot believe, rather than composing it wider', async () => {
+    const w = await world([narrowRow])
+    const { childId } = await delegateOnce(w)
+    const file = join(w.sessionsRoot, `${encodeURIComponent(childId)}.jsonl`)
+    const lines = readFileSync(file, 'utf8').split('\n')
+    const at = lines.findIndex((line) => line.includes('"agent/narrowing"'))
+    expect(at).toBeGreaterThan(0)
+    const record = JSON.parse(lines[at]!) as { data: unknown }
+    // A term this reader does not know is a narrowing it cannot apply.
+    lines[at] = JSON.stringify({ ...record, data: { tools: [{ hideEverythingBut: ['shell'] }] } })
+    writeFileSync(file, lines.join('\n'))
+    await expect(w.root.get(AGENTS).resume(w.root, asSessionId(childId))).rejects.toMatchObject({ code: 'NARROWING_MALFORMED' })
+    // Nothing was published or appended: the stored log is what the tamper left.
+    expect(readFileSync(file, 'utf8')).toBe(lines.join('\n'))
+  })
+
+  it('refuses, live, a narrowing written after the agent has run a turn', async () => {
+    const w = await world()
+    w.adapter.script(assistantText('hello'))
+    const handle = await w.create()
+    handle.agent.followup(createUserMessage('hi'))
+    await handle.agent.whenIdle()
+    expect(() => handle.agent.session.append(AGENT_NARROWING, { tools: [{ deny: ['shell'] }] })).toThrow(/opening fact of the first lifecycle/)
     await handle.dispose()
   })
 })

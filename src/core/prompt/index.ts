@@ -35,6 +35,14 @@ export interface PromptDraft {
 
 export interface Prompt {
   section(owner: Context, section: PromptSection): Disposer
+  /**
+   * The section `owner`'s OWN layer holds under `name`, if any — never an
+   * inherited global. What a narrowing asks before it registers: shadowing a
+   * global is how a section replaces the deployment's, and a name this very
+   * scope already claimed (a preset world's persona) cannot be shadowed, only
+   * composed beside (`core/loop/factory.ts`).
+   */
+  sectionIn(owner: Context, name: string): PromptSection | undefined
   variable(owner: Context, name: string, provider: () => string | undefined): Disposer
   assemble(agent?: Agent): Promise<AssembledPrompt>
 }
@@ -62,6 +70,13 @@ class PromptRegistry implements Prompt {
         if (layer.get(section.name) === section) layer.delete(section.name)
       }
     }, `prompt.section("${section.name}")`)
+  }
+
+  sectionIn(owner: Context, name: string): PromptSection | undefined {
+    // An unscoped owner's own layer is the globals: the question is about a
+    // scope, so it has no answer there.
+    if (owner.scope === undefined) return undefined
+    return this.sections.layerFor(owner).get(name)
   }
 
   variable(owner: Context, name: string, provider: () => string | undefined): Disposer {

@@ -16,6 +16,7 @@ export {
   type Tools,
   type ToolCall,
   type ToolRestriction,
+  type RestrictOptions,
   type ToolsConfig,
 } from './registry.ts'
 

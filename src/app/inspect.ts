@@ -11,7 +11,8 @@
  *
  * Its one consumer is the CLI; a wire method would move it below the surfaces.
  */
-import { foldInbox, INBOX_SPLICED, repairTail, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
+import { describeNarrowing, foldInbox, foldNarrowing, INBOX_SPLICED, repairTail, SUBAGENT_END, SUBAGENT_START, type AgentNarrowing } from '../core/agent/index.ts'
+import { checkNarrowingLog } from '../core/agent/invariant.ts'
 import { COMPACTION_END } from '../core/compaction/events.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, delegationPin, effectiveApprovalPolicy, liveGrants, undecidedApprovals, type ApprovalGrant, type ApprovalPolicy } from '../core/approval/index.ts'
 import type { Attachments } from '../core/attachments/index.ts'
@@ -47,7 +48,7 @@ export type Severity = 'error' | 'warning' | 'info'
 
 export interface Finding {
   readonly severity: Severity
-  /** Which judgement found it: `integrity`, `session`, `authority`, `jobs`, `repair`, `delegation`, `approvals`, `attachments`, `fold`, `tail`. */
+  /** Which judgement found it: `integrity`, `session`, `authority`, `jobs`, `narrowing`, `repair`, `delegation`, `approvals`, `attachments`, `fold`, `tail`. */
   readonly check: string
   readonly seq?: number
   readonly message: string
@@ -132,6 +133,7 @@ export function verifyStored(stored: StoredSession): Verification {
     ['session', checkSessionLog],
     ['authority', checkAuthorityLog],
     ['jobs', checkJobsLog],
+    ['narrowing', checkNarrowingLog],
   ] as const) {
     const violation = run(continued)
     if (violation === undefined) continue
@@ -286,6 +288,8 @@ export interface Inspection {
     readonly grants: readonly ApprovalGrant[]
     readonly delegation?: { readonly ceiling?: SandboxMode; readonly pin?: ApprovalPolicy; readonly accepts?: { readonly accepts: SandboxEnforcement; readonly forMode: SandboxMode } }
   }
+  /** What the agent's creator narrowed its world to (`agent/narrowing`), re-applied by every lifecycle; absent for an agent nobody narrowed. */
+  readonly narrowing?: AgentNarrowing
   readonly undecidedApprovals: readonly { readonly id: string; readonly toolName: string; readonly seq: number; readonly closedOnResume: boolean }[]
   readonly inbox: { readonly nextTurn: readonly string[]; readonly nextStep: readonly string[] }
   readonly children: readonly { readonly childId: string; readonly callId: string; readonly seq: number; readonly ended?: string }[]
@@ -312,7 +316,7 @@ export interface InspectedJob {
   readonly closedOnResume?: true
 }
 
-type Report = Pick<Inspection, 'lifecycles' | 'turns' | 'authority' | 'undecidedApprovals' | 'inbox' | 'children' | 'jobs' | 'cost'> & { readonly facts: number }
+type Report = Pick<Inspection, 'lifecycles' | 'turns' | 'authority' | 'narrowing' | 'undecidedApprovals' | 'inbox' | 'children' | 'jobs' | 'cost'> & { readonly facts: number }
 
 /**
  * What the report reads off the log: each section its owner's fold, each
@@ -445,6 +449,7 @@ function readFolds(events: readonly EventEnvelope[], closers: readonly EventEnve
     },
     [],
   )
+  const narrowing = attempt('narrowing', () => foldNarrowing(facts), undefined)
   const metrics = attempt('cost', () => meterSession(facts, 0), undefined)
   return {
     report: {
@@ -452,6 +457,7 @@ function readFolds(events: readonly EventEnvelope[], closers: readonly EventEnve
       lifecycles,
       turns: { total, notCompleted, ...(open === undefined ? {} : { open }) },
       authority,
+      ...(narrowing === undefined ? {} : { narrowing }),
       undecidedApprovals: asked,
       inbox,
       children: [...children.values()],
@@ -573,6 +579,7 @@ export function inspectLines(inspection: Inspection): string[] {
     const { ceiling, pin, accepts: pinned } = authority.delegation
     lines.push(`  delegation: ceiling ${ceiling ?? 'none'} · approvals pinned ${pin ?? 'none'}${pinned === undefined ? '' : ` · accepts pinned ${pinned.accepts} for ${pinned.forMode}`}`)
   }
+  if (inspection.narrowing !== undefined) lines.push(printableText(`narrowing: ${describeNarrowing(inspection.narrowing)}`))
   for (const ask of inspection.undecidedApprovals) {
     lines.push(`undecided approval: ${ask.id} ${ask.toolName} at ${ask.seq}${ask.closedOnResume ? ' — closed `cancelled` on resume' : ' — outside the open turn, closed by nothing'}`)
   }

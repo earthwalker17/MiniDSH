@@ -12,7 +12,7 @@
  * can carry an ESC, so the log's bytes reach a terminal only with control
  * characters neutralized — the plain-text half of the projection §8 names.
  */
-import { AGENT_OPTIONS, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
+import { AGENT_NARROWING, AGENT_OPTIONS, describeNarrowing, narrowingFault, SUBAGENT_END, SUBAGENT_START } from '../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY } from '../core/approval/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../core/compaction/index.ts'
 import { describeEffect, describeIntent, EFFECT_RECORDED } from '../core/effects/index.ts'
@@ -136,6 +136,11 @@ function lineFor(event: EventEnvelope): string | undefined {
     const named = event.data.grantId === undefined ? '' : ` ${event.data.grantId}`
     const by = event.data.decidedBy === undefined ? '' : ` (by ${event.data.decidedBy}${named})`
     return `! ${event.data.id} ${event.data.outcome}${by}`
+  }
+  if (matches(event, AGENT_NARROWING)) {
+    // A stored payload is untrusted: a record no fold would believe is named
+    // as such rather than described as if it narrowed something.
+    return printableText(narrowingFault(event.data) === undefined ? `[narrowed: ${describeNarrowing(event.data)}]` : '[narrowed: a record this reader cannot read]')
   }
   if (matches(event, SUBAGENT_START)) {
     const { childId, depth, provider, model, sandbox } = event.data

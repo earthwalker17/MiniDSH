@@ -42,6 +42,39 @@ export interface AgentOptions extends CallConfig {
 /** Why an `agent/options` record was written: the opening base, a durable switch, or an override at resume. */
 export type AgentOptionsReason = 'initial' | 'change' | 'resume'
 
+/**
+ * One subtractive view over the tools an agent's world gives it — the shape of
+ * `core/tools`' `ToolRestriction`, spelled here because this file sits below
+ * that registry (core is acyclic at file level). Names and KINDS (`tags`).
+ */
+export interface NarrowingRestriction {
+  readonly allow?: readonly string[]
+  readonly deny?: readonly string[]
+  readonly allowTags?: readonly string[]
+  readonly denyTags?: readonly string[]
+}
+
+/** A prompt section a narrowing registers in the agent's scope, shadowing the world's same-named one. */
+export interface NarrowingSection {
+  readonly name: string
+  readonly order: number
+  readonly text: string
+}
+
+/**
+ * What an agent's CREATOR narrowed its world to — a delegated child's tool
+ * filter, hidden kinds and persona — recorded once as the opening fact
+ * `agent/narrowing` and re-applied by every lifecycle (`core/loop/factory.ts`),
+ * so a resume or a fork composes the same narrow world without anyone having
+ * to reconstruct it. Scoping, not authority: a child's ceiling and pins are
+ * its fence (§7), and stay so where this is absent.
+ */
+export interface AgentNarrowing {
+  /** Restrictions that intersect; each reaches the agent's own registrations too (`RestrictOptions.includeOwn`). */
+  readonly tools?: readonly NarrowingRestriction[]
+  readonly sections?: readonly NarrowingSection[]
+}
+
 /** The live agent handle. `id` equals the session id. */
 export interface Agent {
   readonly id: SessionId
@@ -141,6 +174,13 @@ export interface CreateAgentOptions {
    * authority into before its first effect.
    */
   readonly setup?: (agentCtx: Context, agent: Agent) => void | Promise<void>
+  /**
+   * A FRESH agent's narrowing, written as its opening `agent/narrowing` and
+   * applied after `world`, before `setup`. A continuation passes none: the log's
+   * record is its narrowing, re-applied by the factory, and a seed that already
+   * records one refuses another.
+   */
+  readonly narrowing?: AgentNarrowing
 }
 
 export interface AgentFactory {

@@ -213,4 +213,38 @@ describe('tool restriction', () => {
     // An unscoped restriction would hide tools from every agent: refused.
     expect(() => tools.restrict(harness!.root, { deny: ['upper'] })).toThrowError(/scoped owner/)
   })
+
+  /**
+   * A KIND, not a name: a restriction by tag hides a tool registered after it
+   * was installed, which a list of names copied at installation cannot.
+   */
+  it('restricts by kind, read off the resolved definition, so a later tool of the kind is hidden too', async () => {
+    const { tools, agent, signal } = await setup()
+    tools.register(harness!.root, upper)
+    tools.restrict(agent.ctx, { denyTags: ['network'] })
+    tools.register(harness!.root, { ...upper, name: 'fetch_it', tags: ['network'] })
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['upper'])
+    expect(tools.get('fetch_it', agent)).toBeUndefined()
+    expect((await tools.execute(call('fetch_it', { text: 'x' }, agent, signal))).error?.info?.code).toBe('UNKNOWN_TOOL')
+    // `allowTags` alone turns allow-mode on: only a tool of the kind passes.
+    tools.register(harness!.root, { ...upper, name: 'recall_it', tags: ['recall'] })
+    const allowKind = tools.restrict(agent.ctx, { allowTags: ['recall'] })
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['recall_it'])
+    await allowKind()
+    // A name OR a kind passes an allow; a deny by kind outranks an allow by name.
+    tools.restrict(agent.ctx, { allow: ['upper', 'fetch_it'], allowTags: ['recall'] })
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['recall_it', 'upper'])
+  })
+
+  it('reaches the scope\'s own registrations only where it says so (`includeOwn`)', async () => {
+    const { tools, agent } = await setup()
+    tools.register(harness!.root, upper)
+    tools.register(agent.ctx, { ...upper, name: 'own_net', tags: ['network'] })
+    const plain = tools.restrict(agent.ctx, { denyTags: ['network'] })
+    expect(tools.schemas(agent).map((schema) => schema.name), 'a plain restriction exempts what the scope registered itself').toEqual(['own_net', 'upper'])
+    await plain()
+    tools.restrict(agent.ctx, { denyTags: ['network'] }, { includeOwn: true })
+    expect(tools.schemas(agent).map((schema) => schema.name), 'a narrowing narrows the world composed into the scope').toEqual(['upper'])
+    expect(tools.get('own_net', agent)).toBeUndefined()
+  })
 })

@@ -14,6 +14,7 @@ import type { SandboxMode } from '../sandbox/events.ts'
 import { eventKind, matches, type EventEnvelope, type TurnEndReason } from '../session/types.ts'
 import type {
   Agent,
+  AgentNarrowing,
   AgentOptions,
   AgentOptionsReason,
   AgentStatus,
@@ -173,4 +174,101 @@ export function foldAgentOptions(events: readonly EventEnvelope[]): AgentOptions
     if (matches(event, AGENT_OPTIONS)) return event.data.options
   }
   return undefined
+}
+
+// ---- the narrowing -----------------------------------------------------------
+
+/**
+ * Log-only, an OPENING fact: what this agent's creator narrowed its world to
+ * (`AgentNarrowing`). Written once, by the factory, before any authority
+ * stamp; re-applied by every lifecycle, so a continued child is exactly as
+ * narrow as the child that was delegated (`core/loop/factory.ts`). Held to one
+ * per log, in its first lifecycle, by `core-agent` (`./invariant.ts`).
+ */
+export const AGENT_NARROWING = eventKind<AgentNarrowing>('agent/narrowing')
+
+/** A narrowing a reader cannot believe; a continuation over it is refused, never composed wider. */
+export class NarrowingError extends Error {
+  readonly code = 'NARROWING_MALFORMED' as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'NarrowingError'
+  }
+}
+
+const RESTRICTION_TERMS = new Set(['allow', 'deny', 'allowTags', 'denyTags'])
+
+function stringList(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length > 0)
+}
+
+/**
+ * What is wrong with a stored narrowing, or `undefined`. Strict on purpose —
+ * an unknown key is a fault, not something to skip: a term this reader does
+ * not know is a narrowing it cannot apply, and composing without it would be
+ * composing wider than the record says.
+ */
+export function narrowingFault(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return 'agent/narrowing carries no record'
+  for (const key of Object.keys(data)) if (key !== 'tools' && key !== 'sections') return `agent/narrowing has an unknown field "${key}"`
+  const { tools, sections } = data as { tools?: unknown; sections?: unknown }
+  if (tools !== undefined) {
+    if (!Array.isArray(tools)) return 'agent/narrowing tools is not a list'
+    for (const restriction of tools) {
+      if (typeof restriction !== 'object' || restriction === null || Array.isArray(restriction)) return 'agent/narrowing has a tool restriction that is not a record'
+      for (const [key, value] of Object.entries(restriction)) {
+        if (!RESTRICTION_TERMS.has(key)) return `agent/narrowing has an unknown tool restriction term "${key}"`
+        if (!stringList(value)) return `agent/narrowing tool restriction "${key}" is not a list of names`
+      }
+    }
+  }
+  if (sections !== undefined) {
+    if (!Array.isArray(sections)) return 'agent/narrowing sections is not a list'
+    for (const section of sections) {
+      const { name, order, text, ...rest } = (section ?? {}) as { name?: unknown; order?: unknown; text?: unknown }
+      if (typeof name !== 'string' || name.length === 0) return 'agent/narrowing has a section with no name'
+      if (typeof order !== 'number' || !Number.isFinite(order)) return `agent/narrowing section "${name}" has no finite order`
+      if (typeof text !== 'string') return `agent/narrowing section "${name}" has no text`
+      if (Object.keys(rest).length > 0) return `agent/narrowing section "${name}" has an unknown field`
+    }
+  }
+  return undefined
+}
+
+/**
+ * A narrowing in a reader's words, one clause per term — what `sessions show`,
+ * `inspect` and the browser (`app/web/rows.js`, which cannot import this) say
+ * of it. Section TEXT is never quoted: a persona can be long, and the clause
+ * that matters is that the agent does not run under the deployment's.
+ */
+export function describeNarrowing(narrowing: AgentNarrowing): string {
+  const parts: string[] = []
+  for (const restriction of narrowing.tools ?? []) {
+    const only = [...(restriction.allow ?? []), ...(restriction.allowTags ?? []).map((tag) => `${tag} tools`)]
+    if (only.length > 0) parts.push(`only ${only.join(', ')}`)
+    const no = [...(restriction.deny ?? []), ...(restriction.denyTags ?? []).map((tag) => `${tag} tools`)]
+    if (no.length > 0) parts.push(`no ${no.join(', ')}`)
+  }
+  for (const section of narrowing.sections ?? []) parts.push(`its own ${section.name}`)
+  return parts.length === 0 ? 'nothing' : parts.join(' · ')
+}
+
+/**
+ * The agent's narrowing: the FIRST record, or `undefined` for an agent nobody
+ * narrowed. First, not last: a later record could only be a forgery or a bug,
+ * and last-wins would let one widen a child even where the invariant that
+ * refuses it is not mounted. A malformed first record THROWS, and so does a
+ * second one that disagrees with it: either way the continuation is refused
+ * rather than composed wider (`core/loop/factory.ts`).
+ */
+export function foldNarrowing(events: readonly EventEnvelope[]): AgentNarrowing | undefined {
+  let first: AgentNarrowing | undefined
+  for (const event of events) {
+    if (!matches(event, AGENT_NARROWING)) continue
+    const fault = narrowingFault(event.data)
+    if (fault !== undefined) throw new NarrowingError(`${fault} (seq ${event.seq})`)
+    if (first === undefined) first = event.data
+    else if (JSON.stringify(first) !== JSON.stringify(event.data)) throw new NarrowingError(`agent/narrowing at seq ${event.seq} is a second, different narrowing`)
+  }
+  return first
 }

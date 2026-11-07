@@ -47,6 +47,15 @@
  * reports the authority fold malformed and a wire attach errors): still the
  * refusal direction.
  *
+ * **What 1.2.0 cannot do with an S21.1 log.** It skips `agent/narrowing` as
+ * an opaque fact, so it continues a delegated child UN-narrowed: the tool
+ * filter, the hidden kinds and the persona its creator gave it come back as
+ * the deployment's. No authority moves — a child's ceiling and pins are its
+ * fence, and 1.2.0 keeps both — and nothing is misrecorded; the model merely
+ * sees more tools than it was scoped to. A child log written before S21.1 has
+ * no record and continues un-narrowed under this writer too, as it always
+ * did. Noted, not bumped.
+ *
  * **Inside a declared format, a malformed line is damage, not format.** A
  * writer that follows the rule above never writes an envelope key or a surface
  * kind its format lacks, so meeting one means the bytes are not what the

@@ -38,11 +38,20 @@
  */
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { AGENTS, resolveCallConfig, SUBAGENT_END, SUBAGENT_START, type Agent, type AgentOptions } from '../../core/agent/index.ts'
+import {
+  AGENTS,
+  foldNarrowing,
+  resolveCallConfig,
+  SUBAGENT_END,
+  SUBAGENT_START,
+  type Agent,
+  type AgentNarrowing,
+  type AgentOptions,
+  type NarrowingRestriction,
+} from '../../core/agent/index.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { JOBS } from '../../core/jobs/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
-import { PROMPT, type Prompt } from '../../core/prompt/index.ts'
 import {
   effectiveSandboxMode,
   narrowest,
@@ -54,18 +63,17 @@ import {
   type SandboxMode,
 } from '../../core/sandbox/index.ts'
 import { ASSISTANT_MESSAGE, foldLastAssistantText, foldLastTurnEnd, matches, type Session, type TurnEndReason } from '../../core/session/index.ts'
-import { defineTool, DELEGATION_TOOL, NETWORK_TOOL, RECALL_TOOL, TOOLS, type ToolContext, type ToolRestriction, type Tools } from '../../core/tools/index.ts'
+import { defineTool, DELEGATION_TOOL, NETWORK_TOOL, RECALL_TOOL, TOOLS, type ToolContext, type ToolRestriction } from '../../core/tools/index.ts'
 import type { TokenUsage } from '../../core/llm/index.ts'
 
 export interface SubagentConfig {
   /** How deep delegation may go; `0` forbids it entirely (default 2). */
   readonly maxDepth?: number | undefined
   /**
-   * The subtractive view every child gets AT DELEGATION over the tools it
-   * inherits (the delegation tool itself is always denied, and so is every
-   * `NETWORK_TOOL`, whose asks the child's pin refuses). It lives in
-   * `setup`, which no continuation re-runs: a child resumed or forked alone
-   * keeps its ceiling and pins, not this view or its persona (§13; S21).
+   * The subtractive view every child gets over the tools its world gives it,
+   * by name (every `NETWORK_TOOL` is denied besides, and every delegation tool
+   * at the depth cap). Recorded in the child's opening `agent/narrowing`, so a
+   * resumed or forked child keeps it (`childNarrowing`).
    */
   readonly toolFilter?: ToolRestriction | undefined
   /**
@@ -73,7 +81,8 @@ export interface SubagentConfig {
    * shadows a same-named global, and the deployment's persona is a global.
    * Where the child's inherited world has already claimed that name in its own
    * scope (an agent preset that registers a persona), replacement is not
-   * expressible, so this is added ahead of it instead of failing the delegation.
+   * expressible, so the factory adds this ahead of it instead of failing the
+   * delegation. Recorded with the narrowing, like the filter.
    */
   readonly persona?: string | undefined
   /** Step ceiling for a child's single turn (default 12). */
@@ -170,37 +179,49 @@ interface Deps {
   readonly ctx: Context
   readonly sandbox: Sandbox
   readonly approval: Approval
-  readonly prompt: Prompt
   readonly config: ResolvedConfig
   readonly toolName: string
 }
 
 /**
- * Every delegation tool this DEPLOYMENT registered, read from its own registry.
+ * What this delegation narrows the child to: the record the factory writes as
+ * the child's opening `agent/narrowing` and re-applies at every lifecycle of
+ * it (`core/loop/factory.ts`). Three rules, each a KIND by tag rather than a
+ * list of names snapshotted now, so a continuation under a later composition
+ * hides that composition's tools of the kind — and a preset row's own, which
+ * the factory's restriction reaches too:
  *
- * The depth cap is meant to be a fact about the child's WORLD rather than an
- * error it discovers by trying, and hiding only this row's own tool stopped
- * being enough the moment a verifier became a second row of the same plugin:
- * a grandchild at the cap would still see the other row's tool, call it, and
- * spend a paid step learning what its tool list should already have told it.
+ *   - the depth cap is a fact about the child's WORLD, not an error it finds by
+ *     trying: at the cap EVERY delegation tool is hidden, a verifier row's
+ *     included (a tag read through one registry, never a process-global map of
+ *     names, which once leaked between compositions in one process);
+ *   - a network tool asks consent on every call and this child's approvals are
+ *     pinned `never`, so it could only ever be refused: hidden at every depth,
+ *     and a deny outranks an `allow` that names it;
+ *   - a recall tool survives an `allow` filter, as this row's own tool does
+ *     while the child may still delegate: the filter scopes the child's WORK,
+ *     and reading back its own shadowed history is not work — a child that
+ *     compacts is handed a summary naming that tool.
  *
- * This used to be a ref-counted module map, which is process state in a process
- * that mounts many compositions: a row named `verify` in one composition denied
- * a tool of that name to another composition's children, and the count existed
- * only so out-of-order disposal could not un-hide a name a live composition had
- * added. A tag read through `TOOLS` is scoped to one registry by construction,
- * so both problems are gone. Unscoped, because the globals are exactly what a
- * child inherits: a scoped registration is never inherited (`core/scope.ts`).
+ * Monotone down the tree: the parent's own narrowing comes first, so a child
+ * delegated through ANOTHER row (a verifier) still never sees a tool its
+ * parent was denied. Several restrictions intersect.
  */
-function delegationToolNames(tools: Tools): string[] {
-  return taggedToolNames(tools, DELEGATION_TOOL)
-}
-
-function taggedToolNames(tools: Tools, tag: string): string[] {
-  return tools
-    .list()
-    .filter((definition) => definition.tags?.includes(tag))
-    .map((definition) => definition.name)
+function childNarrowing(parent: Agent, depth: number, deps: Deps): AgentNarrowing {
+  const childMayDelegate = depth + 1 <= deps.config.maxDepth
+  const filter = deps.config.toolFilter
+  const own: NarrowingRestriction = {
+    ...(filter?.allow === undefined ? {} : { allow: [...filter.allow, ...(childMayDelegate ? [deps.toolName] : [])], allowTags: [RECALL_TOOL] }),
+    ...(filter?.deny === undefined || filter.deny.length === 0 ? {} : { deny: [...filter.deny] }),
+    denyTags: childMayDelegate ? [NETWORK_TOOL] : [NETWORK_TOOL, DELEGATION_TOOL],
+  }
+  const inherited = foldNarrowing(parent.session.facts)?.tools ?? []
+  return {
+    tools: [...inherited, own],
+    // `persona`, because a scoped section shadows the deployment's global one
+    // of that name (`context-runtime`) — which is what replacing it means.
+    ...(deps.config.persona === undefined ? {} : { sections: [{ name: 'persona', order: -50, text: deps.config.persona }] }),
+  }
 }
 
 /**
@@ -276,42 +297,12 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
   const inherited = captureAuthority(parent, deps.sandbox, deps.config.sandbox, deps.config.accepts)
   const route = await resolveCallConfig(parent, { purpose: deps.config.purpose, signal: exec.callSignal })
   const agentOptions: AgentOptions = { ...route, maxSteps: deps.config.maxSteps, maxParallelToolCalls: deps.config.childParallelCalls }
-  // The child keeps this tool only if it could still use it: at the cap it is
-  // hidden AND unknown, so a depth limit is a fact about the child's world
-  // rather than an error it discovers by trying.
-  const childMayDelegate = depth + 1 <= deps.config.maxDepth
-  const tools = deps.ctx.get(TOOLS)
-  // A network tool asks consent on every call, and this child's approvals are
-  // pinned `never` (below), so every call it made would be refused inside the
-  // seam before anyone was asked. Hidden at every depth, and a deny outranks
-  // an `allow` filter that names it — the pin is not the filter's to lift.
-  const denied = [
-    ...(childMayDelegate ? [] : delegationToolNames(tools)),
-    ...taggedToolNames(tools, NETWORK_TOOL),
-    ...(deps.config.toolFilter?.deny ?? []),
-  ]
-  // A recall tool survives an `allow` filter, for the same reason the delegation
-  // tool does when the child may still delegate: the filter says what WORK the
-  // child is scoped to, and reading back its own shadowed history is not work
-  // it was scoped away from — it is the child's own context. Without this, a
-  // child under `allow` that compacts is handed a durable summary naming a tool
-  // its schemas do not contain, and spends a step learning that.
-  const restriction: ToolRestriction = {
-    ...(deps.config.toolFilter?.allow === undefined
-      ? {}
-      : {
-          allow: [
-            ...deps.config.toolFilter.allow,
-            ...(childMayDelegate ? [deps.toolName] : []),
-            ...taggedToolNames(tools, RECALL_TOOL),
-          ],
-        }),
-    ...(denied.length > 0 ? { deny: denied } : {}),
-  }
+  const narrowing = childNarrowing(parent, depth, deps)
   // The parent's WORLD — the inheritable half of what it was composed from,
-  // which the registry keeps separate from the narrowing `setup` below. A child
-  // is created with both; a grandchild inherits only this one, so nobody
-  // re-runs a generation's authority stamps one generation late.
+  // which the registry keeps separate from the narrowing and the stamping
+  // `setup` below. A child is created with all three; a grandchild inherits
+  // only the world (and, through `childNarrowing`, its parent's narrowing as a
+  // floor), so nobody re-runs a generation's authority stamps one generation late.
   const world = parent.world
 
   const handle = await deps.ctx.get(AGENTS).create(parent.ctx, {
@@ -325,29 +316,18 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
     delegationDepth: depth,
     ...(parent.session.header.agentPreset === undefined ? {} : { agentPreset: parent.session.header.agentPreset }),
     signal: exec.callSignal,
-    // The factory runs `world` first and this second: the child's world is its
-    // parent's, then narrowed — same preset, same tools minus the filter, its
-    // own persona, and an authority that opens as a ceiling before a single
-    // effect can run.
+    // The factory runs `world`, then the narrowing, then `setup`: the child's
+    // world is its parent's, then narrowed — same preset, same tools minus the
+    // filter, its own persona — and an authority that opens as a ceiling
+    // before a single effect can run. The narrowing is RECORDED, as the
+    // child's opening `agent/narrowing`, and the factory re-applies it at
+    // every resume and fork of this child; the stamps below are durable on
+    // their own (§7), so `setup` is left holding only them.
     ...(world === undefined ? {} : { world }),
-    setup: (childCtx, child) => {
+    narrowing,
+    setup: (_childCtx, child) => {
       deps.sandbox.open(child.session, { mode: inherited.mode, reason: 'delegation', accepts: inherited.accepts })
       deps.approval.open(child.session, { policy: 'never', reason: 'delegation' })
-      deps.ctx.get(TOOLS).restrict(childCtx, restriction)
-      // `persona` first, because a SCOPED section shadows a same-named global
-      // and the deployment persona is a global — shadowing is how this replaces
-      // it, which is what the config says it does. The name is only ever taken
-      // when the world above put its own persona in THIS scope (an agent preset
-      // that registers one), and a duplicate registration throws; that used to
-      // fail the whole delegation. Then, and only then, it composes instead:
-      // its own name, ordered ahead, so the child gets both rather than none.
-      if (deps.config.persona !== undefined) {
-        try {
-          deps.prompt.section(childCtx, { name: 'persona', order: -50, text: deps.config.persona })
-        } catch {
-          deps.prompt.section(childCtx, { name: 'subagent', order: -60, text: deps.config.persona })
-        }
-      }
     },
   })
 
@@ -427,7 +407,7 @@ async function delegate(args: Input, exec: ToolContext, deps: Deps): Promise<{ o
 
 export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
   name: 'tool-subagent',
-  inject: [TOOLS, AGENTS, SANDBOX, APPROVAL, PROMPT],
+  inject: [TOOLS, AGENTS, SANDBOX, APPROVAL],
   config: configSchema,
   apply(ctx, config) {
     const toolName = config?.toolName ?? DEFAULT_TOOL_NAME
@@ -435,7 +415,6 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
       ctx,
       sandbox: ctx.get(SANDBOX),
       approval: ctx.get(APPROVAL),
-      prompt: ctx.get(PROMPT),
       toolName,
       config: {
         maxDepth: config?.maxDepth ?? 2,

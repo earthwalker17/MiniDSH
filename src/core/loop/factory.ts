@@ -1,5 +1,16 @@
 import type { Context, Disposer, Plugin } from '../../kernel/index.ts'
-import { AGENT_OPTIONS, AGENTS, foldAgentOptions, sameAgentOptions, type AgentFactory, type AgentHandle, type CreateAgentOptions } from '../agent/index.ts'
+import {
+  AGENT_NARROWING,
+  AGENT_OPTIONS,
+  AGENTS,
+  foldAgentOptions,
+  foldNarrowing,
+  sameAgentOptions,
+  type AgentFactory,
+  type AgentHandle,
+  type AgentNarrowing,
+  type CreateAgentOptions,
+} from '../agent/index.ts'
 import { LLM } from '../llm/index.ts'
 import { PERSISTENCE } from '../persistence/index.ts'
 import { PROMPT } from '../prompt/index.ts'
@@ -53,6 +64,7 @@ class LoopFactory implements AgentFactory {
     // the real reason (S20.5 review).
     let agent: ReactLoopAgent | undefined
     let scope: Context | undefined
+    let narrowing: AgentNarrowing | undefined
     try {
       session.append(SESSION_LIFECYCLE, {
         origin: session.origin,
@@ -72,6 +84,17 @@ class LoopFactory implements AgentFactory {
       if (!folded || !sameAgentOptions(folded, agent.options)) {
         session.append(AGENT_OPTIONS, { options: agent.options, reason: !folded ? 'initial' : session.origin === 'resumed' ? 'resume' : 'change' })
       }
+      // The narrowing is an opening fact of the agent, like its base, but it
+      // is only ever WRITTEN for a fresh agent: a continuation's record is
+      // its narrowing (§4). Folded before anything composes, so a record this
+      // reader cannot believe refuses the continuation here (`foldNarrowing`)
+      // instead of letting it compose wider than the log says.
+      const recorded = foldNarrowing(session.facts)
+      if (options.narrowing !== undefined) {
+        if (recorded !== undefined) throw new Error(`agent ${session.id}: its log already records a narrowing, which a continuation re-applies; it takes no new one`)
+        session.append(AGENT_NARROWING, canonicalNarrowing(options.narrowing))
+      }
+      narrowing = recorded ?? foldNarrowing(session.facts)
     } catch (error) {
       await scope?.dispose()
       await sessions.detach(session)
@@ -102,6 +125,18 @@ class LoopFactory implements AgentFactory {
       // and a stamp written by the narrowing must land after whatever the world
       // put in the scope. Each is a rollback point of its own.
       if (options.world) await options.world(scope, agent)
+      // The recorded narrowing, on EVERY lifecycle — the one place a create, a
+      // resume and a fork all pass through, so no resumer has to know a child
+      // was narrowed, let alone reconstruct how (BLUEPRINT §1 refused a
+      // resume-time `setup` for exactly that). After the world, because it
+      // narrows the world; after the world has SETTLED, because a preset
+      // world mounts plugins that activate asynchronously, and what they
+      // claimed decides how a section composes. Before `setup`, which a fresh
+      // child still uses for its authority stamps.
+      if (narrowing !== undefined) {
+        await scope.settle((plugin) => plugin.scope === agent)
+        this.applyNarrowing(scope, narrowing)
+      }
       if (options.signal?.aborted) throw new Error(`agent ${session.id}: creation aborted during setup`)
       if (options.setup) await options.setup(scope, agent)
       // Publication is atomic: what setup mounted is active (or creation fails) before the agent is visible.
@@ -146,6 +181,40 @@ class LoopFactory implements AgentFactory {
     if (session.origin === 'resumed') agent.wakeIfPending()
     return { agent, dispose }
   }
+
+  /**
+   * Installs a narrowing in the agent's scope. Its restrictions reach the
+   * scope's OWN registrations (`includeOwn`): a preset world composes its rows
+   * into this very scope, and a narrowing that exempted them would hide a
+   * global network tool while leaving the preset's own in view.
+   *
+   * A section shadows the world's same-named GLOBAL (how a child's persona
+   * replaces the deployment's). Where the world claimed that name in this
+   * scope itself — a preset with a persona of its own — shadowing is not
+   * expressible, so the section composes just AHEAD of the claimed one under
+   * its own key, and the agent reads both, the narrowing first.
+   */
+  private applyNarrowing(scope: Context, narrowing: AgentNarrowing): void {
+    const tools = this.ctx.get(TOOLS)
+    const prompt = this.ctx.get(PROMPT)
+    for (const restriction of narrowing.tools ?? []) tools.restrict(scope, restriction, { includeOwn: true })
+    for (const section of narrowing.sections ?? []) {
+      const claimed = prompt.sectionIn(scope, section.name)
+      prompt.section(scope, claimed === undefined ? section : { name: `narrowing:${section.name}`, order: claimed.order - 0.5, text: section.text })
+    }
+  }
+}
+
+/** Canonical form for the log: absent rather than empty, every list copied, nothing a caller can mutate later. */
+function canonicalNarrowing(narrowing: AgentNarrowing): AgentNarrowing {
+  const terms = ['allow', 'deny', 'allowTags', 'denyTags'] as const
+  const tools = (narrowing.tools ?? []).map((restriction) => {
+    const out: Record<string, readonly string[]> = {}
+    for (const term of terms) if (restriction[term] !== undefined) out[term] = [...restriction[term]]
+    return out
+  })
+  const sections = (narrowing.sections ?? []).map((section) => ({ name: section.name, order: section.order, text: section.text }))
+  return { ...(tools.length === 0 ? {} : { tools }), ...(sections.length === 0 ? {} : { sections }) }
 }
 
 /** The one concrete loop plugin. Extension code depends on `dsh-agent` events, never on this. */

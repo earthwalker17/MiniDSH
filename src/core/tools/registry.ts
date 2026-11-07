@@ -49,23 +49,48 @@ export interface ToolCall {
 }
 
 /**
- * A subtractive view over the tools an agent inherits: `allow` keeps only the
+ * A subtractive view over the tools an agent sees: `allow` keeps only the
  * named ones, `deny` removes the named ones, allow before deny, several
  * restrictions intersect. A tool the restriction hides is unknown to the
  * model (absent from its schemas) AND refused at execution — one resolver
- * decides both, so nothing can be called that was never shown. The scope's
- * OWN registrations are exempt: a child keeps the tools it answers through.
+ * decides both, so nothing can be called that was never shown.
+ *
+ * The `*Tags` terms name a KIND of tool (`ToolDefinition.tags`, §11) rather
+ * than a tool: `denyTags: [NETWORK_TOOL]` hides every network tool the
+ * deployment has or will have, which a list of names snapshotted at one
+ * moment cannot say. Allow-mode is on iff `allow` or `allowTags` is present,
+ * and a tool passes it by name OR by kind; deny, either way, outranks allow.
+ * They are read off the RESOLVED definition, so `get`, `list` and `schemas`
+ * agree by construction.
  */
 export interface ToolRestriction {
   readonly allow?: readonly string[] | undefined
   readonly deny?: readonly string[] | undefined
+  readonly allowTags?: readonly string[] | undefined
+  readonly denyTags?: readonly string[] | undefined
+}
+
+export interface RestrictOptions {
+  /**
+   * Also hide the scope's OWN registrations. A plain restriction exempts them
+   * (an owner lifting or narrowing its own view keeps the tools it registered
+   * itself); an agent's recorded NARROWING does not, because a preset world
+   * composes its rows into that very scope, and a narrowing narrows the world,
+   * not only what the agent inherits (`core/loop/factory.ts`).
+   */
+  readonly includeOwn?: boolean
+}
+
+/** A restriction as installed: a private copy plus how far it reaches. */
+interface InstalledRestriction extends ToolRestriction {
+  readonly includeOwn: boolean
 }
 
 export interface Tools {
   register<Args, Value extends JsonValue>(owner: Context, definition: ToolDefinition<Args, Value>): Disposer
   guard(owner: Context, guard: ToolGuard): Disposer
   /** Installs a restriction on the owner's scope (an unscoped owner is refused: it would hide tools from every agent). */
-  restrict(owner: Context, restriction: ToolRestriction): Disposer
+  restrict(owner: Context, restriction: ToolRestriction, options?: RestrictOptions): Disposer
   get(name: string, agent?: Agent): AnyToolDefinition | undefined
   list(agent?: Agent): AnyToolDefinition[]
   schemas(agent?: Agent): ToolSchema[]
@@ -115,7 +140,7 @@ function codeOf(error: unknown): string {
 class ToolRegistry implements Tools {
   private readonly definitions = new ScopedLayers<AnyToolDefinition>()
   private readonly guards = new ScopedLayers<ToolGuard>()
-  private readonly restrictions = new WeakMap<object, ToolRestriction[]>()
+  private readonly restrictions = new WeakMap<object, InstalledRestriction[]>()
   private guardSeq = 0
   private readonly ctx: Context
   private readonly defaultTimeoutMs: number
@@ -154,7 +179,7 @@ class ToolRegistry implements Tools {
     }, 'tool.guard')
   }
 
-  restrict(owner: Context, restriction: ToolRestriction): Disposer {
+  restrict(owner: Context, restriction: ToolRestriction, options?: RestrictOptions): Disposer {
     const scope = owner.scope
     if (scope === null || typeof scope !== 'object') {
       throw new Error('a tool restriction needs a scoped owner: an unscoped one would hide tools from every agent')
@@ -164,7 +189,16 @@ class ToolRegistry implements Tools {
       list = []
       this.restrictions.set(scope, list)
     }
-    const entry: ToolRestriction = { ...(restriction.allow === undefined ? {} : { allow: [...restriction.allow] }), ...(restriction.deny === undefined ? {} : { deny: [...restriction.deny] }) }
+    // Copied term by term: a field this copy forgets is a restriction that
+    // silently never applies.
+    const copy = (terms: readonly string[] | undefined): readonly string[] | undefined => (terms === undefined ? undefined : [...terms])
+    const entry: InstalledRestriction = {
+      allow: copy(restriction.allow),
+      deny: copy(restriction.deny),
+      allowTags: copy(restriction.allowTags),
+      denyTags: copy(restriction.denyTags),
+      includeOwn: options?.includeOwn === true,
+    }
     return owner.effect(() => {
       list.push(entry)
       this.ctx.emit(TOOLS_CHANGE)
@@ -176,22 +210,34 @@ class ToolRegistry implements Tools {
     }, 'tool.restrict')
   }
 
-  /** The one visibility rule: the agent's own registrations always; an inherited one unless a restriction hides it. */
-  private visible(name: string, agent: Agent | undefined): boolean {
+  /**
+   * The one visibility rule, over the RESOLVED definition: a restriction hides
+   * an inherited tool, and also an own registration where it says so
+   * (`includeOwn`); an own one is otherwise exempt.
+   */
+  private visible(def: AnyToolDefinition, agent: Agent | undefined): boolean {
     if (!agent) return true
     const restrictions = this.restrictions.get(agent)
     if (!restrictions || restrictions.length === 0) return true
-    if (this.definitions.owns(name, agent)) return true
-    return restrictions.every((restriction) => (restriction.allow === undefined || restriction.allow.includes(name)) && !(restriction.deny ?? []).includes(name))
+    const own = this.definitions.owns(def.name, agent)
+    const tags = def.tags ?? []
+    return restrictions.every((restriction) => {
+      if (own && !restriction.includeOwn) return true
+      const allowing = restriction.allow !== undefined || restriction.allowTags !== undefined
+      const allowed = !allowing || (restriction.allow?.includes(def.name) ?? false) || (restriction.allowTags?.some((tag) => tags.includes(tag)) ?? false)
+      const denied = (restriction.deny?.includes(def.name) ?? false) || (restriction.denyTags?.some((tag) => tags.includes(tag)) ?? false)
+      return allowed && !denied
+    })
   }
 
   get(name: string, agent?: Agent): AnyToolDefinition | undefined {
-    return this.visible(name, agent) ? this.definitions.get(name, agent) : undefined
+    const def = this.definitions.get(name, agent)
+    return def !== undefined && this.visible(def, agent) ? def : undefined
   }
 
   list(agent?: Agent): AnyToolDefinition[] {
     return [...this.definitions.view(agent).values()]
-      .filter((def) => this.visible(def.name, agent))
+      .filter((def) => this.visible(def, agent))
       .toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   }
 

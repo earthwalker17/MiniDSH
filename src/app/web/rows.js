@@ -38,6 +38,7 @@
 /** @typedef {DataOf<typeof import('../../core/sandbox/events.ts').SANDBOX_ACCEPTANCE>} SandboxAcceptanceData */
 /** @typedef {DataOf<typeof import('../../core/presets/index.ts').AUTHORITY_PRESET>} AuthorityPresetData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').AGENT_OPTIONS>} AgentOptionsData */
+/** @typedef {DataOf<typeof import('../../core/agent/events.ts').AGENT_NARROWING>} AgentNarrowingData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').SUBAGENT_START>} SubagentStartData */
 /** @typedef {DataOf<typeof import('../../core/agent/events.ts').SUBAGENT_END>} SubagentEndData */
 /** @typedef {DataOf<typeof import('../../core/effects/index.ts').EFFECT_RECORDED>} EffectRecordedData */
@@ -236,6 +237,20 @@ export function describeRow(event) {
       }
       const outcome = data.timedOut === true ? 'timed out' : data.exitCode === undefined ? 'no exit code' : `exit ${data.exitCode}`
       return note(`[effect: shell command · ${outcome} · ${data.mode}/${data.enforcement}]`)
+    }
+    case 'agent/narrowing': {
+      // `describeNarrowing` (core/agent/events.ts) in the browser's words: this
+      // module shares only the wire with the host, never its code.
+      const data = /** @type {AgentNarrowingData} */ (event.data)
+      const parts = []
+      for (const restriction of data.tools ?? []) {
+        const only = [...(restriction.allow ?? []), ...(restriction.allowTags ?? []).map((tag) => `${tag} tools`)]
+        if (only.length > 0) parts.push(`only ${only.join(', ')}`)
+        const no = [...(restriction.deny ?? []), ...(restriction.denyTags ?? []).map((tag) => `${tag} tools`)]
+        if (no.length > 0) parts.push(`no ${no.join(', ')}`)
+      }
+      for (const section of data.sections ?? []) parts.push(`its own ${section.name}`)
+      return note(`[narrowed: ${parts.length === 0 ? 'nothing' : parts.join(' · ')}]`)
     }
     case 'subagent/start': {
       const data = /** @type {SubagentStartData} */ (event.data)
