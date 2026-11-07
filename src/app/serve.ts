@@ -42,7 +42,7 @@ export async function startProtocolHost(options: ServeOptions): Promise<Protocol
     serverVersion: VERSION,
     // An explicit authority flag is a durable switch on every session this
     // process continues, a wire resume included (ARCHITECTURE §9).
-    onResumed: (handle, ctx) => applyAuthority(ctx, handle, options),
+    onResumed: (agent, ctx) => applyAuthority(ctx, agent, options),
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),

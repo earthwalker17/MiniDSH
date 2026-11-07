@@ -396,7 +396,7 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
         // The route the recording ran on, never a literal (A8-11).
         agentOptions: recordedRoute(events),
       })
-      applyAuthority(root, handle, boot)
+      applyAuthority(root, handle.agent, boot)
       // Every recorded prompt in order, so the replayed session walks the same path.
       for (const text of [FIRST_PROMPT, ...prompts]) {
         handle.agent.followup(createUserMessage(text))

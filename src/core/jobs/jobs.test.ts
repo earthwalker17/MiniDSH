@@ -475,10 +475,11 @@ describe('the review cases', () => {
     expect(h.adapter.calls.at(-1)!.messages.map((message) => message.id)).toContain(jobNoticeId(jobId))
   })
 
-  it('a disposing agent records a runtime notice, quiet, and drops a prompt nobody saw accepted', async () => {
+  it('a disposing agent records a runtime notice, quiet, and refuses a prompt rather than dropping it unseen', async () => {
     const { agent } = await setup()
     agent.cancel({ kind: 'disposed' })
-    agent.followup(createUserMessage('late prompt'))
+    // Refused, so its sender is told — never accepted and silently lost (S21.1).
+    expect(() => agent.followup(createUserMessage('late prompt'))).toThrowError(expect.objectContaining({ code: 'AGENT_DISPOSED' }))
     agent.send(createPluginMessage('test', 'late notice'), 'next-step', true)
     expect(inserts(agent).map((insert) => ({ waking: insert.waking }))).toEqual([{ waking: false }])
   })

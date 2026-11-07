@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import type { Context, Disposer, Plugin } from '../../kernel/index.ts'
 import {
   AGENT_NARROWING,
@@ -26,8 +27,10 @@ import { ReactLoopAgent } from './driver.ts'
  */
 class LoopFactory implements AgentFactory {
   private readonly ctx: Context
-  constructor(ctx: Context) {
+  private readonly ownedWorkBoundMs: number
+  constructor(ctx: Context, config: LoopConfig) {
     this.ctx = ctx
+    this.ownedWorkBoundMs = config.ownedWorkBoundMs ?? DEFAULT_OWNED_WORK_BOUND_MS
   }
 
   async create(owner: Context, options: CreateAgentOptions): Promise<AgentHandle> {
@@ -108,6 +111,13 @@ class LoopFactory implements AgentFactory {
     const run = async (): Promise<void> => {
       agent.cancel({ kind: 'disposed' })
       await agent.whenIdle()
+      // Work the agent owns outside a turn (`Agent.own`): the cancel above
+      // aborted its signal, and it gets to record how it ended while the scope
+      // is whole and the session still takes appends — the end recorded
+      // before the detach. Bounded: the cancel is cooperative.
+      if (!(await agent.settleOwned(this.ownedWorkBoundMs))) {
+        this.ctx.logger.warn(`agent ${session.id}: work it owned outside a turn did not stop within ${this.ownedWorkBoundMs} ms of its disposal; disposing anyway`)
+      }
       await scope.dispose()
       await lifetime.detach?.()
       await sessions.detach(session)
@@ -217,11 +227,26 @@ function canonicalNarrowing(narrowing: AgentNarrowing): AgentNarrowing {
   return { ...(tools.length === 0 ? {} : { tools }), ...(sections.length === 0 ? {} : { sections }) }
 }
 
+export interface LoopConfig {
+  /**
+   * How long an agent's disposal waits for the work it owns outside a turn
+   * (`Agent.own`) once that work's signal has aborted (default 10 s). A
+   * bound, not a budget: cooperative work ends in milliseconds, and a host
+   * shutting down disposes its agents one by one.
+   */
+  readonly ownedWorkBoundMs?: number | undefined
+}
+
+const DEFAULT_OWNED_WORK_BOUND_MS = 10_000
+
+const configSchema = z.strictObject({ ownedWorkBoundMs: z.number().int().positive().optional() }).optional()
+
 /** The one concrete loop plugin. Extension code depends on `dsh-agent` events, never on this. */
-export const loopPlugin: Plugin = {
+export const loopPlugin: Plugin<LoopConfig | undefined> = {
   name: 'core-agent-loop',
   inject: [AGENTS, SESSIONS, LLM, TOOLS, PROMPT],
-  apply(ctx) {
-    ctx.get(AGENTS).setFactory(ctx, new LoopFactory(ctx))
+  config: configSchema,
+  apply(ctx, config) {
+    ctx.get(AGENTS).setFactory(ctx, new LoopFactory(ctx, config ?? {}))
   },
 }

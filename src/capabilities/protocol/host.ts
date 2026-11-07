@@ -183,15 +183,17 @@ export interface ProtocolServerConfig {
   /** The name of the preset `world` composes, recorded in each session's header. */
   readonly agentPreset?: string
   /**
-   * Called on a session this host resumed, before any tool runs on it (one
-   * its restored inbox woke may already have begun its first request): the
-   * app applies the operator's EXPLICIT authority flags here as the durable
-   * switch they are on every other path (§9). Without it a `web --sandbox
-   * read-only` host continued a stored session at its recorded wider mode.
-   * It is handed the host's own context: a hook that read a root the app
-   * filled only after boot could meet a resume that arrived first (S20.5).
+   * Called on a session this host resumes, INSIDE its creation transaction
+   * (`ResumeAgentOptions.opening`): the app applies the operator's EXPLICIT
+   * authority flags here as the durable switch they are on every other path
+   * (§9), before publication, so a prompt the restored inbox owes cannot wake
+   * a turn ahead of them — and a refusal rolls the resume back with that
+   * prompt still queued (S21.1). Without it a `web --sandbox read-only` host
+   * continued a stored session at its recorded wider mode. It is handed the
+   * host's own context: a hook that read a root the app filled only after
+   * boot could meet a resume that arrived first (S20.5).
    */
-  readonly onResumed?: (handle: AgentHandle, ctx: Context) => void
+  readonly onResumed?: (agent: Agent, ctx: Context) => void
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
   /**
@@ -1011,6 +1013,21 @@ export class ProtocolHost {
     )
   }
 
+  /**
+   * This host's own authority flags on a session it resumes, as the resume's
+   * `opening`: inside the creation transaction, so a refusal (a child's pin,
+   * refused whole before any append by `authoritySwitchRefusal`) rolls the
+   * resume back with nothing published and the restored prompt still queued.
+   * The caller's to resolve, as a format this host cannot continue is.
+   */
+  private applyResumeFlags(agent: Agent): void {
+    try {
+      this.config.onResumed?.(agent, this.ctx)
+    } catch (error) {
+      throw new RpcFailure(INVALID_PARAMS, `this host's authority flags cannot apply to session "${agent.id}": ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** A route names a provider this host serves, or it is refused before it can become a durable fact. */
   private assertRoutable(partial: Partial<AgentOptions>, method: string): void {
     if (partial.provider !== undefined && !this.ctx.get(LLM).hasProvider(partial.provider)) {
@@ -1100,18 +1117,15 @@ export class ProtocolHost {
         // The preset this host composes is named, so a session composed under
         // another one is refused rather than run under a world its header does
         // not name (core/agent `assertSamePreset`).
-        .resume(this.ctx, asSessionId(requested), { agentOptions: options.partial, defaults: this.agentDefaults(), ...world, ...preset })
+        .resume(this.ctx, asSessionId(requested), {
+          agentOptions: options.partial,
+          defaults: this.agentDefaults(),
+          ...world,
+          ...preset,
+          ...(this.config.onResumed === undefined ? {} : { opening: (agent: Agent) => this.applyResumeFlags(agent) }),
+        })
         .then(
-          async (handle) => {
-            try {
-              this.config.onResumed?.(handle, this.ctx)
-            } catch (error) {
-              // This host's own flags refused by the session (a child's pin):
-              // refused whole before any append (`authoritySwitchRefusal`), and
-              // the caller's to resolve, as a format this host cannot continue is.
-              await handle.dispose()
-              throw new RpcFailure(INVALID_PARAMS, `this host's authority flags cannot apply to session "${handle.agent.id}": ${error instanceof Error ? error.message : String(error)}`)
-            }
+          (handle) => {
             this.owned.set(handle.agent.id, handle)
             return handle.agent
           },

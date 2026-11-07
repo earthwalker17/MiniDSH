@@ -16,13 +16,15 @@ import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context, Logger } from '../kernel/index.ts'
-import { AGENTS } from '../core/agent/index.ts'
+import { AGENTS, foldInbox } from '../core/agent/index.ts'
 import { APPROVAL } from '../core/approval/index.ts'
 import { asSessionId } from '../core/ids.ts'
 import { LLM } from '../core/llm/index.ts'
-import { createUserMessage } from '../core/llm/message.ts'
+import { createUserMessage, messageText, restoreMessage } from '../core/llm/message.ts'
 import { SANDBOX } from '../core/sandbox/index.ts'
+import type { EventEnvelope } from '../core/session/index.ts'
 import { assistantText, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
+import { resumeTask } from './headless.ts'
 import { startProtocolHost, type ProtocolHostHandle } from './serve.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -148,5 +150,89 @@ describe('a wire resume', () => {
     await strict.idle(sessionId)
     const authority = await strict.call('session/authority', { sessionId })
     expect(authority.result).toMatchObject({ sandbox: 'read-only' })
+  })
+})
+
+/**
+ * S21.1: a continuation's own switches land INSIDE its creation transaction
+ * (`ResumeAgentOptions.opening`). They used to land after publication, when a
+ * prompt the restored inbox owed had already woken a turn and been claimed;
+ * a refused flag then disposed that turn, and the claim took the prompt out of
+ * the log for good. Now the refusal rolls the resume back before anything is
+ * published, woken or claimed — over the wire and on the CLI alike.
+ */
+describe('a resume whose flags are refused', () => {
+  async function storedChildWithQueuedPrompt(sessionsRoot: string, cwd: string): Promise<{ childId: string; file: string }> {
+    let root!: Context
+    const first = await startHost(sessionsRoot, cwd, {
+      prepare: (r: Context) => {
+        root = r
+        void r.get(LLM).registerAdapter(r, new ScriptedAdapter().script(assistantText('one')))
+      },
+    })
+    const child = await root.get(AGENTS).create(root, {
+      cwd,
+      agentOptions: { provider: 'scripted', model: 'scripted-model' },
+      delegatedBy: asSessionId('session-parent-gone'),
+      setup: (_ctx, agent) => {
+        root.get(SANDBOX).open(agent.session, { mode: 'workspace-write', reason: 'delegation' })
+        root.get(APPROVAL).open(agent.session, { policy: 'never', reason: 'delegation' })
+      },
+    })
+    child.agent.followup(createUserMessage('hi'))
+    await child.agent.whenIdle()
+    // Queued durably and NOT woken: the shape a restored inbox wakes at resume.
+    child.agent.send(createUserMessage('QUEUED-PROMPT'), 'next-turn', false)
+    const childId = child.agent.id
+    await child.dispose()
+    await first.handle.dispose()
+    return { childId, file: join(sessionsRoot, `${childId}.jsonl`) }
+  }
+
+  function stored(file: string): EventEnvelope[] {
+    return readFileSync(file, 'utf8')
+      .trim()
+      .split('\n')
+      .slice(1)
+      .map((line) => JSON.parse(line) as EventEnvelope)
+  }
+
+  function expectUntouched(file: string, before: string, what: string): void {
+    expect(readFileSync(file, 'utf8'), `${what}: nothing was appended`).toBe(before)
+    const queued = foldInbox(stored(file)).turnQueue.map((message) => messageText(restoreMessage(message)))
+    expect(queued, `${what}: the restored prompt is still owed`).toEqual(['QUEUED-PROMPT'])
+  }
+
+  it('over the wire: refused before publication, the restored prompt still queued', async () => {
+    base = mkdtempSync(join(tmpdir(), 'minidsh-wire-resume-'))
+    const sessionsRoot = join(base, 'sessions')
+    const { childId, file } = await storedChildWithQueuedPrompt(sessionsRoot, base)
+    const before = readFileSync(file, 'utf8')
+    expect(stored(file).filter((event) => event.type === 'turn/start')).toHaveLength(1)
+
+    const strict = await startHost(sessionsRoot, base, { approvalPolicy: 'ask' })
+    const refused = await strict.call('session/prompt', { sessionId: childId, text: 'again' })
+    expect(refused.error).toMatchObject({ code: -32602, message: expect.stringContaining('pinned "never"') })
+    await strict.handle.dispose()
+    expectUntouched(file, before, 'the wire resume')
+  })
+
+  it('on the CLI: refused before publication, the restored prompt still queued', async () => {
+    base = mkdtempSync(join(tmpdir(), 'minidsh-wire-resume-'))
+    const sessionsRoot = join(base, 'sessions')
+    const { childId, file } = await storedChildWithQueuedPrompt(sessionsRoot, base)
+    const before = readFileSync(file, 'utf8')
+    await expect(
+      resumeTask({
+        id: childId,
+        sessionsRoot,
+        confinement: 'none',
+        logger: silent,
+        sandbox: 'danger-full-access',
+        patches: [{ id: 'llm-deepseek', disabled: true }],
+        prepare: (root: Context) => void root.get(LLM).registerAdapter(root, new ScriptedAdapter().script(assistantText('never'))),
+      }),
+    ).rejects.toThrow(/ceiling|cannot be widened/i)
+    expectUntouched(file, before, 'the CLI resume')
   })
 })

@@ -16,7 +16,7 @@
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
-import { AGENTS, type AgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, type Agent, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
 import type { ApprovalOfferId, ApprovedCall, OpenApproval } from '../../core/approval/index.ts'
 import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
@@ -711,14 +711,16 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
         defaults: init.defaultAgentOptions,
         ...(options.agentWorld === undefined ? {} : { world: options.agentWorld }),
         ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
+        // An explicitly requested authority is a durable switch here too: a
+        // resumed session keeps what it recorded unless someone says otherwise.
+        // Inside the continuation's transaction, so it lands before a restored
+        // prompt can wake a turn (`ResumeAgentOptions.opening`).
+        opening: (agent: Agent) => applyAuthority(host.root, agent, options),
       }
       const handle =
         options.resumeId !== undefined
           ? await agents.resume(host.root, asSessionId(options.resumeId), continueOptions)
           : await agents.fork(host.root, asSessionId(options.forkId!), options.boundary, { ...continueOptions, ...(options.salvage === true ? { salvage: true } : {}) })
-      // An explicitly requested authority is a durable switch here too: a
-      // resumed session keeps what it recorded unless someone says otherwise.
-      applyAuthority(host.root, handle, options)
       sessionId = handle.agent.id
       // Attach first; live rendering starts at the seq after the cursor, and
       // the backlog replays whatever streamed while we attached (a resumed

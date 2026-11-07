@@ -8,7 +8,7 @@
  */
 import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../kernel/index.ts'
-import { AGENTS, mergeAgentOptions, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
+import { AGENTS, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
 import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
 import { JOBS } from '../core/jobs/index.ts'
 import { effectiveSandboxMode, SANDBOX, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
@@ -217,31 +217,38 @@ function registerAgentSettings(root: Context, base: AgentOptions): void {
 /**
  * An explicitly requested authority is a durable switch on the agent session,
  * not just a composition default — so it also governs a resumed session.
+ *
+ * On a resume or a fork it is the continuation's `opening`
+ * (`ResumeAgentOptions`): it runs inside the creation transaction, before
+ * publication, so it lands before a restored prompt can wake a turn, and a
+ * refusal rolls the continuation back with nothing published or claimed. Run
+ * after publication, a refused flag used to dispose a turn that had already
+ * claimed the restored prompt, and the claim lost it from the log (S21.1).
  */
-export function applyAuthority(root: Context, handle: AgentHandle, options: BootOptions & { readonly preset?: string }): void {
+export function applyAuthority(root: Context, agent: Agent, options: BootOptions & { readonly preset?: string }): void {
   // All or nothing: a delegated child's pin refused the approval only after
   // the mode had landed, durably (S20.5 review).
-  const refusal = authoritySwitchRefusal(handle.agent.session, { sandbox: options.sandbox, approval: options.approvalPolicy, accepts: options.accepts })
+  const refusal = authoritySwitchRefusal(agent.session, { sandbox: options.sandbox, approval: options.approvalPolicy, accepts: options.accepts })
   if (refusal !== undefined) throw new Error(refusal)
-  if (options.sandbox !== undefined) root.get(SANDBOX).setMode(handle.agent.session, options.sandbox)
-  if (options.approvalPolicy !== undefined) root.get(APPROVAL).setPolicy(handle.agent.session, options.approvalPolicy)
+  if (options.sandbox !== undefined) root.get(SANDBOX).setMode(agent.session, options.sandbox)
+  if (options.approvalPolicy !== undefined) root.get(APPROVAL).setPolicy(agent.session, options.approvalPolicy)
   // The preset before the acceptance and after the pair, because the pair and
   // the preset are mutually exclusive at the CLI while the acceptance composes
   // with both — and an acceptance is given FOR a mode, so it must see the mode
   // this run ends up under, not the one it started from.
-  applyPreset(root, handle, options.preset)
+  applyPreset(root, agent, options.preset)
   if (options.accepts !== undefined) {
     const sandbox = root.get(SANDBOX)
-    sandbox.setAcceptance(handle.agent.session, options.accepts, effectiveSandboxMode(handle.agent.session.facts) ?? sandbox.defaultMode)
+    sandbox.setAcceptance(agent.session, options.accepts, effectiveSandboxMode(agent.session.facts) ?? sandbox.defaultMode)
   }
 }
 
 /** A preset is the same durable act through the one selector; `applyAuthority` stays preset-ignorant. */
-function applyPreset(root: Context, handle: AgentHandle, name: string | undefined): void {
+function applyPreset(root: Context, agent: Agent, name: string | undefined): void {
   if (name === undefined) return
   const presets = root.tryGet(PRESETS)
   if (!presets) throw new Error('a preset needs the authority-presets row, which this composition removes')
-  presets.apply(handle.agent.session, name)
+  presets.apply(agent.session, name)
 }
 
 /**
@@ -307,7 +314,7 @@ export async function runTask(options: TaskOptions, onEvent?: EventListener): Pr
       ...(options.world === undefined ? {} : { world: options.world }),
       ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
     })
-    applyAuthority(root, handle, options)
+    applyAuthority(root, handle.agent, options)
     return await drive(root, handle, options.task)
   } finally {
     await root.dispose()
@@ -337,8 +344,7 @@ function continueArgs(options: ContinueOptions): {
 export async function resumeTask(options: ContinueOptions, onEvent?: EventListener): Promise<TaskResult> {
   const root = await bootComposition(options, onEvent)
   try {
-    const handle = await root.get(AGENTS).resume(root, asSessionId(options.id), continueArgs(options))
-    applyAuthority(root, handle, options)
+    const handle = await root.get(AGENTS).resume(root, asSessionId(options.id), { ...continueArgs(options), opening: (agent) => applyAuthority(root, agent, options) })
     return await drive(root, handle, options.task)
   } finally {
     await root.dispose()
@@ -351,8 +357,8 @@ export async function forkTask(options: ContinueOptions, onEvent?: EventListener
     const handle = await root.get(AGENTS).fork(root, asSessionId(options.id), options.boundary, {
       ...continueArgs(options),
       ...(options.salvage === true ? { salvage: true } : {}),
+      opening: (agent) => applyAuthority(root, agent, options),
     })
-    applyAuthority(root, handle, options)
     return await drive(root, handle, options.task)
   } finally {
     await root.dispose()

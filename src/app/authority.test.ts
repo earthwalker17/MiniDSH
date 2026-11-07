@@ -237,7 +237,7 @@ describe('what the model is told about its authority', () => {
       ...(sandbox === undefined ? {} : { sandbox }),
     })
     const handle = await root.get(AGENTS).create(root, { cwd, agentOptions: { provider: 'scripted', model: 'scripted-model' } })
-    if (sandbox !== undefined) applyAuthority(root, handle, { sandbox, sessionsRoot: '' })
+    if (sandbox !== undefined) applyAuthority(root, handle.agent, { sandbox, sessionsRoot: '' })
     return { root, handle }
   }
 

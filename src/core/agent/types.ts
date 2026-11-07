@@ -114,6 +114,19 @@ export interface Agent {
   inject(message: Message): void
   cancel(cause: CancelCause, options?: CancelOptions): void
   whenIdle(): Promise<void>
+  /**
+   * Runs work this agent OWNS outside any turn — an idle `/compact`'s summary
+   * is the first (BLUEPRINT §3). `work` gets a signal that aborts when the
+   * agent's disposal begins, and the disposal waits for it, bounded, once the
+   * loop is idle and BEFORE the scope unwinds and the session detaches
+   * (`core/loop/factory.ts`), so whatever it records lands in an open log.
+   * Refused (`AGENT_DISPOSED`) once disposal has begun.
+   *
+   * The cancel it takes is the agent's LIFETIME and nothing else: a person's
+   * `cancel` stops a turn, not this. Nor does `whenIdle` wait for it — "idle"
+   * stays the loop's, which is what delegation and headless read as done.
+   */
+  own<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T>
 }
 
 export interface AgentHandle {
@@ -202,6 +215,16 @@ export interface ResumeAgentOptions {
   readonly defaults?: AgentOptions
   /** The continued lifecycle's world — inheritable, exactly as at creation. */
   readonly world?: CreateAgentOptions['world']
+  /**
+   * The RESUMER's own durable switches for this lifecycle — a host's authority
+   * flags — run inside the creation transaction, after the world and the
+   * re-applied narrowing and before publication (it becomes the creation's
+   * `setup`). So they land before a restored prompt can wake a turn, and a
+   * refusal rolls the continuation back with nothing published, woken or
+   * claimed. Never what an earlier creator decided: that is the log's own
+   * (`agent/narrowing`, the stamps), which no resumer reconstructs.
+   */
+  readonly opening?: (agent: Agent) => void | Promise<void>
   /**
    * The agent preset that `world` was composed from, or none. The header
    * names the preset a session was composed under and is immutable, so a

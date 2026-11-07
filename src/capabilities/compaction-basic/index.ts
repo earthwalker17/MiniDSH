@@ -212,7 +212,16 @@ class BasicCompaction implements Compaction {
       this.requested.add(agent)
       return { kind: 'scheduled' }
     }
-    return this.run(agent, 'explicit', signal)
+    // Outside any turn, so nothing else binds it to the agent: run it as work
+    // the agent OWNS (§6). A disposal then aborts the summary call instead of
+    // paying for it into a detached session, and waits for the bracket's end to
+    // be recorded before the log closes (DSH's `runMaintenance`, bounded here).
+    try {
+      return await agent.own((lifetime) => this.run(agent, 'explicit', signal === undefined ? lifetime : AbortSignal.any([lifetime, signal])))
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'AGENT_DISPOSED') return { kind: 'nothing-to-do', reason: 'agent-gone' }
+      throw error
+    }
   }
 
   /** The budget every path measures against. */
@@ -335,6 +344,9 @@ class BasicCompaction implements Compaction {
       retainRatio: this.config.retainRatio,
     })
     if (!plan) return { kind: 'nothing-to-do' }
+    // Two awaits since the caller's check: an attempt cancelled in them (a
+    // disposal began) opens no bracket it would only have to close at once.
+    if (signal?.aborted) return { kind: 'nothing-to-do', reason: 'cancelled' }
 
     // The bracket opens once there IS an attempt: after the plan, before the
     // paid call. Opening it earlier would append a record at every step boundary

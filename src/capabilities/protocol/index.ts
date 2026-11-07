@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto'
 import type { IncomingMessage, Server as HttpServer } from 'node:http'
 import { basename } from 'node:path'
 import type { Context, Plugin } from '../../kernel/index.ts'
-import { AGENTS, AGENT_CREATED, AGENT_DISPOSED, AGENT_STATUS, type AgentHandle, type AgentOptions } from '../../core/agent/index.ts'
+import { AGENTS, AGENT_CREATED, AGENT_DISPOSED, AGENT_STATUS, type Agent, type AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL, APPROVAL_REQUEST } from '../../core/approval/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { canonicalPath, SANDBOX } from '../../core/sandbox/index.ts'
@@ -94,8 +94,8 @@ export interface ProtocolConfig {
   readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, recorded in each session's header so a resume can compose the same world. */
   readonly agentPreset?: string
-  /** Called on a session this host resumed, before anything runs on it (the app applies its explicit authority flags). */
-  readonly onResumed?: (handle: AgentHandle, ctx: Context) => void
+  /** Called on a session this host resumes, inside its creation transaction (the app applies its explicit authority flags). */
+  readonly onResumed?: (agent: Agent, ctx: Context) => void
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
   readonly onClose?: () => void
 }

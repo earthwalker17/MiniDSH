@@ -120,6 +120,10 @@ export class ReactLoopAgent implements Agent {
   private running = false
   private disposed = false
   private idleWaiters: (() => void)[] = []
+  /** Aborted when disposal begins: the one cancel every owned work derives from (`own`). */
+  private readonly lifetime = new AbortController()
+  /** Owned work still running, each settled-or-failed alike: what the disposal joins. */
+  private readonly owned = new Set<Promise<void>>()
 
   constructor(session: Session, options: AgentOptions, world?: CreateAgentOptions['world']) {
     this.id = session.id
@@ -189,10 +193,14 @@ export class ReactLoopAgent implements Agent {
       // now — a runtime notice, the end of a job this very disposal stopped — is
       // RECORDED for the session's next lifecycle, quiet, rather than dropped:
       // the inbox re-delivers, never loses (§4), and it enters with the next
-      // prompt. A PROMPT racing the shutdown is not: a restored next-turn entry
-      // wakes a resume, and nobody saw that prompt accepted. Only a session the
-      // store has closed takes nothing more.
-      if (target === 'next-step' && !this.session.isClosed) this.inbox.append(message, target, false)
+      // prompt. A PROMPT racing the shutdown is not recorded — a restored
+      // next-turn entry wakes a resume, and nobody saw that prompt accepted —
+      // and it is REFUSED, not dropped: its sender (a wire client) used to be
+      // told it was accepted, and the window grew once a disposal began
+      // waiting for owned work. Only a session the store has closed takes
+      // nothing more.
+      if (target === 'next-turn') throw Object.assign(new Error(`agent ${this.id} is being disposed: the prompt was not accepted`), { code: 'AGENT_DISPOSED' })
+      if (!this.session.isClosed) this.inbox.append(message, target, false)
       return
     }
     this.inbox.append(message, target, wakeup)
@@ -211,8 +219,45 @@ export class ReactLoopAgent implements Agent {
     this.send(message, 'next-step', false)
   }
 
+  own<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.disposed) return Promise.reject(Object.assign(new Error(`agent ${this.id} is being disposed: no new work may start`), { code: 'AGENT_DISPOSED' }))
+    let task: Promise<T>
+    try {
+      task = work(this.lifetime.signal)
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    const tracked = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.owned.add(tracked)
+    void tracked.then(() => this.owned.delete(tracked))
+    return task
+  }
+
+  /**
+   * The disposal's join (`core/loop/factory.ts`): true once every owned work
+   * has settled, false when `boundMs` passed first. Bounded, because the
+   * cancel is cooperative — work that ignores its signal must not hold a
+   * disposal (and a host's shutdown, which disposes agent after agent) open.
+   */
+  async settleOwned(boundMs: number): Promise<boolean> {
+    if (this.owned.size === 0) return true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const bound = new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), boundMs)))
+    try {
+      return await Promise.race([Promise.all(this.owned).then(() => true as const), bound])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   cancel(cause: CancelCause, options?: CancelOptions): void {
-    if (cause.kind === 'disposed') this.disposed = true
+    if (cause.kind === 'disposed') {
+      this.disposed = true
+      this.lifetime.abort(cause)
+    }
     // Graceful teardown must not durably erase the queue the log preserves for
     // the next resume; a user/hook cancel means it, unless the caller says the
     // queue is not theirs alone to discard (several clients on one session).
@@ -286,6 +331,17 @@ export class ReactLoopAgent implements Agent {
         // on every exit path — including a pre-step listener throw or a cancel
         // landing inside the pre-step await (whose clear records it first).
         const commitClaim = (): void => this.inbox.commitClaim()
+        // A claim nothing entered, handed back. EXCEPT under a disposal: its
+        // clear left the log's queue whole, so the claimed messages are still
+        // owed there to the next lifecycle — committing would lose a prompt,
+        // and requeueing a notice would deliver it twice (S21.1).
+        const giveBack = (messages: readonly Message[]): void => {
+          // A person's durable clear may have recorded the claim before the
+          // disposal came: then the notices it claimed are owed again as usual.
+          if (this.disposed && this.inbox.abandonClaim()) return
+          commitClaim()
+          this.requeueNotices(messages)
+        }
         let decision: PreStepDecision
         let config: CallConfig
         try {
@@ -301,13 +357,11 @@ export class ReactLoopAgent implements Agent {
             async () => ({ kind: 'enter', messages: claimed }) as PreStepDecision,
           )
         } catch (error) {
-          commitClaim()
-          this.requeueNotices(claimed)
+          giveBack(claimed)
           throw error
         }
         if (signal.aborted) {
-          commitClaim()
-          this.requeueNotices(claimed)
+          giveBack(claimed)
           throw new Error('turn aborted')
         }
         if (decision.kind === 'reject') {

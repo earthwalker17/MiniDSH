@@ -17,7 +17,7 @@ import { sessionInvariantPlugin, sessionPlugin } from '../core/session/index.ts'
 import { toolsPlugin, type ToolsConfig } from '../core/tools/index.ts'
 import { agentPlugin } from '../core/agent/index.ts'
 import { agentInvariantPlugin } from '../core/agent/invariant.ts'
-import { loopInvariantPlugin, loopPlugin } from '../core/loop/index.ts'
+import { loopInvariantPlugin, loopPlugin, type LoopConfig } from '../core/loop/index.ts'
 import { ScriptedAdapter } from './scripted-adapter.ts'
 
 const silentLogger: Logger = { warn: () => {}, error: () => {} }
@@ -32,7 +32,7 @@ export interface CoreHarness {
 }
 
 export async function coreHarness(
-  options: { persona?: string; logger?: Logger; tools?: ToolsConfig; sandbox?: SandboxConfig; jobs?: JobsConfig } = {},
+  options: { persona?: string; logger?: Logger; tools?: ToolsConfig; sandbox?: SandboxConfig; jobs?: JobsConfig; loop?: LoopConfig } = {},
 ): Promise<CoreHarness> {
   const root = createRoot({ logger: options.logger ?? silentLogger })
   root.plugin(invariantsPlugin, {})
@@ -48,7 +48,7 @@ export async function coreHarness(
   root.plugin(agentInvariantPlugin)
   root.plugin(jobsPlugin, options.jobs ?? {})
   root.plugin(jobsInvariantPlugin)
-  const loop = root.plugin(loopPlugin)
+  const loop = root.plugin(loopPlugin, options.loop)
   root.plugin(loopInvariantPlugin)
   await root.settle()
 

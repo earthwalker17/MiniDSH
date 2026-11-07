@@ -258,16 +258,81 @@ describe('compaction through the real loop', () => {
   it('records a cancelled summary as cancelled, and the fold does not count it', async () => {
     const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false, maxSummaryFailures: 2 })
     const { agent } = await test.create()
-    arm(test, { failSummary: true })
+    arm(test)
     await grow(agent, 6)
 
+    // Cancelled before the attempt even began: no bracket to open and close.
+    const early = new AbortController()
+    early.abort()
+    expect(await test.root.get(COMPACTION).compactNow(agent, early.signal)).toMatchObject({ kind: 'nothing-to-do', reason: 'cancelled' })
+    expect(agent.session.events.filter((event) => event.type === 'compaction/start')).toHaveLength(0)
+
+    // Cancelled DURING the summary: the bracket closes `cancelled`, uncounted.
     const controller = new AbortController()
-    controller.abort()
+    test.adapter.scriptWhen(
+      (request) => request.purpose === 'compaction',
+      () => {
+        controller.abort()
+        return assistantText('## Primary Request\n- never delivered')
+      },
+    )
     const outcome = await test.root.get(COMPACTION).compactNow(agent, controller.signal)
     expect(outcome).toMatchObject({ kind: 'nothing-to-do', reason: 'cancelled' })
     const end = agent.session.events.filter((event) => event.type === 'compaction/end').at(-1)!
     expect(end.data).toMatchObject({ outcome: { kind: 'declined', reason: 'cancelled' } })
     expect(foldCompactionFailures(agent.session.facts, agent.session.liveStart)).toBe(0)
+  })
+
+  /**
+   * S21.1: an idle `/compact` is work the agent OWNS (`Agent.own`). Before, a
+   * disposal neither aborted nor awaited its summary: the call went on being
+   * paid for, its record met a detached session, and `compaction/start` stayed
+   * unpaired until some later resume closed it `unclosed`.
+   */
+  it('binds an idle /compact to its agent: a disposal aborts the summary and records the end before the log closes', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
+    const handle = await test.create()
+    const { agent } = handle
+    arm(test)
+    await grow(agent, 6)
+    let summaryAsked!: () => void
+    const asked = new Promise<void>((resolve) => (summaryAsked = resolve))
+    let sawAbort = false
+    test.adapter.scriptWhen(
+      (request) => request.purpose === 'compaction',
+      async (request) => {
+        summaryAsked()
+        // A provider that answers only once it is told to stop.
+        await new Promise<void>((resolve) => request.signal?.addEventListener('abort', () => resolve(), { once: true }))
+        sawAbort = request.signal?.aborted === true
+        return assistantText('## Primary Request\n- too late')
+      },
+    )
+    const outcome = test.root.get(COMPACTION).compactNow(agent)
+    await asked
+    const started = Date.now()
+    await handle.dispose()
+    expect(Date.now() - started, 'the disposal waited out a bound instead of aborting the call').toBeLessThan(3_000)
+    expect(sawAbort, 'the disposal never aborted the summary call').toBe(true)
+    expect(await outcome).toMatchObject({ kind: 'nothing-to-do', reason: 'cancelled' })
+    const start = agent.session.events.filter((event) => event.type === 'compaction/start').at(-1)
+    expect(start, 'no attempt was made').toBeDefined()
+    const aux = agent.session.events.filter((event) => matchesAux(event)).at(-1)
+    expect(aux?.data).toMatchObject({ purpose: 'compaction', outcome: { kind: 'error' } })
+    const end = agent.session.events.filter((event) => event.type === 'compaction/end').at(-1)
+    expect(end?.data, 'the bracket closed before the log did').toMatchObject({ startSeq: start!.seq, outcome: { kind: 'declined', reason: 'cancelled' } })
+    // And a /compact that arrives once the disposal has begun starts nothing.
+    expect(await test.root.get(COMPACTION).compactNow(agent)).toMatchObject({ kind: 'nothing-to-do' })
+  })
+
+  it('answers a /compact on an agent already being disposed as agent-gone, and opens no bracket', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
+    const { agent } = await test.create()
+    arm(test)
+    await grow(agent, 6)
+    agent.cancel({ kind: 'disposed' })
+    expect(await test.root.get(COMPACTION).compactNow(agent)).toEqual({ kind: 'nothing-to-do', reason: 'agent-gone' })
+    expect(agent.session.events.filter((event) => event.type === 'compaction/start')).toHaveLength(0)
   })
 
   it('compacts under pressure before the step, and every request still equals the log', async () => {
@@ -522,3 +587,7 @@ describe('the summary takes the route the log names', () => {
     expect(agent.session.foldRequestHeader()!.model).toBe('scripted-model')
   })
 })
+
+function matchesAux(event: { readonly type: string }): boolean {
+  return event.type === LLM_AUX_CALL.type
+}

@@ -206,6 +206,20 @@ export class Inbox {
     return { messages: claimed, ...(splice === undefined ? {} : { splice }) }
   }
 
+  /**
+   * Forgets the claim taken last WITHOUT recording it. Only a disposal does
+   * this, for a turn it stopped before the claimed messages entered: its clear
+   * is non-durable (`clear(false)`), so the log still holds them queued, and
+   * committing the claim now would durably consume a prompt nobody saw — the
+   * one loss the claim-after-entry order exists to rule out (S21.1). False when
+   * there was nothing unrecorded to forget: a durable clear got there first.
+   */
+  abandonClaim(): boolean {
+    const pending = this.pendingClaim !== undefined
+    this.pendingClaim = undefined
+    return pending
+  }
+
   /** Records the claim taken last, once: after a clear already recorded it, nothing. */
   commitClaim(): void {
     const splice = this.pendingClaim
@@ -341,6 +355,7 @@ class AgentRegistry implements Agents {
       ...(stored.header.agentPreset === undefined ? {} : { agentPreset: stored.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `session "${id}"`),
       ...(options.world === undefined ? {} : { world: options.world }),
+      ...(options.opening === undefined ? {} : { setup: (_ctx: Context, agent: Agent) => options.opening!(agent) }),
     })
   }
 
@@ -386,6 +401,7 @@ class AgentRegistry implements Agents {
       ...(src.header.agentPreset === undefined ? {} : { agentPreset: src.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `fork of "${src.parentId}"`),
       ...(options.world === undefined ? {} : { world: options.world }),
+      ...(options.opening === undefined ? {} : { setup: (_ctx: Context, agent: Agent) => options.opening!(agent) }),
       ...(src.salvage === undefined ? {} : { salvage: src.salvage }),
     })
   }
