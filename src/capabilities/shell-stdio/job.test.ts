@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SandboxExecutionPolicy } from '../../core/sandbox/index.ts'
 import type { ShellJobExit } from '../../core/shell/index.ts'
-import { ShellProcess, type ShellDialect } from './process.ts'
+import { PWSH_CONTAINMENT, ShellProcess, type ShellDialect } from './process.ts'
 
 const dialect: ShellDialect = process.platform === 'win32' ? 'pwsh' : 'bash'
 const binary = dialect === 'pwsh' ? 'pwsh' : 'bash'
@@ -190,5 +190,92 @@ describe.runIf(available)('a job process', () => {
     cancel.abort()
     await run
     await until(() => !alive(pid))
+  })
+})
+
+/**
+ * S21.1: on Windows every pwsh this shell spawns holds what it starts in a
+ * kill-on-close Job of its own (`PWSH_CONTAINMENT`). The sharp case is an
+ * ORPHAN: a program whose parent has already exited, which `taskkill /T`
+ * cannot reach because it walks parent links — before S21.1 it outlived the
+ * job's end, the job's kill, a one-shot and the shell itself.
+ */
+describe.runIf(available && process.platform === 'win32')('S21.1: a Windows pwsh contains what it starts', () => {
+  /** A detached grandchild whose intermediate parent exits at once: the chain `/T` follows is broken. */
+  function orphan(root: string): string {
+    writeFileSync(join(root, 'gc.cjs'), "require('fs').writeFileSync('gc.pid', String(process.pid)); setInterval(() => {}, 1000)\n")
+    return "Start-Process pwsh -ArgumentList '-NoProfile','-Command','Start-Process node -ArgumentList gc.cjs -WindowStyle Hidden' -WindowStyle Hidden"
+  }
+
+  async function orphanPid(root: string): Promise<number> {
+    await until(() => existsSync(join(root, 'gc.pid')))
+    const pid = Number(readFileSync(join(root, 'gc.pid'), 'utf8'))
+    expect(alive(pid), 'the orphan was never running').toBe(true)
+    return pid
+  }
+
+  it("ends an orphan at the job's own end", { timeout: TIMEOUT_MS }, async () => {
+    const { shell, policy, root } = setup()
+    const job = await shell.start({ command: `${orphan(root)}; while (-not (Test-Path gc.pid)) { Start-Sleep -Milliseconds 50 }; exit 7`, policy, output: () => {} })
+    const pid = await orphanPid(root)
+    expect((await job.exited).exitCode, "the command's exit code is kept").toBe(7)
+    await until(() => !alive(pid), 10_000)
+  })
+
+  it('ends an orphan when the job is killed', { timeout: TIMEOUT_MS }, async () => {
+    const { shell, policy, root } = setup()
+    const job = await shell.start({ command: `${orphan(root)}; Start-Sleep 60`, policy, output: () => {} })
+    const pid = await orphanPid(root)
+    job.kill()
+    await job.exited
+    await until(() => !alive(pid), 10_000)
+  })
+
+  it("ends an orphan with the approved one-shot that started it, even across a forced collection", { timeout: TIMEOUT_MS }, async () => {
+    const { shell, policy, root } = setup()
+    const result = await shell.exec({
+      command: `${orphan(root)}; while (-not (Test-Path gc.pid)) { Start-Sleep -Milliseconds 50 }; [GC]::Collect(); [GC]::WaitForPendingFinalizers(); Write-Output still-here`,
+      policy,
+      oneShot: true,
+      timeoutMs: TIMEOUT_MS,
+    })
+    expect(result.output).toContain('still-here')
+    expect(result.output, 'the containment line said nothing: it worked').not.toContain('minidsh:')
+    const pid = Number(readFileSync(join(root, 'gc.pid'), 'utf8'))
+    await until(() => !alive(pid), 10_000)
+  })
+
+  it('ends an orphan of the persistent shell at its disposal, and at an `exit` typed into it', { timeout: TIMEOUT_MS }, async () => {
+    for (const end of ['dispose', 'exit'] as const) {
+      const { shell, policy, root } = setup()
+      const started = await shell.exec({ command: `${orphan(root)}; while (-not (Test-Path gc.pid)) { Start-Sleep -Milliseconds 50 }`, policy, timeoutMs: TIMEOUT_MS })
+      expect(started.output, end).not.toContain('minidsh:')
+      const pid = await orphanPid(root)
+      if (end === 'dispose') await shell.dispose()
+      else expect((await shell.exec({ command: 'exit', policy, timeoutMs: TIMEOUT_MS })).reset, end).toBe(true)
+      await until(() => !alive(pid), 10_000)
+      await proc?.dispose()
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+    }
+  })
+
+  it('leaves nothing of itself in the command\'s scope', { timeout: TIMEOUT_MS }, async () => {
+    const { shell, policy } = setup()
+    // `Ignore`, not `SilentlyContinue`: the latter records every name it misses in `$Error`.
+    const probe = "Write-Output ($Error.Count + (Get-Variable n,tb,t,job,info,i -ErrorAction Ignore | Measure-Object).Count + (Get-Command D -ErrorAction Ignore | Measure-Object).Count)"
+    expect((await shell.exec({ command: probe, policy, oneShot: true, timeoutMs: TIMEOUT_MS })).output.trim(), 'a one-shot').toBe('0')
+    expect((await shell.exec({ command: probe, policy, timeoutMs: TIMEOUT_MS })).output.trim(), 'the persistent shell').toBe('0')
+  })
+
+  /** Constrained Language Mode refuses the type builder: one warning, and the command runs as before. */
+  it('fails soft where Constrained Language Mode refuses it', { timeout: TIMEOUT_MS }, async () => {
+    const run = spawnSync(
+      'pwsh',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; ${PWSH_CONTAINMENT}Write-Output RAN; exit 7`],
+      { encoding: 'utf8', windowsHide: true },
+    )
+    expect(run.status).toBe(7)
+    expect(`${run.stdout}${run.stderr}`).toContain('minidsh: what this command starts is not contained')
+    expect(run.stdout).toContain('RAN')
   })
 })

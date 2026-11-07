@@ -19,6 +19,7 @@ import {
   type ShellSession,
 } from '../../core/shell/index.ts'
 import { childEnvironment, killAndWait, killTree, spawnChild, spawnRefusal, transientSpawnText, type Spawner } from '../../core/process.ts'
+import { printableText } from '../../core/text.ts'
 import { confinementRemedy, NO_CONFINEMENT, type Confinement } from './confine/index.ts'
 
 export type ShellDialect = 'bash' | 'pwsh'
@@ -32,17 +33,79 @@ function shellCommand(dialect: ShellDialect, shellPath: string | undefined): { c
 }
 
 /**
+ * On Windows, every pwsh this shell spawns first assigns ITSELF to a nested,
+ * unnamed kill-on-close Job (S21.1), so what its command starts ends with it.
+ *
+ * Node already holds each child in libuv's own kill-on-close Job, but that Job
+ * allows SILENT breakaway: a `Start-Process`'d program leaves it at birth and
+ * outlived the job's end, a kill and even a killed host (measured 2026-11-08 on
+ * this project's Windows 11 host: alive after a normal exit, after
+ * `child.kill()` and after `taskkill /F` of the host node; only a `/T` walk
+ * over a live parent reached it). With this prefix pwsh holds the only handle
+ * to a Job without that flag, so pwsh's exit — on its own, killed, or because
+ * libuv's Job killed it with the host — closes the handle and the kernel ends
+ * every member: dead in all four cases, the persistent shell's restart, reset,
+ * dispose and a typed `exit` included. This is the POSIX job rule (a job's end
+ * kills its group) reached on Windows. Two deliberate differences from POSIX,
+ * both §13: an approved one-shot's descendants end with the CALL, and the
+ * persistent shell's with the shell.
+ *
+ * How, and why so:
+ *   - Reflection.Emit P/Invoke, never `Add-Type`, which compiles through Roslyn
+ *     in every cold pwsh (0.7–2.2 s, S21). Measured cost: ~+55 ms on a ~610 ms
+ *     start (median of six each, 2026-11-08). No native binding, no runner
+ *     process: DSH reaches the same ordering with a koffi FFI runner.
+ *   - Assigned before a byte of the command runs, so nothing it starts is born
+ *     outside the Job.
+ *   - KILL_ON_JOB_CLOSE | BREAKAWAY_OK (0x2800) and NOT silent breakaway: an
+ *     ordinary child stays in, while a program that explicitly ASKS to break
+ *     away (CREATE_BREAKAWAY_FROM_JOB) still starts, as it would under libuv's
+ *     Job, instead of failing with access denied. That and a process created
+ *     by WMI or the Task Scheduler escape any Job (§13). Not measured: no test
+ *     here creates a process that asks to break away.
+ *   - The handle is a raw `IntPtr`, which no finalizer closes: a command that
+ *     forces a full collection keeps its Job (measured).
+ *   - Inside `& { }`, and `$Error` trimmed back to what it was: the command
+ *     sees no variable, function or error of this line. Exit codes were
+ *     identical with and without it across ten command shapes (measured).
+ *   - It fails SOFT. Where Constrained Language Mode refuses the type builder
+ *     (WDAC, AppLocker), or any call fails, `Write-Warning` — legal under CLM —
+ *     prints one `minidsh:` line and the command runs as before, under the old
+ *     taskkill tree kill (measured: the warning, then the command, exit kept).
+ *
+ * About 1.4 KB of the 32,767 characters a one-shot's or a job's argv may hold;
+ * a command past what remains is refused `SHELL_COMMAND_INVALID`, as before.
+ */
+export const PWSH_CONTAINMENT =
+  "& { $n = $Error.Count; try { " +
+  "$tb = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly([Reflection.AssemblyName]::new('MiniDshJob'), 'Run').DefineDynamicModule('MiniDshJob').DefineType('MiniDshJob', 'Public,Class'); " +
+  "function D($name, $ret, [Type[]]$params) { $tb.DefinePInvokeMethod($name, 'kernel32.dll', 'Public,Static,PinvokeImpl', [Reflection.CallingConventions]::Standard, $ret, $params, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode).SetImplementationFlags('PreserveSig') }; " +
+  "D 'CreateJobObjectW' ([IntPtr]) @([IntPtr], [IntPtr]); D 'SetInformationJobObject' ([bool]) @([IntPtr], [int], [IntPtr], [uint32]); D 'AssignProcessToJobObject' ([bool]) @([IntPtr], [IntPtr]); D 'GetCurrentProcess' ([IntPtr]) @(); " +
+  "$t = $tb.CreateType(); $job = $t::CreateJobObjectW([IntPtr]::Zero, [IntPtr]::Zero); if ($job -eq [IntPtr]::Zero) { throw 'CreateJobObject failed' }; " +
+  "$info = [Runtime.InteropServices.Marshal]::AllocHGlobal(144); for ($i = 0; $i -lt 144; $i++) { [Runtime.InteropServices.Marshal]::WriteByte($info, $i, 0) }; [Runtime.InteropServices.Marshal]::WriteInt32($info, 16, 0x2800); " +
+  "if (-not $t::SetInformationJobObject($job, 9, $info, 144)) { throw 'SetInformationJobObject failed' }; " +
+  "if (-not $t::AssignProcessToJobObject($job, $t::GetCurrentProcess())) { throw 'AssignProcessToJobObject failed' } " +
+  "} catch { Write-Warning ('minidsh: what this command starts is not contained: ' + $_.Exception.Message) }; " +
+  "try { while ($Error.Count -gt $n) { $Error.RemoveAt(0) } } catch {} }; "
+
+/** The containment line, where it applies: pwsh on Windows (a POSIX child leads its own process group instead). */
+function containment(dialect: ShellDialect): string {
+  return dialect === 'pwsh' && process.platform === 'win32' ? PWSH_CONTAINMENT : ''
+}
+
+/**
  * The same shell, asked to run exactly one command and exit: the one-shot
  * grant's shape, and a job's. pwsh gets the persistent child's encoding
  * line first: without it PowerShell writes its own text in the OEM code page,
  * which a host on CP936 delivered to the model as replacement characters
  * (measured 2026-10-15). Guarded, because a console setting can throw where
- * there is no console; the command's own exit code is unchanged.
+ * there is no console; the command's own exit code is unchanged. Then, on
+ * Windows, the containment line (`PWSH_CONTAINMENT`).
  */
 function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, command: string): { cmd: string; args: string[] } {
   if (dialect === 'pwsh') {
     const utf8 = 'try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $OutputEncoding = [Text.Encoding]::UTF8; '
-    return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8 + command] }
+    return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8 + containment(dialect) + command] }
   }
   return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc', '-c', command] }
 }
@@ -56,7 +119,10 @@ function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, co
  */
 function initLine(dialect: ShellDialect, ready: string): string {
   if (dialect === 'pwsh') {
-    return `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Continue'; Write-Output '${ready}'\n`
+    // The containment line before the marker, so no command can run outside
+    // the Job; a warning it prints lands before the marker too, and is kept
+    // for the first command's output (`takeReady`).
+    return `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Continue'; ${containment(dialect)}Write-Output '${ready}'\n`
   }
   return `export LC_ALL=C.UTF-8 2>/dev/null; printf '%s\\n' '${ready}'\n`
 }
@@ -173,6 +239,8 @@ export class ShellProcess implements ShellSession {
   private fresh = false
   /** True when the live child was spawned through the confinement wrapper. */
   private childWrapped = false
+  /** A warning the live child printed before its ready marker, owed to the next command's output. */
+  private startupNotice: string | undefined
   private buffer = ''
   private readonly markerBase = `__DSH_${crypto.randomUUID().replace(/-/g, '')}__`
   /** The init line's handshake: sequence 0, which no command is ever given. */
@@ -351,6 +419,14 @@ export class ShellProcess implements ShellSession {
     const at = this.buffer.indexOf(this.readyMarker)
     const end = at === -1 ? -1 : this.buffer.indexOf('\n', at + this.readyMarker.length)
     if (end === -1) return
+    // Start-up noise is dropped — except the containment line's own warning,
+    // the one thing in it a reader must not lose: this shell's descendants are
+    // not contained here, so it heads the first command's output.
+    const notice = this.buffer
+      .slice(0, at)
+      .split(/\r?\n/)
+      .find((line) => line.includes('minidsh:'))
+    if (notice !== undefined) this.startupNotice = printableText(notice).trim()
     this.buffer = this.buffer.slice(end + 1)
     this.fresh = false
   }
@@ -682,7 +758,10 @@ export class ShellProcess implements ShellSession {
     extra: { exitCode?: number; timedOut: boolean; reset: boolean; restarted: boolean; startedAt: number; durationMs?: number },
     sandbox: ShellRunResult['sandbox'],
   ): ShellRunResult {
-    const trimmed = raw.replace(/^\n+/, '').replace(/\n+$/, '')
+    const notice = this.startupNotice
+    this.startupNotice = undefined
+    const body = raw.replace(/^\n+/, '').replace(/\n+$/, '')
+    const trimmed = notice === undefined ? body : body.length === 0 ? notice : `${notice}\n${body}`
     // A MEMORY bound, not a context bound. What the model should see is the
     // tool's decision, and it cannot make it from output the executor already
     // threw away — so everything captured is returned, and `truncated` reports

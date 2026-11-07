@@ -199,6 +199,11 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
     console.log(`[jobs arc B] ${process.platform}: the job's worker ${survived ? 'SURVIVED' : 'died with'} its host; its root (pid ${pid ?? '?'}) is ${root}`)
     if (pid !== undefined) killTree(pid)
     killTree(worker)
+    // On Windows the job's own pwsh holds what it starts in a kill-on-close
+    // Job (S21.1, `PWSH_CONTAINMENT`): libuv's Job killed that pwsh with the
+    // host, and closing its handle took the worker down too. It SURVIVED in
+    // 7 of 7 S17 runs.
+    if (process.platform === 'win32') expect(survived, "a Windows job's worker outlived its killed host").toBe(false)
 
     // ---- a cold read predicts the closers -----------------------------------
     const sessionFile = join(home, 'sessions', `${encodeURIComponent(sessionId)}.jsonl`)
