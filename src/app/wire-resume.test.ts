@@ -24,7 +24,7 @@ import { createUserMessage, messageText, restoreMessage } from '../core/llm/mess
 import { SANDBOX } from '../core/sandbox/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { assistantText, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
-import { resumeTask } from './headless.ts'
+import { resumeTask, runTask } from './headless.ts'
 import { startProtocolHost, type ProtocolHostHandle } from './serve.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -158,8 +158,10 @@ describe('a wire resume', () => {
  * (`ResumeAgentOptions.opening`). They used to land after publication, when a
  * prompt the restored inbox owed had already woken a turn and been claimed;
  * a refused flag then disposed that turn, and the claim took the prompt out of
- * the log for good. Now the refusal rolls the resume back before anything is
- * published, woken or claimed — over the wire and on the CLI alike.
+ * the log for good. Now they run after publication (so their switch notes
+ * reach the model) and BEFORE any wake: a refusal leaves only the new
+ * lifecycle's own opening records, with no turn run, no authority fact
+ * landed and the prompt still owed — over the wire and on the CLI alike.
  */
 describe('a resume whose flags are refused', () => {
   async function storedChildWithQueuedPrompt(sessionsRoot: string, cwd: string): Promise<{ childId: string; file: string }> {
@@ -198,12 +200,18 @@ describe('a resume whose flags are refused', () => {
   }
 
   function expectUntouched(file: string, before: string, what: string): void {
-    expect(readFileSync(file, 'utf8'), `${what}: nothing was appended`).toBe(before)
+    const was = before.trim().split('\n').length - 1
+    const added = stored(file).slice(was)
+    const kinds = added.map((event) => event.type)
+    for (const kind of ['turn/start', 'user/message', 'sandbox/mode', 'approval/policy', 'sandbox/acceptance', 'authority/preset']) {
+      expect(kinds, `${what}: ${kind} after the refusal`).not.toContain(kind)
+    }
+    expect(added.filter((event) => event.type === 'inbox/spliced'), `${what}: the inbox was touched`).toHaveLength(0)
     const queued = foldInbox(stored(file)).turnQueue.map((message) => messageText(restoreMessage(message)))
     expect(queued, `${what}: the restored prompt is still owed`).toEqual(['QUEUED-PROMPT'])
   }
 
-  it('over the wire: refused before publication, the restored prompt still queued', async () => {
+  it('over the wire: refused before any wake, the restored prompt still queued', async () => {
     base = mkdtempSync(join(tmpdir(), 'minidsh-wire-resume-'))
     const sessionsRoot = join(base, 'sessions')
     const { childId, file } = await storedChildWithQueuedPrompt(sessionsRoot, base)
@@ -217,7 +225,7 @@ describe('a resume whose flags are refused', () => {
     expectUntouched(file, before, 'the wire resume')
   })
 
-  it('on the CLI: refused before publication, the restored prompt still queued', async () => {
+  it('on the CLI: refused before any wake, the restored prompt still queued', async () => {
     base = mkdtempSync(join(tmpdir(), 'minidsh-wire-resume-'))
     const sessionsRoot = join(base, 'sessions')
     const { childId, file } = await storedChildWithQueuedPrompt(sessionsRoot, base)
@@ -234,5 +242,50 @@ describe('a resume whose flags are refused', () => {
       }),
     ).rejects.toThrow(/ceiling|cannot be widened/i)
     expectUntouched(file, before, 'the CLI resume')
+  })
+})
+
+/**
+ * S21.1 review: the continuer's switches ran before publication once, and the
+ * runtime's switch note — which finds its agent through the registry — never
+ * reached the model: a resume under `--sandbox read-only` ran read-only while
+ * its first request still said the old mode. They run after publication now.
+ */
+describe('a resume that switches authority', () => {
+  it('tells the model, in the first request it makes', async () => {
+    base = mkdtempSync(join(tmpdir(), 'minidsh-wire-resume-'))
+    const sessionsRoot = join(base, 'sessions')
+    const boot = {
+      sessionsRoot,
+      confinement: 'none' as const,
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+    }
+    const first = await runTask({
+      ...boot,
+      task: 'hi',
+      cwd: base,
+      provider: 'scripted',
+      model: 'scripted-model',
+      prepare: (root: Context) => void root.get(LLM).registerAdapter(root, new ScriptedAdapter().script(assistantText('one'))),
+    })
+    expect(first.exitCode).toBe(0)
+    let seen = ''
+    const resumed = await resumeTask({
+      ...boot,
+      id: first.sessionId,
+      task: 'again',
+      sandbox: 'read-only',
+      prepare: (root: Context) =>
+        void root.get(LLM).registerAdapter(
+          root,
+          new ScriptedAdapter().script((request) => {
+            seen = request.messages.map((message) => messageText(message)).join('\n')
+            return assistantText('two')
+          }),
+        ),
+    })
+    expect(resumed.exitCode).toBe(0)
+    expect(seen, 'the first request after the resume never heard of the switch').toContain('Sandbox mode is now "read-only"')
   })
 })

@@ -50,6 +50,22 @@
 /** @typedef {DataOf<typeof import('../../core/jobs/events.ts').JOB_END>} JobEndData */
 
 /**
+ * The shape `narrowingFault` (core/agent/events.ts) accepts, as far as this
+ * renderer reads it. Plain boolean, deliberately: a type predicate here would
+ * narrow the typed payload into `any`.
+ * @param {unknown} data
+ * @returns {boolean}
+ */
+function readableNarrowing(data) {
+  const names = (/** @type {unknown} */ list) => list === undefined || (Array.isArray(list) && list.every((item) => typeof item === 'string'))
+  if (typeof data !== 'object' || data === null) return false
+  const { tools, sections } = /** @type {{ tools?: unknown, sections?: unknown }} */ (data)
+  const restrictions = tools === undefined || (Array.isArray(tools) && tools.every((r) => typeof r === 'object' && r !== null && names(r.allow) && names(r.deny) && names(r.allowTags) && names(r.denyTags)))
+  const parts = sections === undefined || (Array.isArray(sections) && sections.every((section) => typeof section?.name === 'string'))
+  return restrictions && parts
+}
+
+/**
  * What `app.js` renders: `cls` is the row's class list; a row with `who` is a
  * speaker row (a label and a body), any other is one line of text.
  * @typedef {{ cls: string, who?: string, text: string }} Row
@@ -242,6 +258,9 @@ export function describeRow(event) {
       // `describeNarrowing` (core/agent/events.ts) in the browser's words: this
       // module shares only the wire with the host, never its code.
       const data = /** @type {AgentNarrowingData} */ (event.data)
+      // A stored payload is untrusted: a record no fold would believe is named
+      // as such, never described as a narrowing (present.ts says the same).
+      if (!readableNarrowing(event.data)) return note('[narrowed: a record this reader cannot read]')
       const parts = []
       for (const restriction of data.tools ?? []) {
         const only = [...(restriction.allow ?? []), ...(restriction.allowTags ?? []).map((tag) => `${tag} tools`)]

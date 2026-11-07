@@ -15,6 +15,10 @@
  *                reaches the approval seam and is refused by the pin without
  *                anyone being asked, and a wire attempt to widen the child is
  *                refused too
+ *   narrowing    the subagent row denies the job tools and gives the child a
+ *                marked persona (S21.1); the child opens with that narrowing
+ *                recorded, and the wire RESUME of it below runs a step that
+ *                is still narrow — the factory re-applied the record
  *   the world    the parent then writes the file the child could not have
  *   replay       the parent's log replays keylessly
  *
@@ -26,7 +30,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import { effectiveSandboxMode } from '../core/sandbox/index.ts'
-import type { EventEnvelope } from '../core/session/index.ts'
+import { foldRequestHeader, type EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { auditLines } from './present.ts'
@@ -57,6 +61,31 @@ function storedEvents(home: string, id: string): EventEnvelope[] {
     .map((line) => JSON.parse(line) as EventEnvelope)
 }
 
+/**
+ * What the arc's composition narrows a child to (S21.1): the job tools denied,
+ * and a persona whose marker a request header can be searched for. Neither
+ * touches the task, which needs only the shell and the editor.
+ */
+const PERSONA_MARK = 'NARROW-PERSONA-7'
+const NARROWED_ROW = {
+  id: 'tool-subagent',
+  config: {
+    persona: `You are a delegated MiniDSH subagent (${PERSONA_MARK}). Work in the user's workspace with the provided tools, do exactly the task you were given, and answer in one short reply.`,
+    toolFilter: { deny: ['job_start', 'job_output', 'job_cancel'] },
+  },
+}
+const DENIED = NARROWED_ROW.config.toolFilter.deny
+
+/** The child's effective request header after `events`: a step that ran wider would have written a new one. */
+function narrowHeader(events: readonly EventEnvelope[], what: string): void {
+  const header = foldRequestHeader(events)
+  expect(header, `${what}: no request header`).toBeDefined()
+  const tools = header!.tools.map((tool) => tool.name)
+  for (const name of DENIED) expect(tools, `${what}: ${name}`).not.toContain(name)
+  expect(tools, what).toContain('str_replace_editor')
+  expect(header!.system, `${what}: the persona`).toContain(PERSONA_MARK)
+}
+
 function storedHeader(home: string, id: string): Record<string, unknown> {
   const first = readFileSync(join(home, 'sessions', `${encodeURIComponent(id)}.jsonl`), 'utf8').split('\n')[0]!
   return JSON.parse(first) as Record<string, unknown>
@@ -74,6 +103,7 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     writeFileSync(decoy, 'must never change\n', 'utf8')
     const decoyBytes = readFileSync(decoy)
 
+    writeFileSync(join(home, 'composition.json'), JSON.stringify({ patches: [NARROWED_ROW] }))
     // No --approve: an escalation would need a real answer, and none is coming.
     const serve = new ServeProcess(workspace, home, {})
     // The child's task REQUIRES a consent: a named command, explicitly
@@ -104,6 +134,11 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     const childEvents = storedEvents(home, childId)
     expect(storedHeader(home, childId)).toMatchObject({ delegatedBy: sessionId, delegationDepth: 1 })
     expect(childEvents.some((event) => event.type === 'tool/call')).toBe(true)
+    // Its narrowing is an opening fact of its own log, and its steps ran narrow.
+    const narrowings = childEvents.filter((event) => event.type === 'agent/narrowing')
+    expect(narrowings).toHaveLength(1)
+    expect(narrowings[0]!.data).toMatchObject({ tools: [{ deny: DENIED }], sections: [{ name: 'persona' }] })
+    narrowHeader(childEvents, 'the delegated child')
     // Its opening stamps say it was delegated, and nothing widened them.
     const stamps = childEvents.filter((event) => event.type === 'sandbox/mode').map((event) => event.data as { mode: string; reason: string })
     expect(stamps[0]).toMatchObject({ reason: 'delegation' })
@@ -153,6 +188,18 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     const childView = await serve.request<{ accepts: string }>('session/authority', { sessionId: childId })
     expect(childView.accepts).toBe('full')
 
+    // ---- the resumed child is exactly as narrow (S21.1) --------------------
+    // The resume composed the child from its log alone — no resumer knew it
+    // was narrowed — and its 'Say ok.' turn ran a step. A narrowing lost here
+    // would have written a request header carrying the job tools.
+    await serve.waitForCompletedTurn(childId, 2)
+    const resumedChild = storedEvents(home, childId)
+    const resumedAt = resumedChild.filter((event) => event.type === 'session/lifecycle').at(-1)!.seq
+    expect(resumedAt, 'the child was resumed into a second lifecycle').toBeGreaterThan(0)
+    expect(resumedChild.some((event) => event.type === 'step/start' && event.seq > resumedAt), 'the resumed lifecycle ran no step').toBe(true)
+    expect(resumedChild.filter((event) => event.type === 'agent/narrowing'), 'a continuation writes no narrowing of its own').toHaveLength(1)
+    narrowHeader(resumedChild, 'the resumed child')
+
     // ---- the parent finishes the job ---------------------------------------
     await serve.request('session/prompt', { sessionId, text: 'Now write the token you reported into found.txt in the working directory, on one line.' })
     await serve.waitForCompletedTurn(sessionId, 2)
@@ -171,6 +218,7 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     }
     expect(child.verdict).toBe('ok')
     expect(child.authority.delegation).toMatchObject({ ceiling: stamps[0]!.mode, pin: 'never' })
+    expect((childCold.json as { narrowing?: unknown }).narrowing, 'a cold reader states the narrowing').toMatchObject({ tools: [{ deny: DENIED }] })
     expect(child.header).toMatchObject({ delegatedBy: sessionId, delegatedByCallId: (start!.data as { callId: string }).callId })
     const parentCold = coldRead(home, ['inspect', sessionId, '--json']).json as { children: { childId: string; callId: string; ended?: string }[] }
     expect(parentCold.children).toEqual([{ childId, callId: (start!.data as { callId: string }).callId, seq: start!.seq, ended: 'completed' }])
@@ -207,7 +255,9 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
         skillRoots: skillRootsFor(home),
         browserProfileRoot: join(home, 'browser-replay'),
         logger: silent,
-        patches: [{ id: 'llm-deepseek', disabled: true }],
+        // The recording's composition, the narrowed row included: the child's
+        // replayed requests carry what that row narrowed.
+        patches: [{ id: 'llm-deepseek', disabled: true }, NARROWED_ROW],
         prepare: (context) => {
           replayHandle = installLlmReplay(context, { events: parentTurnOne, children: [{ id: childId, events: childEvents }] })
         },

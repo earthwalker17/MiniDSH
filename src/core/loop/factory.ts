@@ -130,10 +130,10 @@ class LoopFactory implements AgentFactory {
     const dispose = (): Promise<void> => (lifetime.task ??= run())
 
     try {
-      // The inheritable world first, then what this agent alone needs: a
-      // delegated child composes its parent's world and only then narrows it,
-      // and a stamp written by the narrowing must land after whatever the world
-      // put in the scope. Each is a rollback point of its own.
+      // The inheritable world first, then the recorded narrowing, then what a
+      // fresh agent alone needs (`setup`: a child's authority stamps), each a
+      // rollback point of its own; a continuer's own switches come only after
+      // publication (`opening`, below).
       if (options.world) await options.world(scope, agent)
       // The recorded narrowing, on EVERY lifecycle — the one place a create, a
       // resume and a fork all pass through, so no resumer has to know a child
@@ -177,6 +177,15 @@ class LoopFactory implements AgentFactory {
           throw error instanceof AggregateError && error.errors.length === 1 ? error.errors[0] : error
         }
       }
+      // The continuer's own durable switches (`ResumeAgentOptions.opening`):
+      // AFTER publication, so the services' own opening stamps for this
+      // lifecycle land first and a switch note finds its agent registered —
+      // before publication a resume's `--sandbox` reached the log but not the
+      // model (S21.1 review) — and BEFORE any restored prompt may wake, so no
+      // turn starts ahead of them. A refusal is the rollback below: nothing
+      // woke, so nothing was claimed, and the disposal's non-durable clear
+      // leaves the restored prompt owed.
+      if (options.opening) await options.opening(agent)
       // Whichever dies first — the loop plugin that owns the scope, or the creator — disposes the whole agent.
       lifetime.releases.push(this.ctx.effect(() => () => dispose(), `agent-lifetime(${session.id})`))
       lifetime.releases.push(owner.effect(() => () => dispose(), `agent(${session.id})`))

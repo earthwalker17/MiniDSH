@@ -8,37 +8,20 @@
  * rather than of one moment of it — a record written after a turn would
  * describe a world the agent had already acted in wider, and one written by a
  * later lifecycle would be a continuation choosing its own narrowing, which
- * only the creator does (`core/loop/factory.ts`). The fold refuses what it
- * cannot believe on its own (`foldNarrowing`), so this is the second fence,
- * not the only one.
+ * only the creator does (`core/loop/factory.ts`). The rule itself is
+ * `narrowingStep` (`./events.ts`), which `foldNarrowing` applies too: a seed
+ * that breaks it refuses its continuation at the factory, so this observer
+ * holds only the LIVE appends.
  */
 import type { Plugin } from '../../kernel/index.ts'
 import { firstViolation, INVARIANTS, type InvariantFailure, type InvariantInstaller, type LogViolation } from '../invariants/index.ts'
-import { SANDBOX_MODE } from '../sandbox/events.ts'
-import { END_SEED, matches, SESSION_EVENT, TURN_START, type EventEnvelope, type Session } from '../session/index.ts'
-import { AGENT_NARROWING, AGENT_STATUS, narrowingFault } from './events.ts'
+import { matches, SESSION_EVENT, type EventEnvelope, type Session } from '../session/index.ts'
+import { AGENT_NARROWING, AGENT_STATUS, narrowingStep, type NarrowingOpening } from './events.ts'
 import type { Agent, AgentStatus } from './types.ts'
 
-/** What a log has seen so far that decides whether a narrowing may still be written. */
-interface Opening {
-  narrowed: boolean
-  /** A turn, an authority stamp or a lifecycle boundary has passed: the opening is over. */
-  closedBy: string | undefined
-}
-
-function validate(opening: Opening, event: EventEnvelope, fail: InvariantFailure): void {
-  if (matches(event, AGENT_NARROWING)) {
-    const fault = narrowingFault(event.data)
-    if (fault !== undefined) fail(fault)
-    if (opening.narrowed) fail('agent/narrowing: a log records at most one narrowing')
-    if (opening.closedBy !== undefined) fail(`agent/narrowing after ${opening.closedBy}: a narrowing is an opening fact of the first lifecycle`)
-    opening.narrowed = true
-    return
-  }
-  if (opening.closedBy !== undefined) return
-  if (matches(event, TURN_START)) opening.closedBy = 'a turn/start'
-  else if (matches(event, SANDBOX_MODE)) opening.closedBy = 'a sandbox/mode stamp'
-  else if (matches(event, END_SEED)) opening.closedBy = 'a session/end-seed'
+function validate(opening: NarrowingOpening, event: EventEnvelope, fail: InvariantFailure): void {
+  const violation = narrowingStep(opening, event)
+  if (violation !== undefined) fail(violation)
 }
 
 const install: InvariantInstaller = (ctx, fail) => {
@@ -58,7 +41,7 @@ const install: InvariantInstaller = (ctx, fail) => {
     // carried on every event of every session.
     if (!matches(event, AGENT_NARROWING)) return
     const session = info.args[0] as Session
-    const opening: Opening = { narrowed: false, closedBy: undefined }
+    const opening: NarrowingOpening = {}
     for (const prior of session.facts) {
       if (prior.seq >= event.seq) break
       validate(opening, prior, fail)
@@ -69,7 +52,7 @@ const install: InvariantInstaller = (ctx, fail) => {
 
 /** The narrowing rule over a whole stored log, cold. The first violation, or none. */
 export function checkNarrowingLog(events: readonly EventEnvelope[]): LogViolation | undefined {
-  const opening: Opening = { narrowed: false, closedBy: undefined }
+  const opening: NarrowingOpening = {}
   return firstViolation(events, (index, fail) => validate(opening, events[index]!, fail))
 }
 

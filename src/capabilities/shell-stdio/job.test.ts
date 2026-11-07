@@ -201,6 +201,20 @@ describe.runIf(available)('a job process', () => {
  * job's end, the job's kill, a one-shot and the shell itself.
  */
 describe.runIf(available && process.platform === 'win32')('S21.1: a Windows pwsh contains what it starts', () => {
+  // An orphan is outside every tree this suite can reach, so a test that fails
+  // (containment broken, or failing soft) must not leave one running.
+  const orphans: number[] = []
+  afterEach(() => {
+    for (const pid of orphans.splice(0)) {
+      if (!alive(pid)) continue
+      try {
+        process.kill(pid)
+      } catch {
+        // Gone since the check.
+      }
+    }
+  })
+
   /** A detached grandchild whose intermediate parent exits at once: the chain `/T` follows is broken. */
   function orphan(root: string): string {
     writeFileSync(join(root, 'gc.cjs'), "require('fs').writeFileSync('gc.pid', String(process.pid)); setInterval(() => {}, 1000)\n")
@@ -210,14 +224,18 @@ describe.runIf(available && process.platform === 'win32')('S21.1: a Windows pwsh
   async function orphanPid(root: string): Promise<number> {
     await until(() => existsSync(join(root, 'gc.pid')))
     const pid = Number(readFileSync(join(root, 'gc.pid'), 'utf8'))
+    orphans.push(pid)
     expect(alive(pid), 'the orphan was never running').toBe(true)
     return pid
   }
 
   it("ends an orphan at the job's own end", { timeout: TIMEOUT_MS }, async () => {
     const { shell, policy, root } = setup()
-    const job = await shell.start({ command: `${orphan(root)}; while (-not (Test-Path gc.pid)) { Start-Sleep -Milliseconds 50 }; exit 7`, policy, output: () => {} })
+    // The job ends only once the test has SEEN the orphan alive (`go`): ending
+    // as soon as it exists raced the alive check on a loaded runner.
+    const job = await shell.start({ command: `${orphan(root)}; while (-not (Test-Path go)) { Start-Sleep -Milliseconds 50 }; exit 7`, policy, output: () => {} })
     const pid = await orphanPid(root)
+    writeFileSync(join(root, 'go'), '')
     expect((await job.exited).exitCode, "the command's exit code is kept").toBe(7)
     await until(() => !alive(pid), 10_000)
   })
@@ -242,6 +260,7 @@ describe.runIf(available && process.platform === 'win32')('S21.1: a Windows pwsh
     expect(result.output).toContain('still-here')
     expect(result.output, 'the containment line said nothing: it worked').not.toContain('minidsh:')
     const pid = Number(readFileSync(join(root, 'gc.pid'), 'utf8'))
+    orphans.push(pid)
     await until(() => !alive(pid), 10_000)
   })
 

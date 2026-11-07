@@ -65,28 +65,52 @@ function shellCommand(dialect: ShellDialect, shellPath: string | undefined): { c
  *     here creates a process that asks to break away.
  *   - The handle is a raw `IntPtr`, which no finalizer closes: a command that
  *     forces a full collection keeps its Job (measured).
- *   - Inside `& { }`, and `$Error` trimmed back to what it was: the command
- *     sees no variable, function or error of this line. Exit codes were
- *     identical with and without it across ten command shapes (measured).
- *   - It fails SOFT. Where Constrained Language Mode refuses the type builder
- *     (WDAC, AppLocker), or any call fails, `Write-Warning` — legal under CLM —
- *     prints one `minidsh:` line and the command runs as before, under the old
- *     taskkill tree kill (measured: the warning, then the command, exit kept).
+ *   - In a script block of its own, and `$Error` trimmed back to what it was:
+ *     the command sees no variable, function or error of this line. Exit codes
+ *     were identical with and without it across ten command shapes (measured).
+ *     Its own block, too, is what keeps the COMMAND out of PowerShell's
+ *     suspicious-script log (`PWSH_CONTAINMENT`).
+ *   - It fails SOFT. Under Constrained Language Mode (WDAC, AppLocker) it runs
+ *     nothing and only warns; where any call fails, the same: one
+ *     `Write-Warning` line naming `minidsh:`, and the command runs as before,
+ *     under the old taskkill tree kill (measured: the warning, then the
+ *     command, exit kept).
+ *   - On a machine whose security tooling reads that log, each pwsh start
+ *     still logs the BODY once (reflection over kernel32's Job calls), which
+ *     such tooling may flag (§13).
  *
- * About 1.4 KB of the 32,767 characters a one-shot's or a job's argv may hold;
+ * About 2.4 KB of the 32,767 characters a one-shot's or a job's argv may hold;
  * a command past what remains is refused `SHELL_COMMAND_INVALID`, as before.
  */
-export const PWSH_CONTAINMENT =
-  "& { $n = $Error.Count; try { " +
+const CONTAINMENT_BODY =
+  "$n = $Error.Count; try { " +
   "$tb = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly([Reflection.AssemblyName]::new('MiniDshJob'), 'Run').DefineDynamicModule('MiniDshJob').DefineType('MiniDshJob', 'Public,Class'); " +
   "function D($name, $ret, [Type[]]$params) { $tb.DefinePInvokeMethod($name, 'kernel32.dll', 'Public,Static,PinvokeImpl', [Reflection.CallingConventions]::Standard, $ret, $params, [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Unicode).SetImplementationFlags('PreserveSig') }; " +
   "D 'CreateJobObjectW' ([IntPtr]) @([IntPtr], [IntPtr]); D 'SetInformationJobObject' ([bool]) @([IntPtr], [int], [IntPtr], [uint32]); D 'AssignProcessToJobObject' ([bool]) @([IntPtr], [IntPtr]); D 'GetCurrentProcess' ([IntPtr]) @(); " +
   "$t = $tb.CreateType(); $job = $t::CreateJobObjectW([IntPtr]::Zero, [IntPtr]::Zero); if ($job -eq [IntPtr]::Zero) { throw 'CreateJobObject failed' }; " +
-  "$info = [Runtime.InteropServices.Marshal]::AllocHGlobal(144); for ($i = 0; $i -lt 144; $i++) { [Runtime.InteropServices.Marshal]::WriteByte($info, $i, 0) }; [Runtime.InteropServices.Marshal]::WriteInt32($info, 16, 0x2800); " +
-  "if (-not $t::SetInformationJobObject($job, 9, $info, 144)) { throw 'SetInformationJobObject failed' }; " +
+  // JOBOBJECT_EXTENDED_LIMIT_INFORMATION is 144 bytes on a 64-bit process and
+  // 112 on a 32-bit one; LimitFlags sits at offset 16 in both.
+  "$size = if ([IntPtr]::Size -eq 8) { 144 } else { 112 }; " +
+  "$info = [Runtime.InteropServices.Marshal]::AllocHGlobal($size); for ($i = 0; $i -lt $size; $i++) { [Runtime.InteropServices.Marshal]::WriteByte($info, $i, 0) }; [Runtime.InteropServices.Marshal]::WriteInt32($info, 16, 0x2800); " +
+  "if (-not $t::SetInformationJobObject($job, 9, $info, $size)) { throw 'SetInformationJobObject failed' }; " +
   "if (-not $t::AssignProcessToJobObject($job, $t::GetCurrentProcess())) { throw 'AssignProcessToJobObject failed' } " +
   "} catch { Write-Warning ('minidsh: what this command starts is not contained: ' + $_.Exception.Message) }; " +
-  "try { while ($Error.Count -gt $n) { $Error.RemoveAt(0) } } catch {} }; "
+  "try { while ($Error.Count -gt $n) { $Error.RemoveAt(0) } } catch {}"
+
+/**
+ * The line itself: the body runs as a script block of its OWN, decoded from
+ * base64. pwsh writes any script block it finds suspicious — and reflection
+ * plus `kernel32` is exactly that — to the PowerShellCore/Operational event
+ * log, which other interactive users of the machine can read; inline, the
+ * whole `-Command` text was that block, so every Windows job and one-shot
+ * COMMAND, secrets and all, was logged (S21.1 review, measured as event 4104).
+ * Now only the body is. Under Constrained Language Mode nothing is invoked at
+ * all — the type builder would be refused anyway — so the warning is the
+ * whole line, and `$Error` stays exactly as the command will find it.
+ */
+export const PWSH_CONTAINMENT =
+  `if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(CONTAINMENT_BODY, 'utf8').toString('base64')}')))) } ` +
+  "else { Write-Warning ('minidsh: what this command starts is not contained: this PowerShell runs in ' + $ExecutionContext.SessionState.LanguageMode) }; "
 
 /** The containment line, where it applies: pwsh on Windows (a POSIX child leads its own process group instead). */
 function containment(dialect: ShellDialect): string {
@@ -426,7 +450,11 @@ export class ShellProcess implements ShellSession {
       .slice(0, at)
       .split(/\r?\n/)
       .find((line) => line.includes('minidsh:'))
-    if (notice !== undefined) this.startupNotice = printableText(notice).trim()
+    // pwsh colours a warning even into a pipe; `printableText` would keep the
+    // CSI parameters as literal `[33;1m` text, so the sequences go first (the
+    // ESC is matched on purpose: it is the thing being removed).
+    // oxlint-disable-next-line no-control-regex
+    if (notice !== undefined) this.startupNotice = printableText(notice.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')).trim()
     this.buffer = this.buffer.slice(end + 1)
     this.fresh = false
   }

@@ -10,8 +10,8 @@
 import { emitEvent, serialEvent, waterfallEvent } from '../../kernel/index.ts'
 import { restoreMessage } from '../llm/message.ts'
 import type { Message, TokenUsage } from '../llm/types.ts'
-import type { SandboxMode } from '../sandbox/events.ts'
-import { eventKind, matches, type EventEnvelope, type TurnEndReason } from '../session/types.ts'
+import { SANDBOX_MODE, type SandboxMode } from '../sandbox/events.ts'
+import { END_SEED, eventKind, matches, TURN_START, type EventEnvelope, type TurnEndReason } from '../session/types.ts'
 import type {
   Agent,
   AgentNarrowing,
@@ -254,21 +254,52 @@ export function describeNarrowing(narrowing: AgentNarrowing): string {
 }
 
 /**
- * The agent's narrowing: the FIRST record, or `undefined` for an agent nobody
- * narrowed. First, not last: a later record could only be a forgery or a bug,
- * and last-wins would let one widen a child even where the invariant that
- * refuses it is not mounted. A malformed first record THROWS, and so does a
- * second one that disagrees with it: either way the continuation is refused
- * rather than composed wider (`core/loop/factory.ts`).
+ * Where a log stands toward its narrowing: the ONE rule both the fold and the
+ * `core-agent` invariant apply, so the runtime refuses what a cold `inspect`
+ * calls invalid even where invariants are not mounted (S21.1 review).
+ */
+export interface NarrowingOpening {
+  narrowing?: AgentNarrowing
+  /** A turn, an authority stamp or a lifecycle boundary has passed: the opening is over. */
+  closedBy?: string
+}
+
+/**
+ * One event's step under the rule: well-formed, at most one per log, and only
+ * in the first lifecycle's opening — before any `turn/start`, any
+ * `sandbox/mode` and any `session/end-seed`. Returns what is wrong, or
+ * `undefined`. A record after a turn would describe a world the agent had
+ * already acted in wider; one in a later lifecycle would be a continuation
+ * choosing its own narrowing, which only a creator does.
+ */
+export function narrowingStep(opening: NarrowingOpening, event: EventEnvelope): string | undefined {
+  if (matches(event, AGENT_NARROWING)) {
+    const fault = narrowingFault(event.data)
+    if (fault !== undefined) return fault
+    if (opening.narrowing !== undefined) return 'agent/narrowing: a log records at most one narrowing'
+    if (opening.closedBy !== undefined) return `agent/narrowing after ${opening.closedBy}: a narrowing is an opening fact of the first lifecycle`
+    opening.narrowing = event.data
+    return undefined
+  }
+  if (opening.closedBy !== undefined) return undefined
+  if (matches(event, TURN_START)) opening.closedBy = 'a turn/start'
+  else if (matches(event, SANDBOX_MODE)) opening.closedBy = 'a sandbox/mode stamp'
+  else if (matches(event, END_SEED)) opening.closedBy = 'a session/end-seed'
+  return undefined
+}
+
+/**
+ * The agent's narrowing, or `undefined` for an agent nobody narrowed. It
+ * THROWS on any record the rule refuses — malformed, a second one, or one
+ * outside the first lifecycle's opening — so a continuation over a narrowing
+ * nobody can believe is refused (`core/loop/factory.ts`) rather than composed
+ * from a record the runtime would never have written where it sits.
  */
 export function foldNarrowing(events: readonly EventEnvelope[]): AgentNarrowing | undefined {
-  let first: AgentNarrowing | undefined
+  const opening: NarrowingOpening = {}
   for (const event of events) {
-    if (!matches(event, AGENT_NARROWING)) continue
-    const fault = narrowingFault(event.data)
-    if (fault !== undefined) throw new NarrowingError(`${fault} (seq ${event.seq})`)
-    if (first === undefined) first = event.data
-    else if (JSON.stringify(first) !== JSON.stringify(event.data)) throw new NarrowingError(`agent/narrowing at seq ${event.seq} is a second, different narrowing`)
+    const violation = narrowingStep(opening, event)
+    if (violation !== undefined) throw new NarrowingError(`${violation} (seq ${event.seq})`)
   }
-  return first
+  return opening.narrowing
 }

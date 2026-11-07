@@ -331,14 +331,19 @@ export class ReactLoopAgent implements Agent {
         // on every exit path — including a pre-step listener throw or a cancel
         // landing inside the pre-step await (whose clear records it first).
         const commitClaim = (): void => this.inbox.commitClaim()
-        // A claim nothing entered, handed back. EXCEPT under a disposal: its
-        // clear left the log's queue whole, so the claimed messages are still
-        // owed there to the next lifecycle — committing would lose a prompt,
-        // and requeueing a notice would deliver it twice (S21.1).
+        // A claim nothing entered, handed back. EXCEPT when a disposal is what
+        // stopped this turn: its clear left the log's queue whole, so the
+        // claimed messages are still owed there to the next lifecycle —
+        // committing would lose a prompt, and requeueing a notice would deliver
+        // it twice (S21.1). The turn's OWN abort reason decides, never
+        // `disposed`: a person's cancel that got there first (keepInbox records
+        // no clear) consumed the prompt it cancelled, and a disposal landing
+        // after it must not hand that prompt to the next resume to run again.
         const giveBack = (messages: readonly Message[]): void => {
-          // A person's durable clear may have recorded the claim before the
-          // disposal came: then the notices it claimed are owed again as usual.
-          if (this.disposed && this.inbox.abandonClaim()) return
+          const byDisposal = signal.aborted && (signal.reason as CancelCause | undefined)?.kind === 'disposed'
+          // A durable clear may have recorded the claim already: then the
+          // notices it claimed are owed again as usual.
+          if (byDisposal && this.inbox.abandonClaim()) return
           commitClaim()
           this.requeueNotices(messages)
         }

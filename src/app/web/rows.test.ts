@@ -17,7 +17,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { AGENT_OPTIONS, INBOX_SPLICED, SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
+import { AGENT_NARROWING, AGENT_OPTIONS, INBOX_SPLICED, SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED, APPROVAL_GRANT, APPROVAL_POLICY } from '../../core/approval/index.ts'
 import { COMPACTION_APPLIED, COMPACTION_END, COMPACTION_START } from '../../core/compaction/index.ts'
 import { asAttachmentId } from '../../core/attachments/index.ts'
@@ -82,6 +82,8 @@ const SAMPLES: readonly Sample[] = [
   sample('APPROVAL_POLICY', 'policy', APPROVAL_POLICY, { policy: 'ask', reason: 'initial' }),
   sample('AGENT_OPTIONS', 'initial', AGENT_OPTIONS, { options: { provider: 'deepseek', model: 'deepseek-v4-flash' }, reason: 'initial' }),
   sample('AGENT_OPTIONS', 'change', AGENT_OPTIONS, { options: { provider: 'anthropic', model: 'claude-sonnet-5', reasoningEffort: 'high' }, reason: 'change' }),
+  sample('AGENT_NARROWING', 'narrowing', AGENT_NARROWING, { tools: [{ deny: ['job_start'], denyTags: ['network'] }], sections: [{ name: 'persona', order: -50, text: 'You are a subagent.' }] }),
+  sample('AGENT_NARROWING', 'unreadable', AGENT_NARROWING, { tools: 'all' } as never),
   sample('REQUEST_CONTEXT', 'route', REQUEST_CONTEXT, { provider: 'anthropic', model: 'claude-sonnet-5', contextWindow: 1_000_000 }),
   sample('AUTHORITY_PRESET', 'preset', AUTHORITY_PRESET, { name: 'workspace-write' }),
   sample('APPROVAL_ASKED', 'asked', APPROVAL_ASKED, { id: 'approval-7', toolName: 'pwsh', callId: 'c1', reason: 'run under "danger-full-access": tests' }),

@@ -208,7 +208,8 @@ export class Inbox {
 
   /**
    * Forgets the claim taken last WITHOUT recording it. Only a disposal does
-   * this, for a turn it stopped before the claimed messages entered: its clear
+   * this, for a turn IT stopped (the turn's abort reason, not merely a disposal
+   * that came later) before the claimed messages entered: its clear
    * is non-durable (`clear(false)`), so the log still holds them queued, and
    * committing the claim now would durably consume a prompt nobody saw — the
    * one loss the claim-after-entry order exists to rule out (S21.1). False when
@@ -355,7 +356,7 @@ class AgentRegistry implements Agents {
       ...(stored.header.agentPreset === undefined ? {} : { agentPreset: stored.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `session "${id}"`),
       ...(options.world === undefined ? {} : { world: options.world }),
-      ...(options.opening === undefined ? {} : { setup: (_ctx: Context, agent: Agent) => options.opening!(agent) }),
+      ...(options.opening === undefined ? {} : { opening: options.opening }),
     })
   }
 
@@ -401,7 +402,7 @@ class AgentRegistry implements Agents {
       ...(src.header.agentPreset === undefined ? {} : { agentPreset: src.header.agentPreset }),
       agentOptions: resolveSeedAgentOptions(seed, options, `fork of "${src.parentId}"`),
       ...(options.world === undefined ? {} : { world: options.world }),
-      ...(options.opening === undefined ? {} : { setup: (_ctx: Context, agent: Agent) => options.opening!(agent) }),
+      ...(options.opening === undefined ? {} : { opening: options.opening }),
       ...(src.salvage === undefined ? {} : { salvage: src.salvage }),
     })
   }

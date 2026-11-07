@@ -103,8 +103,9 @@ export interface Agent {
    * created with, so a creator of a child can compose the SAME world into the
    * child's scope before adding what the child alone needs (DSH's
    * `composeFrom`). Deliberately not `setup`: a delegated child's `setup` is
-   * the narrowing closure that stamped its authority, and a grandchild
-   * composing THAT would re-open a ceiling that is already open.
+   * the closure that stamped its authority, and a grandchild composing THAT
+   * would re-open a ceiling that is already open. Nor its `narrowing`, which
+   * the child's own log records and a grandchild's creator re-reads as a floor.
    */
   readonly world: CreateAgentOptions['world']
   /** Low-level delivery; `followup`/`steer`/`inject` are the presets. */
@@ -166,8 +167,8 @@ export interface CreateAgentOptions {
    *
    * It is a separate slot from `setup` rather than a default for it, because
    * the difference is not stylistic: a delegated child is created with its
-   * parent's `world` and its OWN narrowing `setup`, and a grandchild must
-   * inherit the first and never the second. Collapsing them into one field —
+   * parent's `world`, its OWN recorded `narrowing` and its OWN stamping
+   * `setup`, and a grandchild must inherit the first and never the last. Collapsing them into one field —
    * or defaulting `world` to `setup` — is how a grandchild ends up re-running
    * its parent's authority stamps one generation late.
    */
@@ -191,9 +192,12 @@ export interface CreateAgentOptions {
    * A FRESH agent's narrowing, written as its opening `agent/narrowing` and
    * applied after `world`, before `setup`. A continuation passes none: the log's
    * record is its narrowing, re-applied by the factory, and a seed that already
-   * records one refuses another.
+   * records one refuses another. Scoping that every lifecycle re-applies;
+   * `setup` is fresh-creation-only and, for a child, holds its authority stamps.
    */
   readonly narrowing?: AgentNarrowing
+  /** See `ResumeAgentOptions.opening`: run after publication, before a restored prompt may wake; a throw disposes the agent. */
+  readonly opening?: (agent: Agent) => void | Promise<void>
 }
 
 export interface AgentFactory {
@@ -217,12 +221,13 @@ export interface ResumeAgentOptions {
   readonly world?: CreateAgentOptions['world']
   /**
    * The RESUMER's own durable switches for this lifecycle — a host's authority
-   * flags — run inside the creation transaction, after the world and the
-   * re-applied narrowing and before publication (it becomes the creation's
-   * `setup`). So they land before a restored prompt can wake a turn, and a
-   * refusal rolls the continuation back with nothing published, woken or
-   * claimed. Never what an earlier creator decided: that is the log's own
-   * (`agent/narrowing`, the stamps), which no resumer reconstructs.
+   * flags — run inside the creation transaction: after publication, so the
+   * services' opening stamps land first and a switch note reaches the model,
+   * and before a restored prompt may wake, so no turn starts ahead of them. A
+   * refusal disposes the continuation with nothing woken or claimed: the
+   * restored prompt stays owed. Never what an earlier creator decided: that is
+   * the log's own (`agent/narrowing`, the stamps), which no resumer
+   * reconstructs.
    */
   readonly opening?: (agent: Agent) => void | Promise<void>
   /**

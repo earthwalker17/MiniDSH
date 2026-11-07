@@ -103,3 +103,38 @@ describe('a turn a disposal stops before its prompt entered', () => {
     expect(foldInbox(events).turnQueue.map((message) => messageText(restoreMessage(message)))).toEqual(['NEVER-ENTERED'])
   })
 })
+
+describe('a prompt a person cancelled before a disposal came', () => {
+  /**
+   * S21.1 review: the claim rule keyed on "disposing", not on what stopped the
+   * turn. A person's `keepInbox` cancel records no clear, so a disposal landing
+   * after it found the claim still pending, forgot it, and handed the
+   * cancelled prompt to the next resume to run again.
+   */
+  it('is consumed by the cancel, not handed to the next lifecycle', async () => {
+    harness = await coreHarness()
+    const handle = await harness.create()
+    let reached!: () => void
+    const atPreStep = new Promise<void>((resolve) => (reached = resolve))
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    harness.root.on(
+      AGENT_PRE_STEP,
+      async (_context, next) => {
+        reached()
+        // A listener that does not watch the signal (a disk read): the cancel
+        // and the disposal both land before it returns.
+        await gate
+        return next()
+      },
+      { global: true },
+    )
+    handle.agent.followup(createUserMessage('CANCELLED-BY-USER'))
+    await atPreStep
+    handle.agent.cancel({ kind: 'user' }, { keepInbox: true })
+    const disposing = handle.dispose()
+    release()
+    await disposing
+    expect(foldInbox(handle.agent.session.events).turnQueue).toHaveLength(0)
+  })
+})

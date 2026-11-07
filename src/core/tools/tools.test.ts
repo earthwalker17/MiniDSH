@@ -221,7 +221,7 @@ describe('tool restriction', () => {
   it('restricts by kind, read off the resolved definition, so a later tool of the kind is hidden too', async () => {
     const { tools, agent, signal } = await setup()
     tools.register(harness!.root, upper)
-    tools.restrict(agent.ctx, { denyTags: ['network'] })
+    const denyKind = tools.restrict(agent.ctx, { denyTags: ['network'] })
     tools.register(harness!.root, { ...upper, name: 'fetch_it', tags: ['network'] })
     expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['upper'])
     expect(tools.get('fetch_it', agent)).toBeUndefined()
@@ -231,9 +231,15 @@ describe('tool restriction', () => {
     const allowKind = tools.restrict(agent.ctx, { allowTags: ['recall'] })
     expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['recall_it'])
     await allowKind()
-    // A name OR a kind passes an allow; a deny by kind outranks an allow by name.
-    tools.restrict(agent.ctx, { allow: ['upper', 'fetch_it'], allowTags: ['recall'] })
-    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['recall_it', 'upper'])
+    await denyKind()
+    // A name OR a kind passes an allow…
+    const allowBoth = tools.restrict(agent.ctx, { allow: ['upper', 'fetch_it'], allowTags: ['recall'] })
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['fetch_it', 'recall_it', 'upper'])
+    await allowBoth()
+    // …and inside ONE restriction a deny by kind outranks an allow by name:
+    // what a child's filter naming a network tool meets beside its network deny.
+    tools.restrict(agent.ctx, { allow: ['upper', 'fetch_it'], denyTags: ['network'] })
+    expect(tools.schemas(agent).map((schema) => schema.name)).toEqual(['upper'])
   })
 
   it('reaches the scope\'s own registrations only where it says so (`includeOwn`)', async () => {

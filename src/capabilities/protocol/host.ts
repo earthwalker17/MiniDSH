@@ -1103,6 +1103,12 @@ export class ProtocolHost {
       this.owned.set(handle.agent.id, handle)
       return handle.agent
     }
+    // A resume of this id already in flight is joined FIRST: its agent is
+    // published (and so found below) before its `opening` — this host's
+    // authority flags — has run, and a prompt delivered to it then would start
+    // the turn the opening exists to precede.
+    const pending = this.resuming.get(requested)
+    if (pending) return pending
     const live = agents.get(asSessionId(requested))
     if (live) {
       this.assertDrivable(live, 'session/prompt')

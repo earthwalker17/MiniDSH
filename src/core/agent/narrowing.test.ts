@@ -25,15 +25,16 @@ describe('foldNarrowing', () => {
   it('reads the first record, and an agent nobody narrowed as none', () => {
     expect(foldNarrowing(log(...opening()))).toEqual(NARROW)
     expect(foldNarrowing(log(['session/lifecycle', {}]))).toBeUndefined()
-    // A repeat that says the same thing changes nothing.
-    expect(foldNarrowing(log(...opening(), ['agent/narrowing', NARROW]))).toEqual(NARROW)
   })
 
-  it('throws on a malformed record and on a second, different one, rather than composing wider', () => {
+  it('throws on any record the opening rule refuses, rather than composing from it', () => {
     for (const bad of [null, [], { tools: 'all' }, { tools: [{ deny: [''] }] }, { tools: [{ hide: ['x'] }] }, { sections: [{ name: 'persona', order: 'first', text: 'x' }] }, { extra: true }]) {
       expect(() => foldNarrowing(log(...opening(bad))), JSON.stringify(bad)).toThrow(NarrowingError)
     }
-    expect(() => foldNarrowing(log(...opening(), ['agent/narrowing', { tools: [] }]))).toThrow(/second, different narrowing/)
+    // A second one, even a repeat, and one placed where the runtime never writes one.
+    expect(() => foldNarrowing(log(...opening(), ['agent/narrowing', NARROW]))).toThrow(/at most one/)
+    expect(() => foldNarrowing(log(['session/lifecycle', {}], ['turn/start', { turn: 1 }], ['agent/narrowing', NARROW]))).toThrow('after a turn/start')
+    expect(() => foldNarrowing(log(['session/lifecycle', {}], ['session/end-seed', {}], ['agent/narrowing', NARROW]))).toThrow('after a session/end-seed')
   })
 })
 
