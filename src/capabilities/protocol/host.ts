@@ -186,8 +186,8 @@ export interface ProtocolServerConfig {
    * Called on a session this host resumes, INSIDE its creation transaction
    * (`ResumeAgentOptions.opening`): the app applies the operator's EXPLICIT
    * authority flags here as the durable switch they are on every other path
-   * (§9), before publication, so a prompt the restored inbox owes cannot wake
-   * a turn ahead of them — and a refusal rolls the resume back with that
+   * (§9), after publication and before any wake, so a prompt the restored
+   * inbox owes cannot start a turn ahead of them — and a refusal rolls the resume back with that
    * prompt still queued (S21.1). Without it a `web --sandbox read-only` host
    * continued a stored session at its recorded wider mode. It is handed the
    * host's own context: a hook that read a root the app filled only after

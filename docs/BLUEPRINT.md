@@ -64,6 +64,36 @@ The runtime work is done (S21.1, §4): S22 is the clients and the wire methods t
 
 One entry per session: what it decided and the measurements that still matter; the detail is in the commits.
 
+- **S21.1 Continuations and process hygiene (2026-11-08).** Its decisions are ARCHITECTURE §4, §6, §7 and the code:
+  - a child's narrowing is an opening fact (`agent/narrowing`) the factory re-applies on every lifecycle: by KIND, reaching a preset's own tools, with the parent's narrowing as a floor; one rule (`narrowingStep`) refuses a record anywhere else;
+  - `Agent.own`: work an agent owns outside a turn is aborted by its disposal and joined, bounded; the idle `/compact` is its first consumer;
+  - a continuer's own switches (`opening`) run after publication and before any wake, and a turn its disposal stopped forgets its claim;
+  - on Windows every pwsh joins its own kill-on-close Job (Reflection.Emit, its body in a script block of its own).
+
+  **User decisions:** the resume-ordering defect pulled in from S22; containment for all three pwsh shapes.
+
+  **Measured (Windows 11, pwsh 7.6, 2026-11-08):**
+  - containment costs ~+55 ms on a ~610 ms pwsh start;
+  - a `Start-Process` grandchild was alive before and dead after a normal exit, `child.kill()`, `taskkill /T` and a killed host, and in the persistent shell; without the prefix it survived all but `/T`;
+  - exit codes were identical across ten command shapes; a forced GC kept the Job; under Constrained Language Mode it warns once and the command runs; a 32-bit PowerShell is contained;
+  - with a positive control, the command text no longer reaches PowerShell's suspicious-script log; the body still does.
+
+  **Found:** the design critic (16 findings) supplied the async-world settle, a narrowing that reaches the preset's own tools, the fail-closed fold, explicit breakaway, and the resume ordering as a defect. The review (3 lenses, 12 findings, 4 major):
+  - before publication, the switch note never reached the model;
+  - a `keepInbox` cancel followed by a disposal re-delivered the cancelled prompt;
+  - a narrowing placed after the turns was still applied;
+  - every Windows command was logged as a suspicious script.
+
+  **Live:** delegation (the resumed child still narrow), parallel, verification, authority and context once on Windows; jobs 3/3 on Windows (the worker died with its host each time, against 7 of 7 surviving in S17) and 3/3 under WSL with bwrap; delegation once under WSL. 0.19 CNY.
+
+  **Gates:** Windows 1,454 passed with 28 named skips on the final tree (an earlier run's one failure, a missing renderer sample, fixed); WSL 1,470 passed with 10 skips.
+
+  **Compaction:** ARCHITECTURE 53.2 → 49.6 KB (87%), by two authors and a claim reviewer whose ten findings were applied (a `TOOL_NOT_STARTED` rule the rewrite had inverted among them); SECURITY.md's Windows job line was stale.
+
+  **DSH at `fcc0ad46`:** a cold-resumed child mounts its saved preset, else the host composition, never the parent's; a manual compaction runs in `runMaintenance`, unbounded.
+
+  **Agents:** 9 of 9: 2 research (the Windows measurement returned nothing and was redone in the parent), 1 critic, 3 review, 2 compaction authors, 1 claim reviewer.
+
 - **S21 Multi-actor execution (2026-10-31).** Its decisions are ARCHITECTURE §6 and the code:
   - no scheduler;
   - concurrency joined at the step: concurrency-safe bodies behind one ordered lane, results in model order, drained, never abandoned;
