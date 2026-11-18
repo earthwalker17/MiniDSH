@@ -850,7 +850,7 @@ describe('llm-openai row', () => {
     expect(root.get(CREDENTIALS).declaredRefs()).toEqual(['OPENAI_API_KEY'])
     const provider = root.get(LLM).providers().find((entry) => entry.id === 'openai')
     expect(provider?.models).toHaveLength(14)
-    expect(provider?.models.find((model) => model.id === 'gpt-5.2')).toEqual({ id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 272_000, inputModalities: ['text', 'image'] })
+    expect(provider?.models.find((model) => model.id === 'gpt-5.2')).toEqual({ id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 272_000, inputModalities: ['text', 'image'], reasoning: { efforts: ['none', 'low', 'medium', 'high', 'xhigh'], defaultEffort: 'none' } })
     await root.dispose()
 
     const renamed = createRoot({ logger: silent })

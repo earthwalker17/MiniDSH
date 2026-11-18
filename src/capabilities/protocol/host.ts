@@ -1218,6 +1218,12 @@ export class ProtocolHost {
     // Shape-checked here, before anything is created; whether the set may
     // apply is decided against the new session's own log, in its opening.
     const authority = this.readPromptAuthority(params, requested !== undefined)
+    // A preset this host does not have is refused before anything exists:
+    // checked only in the opening, a misspelt name created a session, showed
+    // its opening to every unnarrowed watcher, then rolled it back.
+    if (authority?.preset !== undefined && this.ctx.tryGet(PRESETS)?.get(authority.preset) === undefined) {
+      throw new RpcFailure(INVALID_PARAMS, `session/prompt: authority: no preset named "${authority.preset}"`)
+    }
     const agents = this.ctx.get(AGENTS)
     const options = readAgentOptions(this.agentDefaults(), params.agentOptions, 'session/prompt')
     // A route to nowhere is refused here, on every path, rather than becoming
