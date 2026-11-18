@@ -123,3 +123,34 @@ export function assistantToolCall(callId: string, name: string, args: object, us
     { type: 'finish', reason: { kind: 'tool-calls' } },
   ]
 }
+
+/** One part of a scripted assistant message: a thought, text, or a tool call. */
+export type MessagePart = { readonly reasoning: string } | { readonly text: string } | { readonly call: readonly [id: string, name: string, args: object] }
+
+/**
+ * One assistant message as a provider streams it: its thoughts, text and
+ * calls, in order, each as a block; it finishes with `tool-calls` when it
+ * made any, else `stop`.
+ */
+export function assistantMessage(parts: readonly MessagePart[], usage: TokenUsage = DEFAULT_USAGE): StreamChunk[] {
+  const chunks: StreamChunk[] = []
+  let calls = false
+  parts.forEach((part, index) => {
+    if ('reasoning' in part) {
+      chunks.push({ type: 'block-start', index, blockType: 'reasoning' }, { type: 'reasoning-delta', index, text: part.reasoning }, { type: 'block-end', index, block: { type: 'reasoning', text: part.reasoning } })
+    } else if ('text' in part) {
+      chunks.push({ type: 'block-start', index, blockType: 'text' }, { type: 'text-delta', index, text: part.text }, { type: 'block-end', index, block: { type: 'text', text: part.text } })
+    } else {
+      calls = true
+      const [id, name, args] = part.call
+      const text = JSON.stringify(args)
+      chunks.push(
+        { type: 'block-start', index, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index, id: asCallId(id), name, argumentsDelta: text },
+        { type: 'block-end', index, block: { type: 'tool-call', id: asCallId(id), name, arguments: text } },
+      )
+    }
+  })
+  chunks.push({ type: 'usage', usage }, { type: 'finish', reason: { kind: calls ? 'tool-calls' : 'stop' } })
+  return chunks
+}

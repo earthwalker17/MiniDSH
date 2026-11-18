@@ -194,7 +194,7 @@ function renderAll() {
     openParent.addEventListener('click', () => {
       if (parent) void openSession(parent).catch(fail)
     })
-    readonlyBar.replaceChildren(icon('users', { size: 16 }), h('span', { class: 'grow', text: 'Running as a subagent — read-only while its parent drives it.' }), parent ? openParent : '')
+    readonlyBar.replaceChildren(icon('users', { size: 16 }), h('span', { class: 'grow', text: 'A subagent session: read-only while its parent session is open.' }), parent ? openParent : '')
   }
   byId('composer').hidden = asking || readOnly
   byId('composer-meta').hidden = asking || readOnly

@@ -13,7 +13,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { AGENTS } from '../../core/agent/index.ts'
 import { ASSISTANT_MESSAGE, matches } from '../../core/session/index.ts'
 import { expectBrowserSuite, testBrowser } from '../../test-support/browser-fixture.ts'
-import { assistantText, assistantTextPaused } from '../../test-support/scripted-adapter.ts'
+import { assistantMessage, assistantText, assistantTextPaused, gate } from '../../test-support/scripted-adapter.ts'
+import type { LlmRequest } from '../../core/llm/types.ts'
+import type { EventEnvelope } from '../../core/session/index.ts'
+import { TOOLS } from '../../core/tools/index.ts'
+import { asSessionId } from '../../core/ids.ts'
 import { startWebUi, type WebUi } from '../../test-support/web-ui.ts'
 
 expectBrowserSuite('web UI')
@@ -95,6 +99,114 @@ describe.runIf(testBrowser)('the web UI in a real browser', () => {
 
     release()
     await page.waitFor(logHas(`head-${marker} tail-${marker}`))
+    expect(await page.unexpectedProblems()).toEqual([])
+  })
+
+  // ---- the controls, held to the durable fact each click must produce --------
+
+  /** The open session's id: the current crumb names it. */
+  const openSessionId = (page: Awaited<ReturnType<WebUi['page']>>): Promise<string> => page.evaluate<string>("document.querySelector('.crumb.current')?.title ?? ''")
+  const factsOf = (sessionId: string): readonly EventEnvelope[] => ui!.host.root.get(AGENTS).get(asSessionId(sessionId))?.session.facts ?? []
+  /** Clicks the open menu's item whose own label is exactly the one given. */
+  const choose = (label: string): string => "[...document.querySelectorAll('.menu .menu-item')].find((item) => item.querySelector('.text > span')?.textContent === " + JSON.stringify(label) + ').click()'
+  const toolNamed = (card: string): string | undefined => ui!.host.root.get(TOOLS).list().find((tool) => tool.display?.card === card)?.name
+  const OPEN_MENU = "document.querySelector('.menu') !== null"
+  const DIALOG_OK = "dialog.modal[open] .btn.primary"
+
+  it('opens a new session under the permission chosen before its first message', async () => {
+    const page = await ui!.page()
+    await page.waitFor(READY)
+    await page.click('#composer-bar .chip')
+    await page.waitFor(OPEN_MENU)
+    await page.evaluate(choose('Read only'))
+    await page.waitFor("document.querySelector('#composer-bar .chip').textContent.includes('Read only')")
+    ui!.adapter.script(assistantText('read-only and ready'))
+    await page.type('#prompt', 'look around')
+    await page.press('Enter')
+    await page.waitFor(logHas('read-only and ready'))
+    const facts = factsOf(await openSessionId(page))
+    const switched = facts.findIndex((event) => event.type === 'sandbox/mode' && (event.data as { mode: string }).mode === 'read-only')
+    const firstTurn = facts.findIndex((event) => event.type === 'turn/start')
+    expect(switched, 'the chosen mode is a durable switch').toBeGreaterThan(-1)
+    expect(switched).toBeLessThan(firstTurn)
+    // In sight, as a decision.
+    expect(await page.evaluate<boolean>(logHas('Sandbox set to read-only'))).toBe(true)
+    expect(await page.unexpectedProblems()).toEqual([])
+  })
+
+  it("switches a live session's reasoning effort from the model chip, as one durable change", async () => {
+    const page = await ui!.page()
+    await page.waitFor(READY)
+    ui!.adapter.script(assistantText('first answer'))
+    await page.type('#prompt', 'hello')
+    await page.press('Enter')
+    await page.waitFor(logHas('first answer'))
+    await page.click('#composer-bar [aria-label^="Model"]')
+    await page.waitFor(OPEN_MENU)
+    await page.evaluate(choose('low'))
+    await page.waitFor(logHas('Model set to scripted/scripted-model · low'))
+    const change = factsOf(await openSessionId(page)).find((event) => event.type === 'agent/options' && (event.data as { reason: string }).reason === 'change')
+    expect((change?.data as { options: { reasoningEffort?: string } } | undefined)?.options.reasoningEffort).toBe('low')
+    expect(await page.unexpectedProblems()).toEqual([])
+  })
+
+  it('revokes a session grant and stops a background job from the session panel', async () => {
+    const shell = toolNamed('terminal')!
+    const page = await ui!.page()
+    await page.waitFor(READY)
+    // A host that cannot confine the shell starts no job until the session accepts that.
+    await page.click('#composer-bar .chip')
+    await page.waitFor(OPEN_MENU)
+    await page.evaluate(choose('Accept an unconfined shell'))
+    await page.waitFor("document.querySelector('" + DIALOG_OK + "') !== null")
+    await page.click(DIALOG_OK)
+    // The choice is the page's until the first message carries it: wait until the chip shows it.
+    await page.waitFor("document.querySelector('#composer-bar .chip').textContent.includes('shell none')")
+    ui!.adapter.script(
+      assistantMessage([{ call: ['g1', shell, { command: 'node --version', sandbox_permissions: 'danger-full-access', justification: 'checking the runtime outside the sandbox' }] }]),
+      assistantMessage([{ call: ['g2', 'job_start', { command: 'node -e "setInterval(() => {}, 1000)"' }] }]),
+      assistantText('granted and started'),
+    )
+    await page.type('#prompt', 'check node and start a watcher')
+    await page.press('Enter')
+    await page.waitFor("!document.querySelector('#approval').hidden", 20_000)
+    await page.evaluate("[...document.querySelectorAll('#approval .btn')].find((b) => b.textContent === 'Allow for this session').click()")
+    await page.waitFor(logHas('granted and started'), 30_000)
+    const sessionId = await openSessionId(page)
+    await page.click('#topbar [aria-label="Session details"]')
+    await page.waitFor("document.querySelector('#panel [aria-label^=\"Revoke grant\"]') !== null && document.querySelector('#panel [aria-label^=\"Stop job\"]') !== null")
+    await page.click('#panel [aria-label^="Revoke grant"]')
+    await page.waitFor("document.querySelector('#panel [aria-label^=\"Revoke grant\"]') === null")
+    expect(factsOf(sessionId).some((event) => event.type === 'approval/grant' && (event.data as { op: string }).op === 'revoke')).toBe(true)
+    await page.click('#panel [aria-label^="Stop job"]')
+    const deadline = Date.now() + 15_000
+    while (!factsOf(sessionId).some((event) => event.type === 'job/end') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100))
+    const end = factsOf(sessionId).find((event) => event.type === 'job/end')?.data as { cause: string; by?: string } | undefined
+    expect(end).toMatchObject({ cause: 'cancelled', by: 'user' })
+    expect(await page.unexpectedProblems()).toEqual([])
+  })
+
+  it('opens a child mid-delegation read-only, from the card that started it', async () => {
+    const delegate = toolNamed('delegate')
+    if (delegate === undefined) return
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const isChild = (request: LlmRequest) => JSON.stringify(request.messages).includes('hold the review')
+    ui!.adapter.scriptWhen(isChild, [gate(held), ...assistantText('the review, done')])
+    ui!.adapter.script(assistantMessage([{ call: ['d1', delegate, { description: 'Held review', prompt: 'hold the review' }] }]), assistantText('the parent resumed'))
+    const page = await ui!.page()
+    await page.waitFor(READY)
+    await page.type('#prompt', 'delegate something')
+    await page.press('Enter')
+    await page.waitFor("document.querySelector('.child-link') !== null", 20_000)
+    await page.click('.child-link')
+    await page.waitFor("!document.querySelector('#readonly').hidden")
+    expect(await page.evaluate<boolean>("document.querySelector('#composer').hidden")).toBe(true)
+    expect(await page.evaluate<string>("document.querySelector('#readonly').textContent")).toMatch(/read-only/)
+    release()
+    // The child answers; it stays read-only while its parent session is live (`protocol/host.ts` parentRunning).
+    await page.waitFor(logHas('the review, done'), 20_000)
+    expect(await page.evaluate<boolean>("document.querySelector('#readonly').hidden")).toBe(false)
     expect(await page.unexpectedProblems()).toEqual([])
   })
 })

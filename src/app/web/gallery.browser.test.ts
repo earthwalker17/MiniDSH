@@ -17,11 +17,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { asCallId } from '../../core/ids.ts'
 import type { LlmRequest, StreamChunk } from '../../core/llm/types.ts'
 import { TOOLS } from '../../core/tools/index.ts'
 import { expectBrowserSuite, testBrowser } from '../../test-support/browser-fixture.ts'
-import { assistantText } from '../../test-support/scripted-adapter.ts'
+import { assistantMessage, assistantText, type MessagePart } from '../../test-support/scripted-adapter.ts'
 import { startWebUi, type UiPage, type WebUi } from '../../test-support/web-ui.ts'
 
 expectBrowserSuite('web UI gallery')
@@ -29,31 +28,7 @@ expectBrowserSuite('web UI gallery')
 const SHOTS = process.env.MINIDSH_UI_SHOTS
 const WIDTHS = [1440, 1024, 768, 390] as const
 
-type Part = { readonly reasoning: string } | { readonly text: string } | { readonly call: readonly [id: string, name: string, args: object] }
-
-/** One assistant message as a provider streams it: thoughts, text, calls, in order. */
-function message(...parts: Part[]): StreamChunk[] {
-  const chunks: StreamChunk[] = []
-  let calls = false
-  parts.forEach((part, index) => {
-    if ('reasoning' in part) {
-      chunks.push({ type: 'block-start', index, blockType: 'reasoning' }, { type: 'reasoning-delta', index, text: part.reasoning }, { type: 'block-end', index, block: { type: 'reasoning', text: part.reasoning } })
-    } else if ('text' in part) {
-      chunks.push({ type: 'block-start', index, blockType: 'text' }, { type: 'text-delta', index, text: part.text }, { type: 'block-end', index, block: { type: 'text', text: part.text } })
-    } else {
-      calls = true
-      const [id, name, args] = part.call
-      const text = JSON.stringify(args)
-      chunks.push(
-        { type: 'block-start', index, blockType: 'tool-call' },
-        { type: 'tool-call-delta', index, id: asCallId(id), name, argumentsDelta: text },
-        { type: 'block-end', index, block: { type: 'tool-call', id: asCallId(id), name, arguments: text } },
-      )
-    }
-  })
-  chunks.push({ type: 'usage', usage: { inputTokens: 2400, outputTokens: 180, cacheReadTokens: 1800 } }, { type: 'finish', reason: { kind: calls ? 'tool-calls' : 'stop' } })
-  return chunks
-}
+const message = (...parts: MessagePart[]): StreamChunk[] => assistantMessage(parts, { inputTokens: 2400, outputTokens: 180, cacheReadTokens: 1800 })
 
 const FINAL_ANSWER = `## What was wrong
 
