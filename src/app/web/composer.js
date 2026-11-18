@@ -118,7 +118,7 @@ export function createComposer(options) {
       permission.setAttribute('aria-label', `Permissions: ${next.permission.label}${next.permission.sub ? `, ${next.permission.sub}` : ''}`)
       if (next.permission.title) permission.title = next.permission.title
       else permission.removeAttribute('title')
-      model.replaceChildren(h('span', { class: 'value', text: next.model.label }), next.model.sub ? h('span', { class: 'sub', text: next.model.sub }) : '', icon('chevron-down', { size: 12, className: 'chev' }))
+      model.replaceChildren(icon('sparkle', { size: 14 }), h('span', { class: 'value', text: next.model.label }), next.model.sub ? h('span', { class: 'sub', text: next.model.sub }) : '', icon('chevron-down', { size: 12, className: 'chev' }))
       model.disabled = next.model.disabled === true
       model.setAttribute('aria-label', `Model: ${next.model.label}${next.model.sub ? `, effort ${next.model.sub}` : ''}`)
       if (next.model.title) model.title = next.model.title

@@ -350,7 +350,7 @@ export function createTranscript(options) {
   /** @param {string} label @param {...(Node | undefined)} children */
   function section(label, ...children) {
     const [content, action] = children
-    return h('div', { class: 'card-section' }, h('div', { class: 'card-label' }, h('span', { text: label.toUpperCase() }), action), content)
+    return h('div', { class: 'card-section' }, h('div', { class: 'card-label' }, h('span', { text: label }), action), content)
   }
 
   /** @param {string} [outcome] @param {string} [by] */

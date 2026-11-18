@@ -650,6 +650,8 @@ pre {
   align-items: center;
   gap: 2px;
   min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
   font-size: 14px;
 }
 
@@ -688,6 +690,15 @@ pre {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+/* A narrow header keeps the chip's dot and drops its words (the panel has them). */
+@container main (max-width: 560px) {
+  .status-chip > span:not(.state-dot) {
+    display: none;
+  }
 }
 
 .status-chip {
@@ -1372,8 +1383,7 @@ button.row:focus-visible {
   gap: 8px;
   padding: 8px 12px 0;
   color: var(--ink-3);
-  font: 500 10px/16px var(--font-code);
-  letter-spacing: 0.04em;
+  font: 500 11px/16px var(--font-text);
 }
 
 .card-label .icon-btn {
@@ -1570,6 +1580,8 @@ button.row:focus-visible {
 
 .quiet-toggle {
   display: flex;
+  max-width: 100%;
+  min-width: 0;
   align-items: center;
   gap: 6px;
   min-height: 26px;
@@ -1580,6 +1592,16 @@ button.row:focus-visible {
 
 .quiet-toggle:hover {
   color: var(--ink-2);
+}
+
+.quiet-toggle > span {
+  white-space: nowrap;
+}
+
+.quiet-toggle > .muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .opening-rows {
@@ -2070,6 +2092,11 @@ button.row:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* Focused for a screen reader's sake when the card appears, not as a control. */
+.approval-head:focus {
+  outline: none;
+}
+
 .approval-head code {
   padding: 0 5px;
   border-radius: 6px;
@@ -2219,6 +2246,10 @@ button.row:focus-visible {
 
 .kv .mono {
   font-size: 12px;
+}
+
+.panel-section .panel-title:not(:first-child) {
+  margin-top: 14px;
 }
 
 .panel-row {

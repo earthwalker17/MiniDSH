@@ -50,8 +50,8 @@ export function createPanel(options) {
         'info',
         kv([
           ['Id', h('span', { class: 'mono' }, h('span', { text: state.sessionId }), copyButton(() => state.sessionId, 'Copy session id'))],
-          ...(created ? [/** @type {[string, Node | string]} */ (['Created', `${clock(created, Date.now())} · ${compactAgo(created, Date.now())} ago`])] : []),
-          ...(updated ? [/** @type {[string, Node | string]} */ (['Last write', `${compactAgo(updated, Date.now())} ago`])] : []),
+          ...(created ? [/** @type {[string, Node | string]} */ (['Created', `${clock(created, Date.now())} · ${ago(created)}`])] : []),
+          ...(updated ? [/** @type {[string, Node | string]} */ (['Last write', ago(updated)])] : []),
           ...(state.workspace ? [/** @type {[string, Node | string]} */ (['Workspace', state.workspace])] : []),
           ...(state.header?.cwd ? [/** @type {[string, Node | string]} */ (['Folder', h('span', { class: 'mono', text: state.header.cwd })])] : []),
           ...(state.header?.delegatedBy ? [/** @type {[string, Node | string]} */ (['Delegated by', openLink(state.header.delegatedBy, 'parent session')])] : []),
@@ -136,6 +136,12 @@ export function createPanel(options) {
     sections.push(section('Subagents', 'users', children.length > 0 ? h('div', {}, ...children) : h('div', { class: 'panel-empty', text: 'None.' })))
 
     host.replaceChildren(...sections)
+  }
+
+  /** "just now", "5m ago". @param {number} time */
+  function ago(time) {
+    const compact = compactAgo(time, Date.now())
+    return compact === 'now' ? 'just now' : `${compact} ago`
   }
 
   /** @param {string} title @param {string} glyph @param {...(Node | undefined)} content */

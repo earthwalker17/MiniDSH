@@ -143,7 +143,10 @@ function togglePanel(open = !state.panelOpen) {
   state.panelOpen = open && state.window !== undefined
   byId('panel').hidden = !state.panelOpen
   panelToggle.setAttribute('aria-expanded', String(state.panelOpen))
-  if (state.panelOpen) renderPanel()
+  if (state.panelOpen) {
+    renderPanel()
+    void refreshSessions().catch(() => undefined)
+  }
 }
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && state.panelOpen && !document.querySelector('dialog[open], .menu')) togglePanel(false)
@@ -684,6 +687,8 @@ function onWindowChange(opened, change) {
     }
   } else if (change.kind === 'append' && change.events) {
     transcript.append(change.events)
+    // A child the listing has not seen yet: the panel and the crumbs name it from the listing.
+    if (change.events.some((event) => event.type === 'subagent/start' || event.type === 'subagent/end')) refreshSoon()
     for (const event of change.events) {
       if (event.type !== 'user/message') continue
       const id = event.data?.message?.id
