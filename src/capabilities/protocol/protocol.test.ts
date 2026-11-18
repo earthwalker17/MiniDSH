@@ -14,7 +14,7 @@ import { LLM, LlmError } from '../../core/llm/index.ts'
 import { canonicalPath } from '../../core/sandbox/index.ts'
 import { APPROVAL, type Approval } from '../../core/approval/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
-import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
+import { assistantText, assistantTextPaused, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { startProtocolHost, type ProtocolHostHandle } from '../../app/serve.ts'
 import type { Patch } from '../../app/compose.ts'
 import { JOBS, type JobExit, type JobProcess } from '../../core/jobs/index.ts'
@@ -1974,6 +1974,24 @@ describe('protocol: what a surface is told to draw', () => {
 
     release()
     await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+  })
+
+  it('streams the head of an answer to a watcher while its message is not yet durable', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const { client } = await startHost(new ScriptedAdapter().script(assistantTextPaused('the head ', 'and the tail', held)))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    const head = await client.waitFor(
+      () => client.frames('assistant/chunk', sessionId).find((frame) => JSON.stringify(frame.event.data).includes('the head ')),
+      'the streamed head',
+    )
+    expect(head).toBeDefined()
+    // Held open: nothing of the tail, and no durable message, until released.
+    expect(client.frames('assistant/message', sessionId)).toHaveLength(0)
+    expect(JSON.stringify(client.frames('assistant/chunk', sessionId))).not.toContain('and the tail')
+    release()
+    const message = await client.waitFor(() => client.frames('assistant/message', sessionId)[0], 'the durable message')
+    expect(JSON.stringify(message.event.data)).toContain('the head and the tail')
   })
 
   it('re-sends the view on every status flip, so the last one a watcher holds after a turn says idle', async () => {

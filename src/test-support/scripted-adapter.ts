@@ -7,7 +7,21 @@
 import { asCallId } from '../core/ids.ts'
 import type { LlmAdapter, LlmRequest, ModelInfo, ResolvedModel, StreamChunk, TokenUsage } from '../core/llm/types.ts'
 
-export type ScriptedResponse = StreamChunk[] | ((request: LlmRequest) => StreamChunk[] | Promise<StreamChunk[]>)
+/**
+ * A hold inside a scripted stream: the adapter yields nothing past it until
+ * `until` settles. A response is otherwise one burst, so without a hold no
+ * test could see what a surface shows MID-stream — the first chunks recorded
+ * and broadcast, the message not yet durable. Never yielded itself; a cancel
+ * lands at the first chunk after the hold, never during it.
+ */
+export interface ScriptedGate {
+  readonly type: 'gate'
+  readonly until: PromiseLike<unknown>
+}
+
+export type ScriptedChunk = StreamChunk | ScriptedGate
+
+export type ScriptedResponse = ScriptedChunk[] | ((request: LlmRequest) => ScriptedChunk[] | Promise<ScriptedChunk[]>)
 
 const DEFAULT_USAGE: TokenUsage = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0 }
 
@@ -45,6 +59,10 @@ export class ScriptedAdapter implements LlmAdapter {
     if (response === undefined) throw new Error('ScriptedAdapter: no scripted response remaining')
     const chunks = typeof response === 'function' ? await response(request) : response
     for (const chunk of chunks) {
+      if (chunk.type === 'gate') {
+        await chunk.until
+        continue
+      }
       request.signal?.throwIfAborted()
       yield chunk
     }
@@ -64,6 +82,30 @@ export function assistantText(text: string, usage: TokenUsage = DEFAULT_USAGE): 
   return [
     { type: 'block-start', index: 0, blockType: 'text' },
     { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'usage', usage },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
+/** A hold to put between chunks (`ScriptedGate`). */
+export function gate(until: PromiseLike<unknown>): ScriptedGate {
+  return { type: 'gate', until }
+}
+
+/**
+ * An assistant text streamed as two deltas, `head` then `tail`, with the
+ * stream held OPEN between them until `until` settles: `head` is streamed and
+ * the finished message (`head + tail`) is not yet durable for exactly as long
+ * as the test looks.
+ */
+export function assistantTextPaused(head: string, tail: string, until: PromiseLike<unknown>, usage: TokenUsage = DEFAULT_USAGE): ScriptedChunk[] {
+  const text = head + tail
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text: head },
+    gate(until),
+    { type: 'text-delta', index: 0, text: tail },
     { type: 'block-end', index: 0, block: { type: 'text', text } },
     { type: 'usage', usage },
     { type: 'finish', reason: { kind: 'stop' } },

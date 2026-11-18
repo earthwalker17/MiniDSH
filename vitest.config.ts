@@ -7,7 +7,7 @@ import { defineConfig } from 'vitest/config'
  * helper's decode budget, measured 2026-10-19). So they run after everything
  * else, one file at a time, and the rest keeps its full parallelism.
  */
-const BROWSER_SUITES = ['src/capabilities/tool-browser/**/*.test.ts']
+const BROWSER_SUITES = ['src/capabilities/tool-browser/**/*.test.ts', 'src/app/web/**/*.browser.test.ts']
 
 export default defineConfig({
   test: {
