@@ -2,18 +2,24 @@
 
 What comes next, the route there, what is undecided, and a compact record of how the system arrived. `ARCHITECTURE.md` (beside this file) is the current shape and its limitations; this file is direction and the measurements the architecture map does not carry. Its budget is in `scripts/check-docs.ts`; past 90%, compress §4 first (older entries collapse to what a later session reuses).
 
-## 1. Next session — S22 Surfaces: product pass and the Desktop launcher
+## 1. Next session — S22 Web UI redesign
 
-The runtime work is done (S21.1, §4): S22 is the clients and the wire methods they need, nothing beneath them. Each new wire method ships with its first client.
+The runtime work is done (S21.1, §4). The surfaces are now three sessions: S22 web, S22.1 terminal, S22.2 desktop. S22 turns the browser into a product surface: a recognizable, streamlined counterpart of DSH's Web UI with MiniDSH's own identity (accent, mark, authority receipts). It is the clients and the wire methods they need, nothing beneath them; each new method ships with its first client.
 
-- **The wire.** `session/fork` and resume-without-prompt (a continuer's own flags already land after publication and before any wake: `ResumeAgentOptions.opening`); the terminal's beside-the-wire bypass deleted; `publishView` on a status change; tool KIND on the wire so no surface hard-codes a tool name, and a pooled result line naming its call; stopping or showing one child among several (a child mid-delegation is read-only on every driving method today, `protocol/host.ts`).
-- **The clients.** A graceful web stop and `web --json`; a terminal line editor and status line; browser markdown, cards, a model picker, uploads and attachment reads; grants listed and revoked in the web UI.
-- **Desktop** as a packaged launcher plus a webview over the existing carrier, and the importable-surface decision it forces (§3).
-- **The remaining visual assets:** a terminal recording, a browser screenshot, a social preview.
+- **The wire.** Tool presentation as a fact the tool owns (`ToolDefinition.display`, read by surfaces from `initialize` and `session/attach`, never a hard-coded name). Also:
+  - presets and catalog efforts in `initialize`;
+  - a session's last write in `sessions/list`;
+  - the view published on every status flip, with a child mid-delegation marked read-only;
+  - authority on a CREATING `session/prompt`;
+  - a session-scoped `attachment/read` for image previews.
+- **The client.** Markdown; call cards joined by `callId` and drawn from durable facts only; process collapsed in finished turns, with authority decisions and errors always visible. Also: a model and effort picker, a permission chip, grants listed and revoked, a session panel, a light/dark theme, a strict CSP, and the DOM under a real-browser suite.
 
-*Not:* a second runtime, surface-held state, a runtime change a surface could do without.
+*Not:* uploads, fork, or stopping one child (§3, S22.1); a second runtime; surface-held state.
 
-**Gate.** Every new method exercised by its client in a test and live; the `web` and `delegation` arcs; a launcher run on Windows.
+**Gate.**
+- The browser suite in CI.
+- Every arc 3× per host, because the protocol host changes.
+- A live session in real Chrome doing real work, its log asserted and kept as a fixture.
 
 ## 2. Macro route (dependency-ordered; sessions are approximate)
 
@@ -32,8 +38,10 @@ The runtime work is done (S21.1, §4): S22 is the clients and the wire methods t
 | ~~**S20.5** Hardening checkpoint B (2026-10-25 → 10-26)~~ | ✅ The widened runtime reviewed as one system: one spawn home, bounded reads, a write judged by its handle, all-or-nothing authority switches, one grant rule, one provider wire, a two-job release; `references/` at `22ddee37`; 1.2.0 from CI. §4. | S17–S20 |
 | ~~**S21** Multi-actor execution (2026-10-31)~~ | ✅ No scheduler: concurrency joined at the step (concurrency-safe bodies behind one ordered lane, results in model order); parallel foreground delegation, bounded by a durable per-agent width; replay keyed by delegation; an atomic editor CAS; jittered retry. §4. | S20.5 |
 | ~~**S21.1** Continuations and process hygiene (2026-11-08)~~ | ✅ A child's narrowing as an opening fact every lifecycle re-applies; agent-owned work, the idle `/compact` its first consumer; a continuer's switches before any wake; every Windows pwsh contains what it starts. §4. | S21 |
-| **S22** Surfaces: product pass and the Desktop launcher | fork and resume on the wire; terminal and browser quality; uploads; tool display facts; Desktop = launcher + webview (§1) | S21.1 |
-| **S22.5** Hardening checkpoint C = V2 release candidate | — | S21.1, S22 |
+| **S22** Web UI redesign | The browser as a product surface over tool presentation on the wire (§1) | S21.1 |
+| **S22.1** Terminal TUI redesign | A full-screen terminal (status line, line editor, inline single-key approvals, a slash palette that decides the skill gesture, §3), with Codewhale as the visual and interaction reference; cards from `display`; `session/fork` and resume-without-prompt on the wire, and the beside-the-wire bypass deleted | S22 |
+| **S22.2** Desktop application | An installable app over the same runtime and Web UI, after studying DSH's `apps/desktop`: launcher, graceful `web` stop and `web --json`, a credential handoff without a token URL, single instance, packaging, a stable origin for client preferences, the importable-surface decision (§3), the social preview | S22 |
+| **S22.5** Hardening checkpoint C = V2 release candidate | — | S22–S22.2 |
 
 **The ordering principle: deepen the record before widening the runtime.** Every later capability adds a new kind of effect or a new concurrent actor, and each must be expressible as log facts, under recorded authority, with a recovery rule, so those three come first. One concept runs through the first cluster: a core **effect vocabulary** (what a call is about to do and what it did, written by trusted code from validated arguments, never model prose) with three consumers: the crash record (S14), the consent subject and grants (S15), the audit of effects (S16). Authority precedes jobs because on Windows a background job cannot exist while every shell call is a one-shot escalation. **Checkpoints follow clusters of architectural change**, never every session: the record and authority planes; the widened runtime; multi-actor and product. Each `.5` does what CLAUDE.md §6 says.
 
@@ -53,12 +61,14 @@ The runtime work is done (S21.1, §4): S22 is the clients and the wire methods t
 - **A second surface writer.** Only the compaction planner enforces "a replace never separates a call from its result", and the session invariant admits a `replace`-op `user/message` outside a step but not a `tool/result`. A pruner would be that second writer; the rule moves into the session when one exists.
 - **Workspace-lifetime grants.** S15 shipped the session-lifetime shape and the identity any durable grant needs (tool plus exact subject), so what is left open is only the STORE. One that outlives a session cannot live in one log, `settings` may not own authority, and no workspace layer exists: a home-side store keyed by canonical root, COPIED into opening facts, is the only shape that keeps a stored log's audit self-contained.
 - **A document input kind.** A PDF block is a vocabulary change (`AttachmentRef`, `ModelModality`, `ContentBlock`, both serializers, the meter); upstream's generic file kind, projected as one handle line and never bytes, gives every model PDF support for nothing.
-- **A person invoking a skill.** DSH injects a skill's body when a user types `/name`; MiniDSH has no gesture and hides a `disable-model-invocation` skill entirely. A surface could send a prompt naming the listed path (no runtime change) or a plugin message; S22 decides, beside tool KIND on the wire.
+- **A person invoking a skill.** DSH injects a skill's body when a user types `/name`; MiniDSH has no gesture and hides a `disable-model-invocation` skill entirely. A surface could send a prompt naming the listed path (no runtime change) or a plugin message. S22.1's slash palette decides.
+- **Uploads.** An upload is a new image producer. Admission against the step's route happens at delivery, which needs a core path. The store is never swept. A client-sent ref could carry a forged `name`. The shape if evidence asks: host-minted upload ids that `session/prompt` cites, plus a retention row.
+- **Stopping one child among several.** A child mid-delegation is read-only on every driving method (`protocol/host.ts`). Stopping one is a runtime semantic: which result does the parent's call get?
 - **What projection would a rename need?** `session/title` is last-wins, but nothing reads the CURRENT title cheaply: a name chosen at seq 5,000 is nowhere near the bounded prefix `persistence.list()` reads. A sidecar, a writer-maintained stamp, or a real projection store (upstream mounts one by default).
 - **What does a session present of itself to a provider?** DeepSeek's `user_id` gives each id its own rate budget and OpenAI's `prompt_cache_key` routes its cache (upstream sends the session id, and by default uploads the whole log to DeepSeek); MiniDSH sends neither. One decision for both. Separately, Anthropic caps a request at 32 MB with a 413 that maps to `INVALID_REQUEST`, which nothing retries and nothing compacts.
 - **`web_fetch`, and on what boundary.** A dependency-free SSRF guard over `node:https` is feasible: resolve once, refuse the whole answer set if any address is non-public, pin the socket through a validating `lookup`, re-check every hop. Open: HTML extraction without a dependency, the proxy hop (DSH dropped its guard on 2026-10-20), and fetch as the widest exfiltration channel.
 - **One egress world, or a fetch per tool?** S18's search fetches in its own body and records nothing; S20's browser fences itself inside Chrome instead (a proxy it owns, resolver rules). A shared egress provider could record `effect/recorded{network}` and fence what leaves; per-tool boundaries keep each tool's consent and no common one.
-- **Does MiniDSH publish an importable surface?** A module-loaded plugin's own imports do not resolve from an installed package. An `exports` map is a compatibility promise; the first out-of-tree plugin decides, or S22 if its launcher hosts the runtime in-process rather than over the carrier. Skills do not need it.
+- **Does MiniDSH publish an importable surface?** A module-loaded plugin's own imports do not resolve from an installed package. An `exports` map is a compatibility promise; the first out-of-tree plugin decides, or S22.2 if its launcher hosts the runtime in-process rather than over the carrier. Skills do not need it.
 
 ## 4. Development record
 
