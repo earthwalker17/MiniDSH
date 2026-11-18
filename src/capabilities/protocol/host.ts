@@ -35,10 +35,12 @@ import {
   type ApprovalPrompt,
   type OpenApproval,
 } from '../../core/approval/index.ts'
+import { ATTACHMENTS, type AttachmentRef } from '../../core/attachments/index.ts'
 import { COMPACTION } from '../../core/compaction/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { foldJobs, JOB_END, JOB_START, JobError, JOBS, type JobRecord, type JobView } from '../../core/jobs/index.ts'
 import { LLM } from '../../core/llm/index.ts'
+import { collectImageRefs } from '../../core/llm/content.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { meterSession } from '../../core/metering/index.ts'
 import { PERSISTENCE, type StoredSession, type StoredSessionSummary } from '../../core/persistence/index.ts'
@@ -69,10 +71,13 @@ import {
   foldRequestContext,
   matches,
   pageEvents,
+  TOOL_RESULT,
+  USER_MESSAGE,
   type EventEnvelope,
   type Session,
   type SessionHeader,
 } from '../../core/session/index.ts'
+import { TOOLS, type AnyToolDefinition } from '../../core/tools/index.ts'
 import { ClientConnection } from './connection.ts'
 import {
   INTERNAL_ERROR,
@@ -81,6 +86,7 @@ import {
   RpcFailure,
   type ApprovalAnswerResult,
   type ApprovalRevokeResult,
+  type AttachmentReadResult,
   type AttachResult,
   type AuthorityView,
   type CompactResult,
@@ -91,11 +97,14 @@ import {
   type JobCancelResult,
   type JobSummary,
   type PageResult,
+  type PresetInfo,
+  type PromptAuthority,
   type PromptResult,
   type RpcNotification,
   type SessionSummary,
   type SessionView,
   type SessionsListResult,
+  type ToolPresentation,
   type WorkspaceInfo,
 } from './frames.ts'
 
@@ -252,6 +261,69 @@ function readAgentOptions(defaults: AgentOptions, overrides: unknown, method: st
   return { full: mergeAgentOptions(defaults, typed), partial: typed }
 }
 
+/** The knobs one authority switch set may name, and nothing else: the wire's own words, refused rather than ignored. */
+const AUTHORITY_KNOBS: ReadonlySet<string> = new Set(['sandbox', 'approval', 'accepts', 'preset'])
+
+/**
+ * The SHAPE of an authority switch set, validated in the wire's own words
+ * before anything is appended — or, on `session/prompt`, before a session is
+ * created at all. Only shape: whether the set may apply to a session (a
+ * delegated child's ceiling and pins, the preset table) is
+ * `ProtocolHost.switchAuthority`'s, against that session's log.
+ */
+function readAuthoritySwitches(raw: Record<string, unknown>, method: string): PromptAuthority {
+  // Validated here, in the wire's own words, for the reason the mode is: a
+  // value outside the closed vocabulary would reach a durable fact.
+  if (raw.accepts !== undefined && !ACCEPTANCES.has(raw.accepts as string)) {
+    throw new RpcFailure(INVALID_PARAMS, `${method}: "accepts" must be ${[...ACCEPTANCES].join(' | ')}`)
+  }
+  if (raw.sandbox !== undefined && !isSandboxMode(raw.sandbox)) {
+    throw new RpcFailure(INVALID_PARAMS, `${method}: "sandbox" must be one of ${SANDBOX_MODES.join(' | ')}`)
+  }
+  if (raw.approval !== undefined && !isApprovalPolicy(raw.approval)) {
+    throw new RpcFailure(INVALID_PARAMS, `${method}: "approval" must be one of ${APPROVAL_POLICIES.join(' | ')}`)
+  }
+  if (raw.preset !== undefined) {
+    if (typeof raw.preset !== 'string' || raw.preset.length === 0) throw new RpcFailure(INVALID_PARAMS, `${method}: "preset" must be a preset name`)
+    if (raw.sandbox !== undefined || raw.approval !== undefined) {
+      throw new RpcFailure(INVALID_PARAMS, `${method}: "preset" replaces "sandbox"/"approval"; give one or the other`)
+    }
+  }
+  return {
+    ...(raw.sandbox === undefined ? {} : { sandbox: raw.sandbox as SandboxMode }),
+    ...(raw.approval === undefined ? {} : { approval: raw.approval as ApprovalPolicy }),
+    ...(raw.accepts === undefined ? {} : { accepts: raw.accepts as SandboxEnforcement }),
+    ...(raw.preset === undefined ? {} : { preset: raw.preset as string }),
+  }
+}
+
+const switchesAnything = (switches: PromptAuthority): boolean =>
+  switches.sandbox !== undefined || switches.approval !== undefined || switches.accepts !== undefined || switches.preset !== undefined
+
+/**
+ * A tool as a surface is shown it: its name and the display the tool declared
+ * — copied out, never the definition, whose description and schema are
+ * model-facing. Presentation only (core/tools/types.ts `display`).
+ */
+function presentTools(definitions: readonly AnyToolDefinition[]): ToolPresentation[] {
+  return definitions.map((definition) => ({ name: definition.name, ...(definition.display === undefined ? {} : { display: definition.display }) }))
+}
+
+/**
+ * Sessions whose image references are kept for `attachment/read`. Each entry
+ * is a small id→ref map; the bound keeps a long-lived host from holding one
+ * per session it ever served.
+ */
+const IMAGE_INDEX_CACHE = 16
+
+/** One session's image references, indexed as far as its facts have been scanned. */
+interface ImageIndex {
+  /** The facts array scanned: a different array (a resume, a fresh cold parse) is rescanned from the start. */
+  readonly facts: readonly EventEnvelope[]
+  scanned: number
+  readonly refs: Map<string, AttachmentRef>
+}
+
 /**
  * Asked and not yet decided — and only a LIVE agent can have a question
  * outstanding. A stored log read cold never resumes (that is the point of a
@@ -333,6 +405,8 @@ export class ProtocolHost {
   private readonly inflight = new Set<Promise<Agent>>()
   /** Parsed stored sessions, most recently used last (insertion order IS the LRU). */
   private readonly cold = new Map<string, SessionSource>()
+  /** `attachment/read`'s per-session index of the log's own image references, most recently used last. */
+  private readonly images = new Map<string, ImageIndex>()
   /**
    * Sessions owed a `control.summary` at the end of this tick, and whether
    * the owing was a disposal. Coalesced because a summary is whole-state: a
@@ -511,10 +585,14 @@ export class ProtocolHost {
     if (this.closed) return
     const underParent = this.parentRunning(agent.id, agent.session.header) !== undefined
     this.broadcast(agent.id, underParent, { jsonrpc: '2.0', method: 'session.status', params: { sessionId: agent.id, status } })
-    // `held` is the one view field a status change moves with no fact behind
-    // it: a quiet notice queued while a turn ran is held from the moment the
-    // agent goes idle. Re-sent only then, so status stays the cheap signal.
-    if (this.anyReceiver(agent.id, underParent) && foldJobs(agent.session.facts).some(quietlyQueued)) this.publishView(agent.session)
+    // The view carries `status` too, and a flip moves it with no fact behind
+    // it (as it moves `held`: a quiet notice is held from the moment the agent
+    // goes idle). Re-sent on EVERY flip, after the status frame, so the last
+    // view a reader holds never says `running` for an idle session — a view
+    // published by the turn's own last fact (`assistant/message`) was cut
+    // while the agent still ran. `publishView` computes nothing unless
+    // someone receives it.
+    this.publishView(agent.session)
     this.oweSummary(agent.session, false)
   }
 
@@ -644,6 +722,8 @@ export class ProtocolHost {
         return this.detach(connection, record)
       case 'session/page':
         return this.page(record)
+      case 'attachment/read':
+        return this.attachmentRead(record)
       case 'session/cancel':
         return this.cancel(record)
       case 'session/compact':
@@ -684,7 +764,24 @@ export class ProtocolHost {
       defaultAuthority: this.defaultAuthority(),
       workspaceRoots: this.config.workspaceRoots,
       workspaces: this.config.workspaces,
+      // Both via `tryGet`: a composition without a tool registry or a preset
+      // table still answers the handshake, with nothing to present.
+      tools: presentTools(this.ctx.tryGet(TOOLS)?.list() ?? []),
+      presets: this.presetInfos(),
     }
+  }
+
+  /** The preset table as a picker offers it, in table order. */
+  private presetInfos(): PresetInfo[] {
+    const presets = this.ctx.tryGet(PRESETS)
+    if (!presets) return []
+    const infos: PresetInfo[] = []
+    for (const name of presets.names()) {
+      const spec = presets.get(name)
+      if (spec === undefined) continue
+      infos.push({ name, sandbox: spec.sandbox, approval: spec.approval, ...(spec.description === undefined ? {} : { description: spec.description }) })
+    }
+    return infos
   }
 
   /**
@@ -706,7 +803,14 @@ export class ProtocolHost {
         .list()
         .map((session) => {
           const title = foldSessionTitle(session.facts)
-          return [String(session.id), { header: session.header, ...(title === undefined ? {} : { title }) } satisfies StoredSessionSummary] as const
+          // A live session's last change is its last appended event, trace
+          // tier included: the store's mtime lags a session that has not
+          // materialized, and is the same instant once it has.
+          const updatedAt = session.events.at(-1)?.time
+          return [
+            String(session.id),
+            { header: session.header, ...(title === undefined ? {} : { title }), ...(updatedAt === undefined ? {} : { updatedAt }) } satisfies StoredSessionSummary,
+          ] as const
         }),
     )
     const stored = this.ctx.tryGet(PERSISTENCE)?.list() ?? []
@@ -715,7 +819,7 @@ export class ProtocolHost {
     // so the union is what "every session" means.
     for (const [id, summary] of live) summaries.set(id, summary)
     const sessions: SessionSummary[] = []
-    for (const { header, title } of summaries.values()) {
+    for (const { header, title, updatedAt } of summaries.values()) {
       const workspace = this.workspaceOf(header.cwd)
       if (workspaceId !== undefined && workspace?.id !== workspaceId) continue
       sessions.push({
@@ -724,6 +828,7 @@ export class ProtocolHost {
         cwd: header.cwd,
         live: live.has(String(header.id)),
         ...(title === undefined ? {} : { title }),
+        ...(updatedAt === undefined ? {} : { updatedAt }),
         ...(workspace === undefined ? {} : { workspaceId: workspace.id }),
         ...(header.parentId === undefined ? {} : { parentId: String(header.parentId) }),
         ...(header.delegatedBy === undefined ? {} : { delegatedBy: String(header.delegatedBy) }),
@@ -896,38 +1001,29 @@ export class ProtocolHost {
     if (params.sandbox !== undefined || params.approval !== undefined || params.accepts !== undefined || params.preset !== undefined) {
       this.assertDrivable(agent, 'session/authority')
     }
-    // Validated here, in the wire's own words, for the reason the mode is: a
-    // value outside the closed vocabulary would reach a durable fact.
-    if (params.accepts !== undefined && !ACCEPTANCES.has(params.accepts as string)) {
-      throw new RpcFailure(INVALID_PARAMS, `session/authority: "accepts" must be ${[...ACCEPTANCES].join(' | ')}`)
-    }
-    if (params.sandbox !== undefined && !isSandboxMode(params.sandbox)) {
-      throw new RpcFailure(INVALID_PARAMS, `session/authority: "sandbox" must be one of ${SANDBOX_MODES.join(' | ')}`)
-    }
-    if (params.approval !== undefined && !isApprovalPolicy(params.approval)) {
-      throw new RpcFailure(INVALID_PARAMS, `session/authority: "approval" must be one of ${APPROVAL_POLICIES.join(' | ')}`)
-    }
+    return this.switchAuthority(agent, readAuthoritySwitches(params, 'session/authority'), 'session/authority')
+  }
+
+  /**
+   * Apply one authority switch set to a live session, all or nothing, and
+   * answer the authority it ends under. THE switch path: `session/authority`
+   * on a live session, and a new session's `authority` on `session/prompt`
+   * (run as the creation's `opening`, so a refusal there rolls the creation
+   * back). Each switch is its durable event, written through the canonical
+   * setters; `switches` has been shape-checked by `readAuthoritySwitches`.
+   */
+  private switchAuthority(agent: Agent, switches: PromptAuthority, method: string): AuthorityView {
     // ONE call is all or nothing: every knob is held to the session's
     // delegation ceiling and pins BEFORE any is appended. Checked in turn, a
     // narrowed mode landed durably and then the unpinned approval threw, so a
     // call answered with an error had already changed the session (S20.5).
-    const refusal = authoritySwitchRefusal(agent.session, {
-      sandbox: params.sandbox as SandboxMode | undefined,
-      approval: params.approval as ApprovalPolicy | undefined,
-      accepts: params.accepts,
-    })
-    if (refusal !== undefined) throw new RpcFailure(INVALID_PARAMS, `session/authority: ${refusal}`)
-    if (params.preset !== undefined) {
-      if (typeof params.preset !== 'string' || params.preset.length === 0) {
-        throw new RpcFailure(INVALID_PARAMS, 'session/authority: "preset" must be a preset name')
-      }
-      if (params.sandbox !== undefined || params.approval !== undefined) {
-        throw new RpcFailure(INVALID_PARAMS, 'session/authority: "preset" replaces "sandbox"/"approval"; give one or the other')
-      }
+    const refusal = authoritySwitchRefusal(agent.session, { sandbox: switches.sandbox, approval: switches.approval, accepts: switches.accepts })
+    if (refusal !== undefined) throw new RpcFailure(INVALID_PARAMS, `${method}: ${refusal}`)
+    if (switches.preset !== undefined) {
       const presets = this.ctx.tryGet(PRESETS)
       if (!presets) throw new RpcFailure(INVALID_PARAMS, 'this composition has no authority-presets capability')
       try {
-        presets.apply(agent.session, params.preset)
+        presets.apply(agent.session, switches.preset)
       } catch (error) {
         throw new RpcFailure(INVALID_PARAMS, error instanceof Error ? error.message : String(error))
       }
@@ -935,8 +1031,8 @@ export class ProtocolHost {
     const sandbox = this.ctx.get(SANDBOX)
     const approval = this.ctx.get(APPROVAL)
     try {
-      if (params.sandbox !== undefined) sandbox.setMode(agent.session, params.sandbox)
-      if (params.approval !== undefined) approval.setPolicy(agent.session, params.approval)
+      if (switches.sandbox !== undefined) sandbox.setMode(agent.session, switches.sandbox)
+      if (switches.approval !== undefined) approval.setPolicy(agent.session, switches.approval)
     } catch (error) {
       // A refusal of the authority plane is the caller's to fix, never a host failure.
       if (error instanceof SandboxError || error instanceof ApprovalError) throw new RpcFailure(INVALID_PARAMS, error.message)
@@ -947,9 +1043,9 @@ export class ProtocolHost {
     const mode = effectiveSandboxMode(agent.session.facts) ?? sandbox.defaultMode
     // AFTER the mode, deliberately: an acceptance is given FOR a mode, and a
     // client switching both in one call means the mode it is switching to.
-    if (params.accepts !== undefined) {
+    if (switches.accepts !== undefined) {
       try {
-        sandbox.setAcceptance(agent.session, params.accepts as SandboxEnforcement, mode)
+        sandbox.setAcceptance(agent.session, switches.accepts, mode)
       } catch (error) {
         throw new RpcFailure(INVALID_PARAMS, error instanceof Error ? error.message : String(error))
       }
@@ -1005,12 +1101,24 @@ export class ProtocolHost {
    * A child a delegation tool created is owned by its parent's scope instead.
    */
   private assertDrivable(agent: Agent, method: string): void {
-    const parentId = this.parentRunning(agent.id, agent.session.header)
+    const parentId = this.drivenBy(agent)
     if (parentId === undefined) return
     throw new RpcFailure(
       INVALID_PARAMS,
       `${method}: session "${agent.id}" is a subagent of "${parentId}", which is running it now — it can be read, but only its parent may drive it`,
     )
+  }
+
+  /**
+   * The session driving this LIVE agent instead of the wire — its delegating
+   * parent, mid-delegation — or `undefined` when the wire may drive it. The
+   * one rule behind both `assertDrivable`'s refusal and `SessionView.drivable`,
+   * so a surface is told exactly what it would be refused. A driving method
+   * reaches a session only through its live agent (a stored one is resumed,
+   * and a resume makes it this host's own), so no agent means drivable.
+   */
+  private drivenBy(agent: Agent | undefined): string | undefined {
+    return agent === undefined ? undefined : this.parentRunning(agent.id, agent.session.header)
   }
 
   /**
@@ -1026,6 +1134,27 @@ export class ProtocolHost {
     } catch (error) {
       throw new RpcFailure(INVALID_PARAMS, `this host's authority flags cannot apply to session "${agent.id}": ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /**
+   * `session/prompt`'s `authority`: what a NEW session opens under. Refused
+   * beside a `sessionId` — an existing session's authority is switched by
+   * `session/authority`, as a decision of its own, never as a side effect of
+   * talking to it — and refused field by field for an unknown knob, since a
+   * misspelled one silently ignored would open the session under authority
+   * nobody chose.
+   */
+  private readPromptAuthority(params: Record<string, unknown>, existing: boolean): PromptAuthority | undefined {
+    const raw = params.authority
+    if (raw === undefined) return undefined
+    if (existing) {
+      throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "authority" chooses what a NEW session opens under; switch an existing one with session/authority')
+    }
+    if (!isRecord(raw)) throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "authority" must be an object')
+    for (const key of Object.keys(raw)) {
+      if (!AUTHORITY_KNOBS.has(key)) throw new RpcFailure(INVALID_PARAMS, `session/prompt: "authority" has no field "${key}"`)
+    }
+    return readAuthoritySwitches(raw, 'session/prompt: authority')
   }
 
   /** A route names a provider this host serves, or it is refused before it can become a durable fact. */
@@ -1083,6 +1212,9 @@ export class ProtocolHost {
     if (requested !== undefined && (params.cwd !== undefined || params.workspaceId !== undefined || params.path !== undefined)) {
       throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd", "workspaceId" and "path" choose where a NEW session works; an existing one keeps the root it was created with')
     }
+    // Shape-checked here, before anything is created; whether the set may
+    // apply is decided against the new session's own log, in its opening.
+    const authority = this.readPromptAuthority(params, requested !== undefined)
     const agents = this.ctx.get(AGENTS)
     const options = readAgentOptions(this.agentDefaults(), params.agentOptions, 'session/prompt')
     // A route to nowhere is refused here, on every path, rather than becoming
@@ -1099,7 +1231,21 @@ export class ProtocolHost {
       // turn then died `NO_ADAPTER`, and every later resume rebuilt from it.
       this.assertRoutable(options.full, 'session/prompt')
       const cwd = this.resolveCwd(params)
-      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...preset, ...world })
+      // The opening authority runs INSIDE the creation transaction: after
+      // publication, so the services' own opening stamps land first and the
+      // switch is the same durable `…{change}` a later `session/authority`
+      // would write; before this prompt is delivered, so the first turn starts
+      // under it. A refusal rolls the creation back — no session, no file, and
+      // the prompt below never runs.
+      const opening =
+        authority === undefined || !switchesAnything(authority)
+          ? {}
+          : {
+              opening: (agent: Agent): void => {
+                this.switchAuthority(agent, authority, 'session/prompt')
+              },
+            }
+      const handle = await agents.create(this.ctx, { cwd, agentOptions: options.full, ...preset, ...world, ...opening })
       this.owned.set(handle.agent.id, handle)
       return handle.agent
     }
@@ -1191,12 +1337,16 @@ export class ProtocolHost {
     // one left who can see it.
     this.settleUnwatchedApprovals()
     const page = pageEvents(source.facts, { throughSeq: source.cursor, ...(limit === undefined ? {} : { maxMessages: limit }) })
+    // A LIVE agent's own view of the registry: its narrowing applied, and
+    // whatever its preset world mounted, which the deployment list cannot know.
+    const tools = source.agent === undefined ? undefined : presentTools(this.ctx.tryGet(TOOLS)?.list(source.agent) ?? [])
     return {
       header: source.header,
       view: this.viewOf(source),
       page,
       cursor: source.cursor,
       ...(source.damaged ? { damaged: true as const } : {}),
+      ...(tools === undefined ? {} : { tools }),
     }
   }
 
@@ -1241,6 +1391,56 @@ export class ProtocolHost {
         ...(limit === undefined ? {} : { maxMessages: limit }),
       }),
     }
+  }
+
+  /**
+   * The bytes of one image this session's log shows (frames.ts
+   * `AttachmentReadParams` says why the session check is the point). A READ:
+   * no `assertDrivable`, and a stored session is read cold, never resumed —
+   * the same reach `session/attach` has.
+   */
+  private async attachmentRead(params: Record<string, unknown>): Promise<AttachmentReadResult> {
+    const sessionId = requireString(params, 'sessionId', 'attachment/read')
+    const attachmentId = requireString(params, 'attachmentId', 'attachment/read')
+    const attachments = this.ctx.tryGet(ATTACHMENTS)
+    if (!attachments) throw new RpcFailure(INTERNAL_ERROR, 'attachment/read: this host has no attachment store mounted')
+    const ref = this.imageRefOf(sessionId, attachmentId)
+    if (ref === undefined) throw new RpcFailure(INVALID_PARAMS, `attachment/read: "${attachmentId}" is not an image of this session`)
+    // The store re-verifies the bytes against every field of the log's own
+    // reference; a missing or altered object fails here, loudly.
+    const data = await attachments.readImage(ref)
+    return { mediaType: ref.mediaType, bytes: data.byteLength, data: Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64') }
+  }
+
+  /**
+   * The LOG's own reference for an image id, or `undefined` when no `image`
+   * block of this session's facts names it: a user message, or a tool result
+   * at any depth (`collectImageRefs`). Indexed per session and extended
+   * lazily — a miss on a live session scans only what was appended since —
+   * because a surface asks once per image it draws.
+   */
+  private imageRefOf(sessionId: string, attachmentId: string): AttachmentRef | undefined {
+    const source = this.sourceFor(sessionId)
+    let index = this.images.get(sessionId)
+    if (index === undefined || index.facts !== source.facts) index = { facts: source.facts, scanned: 0, refs: new Map() }
+    // Recency, as the cold cache keeps it: the session being drawn stays.
+    this.images.delete(sessionId)
+    this.images.set(sessionId, index)
+    while (this.images.size > IMAGE_INDEX_CACHE) this.images.delete(this.images.keys().next().value!)
+    const found = index.refs.get(attachmentId)
+    if (found !== undefined) return found
+    for (; index.scanned < index.facts.length; index.scanned++) {
+      const event = index.facts[index.scanned]!
+      const message = matches(event, USER_MESSAGE) ? event.data.message : matches(event, TOOL_RESULT) ? event.data.message : undefined
+      if (message === undefined) continue
+      try {
+        collectImageRefs(message.content, index.refs)
+      } catch {
+        // A stored payload this version cannot walk names no image it can
+        // vouch for; `minidsh inspect` is what reports it.
+      }
+    }
+    return index.refs.get(attachmentId)
   }
 
   /**
@@ -1308,7 +1508,9 @@ export class ProtocolHost {
     const route = foldRequestContext(facts)
     const options = source.agent?.options ?? foldAgentOptions(facts)
     const window = route?.contextWindow ?? this.catalogWindow(options)
+    const drivenBy = this.drivenBy(source.agent)
     return {
+      ...(drivenBy === undefined ? {} : { drivable: false as const, drivenBy }),
       status: source.agent?.status ?? 'idle',
       pendingApprovals: pendingApprovalsOf(facts, source.agent),
       authority,

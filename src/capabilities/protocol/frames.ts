@@ -17,6 +17,7 @@ import type { ProviderInfo } from '../../core/llm/index.ts'
 import type { ContextMetrics } from '../../core/metering/index.ts'
 import type { SandboxEnforcement, SandboxMode } from '../../core/sandbox/index.ts'
 import type { EventEnvelope, RequestContextRecord, SessionEventFrame, SessionHeader } from '../../core/session/index.ts'
+import type { ToolDisplay } from '../../core/tools/index.ts'
 
 // ---- JSON-RPC 2.0 envelope ------------------------------------------------
 
@@ -74,6 +75,26 @@ export interface WorkspaceInfo {
   readonly root: string
 }
 
+/**
+ * How a surface should draw calls of one tool: its name and the display the
+ * tool itself declared (`ToolDefinition.display`). Presentation only — the
+ * host copies it out and nothing on either side of the wire may decide what a
+ * call DOES from it. Never the description or the schema: those are
+ * model-facing, and a surface has no use for them.
+ */
+export interface ToolPresentation {
+  readonly name: string
+  readonly display?: ToolDisplay
+}
+
+/** One authority preset as a picker offers it: the pair it selects, and what it says about itself. */
+export interface PresetInfo {
+  readonly name: string
+  readonly sandbox: SandboxMode
+  readonly approval: ApprovalPolicy
+  readonly description?: string
+}
+
 export interface InitializeResult {
   readonly serverInfo: { readonly name: string; readonly version: string }
   readonly providers: readonly ProviderInfo[]
@@ -84,6 +105,15 @@ export interface InitializeResult {
   readonly workspaceRoots: readonly string[]
   /** The named workspaces this host serves. Derived from `workspaceRoots` when the deployment names none. */
   readonly workspaces: readonly WorkspaceInfo[]
+  /**
+   * The DEPLOYMENT's tools — the global registry, before any agent's
+   * narrowing or a preset's own rows. A live session's own list, preset
+   * tools included, comes with its attach (`AttachResult.tools`). `[]` where
+   * no tool registry is mounted.
+   */
+  readonly tools: readonly ToolPresentation[]
+  /** The authority presets a session may be switched to, in table order; `[]` where no presets capability is mounted. */
+  readonly presets: readonly PresetInfo[]
 }
 
 /** One session a client may open, live or stored. */
@@ -107,6 +137,15 @@ export interface SessionSummary {
   /** Which parent tool call created this child, when the header records one. */
   readonly delegatedByCallId?: string
   readonly agentPreset?: string
+  /**
+   * When this session last changed, ms since the epoch: a LIVE session's last
+   * appended event's `time`, a stored one's store write time
+   * (`StoredSessionSummary.updatedAt`). A label for "recent", never an order
+   * the list promises — `sessions/list` stays newest-CREATED first. Absent
+   * where neither is known (a live session with no event yet, a store that
+   * cannot tell).
+   */
+  readonly updatedAt?: number
 }
 
 export interface SessionsListParams {
@@ -176,6 +215,26 @@ export interface PromptParams {
   readonly workspaceId?: string
   /** A path relative to that workspace's root. Absent means the root itself. */
   readonly path?: string
+  /**
+   * The authority a NEW session opens under, applied before its first turn
+   * can start: the same switch set `session/authority` makes — each switch its
+   * durable event, held to the same rules — run inside the creation
+   * transaction (`CreateAgentOptions.opening`), so a refusal rolls the
+   * creation back with no session left and the prompt never delivered. Only
+   * on a prompt that CREATES a session: given with a `sessionId` it is
+   * INVALID_PARAMS, because a live or stored session's authority is switched
+   * by `session/authority`, as a decision of its own. `preset` is exclusive
+   * with `sandbox`/`approval`, exactly as there.
+   */
+  readonly authority?: PromptAuthority
+}
+
+/** The knobs of `session/authority`, without the session: what a new session should open under. */
+export interface PromptAuthority {
+  readonly sandbox?: SandboxMode
+  readonly approval?: ApprovalPolicy
+  readonly accepts?: SandboxEnforcement
+  readonly preset?: string
 }
 
 export interface PromptResult {
@@ -223,6 +282,17 @@ export interface SessionView {
   readonly route?: RequestContextRecord
   /** Every background job the log names, in start order; `[]` when none. A page cannot pair a start with an end it does not hold. */
   readonly jobs: readonly JobSummary[]
+  /**
+   * Present, `false`, exactly when the host would refuse a DRIVING method on
+   * this session right now (prompt, cancel, compact, a switch of route or
+   * authority, a revoke, a job stop): it is a delegated child its live parent
+   * is running, and only that tool call may drive it. Reads stay open. Absent
+   * means drivable. A surface disables its controls from this rather than
+   * learning the rule by being refused.
+   */
+  readonly drivable?: false
+  /** The session driving this one, beside `drivable: false`: the delegating parent's id. */
+  readonly drivenBy?: string
 }
 
 /** One background job as a reader is shown it: a projection of its bracket and its notice, never registry state. */
@@ -280,6 +350,14 @@ export interface AttachResult {
    */
   readonly cursor: number
   readonly damaged?: true
+  /**
+   * The tools THIS session's agent sees, display included — the deployment's,
+   * narrowed by the agent's restrictions and widened by what its preset world
+   * mounted (`initialize`'s list cannot know those). Present only for a LIVE
+   * session: a cold read has no agent, so a surface falls back to
+   * `initialize`'s deployment list.
+   */
+  readonly tools?: readonly ToolPresentation[]
 }
 
 export interface PageParams {
@@ -396,6 +474,36 @@ export type ControlSubscribeParams = Record<string, never>
 /** The baseline: one summary per live session the host would show (a child mid-delegation is its parent's). */
 export interface ControlSubscribeResult {
   readonly sessions: readonly ControlSummary[]
+}
+
+/**
+ * Read the bytes of one image a session's log shows, so a surface can draw
+ * what the model saw. The log carries only an `AttachmentRef` (§5's binary
+ * plane: no base64 in a fact), and a browser has no path to the store.
+ *
+ * There is one principal behind every connection (§13), so this is no
+ * privilege boundary between users — but an attachment id is a CONTENT
+ * address (`sha256:…`), and without the session check this method would be an
+ * oracle over the whole store: "does this host hold an image with this hash",
+ * answered for any hash, from any session. So only an id that appears in an
+ * `image` block of THIS session's facts (a user message, or a tool result at
+ * any depth) is read, through the log's OWN reference — never one the client
+ * supplies — and the store re-verifies the bytes against it. A read, not a
+ * drive: a child mid-delegation and a stored session answer it, from any
+ * connection that could attach to the session.
+ */
+export interface AttachmentReadParams {
+  readonly sessionId: string
+  readonly attachmentId: string
+}
+
+export interface AttachmentReadResult {
+  /** The media type the store verified from the bytes when they were saved. */
+  readonly mediaType: string
+  /** The decoded length. */
+  readonly bytes: number
+  /** Base64, standard alphabet. */
+  readonly data: string
 }
 
 // ---- notifications (host → client) ----------------------------------------

@@ -232,6 +232,8 @@ function buildSearchTool(ctx: Context, settings: SearchSettings) {
     // Not model-facing: how delegation recognises a tool a child's pinned
     // approvals would refuse on every call, and hides it.
     tags: [NETWORK_TOOL],
+    // Presentation only (core/tools/types.ts `display`): the tag above is the runtime kind.
+    display: { card: 'search', title: 'Search the web', fields: { query: 'query' } },
     render: (_args, value) => [{ type: 'text', text: value.text }],
     execute: async (args: Input, exec) => {
       const agent = exec.agent

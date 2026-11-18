@@ -339,6 +339,53 @@ describe('headless runner (real composition, scripted model)', () => {
     }
   })
 
+  /**
+   * `ToolDefinition.display` names the tool's OWN argument names, and nothing
+   * at runtime reads it, so nothing at runtime would notice a rename that left
+   * a card reading an argument that no longer exists. Checked here, over every
+   * tool the shipped composition can register — the opt-in rows inserted too —
+   * against the same JSON Schema the model is given (`toParameters`).
+   */
+  it('gives every registered tool a display whose fields and selector name its own arguments', async () => {
+    const { bootComposition } = await import('./headless.ts')
+    const { TOOLS, toParameters } = await import('../core/tools/index.ts')
+    const { builtinPlugins } = await import('./compose.ts')
+    const optIn = ['tool-view-image', 'tool-web-search'].map((name) => ({ id: name, plugin: builtinPlugins.get(name)! }))
+    const base = scripted(new ScriptedAdapter())
+    const root = await bootComposition({
+      sessionsRoot: tempDir('minidsh-sessions-'),
+      attachmentsRoot: tempDir('minidsh-attachments-'),
+      browserProfileRoot: tempDir('minidsh-browser-'),
+      logger: silent,
+      ...base,
+      patches: [...base.patches, { insert: optIn }],
+    })
+    try {
+      const tools = root.get(TOOLS).list()
+      expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['view_image', 'web_search', 'str_replace_editor', 'subagent', 'history_read']))
+      for (const tool of tools) {
+        const display = tool.display
+        expect(display, `${tool.name} declares no display`).toBeDefined()
+        const properties = (toParameters(tool.input).properties ?? {}) as Record<string, { enum?: unknown[] }>
+        const names = Object.keys(properties)
+        for (const shown of [display!, ...Object.values(display!.by?.cases ?? {})]) {
+          for (const [role, argument] of Object.entries(shown.fields ?? {})) {
+            expect(names, `${tool.name}: display role "${role}" reads "${argument}", which is not an argument`).toContain(argument)
+          }
+        }
+        if (display!.by !== undefined) {
+          const selector = properties[display!.by.arg]
+          expect(selector, `${tool.name}: display selector "${display!.by.arg}" is not an argument`).toBeDefined()
+          for (const value of Object.keys(display!.by.cases)) {
+            if (selector!.enum !== undefined) expect(selector!.enum, `${tool.name}: case "${value}" is not a value of "${display!.by.arg}"`).toContain(value)
+          }
+        }
+      }
+    } finally {
+      await root.dispose()
+    }
+  })
+
   it('mounts no attachment service when the deployment names no store', async () => {
     const sessionsRoot = tempDir('minidsh-sessions-')
     const { bootComposition } = await import('./headless.ts')

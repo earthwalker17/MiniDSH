@@ -104,6 +104,8 @@ export const toolViewImagePlugin: Plugin = {
         description: DESCRIPTION,
         input: InputSchema,
         output: OutputSchema,
+        // Presentation only (core/tools/types.ts `display`).
+        display: { card: 'image', title: 'View image', fields: { path: 'path' } },
         // The block the model actually sees: the reference, and the descriptor
         // that stands in for it wherever the bytes cannot go.
         render: (_args, value) => [

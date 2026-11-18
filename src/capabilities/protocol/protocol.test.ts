@@ -1,5 +1,5 @@
 /** The client protocol, exercised byte-level over an in-memory duplex pair. */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,7 +18,20 @@ import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-su
 import { startProtocolHost, type ProtocolHostHandle } from '../../app/serve.ts'
 import type { Patch } from '../../app/compose.ts'
 import { JOBS, type JobExit, type JobProcess } from '../../core/jobs/index.ts'
-import type { AttachResult, ControlSubscribeResult, ControlSummary, JobCancelResult, PageResult, SessionView } from './frames.ts'
+import { ATTACHMENTS, asAttachmentId, type ImageMediaType } from '../../core/attachments/index.ts'
+import { quadPng } from '../../test-support/images.ts'
+import type {
+  AttachmentReadResult,
+  AttachResult,
+  ControlSubscribeResult,
+  ControlSummary,
+  EventsResult,
+  InitializeResult,
+  JobCancelResult,
+  PageResult,
+  SessionsListResult,
+  SessionView,
+} from './frames.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const SCRIPTED = { provider: 'scripted', model: 'scripted-model' }
@@ -133,6 +146,8 @@ async function startHost(
     accepts?: 'full' | 'none'
     /** Row patches beside the one that keeps the real provider out. */
     patches?: readonly Patch[]
+    /** Mounts the attachment store there; omitted, the composition has none. */
+    attachmentsRoot?: string
   },
 ): Promise<{ host: ProtocolHostHandle; client: TestClient; clients: TestClient[]; sessionsRoot: string }> {
   const clients = Array.from({ length: 1 + (extra?.extraClients ?? 0) }, () => new TestClient())
@@ -148,6 +163,7 @@ async function startHost(
     ...(extra?.settingsStorePath === undefined ? {} : { settingsStorePath: extra.settingsStorePath }),
     ...(extra?.agentDefaults === undefined ? {} : { agentDefaults: extra.agentDefaults }),
     ...(extra?.accepts === undefined ? {} : { accepts: extra.accepts }),
+    ...(extra?.attachmentsRoot === undefined ? {} : { attachmentsRoot: extra.attachmentsRoot }),
     patches: [{ id: 'llm-deepseek', disabled: true }, ...(extra?.patches ?? [])],
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
@@ -1862,5 +1878,289 @@ describe('protocol: the control plane', () => {
       { sessionId, status: 'closed', runningJobs: 0, heldNotices: 0, pendingApprovals: 0 },
     ])
     expect(summariesOf(client, sessionId).at(-1)!.status).toBe('closed')
+  })
+})
+
+describe('protocol: what a surface is told to draw', () => {
+  it('initialize presents the deployment tools with their displays, the preset table, and each model effort set', async () => {
+    const { client } = await startHost(new ScriptedAdapter())
+    const result = await client.result<InitializeResult>('initialize')
+    const editor = result.tools.find((tool) => tool.name === 'str_replace_editor')
+    expect(editor?.display).toMatchObject({ card: 'edit', title: 'Edit file', by: { arg: 'command' } })
+    // Presentation only: neither the description nor the schema crosses — those are the model's.
+    expect(Object.keys(editor!).toSorted()).toEqual(['display', 'name'])
+    expect(result.tools.map((tool) => tool.name)).toContain('subagent')
+    expect(result.presets).toEqual([
+      { name: 'workspace-write', sandbox: 'workspace-write', approval: 'ask', description: expect.any(String) },
+      { name: 'danger-full-access', sandbox: 'danger-full-access', approval: 'never', description: expect.any(String) },
+    ])
+    // The adapter's effort ids, carried opaquely beside its window.
+    const model = result.providers.find((provider) => provider.id === 'scripted')!.models[0]!
+    expect(model.reasoning).toEqual({ efforts: ['off', 'low', 'high'], defaultEffort: 'high' })
+  })
+
+  it('gives a live attach the tools its own agent sees — its world included — and a cold read none', async () => {
+    const worldTool = defineTool({
+      name: 'world_only',
+      description: 'mounted by the preset world',
+      input: z.object({ target: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      display: { card: 'generic', title: 'World tool', fields: { path: 'target' } },
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const first = await startHost(new ScriptedAdapter().script(assistantText('hi')), {
+      agentWorld: (agentCtx) => void agentCtx.tryGet(TOOLS)!.register(agentCtx, worldTool),
+    })
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(sessionId)
+    const live = await first.client.result<AttachResult>('session/attach', { sessionId })
+    expect(live.tools?.find((tool) => tool.name === 'world_only')).toEqual({ name: 'world_only', display: worldTool.display })
+    // The deployment's list cannot know what one agent's world mounted.
+    const deployment = (await first.client.result<InitializeResult>('initialize')).tools
+    expect(deployment.some((tool) => tool.name === 'world_only')).toBe(false)
+    await first.host.dispose()
+
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot: first.sessionsRoot })
+    const cold = await second.client.result<AttachResult>('session/attach', { sessionId })
+    expect(cold.tools).toBeUndefined()
+  })
+
+  it('dates each session by its last change — a live one by its last event, a stored one by its store — and keeps the order', async () => {
+    const first = await startHost(new ScriptedAdapter().script(assistantText('one')))
+    const { sessionId: stored } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'first', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(stored)
+    await first.host.dispose()
+
+    const second = await startHost(new ScriptedAdapter().script(assistantText('two')), { sessionsRoot: first.sessionsRoot })
+    const { sessionId: live } = await second.client.result<{ sessionId: string }>('session/prompt', { text: 'second', agentOptions: SCRIPTED })
+    await second.client.waitForIdle(live)
+    const lastEvent = (await second.client.result<EventsResult>('session/events', { sessionId: live })).events.at(-1)!
+    const listed = (await second.client.result<SessionsListResult>('sessions/list')).sessions
+    expect(listed.find((one) => one.id === live)?.updatedAt).toBe(lastEvent.time)
+    const file = readdirSync(first.sessionsRoot).find((name) => name.startsWith(stored) && name.endsWith('.jsonl'))!
+    expect(listed.find((one) => one.id === stored)?.updatedAt).toBe(Math.trunc(statSync(join(first.sessionsRoot, file)).mtimeMs))
+    // A label, not an order: the list is still newest-CREATED first.
+    expect(listed.map((one) => one.id)).toEqual([live, stored])
+  })
+
+  it('tells a reader of a child mid-delegation that only its parent may drive it, and says nothing on the parent', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const adapter = new ScriptedAdapter().script(
+      assistantToolCall('c1', 'subagent', { description: 'find it', prompt: 'answer the question' }),
+      async () => {
+        await held
+        return assistantText('the child answer')
+      },
+      assistantText('done'),
+    )
+    const { client } = await startHost(adapter)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    const start = await client.waitFor(() => client.frames('subagent/start', sessionId)[0], 'the delegation to start')
+    const childId = start.event.data.childId as string
+
+    const child = await client.result<AttachResult>('session/attach', { sessionId: childId })
+    expect(child.view.drivable).toBe(false)
+    expect(child.view.drivenBy).toBe(sessionId)
+    // The same rule the refusal applies: what the view says is what a drive meets.
+    const refused = await client.call('session/cancel', { sessionId: childId })
+    expect(refused.error?.message).toContain('is a subagent of')
+    const parent = await client.result<AttachResult>('session/attach', { sessionId })
+    expect(parent.view.drivable).toBeUndefined()
+    expect(parent.view.drivenBy).toBeUndefined()
+
+    release()
+    await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+  })
+
+  it('re-sends the view on every status flip, so the last one a watcher holds after a turn says idle', async () => {
+    const { client } = await startHost(new ScriptedAdapter().script(assistantText('hi')))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    await client.waitFor(() => (publishedViews(client, sessionId).at(-1)?.status === 'idle' ? true : undefined), 'an idle view')
+    // Ordered after the status frame, and a running view was sent on the way up.
+    const mine = client.notifications.filter((entry) => entry.params.sessionId === sessionId)
+    const lastStatus = mine.findLastIndex((entry) => entry.method === 'session.status')
+    const lastView = mine.findLastIndex((entry) => entry.method === 'session.view')
+    expect(lastView).toBeGreaterThan(lastStatus)
+    expect(publishedViews(client, sessionId).some((view) => view.status === 'running')).toBe(true)
+  })
+})
+
+describe('protocol: a new session opens under the authority its prompt names', () => {
+  it('records each switch durably before the first turn starts, through the same path session/authority takes', async () => {
+    const { client } = await startHost(new ScriptedAdapter().script(assistantText('one'), assistantText('two')))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', {
+      text: 'hello',
+      agentOptions: SCRIPTED,
+      authority: { sandbox: 'read-only', approval: 'never', accepts: 'none' },
+    })
+    await client.waitForIdle(sessionId)
+    const log = await logOf(client, sessionId)
+    const turn = log.findIndex((event) => event.type === 'turn/start')
+    const mode = log.findIndex((event) => event.type === 'sandbox/mode' && event.data.reason === 'change')
+    const policy = log.findIndex((event) => event.type === 'approval/policy' && event.data.reason === 'change')
+    const accepts = log.findIndex((event) => event.type === 'sandbox/acceptance' && event.data.reason === 'change')
+    expect(log[mode]!.data).toMatchObject({ mode: 'read-only' })
+    expect(log[policy]!.data).toEqual({ policy: 'never', reason: 'change' })
+    expect(log[accepts]!.data).toMatchObject({ accepts: 'none', forMode: 'read-only' })
+    for (const switched of [mode, policy, accepts]) {
+      expect(switched).toBeGreaterThanOrEqual(0)
+      expect(switched).toBeLessThan(turn)
+    }
+
+    // A preset is one switch set too, its intent recorded ahead of the turn.
+    const { sessionId: second } = await client.result<{ sessionId: string }>('session/prompt', {
+      text: 'hello again',
+      agentOptions: SCRIPTED,
+      authority: { preset: 'danger-full-access' },
+    })
+    await client.waitForIdle(second)
+    const secondLog = await logOf(client, second)
+    const intent = secondLog.findIndex((event) => event.type === 'authority/preset')
+    expect(secondLog[intent]!.data).toEqual({ name: 'danger-full-access' })
+    expect(intent).toBeLessThan(secondLog.findIndex((event) => event.type === 'turn/start'))
+
+    const attached = await client.result<AttachResult>('session/attach', { sessionId })
+    expect(attached.view.authority).toMatchObject({ sandbox: 'read-only', approval: 'never', accepts: 'none' })
+  })
+
+  it('creates nothing when the set is refused: the id is freed, nothing is stored, and the prompt is never delivered', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('must not run'), assistantText('the next one runs'))
+    const { host, client, sessionsRoot } = await startHost(adapter)
+    const refused = await client.call('session/prompt', { text: 'hello', agentOptions: SCRIPTED, authority: { preset: 'no-such-preset' } })
+    expect(refused.error?.code).toBe(-32602)
+    expect(refused.error?.message).toContain('no-such-preset')
+    // Rolled back: no agent, no listing, no file, and no model call.
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+    expect((await client.result<SessionsListResult>('sessions/list')).sessions).toEqual([])
+    expect(readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))).toEqual([])
+    expect(adapter.calls).toHaveLength(0)
+    // The id its opening stamps were streamed under names nothing now.
+    const announced = client.frames().map((frame) => frame.sessionId)
+    for (const id of new Set(announced)) expect((await client.call('session/attach', { sessionId: id })).error?.message).toContain('no session')
+    // And the host is unharmed: the next prompt creates as ever.
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    expect(adapter.calls).toHaveLength(1)
+  })
+
+  it('refuses it beside a session id, and in any shape but the knobs, before anything is created', async () => {
+    const { host, client } = await startHost(new ScriptedAdapter().script(assistantText('hi')))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const besideId = await client.call('session/prompt', { sessionId, text: 'more', authority: { sandbox: 'read-only' } })
+    expect(besideId.error?.code).toBe(-32602)
+    expect(besideId.error?.message).toContain('NEW session')
+    for (const authority of ['read-only', { sandbox: 'everything' }, { approval: 'sometimes' }, { accepts: 'partial' }, { mode: 'read-only' }, { preset: 'workspace-write', sandbox: 'read-only' }, { preset: '' }]) {
+      const reply = await client.call('session/prompt', { text: 'hello', agentOptions: SCRIPTED, authority })
+      expect(reply.error?.code, JSON.stringify(authority)).toBe(-32602)
+    }
+    // Only the first session exists, and its authority was never touched.
+    expect(host.root.get(AGENTS).list().map((agent) => agent.id)).toEqual([sessionId])
+    expect((await logOf(client, sessionId)).some((event) => event.type === 'sandbox/mode' && event.data.reason === 'change')).toBe(false)
+  })
+})
+
+describe('protocol: attachment/read', () => {
+  const PNG = quadPng(8)
+  /** A tool that commits an image and shows it, as `view_image` and the browser do. */
+  const snapTool = (root: Context) =>
+    defineTool({
+      name: 'snap',
+      description: 'commits an image',
+      input: z.object({}),
+      output: z.object({ id: z.string(), mediaType: z.string(), bytes: z.number(), width: z.number(), height: z.number() }),
+      execute: async () => {
+        const ref = await root.get(ATTACHMENTS).saveImage({ data: PNG, name: 'quad.png' })
+        return { id: ref.id, mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height }
+      },
+      render: (_args, value) => [
+        {
+          type: 'image',
+          attachment: { id: asAttachmentId(value.id), mediaType: value.mediaType as ImageMediaType, bytes: value.bytes, width: value.width, height: value.height, name: 'quad.png' },
+          text: '[image quad.png]',
+        },
+      ],
+    })
+  const withSnap = (root: Context): void => void root.get(TOOLS).register(root, snapTool(root))
+  const imageIdIn = (data: unknown): string | undefined => /"id":"(sha256:[0-9a-f]{64})"/.exec(JSON.stringify(data))?.[1]
+
+  it('reads an image this session showed, by the log own reference — live, then stored and cold', async () => {
+    const attachmentsRoot = tempDir('minidsh-proto-attachments-')
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'snap', {}), assistantText('saw it'), assistantText('no images here'))
+    const first = await startHost(adapter, { attachmentsRoot, prepare: withSnap })
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'snap', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(sessionId)
+    const id = imageIdIn(first.client.frames('tool/result', sessionId)[0]!.event.data)!
+    expect(id).toBeDefined()
+
+    const read = await first.client.result<AttachmentReadResult>('attachment/read', { sessionId, attachmentId: id })
+    expect(read).toMatchObject({ mediaType: 'image/png', bytes: PNG.length })
+    expect(Buffer.from(read.data, 'base64').equals(PNG)).toBe(true)
+
+    // Not an oracle over the store: another session never showed it.
+    const { sessionId: other } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'plain', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(other)
+    const elsewhere = await first.client.call('attachment/read', { sessionId: other, attachmentId: id })
+    expect(elsewhere.error?.code).toBe(-32602)
+    expect(elsewhere.error?.message).toContain('not an image of this session')
+    const unknown = await first.client.call('attachment/read', { sessionId, attachmentId: `sha256:${'0'.repeat(64)}` })
+    expect(unknown.error?.code).toBe(-32602)
+    await first.host.dispose()
+
+    // Stored: read cold, never resumed.
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot: first.sessionsRoot, attachmentsRoot })
+    const cold = await second.client.result<AttachmentReadResult>('attachment/read', { sessionId, attachmentId: id })
+    expect(Buffer.from(cold.data, 'base64').equals(PNG)).toBe(true)
+    expect(second.host.root.get(AGENTS).list()).toHaveLength(0)
+
+    // The store re-verifies against the log's reference: altered bytes are refused, loudly.
+    const path = second.host.root.get(ATTACHMENTS).hostPath({ id: asAttachmentId(id), mediaType: 'image/png', bytes: PNG.length, width: 8, height: 8 })!
+    writeFileSync(path, quadPng(9))
+    expect((await second.client.call('attachment/read', { sessionId, attachmentId: id })).error).toBeDefined()
+  })
+
+  it('is a read, so a child mid-delegation answers it', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const adapter = new ScriptedAdapter().script(
+      assistantToolCall('p1', 'subagent', { description: 'look', prompt: 'take a picture' }),
+      assistantToolCall('k1', 'snap', {}),
+      async () => {
+        await held
+        return assistantText('the child saw it')
+      },
+      assistantText('done'),
+    )
+    const { client } = await startHost(adapter, { attachmentsRoot: tempDir('minidsh-proto-attachments-'), prepare: withSnap })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    const childId = (await client.waitFor(() => client.frames('subagent/start', sessionId)[0], 'the delegation')).event.data.childId as string
+    let id: string | undefined
+    const deadline = Date.now() + 5000
+    while (id === undefined && Date.now() < deadline) {
+      const { events } = await client.result<EventsResult>('session/events', { sessionId: childId, omitTrace: true })
+      id = imageIdIn(events.find((event) => event.type === 'tool/result')?.data)
+      if (id === undefined) await pause(20)
+    }
+    expect(id, 'the child never showed its image').toBeDefined()
+    const read = await client.result<AttachmentReadResult>('attachment/read', { sessionId: childId, attachmentId: id })
+    expect(Buffer.from(read.data, 'base64').equals(PNG)).toBe(true)
+    release()
+    await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+  })
+
+  it('says so where the deployment mounts no attachment store', async () => {
+    const { client } = await startHost(new ScriptedAdapter().script(assistantText('hi')))
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    const reply = await client.call('attachment/read', { sessionId, attachmentId: `sha256:${'0'.repeat(64)}` })
+    expect(reply.error?.code).toBe(-32603)
+    expect(reply.error?.message).toContain('no attachment store')
   })
 })

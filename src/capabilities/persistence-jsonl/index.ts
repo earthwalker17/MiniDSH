@@ -352,7 +352,9 @@ function summaryFor(file: string): StoredSessionSummary | undefined {
     const parsed = first === undefined ? undefined : (JSON.parse(first) as Partial<HeaderLine>)
     if (parsed !== undefined && parsed.kind === 'session' && typeof parsed.id === 'string' && typeof parsed.createdAt === 'number') {
       const title = foldSessionTitle(prefixEvents(lines))
-      summary = { header: parsed as SessionHeader, ...(title === undefined ? {} : { title }) }
+      // The last write is the file's mtime: the stat the cache key already
+      // took, so it costs nothing and is exactly as fresh as the summary.
+      summary = { header: parsed as SessionHeader, ...(title === undefined ? {} : { title }), updatedAt: Math.trunc(stats.mtimeMs) }
     }
   } catch {
     // An unreadable file is skipped — and the skip is cached too, so a file

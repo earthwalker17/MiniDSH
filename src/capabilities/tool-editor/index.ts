@@ -84,6 +84,22 @@ function buildEditor(ctx: Context, maxOutputChars: number) {
     description: DESCRIPTION,
     input: InputSchema,
     output: OutputSchema,
+    // Presentation only (core/tools/types.ts `display`): one tool, four
+    // commands, so the `command` argument picks the card a surface draws.
+    display: {
+      card: 'edit',
+      title: 'Edit file',
+      fields: { path: 'path' },
+      by: {
+        arg: 'command',
+        cases: {
+          view: { card: 'read', title: 'Read file', fields: { path: 'path' } },
+          create: { card: 'edit', title: 'Create file', fields: { path: 'path', content: 'file_text' } },
+          str_replace: { card: 'edit', title: 'Edit file', fields: { path: 'path', oldText: 'old_str', newText: 'new_str' } },
+          insert: { card: 'edit', title: 'Insert lines', fields: { path: 'path', newText: 'new_str', line: 'insert_line' } },
+        },
+      },
+    },
     render: (_args, value) => [{ type: 'text', text: value.text }],
     execute: async (args: Input, exec) => {
       // The call travels with the actor so the provider can key its effect

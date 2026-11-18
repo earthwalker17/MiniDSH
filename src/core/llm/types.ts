@@ -163,8 +163,9 @@ export interface ModelInfo {
 /**
  * A provider adapter. `stream` performs one provider attempt; `resolveModel`
  * exposes adapter-owned facts (context window, default max tokens, the opaque
- * reasoning-effort ids, input modalities). Effort ids never leak beyond the
- * adapter and the CLI flag that the adapter validates.
+ * reasoning-effort ids, input modalities). Only the adapter INTERPRETS an
+ * effort id; the catalog (`ModelCatalogEntry.reasoning`), the CLI flag and the
+ * wire carry them opaquely, and the adapter validates whatever arrives.
  *
  * The rule for an option the provider cannot honour: refuse BEFORE any I/O
  * with a specific code — `UNSUPPORTED_OPTION` (a sampling field the wire has

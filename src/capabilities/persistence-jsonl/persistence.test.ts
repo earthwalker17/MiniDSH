@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -346,6 +346,27 @@ describe('persistence-jsonl: the read Definition', () => {
 
     unlinkSync(join(base, 'foreign.jsonl'))
     expect(persistence.list().map((one) => String(one.header.id))).toEqual(['growing'])
+  })
+
+  /**
+   * `updatedAt` is the store's last write, read off the same stat the cache
+   * keys on — so a listing can say "recent" without reading a log, and a
+   * cached summary can never carry an older time than the file has.
+   */
+  it('says when the store last wrote each session, and moves it when the file is written again', async () => {
+    const { sessions, base } = await mount()
+    sessions.create({ cwd: '/w', id: asSessionId('dated'), createdAt: 1000 })
+    appendTurn(sessions, 'dated', 1)
+    const persistence = root!.get(PERSISTENCE)
+    const first = persistence.list()[0]!.updatedAt
+    expect(first).toBe(Math.trunc(statSync(fileFor(base, 'dated')).mtimeMs))
+    // A clock a test can see move: the file's mtime set explicitly into the
+    // past, then an append, which a filesystem stamps with now.
+    utimesSync(fileFor(base, 'dated'), new Date(5_000), new Date(5_000))
+    expect(persistence.list()[0]!.updatedAt).toBe(5_000)
+    appendTurn(sessions, 'dated', 2)
+    expect(persistence.list()[0]!.updatedAt).toBe(Math.trunc(statSync(fileFor(base, 'dated')).mtimeMs))
+    expect(persistence.list()[0]!.updatedAt).toBeGreaterThan(5_000)
   })
 })
 

@@ -315,7 +315,9 @@ export const toolHistoryPlugin: Plugin<ToolHistoryConfig | undefined> = {
         // Not model-facing: the tag is how a summary names this tool without
         // knowing which capability provides it.
         tags: [RECALL_TOOL],
-        render: (_args, value) => [{ type: 'text', text: renderRecall(value) }],
+        // Presentation only (core/tools/types.ts `display`); its range is not a display role.
+        display: { card: 'recall', title: 'Recall history' },
+        render:(_args, value) => [{ type: 'text', text: renderRecall(value) }],
         execute: (args: Input, exec) => read(args, exec.agent, deps),
       }),
     )

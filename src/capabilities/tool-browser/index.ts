@@ -376,6 +376,8 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
       viewport: viewportSchema.optional().describe('Resize the page first, e.g. {"width": 390, "height": 844} for a phone.'),
     }),
     output: textOutput,
+    // Presentation only (core/tools/types.ts `display`), as on the other four browser tools.
+    display: { card: 'browse', title: 'Open page', fields: { url: 'url' } },
     timeoutMs: null,
     render: renderText,
     execute: async (args, exec) => {
@@ -414,6 +416,7 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
       timeout_ms: z.number().int().min(0).max(60_000).optional().describe('How long wait_for_text may wait (default 10000).'),
     }),
     output: textOutput,
+    display: { card: 'browse', title: 'Read page', fields: { ref: 'ref' } },
     timeoutMs: null,
     render: renderText,
     execute: (args, exec) =>
@@ -458,6 +461,7 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
         if (args.action === 'select') need('option')
       }),
     output: textOutput,
+    display: { card: 'browse', title: 'Act on page', fields: { action: 'action', ref: 'ref', text: 'text' } },
     timeoutMs: null,
     render: renderText,
     execute: (args, exec) =>
@@ -485,6 +489,7 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
       descriptor: z.string(),
       text: z.string(),
     }),
+    display: { card: 'image', title: 'Take screenshot', fields: { ref: 'ref' } },
     timeoutMs: null,
     render: (_args, value) => [
       { type: 'text', text: value.text },
@@ -542,6 +547,7 @@ function buildTools(deps: Deps, browserFor: (agent: Agent | undefined) => AgentB
       timeout_ms: z.number().int().min(100).max(60_000).optional().describe('How long it may run (default 10000).'),
     }),
     output: textOutput,
+    display: { card: 'browse', title: 'Run script in page', fields: { expression: 'expression' } },
     timeoutMs: null,
     render: renderText,
     execute: (args, exec) =>

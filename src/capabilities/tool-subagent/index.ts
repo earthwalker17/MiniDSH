@@ -446,7 +446,10 @@ export const toolSubagentPlugin: Plugin<SubagentConfig | undefined> = {
         // Not model-facing: how the depth cap recognises every delegation tool
         // in this deployment, including a second row of this same plugin.
         tags: [DELEGATION_TOOL],
-        render: (_args, value) => [{ type: 'text', text: value.output.length > 0 ? value.output : '(the subagent produced no text)' }],
+        // Presentation only (core/tools/types.ts `display`): a surface keys
+        // its card on this, never on the tool's configurable name.
+        display: { card: 'delegate', title: 'Delegate a task', fields: { description: 'description', prompt: 'prompt' } },
+        render:(_args, value) => [{ type: 'text', text: value.output.length > 0 ? value.output : '(the subagent produced no text)' }],
         execute: (args, exec) => delegate(args, exec, deps),
       }),
     )

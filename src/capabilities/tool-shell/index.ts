@@ -127,6 +127,8 @@ function buildShellTool(ctx: Context, timeoutMs: number, excerpt: { headChars: n
     description: shell.dialect === 'pwsh' ? pwshDescription(confining) : bashDescription(confining),
     input: InputSchema,
     output: z.object({ output: z.string(), exitCode: z.number().nullable() }),
+    // Presentation only (core/tools/types.ts `display`): one card for both dialects.
+    display: { card: 'terminal', title: 'Run command', fields: { command: 'command' } },
     // The executor owns the deadline outright: it kills the child and returns
     // the partial output. No registry backstop, because the registry clock
     // would also tick while a person deliberated over this body's escalation

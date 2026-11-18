@@ -65,6 +65,42 @@ export const RECALL_TOOL = 'recall'
 export const NETWORK_TOOL = 'network'
 
 /**
+ * Which card a surface draws for a call. Presentation only: nothing in the
+ * runtime reads it (tags are the runtime KIND).
+ */
+export type ToolCard = 'terminal' | 'edit' | 'read' | 'search' | 'browse' | 'image' | 'delegate' | 'recall' | 'job' | 'generic'
+
+/** Display roles a card reads, each mapped to the tool's OWN argument name. */
+export type ToolDisplayRole =
+  | 'command'
+  | 'path'
+  | 'oldText'
+  | 'newText'
+  | 'content'
+  | 'line'
+  | 'query'
+  | 'url'
+  | 'description'
+  | 'prompt'
+  | 'jobId'
+  | 'expression'
+  | 'ref'
+  | 'action'
+  | 'text'
+
+export interface ToolDisplayCase {
+  readonly card: ToolCard
+  /** A short verb phrase in sentence case: "Run command", "Edit file". */
+  readonly title: string
+  readonly fields?: Readonly<Partial<Record<ToolDisplayRole, string>>>
+}
+
+export interface ToolDisplay extends ToolDisplayCase {
+  /** A per-call selector the tool declares: the value of argument `arg` picks a case; no case matches → the base. */
+  readonly by?: { readonly arg: string; readonly cases: Readonly<Record<string, ToolDisplayCase>> }
+}
+
+/**
  * A tool definition. The body returns the canonical value; `render` projects
  * it into model-facing content. Only `{name, description, parameters}` ever
  * reaches the model.
@@ -103,6 +139,16 @@ export interface ToolDefinition<Args = unknown, Value extends JsonValue = JsonVa
    * scoped to the deployment that registered it.
    */
   readonly tags?: readonly string[]
+  /**
+   * How a SURFACE draws a call of this tool: a card kind, a title, and which of
+   * the tool's own arguments fill which display role. Declared by the tool
+   * because only the tool knows its argument names, and carried to clients
+   * opaquely (`initialize`/`session/attach` `tools`). Presentation only, like
+   * `ToolCard` says: no runtime path reads it — `tags` are what the runtime
+   * keys on — so a wrong or missing display can mislabel a card and never
+   * change what a call does. Absent, a surface draws its generic card.
+   */
+  readonly display?: ToolDisplay
 }
 
 export type AnyToolDefinition = ToolDefinition<never, JsonValue>

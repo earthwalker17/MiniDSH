@@ -66,6 +66,12 @@ export interface StoredSessionSummary {
    * store's bounded prefix read did not reach far enough to find either.
    */
   readonly title?: string
+  /**
+   * When the store last wrote this session (ms since the epoch) — the store's
+   * own clock, not a fact in the log: what a listing sorts or labels "recent"
+   * by without reading the log. Absent from a store that cannot tell.
+   */
+  readonly updatedAt?: number
 }
 
 export interface Persistence {

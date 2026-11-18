@@ -84,6 +84,8 @@ function buildJobTools(ctx: Context, maxWaitMs: number) {
 * You are notified in this session when it ends; read its output with job_output and stop it with job_cancel. Jobs end with their session; on Windows a program a job leaves running after its own command has ended is not stopped with it.`,
     input: z.object({ command: z.string().min(1).describe('The command to run in the background.') }),
     output: z.object({ jobId: z.string(), pid: z.number().nullable(), output: z.string().nullable() }),
+    // Presentation only (core/tools/types.ts `display`), as on the other two job tools.
+    display: { card: 'job', title: 'Start background job', fields: { command: 'command' } },
     render: (_args, value) => [
       {
         type: 'text',
@@ -131,6 +133,7 @@ function buildJobTools(ctx: Context, maxWaitMs: number) {
       wait_ms: z.number().int().nonnegative().optional().describe(`Wait up to this long for the job to end before reading (at most ${maxWaitMs}).`),
     }),
     output: z.object({ status: z.string(), text: z.string() }),
+    display: { card: 'job', title: 'Read job output', fields: { jobId: 'job_id' } },
     // The wait is the tool's own, bounded below; the registry's deadline would
     // cut a legitimate wait short and lose the end it was about to report.
     timeoutMs: null,
@@ -159,6 +162,7 @@ function buildJobTools(ctx: Context, maxWaitMs: number) {
     description: 'Stop a running background job and what it started.',
     input: z.object({ job_id: z.string().min(1) }),
     output: z.object({ status: z.string(), ended: z.boolean() }),
+    display: { card: 'job', title: 'Stop background job', fields: { jobId: 'job_id' } },
     timeoutMs: null,
     render: (args, value) => [
       { type: 'text', text: value.ended ? `job ${args.job_id}: ${value.status}` : `job ${args.job_id}: a stop was requested, but it has not ended yet [status: ${value.status}]` },

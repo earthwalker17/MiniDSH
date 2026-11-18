@@ -11,6 +11,13 @@ import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type
 export interface ModelCatalogEntry extends ModelInfo {
   readonly contextWindow: number
   readonly inputModalities?: readonly ModelModality[]
+  /**
+   * The effort ids this model's adapter accepts, and the one it uses when none
+   * is named — so a surface can offer a picker instead of a free-text field.
+   * Opaque here: the catalog CARRIES them, only the adapter interprets one
+   * (`LlmAdapter`). Absent for a model with no effort knob.
+   */
+  readonly reasoning?: { readonly efforts: readonly string[]; readonly defaultEffort?: string }
 }
 
 /**
@@ -91,7 +98,13 @@ class LlmRuntime implements Llm {
       // method stays the source of the window, and no adapter has to repeat it.
       models: adapter.listModels().map((model) => {
         const resolved = adapter.resolveModel(model.id)
-        return { ...model, contextWindow: resolved.contextWindow, ...(resolved.inputModalities === undefined ? {} : { inputModalities: resolved.inputModalities }) }
+        const { efforts, defaultEffort } = resolved.reasoning
+        return {
+          ...model,
+          contextWindow: resolved.contextWindow,
+          ...(resolved.inputModalities === undefined ? {} : { inputModalities: resolved.inputModalities }),
+          ...(efforts.length === 0 ? {} : { reasoning: { efforts: [...efforts], ...(defaultEffort === undefined ? {} : { defaultEffort }) } }),
+        }
       }),
     }))
   }
