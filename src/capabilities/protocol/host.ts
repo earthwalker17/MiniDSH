@@ -603,6 +603,9 @@ export class ProtocolHost {
 
   /** A session's agent is gone: its last summary says `closed`. */
   onAgentDisposed(agent: Agent): void {
+    // Its image index holds the live log's facts array; a later read indexes
+    // the stored log afresh, so nothing is lost by letting this one go.
+    this.images.delete(agent.id)
     this.oweSummary(agent.session, true)
   }
 
