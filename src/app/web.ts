@@ -137,6 +137,33 @@ function sameAuthority(request: IncomingMessage, authorities: ReadonlySet<string
   return authorities === undefined ? originAuthority === host : authorities.has(originAuthority)
 }
 
+/**
+ * The page may run, style and fetch only what this host serves itself, and
+ * nothing it renders can become script. This surface draws text a MODEL wrote
+ * and tool output an agent read off the workspace or the web — every byte of
+ * it attacker-influenced — on a page that can answer approvals and run
+ * commands; so script is `'self'` only (no inline, no eval), and Trusted Types
+ * with no policy at all make every HTML-string sink (`innerHTML`,
+ * `insertAdjacentHTML`, `document.write`) throw, so the client can build DOM
+ * only from nodes and text. `img-src` admits `blob:`/`data:` for the image
+ * bytes `attachment/read` returns; `frame-ancestors` is the embedding refusal
+ * `x-frame-options` states for older browsers. Pinned directive by directive
+ * in web.test.ts.
+ */
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' blob: data:",
+  "connect-src 'self'",
+  "font-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+  "require-trusted-types-for 'script'",
+  "trusted-types 'none'",
+].join('; ')
+
 /** `Sec-Fetch-Dest` values a browser sends when this page is being put inside another one. */
 const EMBEDDING_DESTINATIONS: ReadonlySet<string> = new Set(['iframe', 'frame', 'embed', 'object', 'fencedframe'])
 
@@ -169,7 +196,8 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
     // port on 127.0.0.1 is the same site, where agents serve their dev
     // servers. Consent buttons a frame can overlay are not consent (S20.5).
     response.setHeader('x-frame-options', 'DENY')
-    response.setHeader('content-security-policy', "frame-ancestors 'none'")
+    // On EVERY response, refusals included: a 401 page is a document too.
+    response.setHeader('content-security-policy', CONTENT_SECURITY_POLICY)
     response.setHeader('x-content-type-options', 'nosniff')
     response.setHeader('referrer-policy', 'no-referrer')
     if (!sameAuthority(request, authorities) || EMBEDDING_DESTINATIONS.has(String(request.headers['sec-fetch-dest'] ?? ''))) {

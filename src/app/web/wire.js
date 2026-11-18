@@ -1,6 +1,8 @@
+// @ts-check
 /**
  * The protocol client, over a WebSocket. Plain ES modules: MiniDSH has no build
- * step, so there is no TypeScript and no bundler in the browser.
+ * step, so there is no TypeScript and no bundler in the browser — the types
+ * below are JSDoc, checked by `tsconfig.web.json` and erased by being comments.
  *
  * It owns three things the host cannot do for it — reconnecting, correlating
  * replies, and keeping one session's event stream gap-free:
@@ -15,17 +17,62 @@
  *   fetched bounded at BOTH ends and applied before the event that revealed it.
  */
 
+/** @typedef {import('../../core/session/types.ts').SessionHeader} SessionHeader */
+/** @typedef {import('../../capabilities/protocol/frames.ts').AttachResult} AttachResult */
+/** @typedef {import('../../capabilities/protocol/frames.ts').PageResult} PageResult */
+/** @typedef {import('../../capabilities/protocol/frames.ts').EventsResult} EventsResult */
+/** @typedef {import('../../capabilities/protocol/frames.ts').SessionView} SessionView */
+
+/**
+ * What the page hears from the wire. Notification params are the method's
+ * (frames.ts); the wire forwards them unread.
+ * @typedef {object} WireHandlers
+ * @property {() => void} [onOpen]
+ * @property {(method: string, params: any) => void} [onNotification]
+ * @property {(event: CloseEvent) => void} [onClose]
+ */
+
+/**
+ * A reply as the pending table settles it: the host's, or the one a closing
+ * socket stands in for.
+ * @typedef {{ result?: unknown, error?: { message: string } }} Reply
+ */
+
+/**
+ * What a window needs of a wire: `Wire` in the page, a scripted host in a
+ * test. Results are the method's (frames.ts).
+ * @typedef {{ request(method: string, params?: any): Promise<any> }} Requester
+ */
+
+/**
+ * One event as a window holds it: the host's envelope, verbatim. The window
+ * reads its `seq` and nothing else, so the payload-bearing fields stay `any`
+ * here — `rows.js` narrows each one through the core kinds (`EventEnvelope`).
+ * @typedef {{ type: string, seq: number, time: number, data: any, surfaceOp?: any, sourceEventSeqs?: any }} WireEvent
+ */
+
+/**
+ * What a window tells its renderer happened (see `SessionWindow`).
+ * @typedef {{ kind: 'reset' } | { kind: 'append', events: WireEvent[] } | { kind: 'prepend', events: WireEvent[] } | { kind: 'view' }} WindowChange
+ */
+
 const BACKOFF_BASE_MS = 500
 const BACKOFF_MAX_MS = 10_000
 /** Events per repair round trip; a hole is fetched in pages like everything else. */
 const REPAIR_LIMIT = 500
 
 export class Wire {
+  /**
+   * @param {string} url
+   * @param {WireHandlers} handlers
+   */
   constructor(url, handlers) {
     this.url = url
     this.handlers = handlers
+    /** @type {WebSocket | undefined} */
     this.socket = undefined
     this.nextId = 1
+    /** @type {Map<number, (frame: Reply) => void>} */
     this.pending = new Map()
     this.attempt = 0
     this.closedByUs = false
@@ -66,6 +113,11 @@ export class Wire {
     })
   }
 
+  /**
+   * @param {string} method
+   * @param {unknown} [params]
+   * @returns {Promise<any>} the method's result, shaped as frames.ts says
+   */
   request(method, params) {
     return new Promise((resolve, reject) => {
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
@@ -100,15 +152,28 @@ export class Wire {
  * `{kind: 'prepend', events}` | `{kind: 'view'}`.
  */
 export class SessionWindow {
+  /**
+   * @param {Requester} wire
+   * @param {string} sessionId
+   * @param {(change: WindowChange) => void} onChange
+   */
   constructor(wire, sessionId, onChange) {
     this.wire = wire
     this.sessionId = sessionId
     this.onChange = onChange
+    /** @type {WireEvent[]} */
     this.events = []
     this.cursor = -1
     this.oldest = 0
     this.hasMore = false
+    /** @type {SessionHeader | undefined} */
     this.header = undefined
+    /**
+     * The host's folds, stored for the renderer and read by nothing here —
+     * `Partial` only because a test pushes a fragment; the page always
+     * receives a whole `SessionView`.
+     * @type {Partial<SessionView> | undefined}
+     */
     this.view = undefined
     /** The stored log is a readable prefix, not the whole session. */
     this.damaged = false
@@ -120,6 +185,7 @@ export class SessionWindow {
     // events arriving around that await would otherwise interleave: the second
     // would see the pre-repair cursor, push itself past the hole, and the
     // repaired range would then be dropped as already-seen.
+    /** @type {Promise<unknown>} */
     this.queue = Promise.resolve()
   }
 
@@ -143,6 +209,7 @@ export class SessionWindow {
   }
 
   async attachOnce() {
+    /** @type {AttachResult} */
     const attached = await this.wire.request('session/attach', { sessionId: this.sessionId })
     if (attached.cursor < this.cursor) throw new Error('the host answered with a cursor behind what was already applied')
     this.header = attached.header
@@ -172,16 +239,19 @@ export class SessionWindow {
     if (!this.hasMore || this.paging) return
     this.paging = true
     try {
+      /** @type {PageResult} */
       const { page } = await this.wire.request('session/page', { sessionId: this.sessionId, throughSeq: this.cursor, beforeSeq: this.oldest })
       this.events = [...page.events, ...this.events]
       this.oldest = page.from
       this.hasMore = page.hasMore
-      this.onChange({ kind: 'prepend', events: page.events })
+      // A renderer reads what it is handed and never mutates it; the cast only drops `readonly`.
+      this.onChange({ kind: 'prepend', events: /** @type {WireEvent[]} */ (page.events) })
     } finally {
       this.paging = false
     }
   }
 
+  /** @param {Partial<SessionView>} view */
   setView(view) {
     this.view = view
     this.onChange({ kind: 'view' })
@@ -197,6 +267,7 @@ export class SessionWindow {
    * a page carries. The repair machinery ran constantly, so a REAL drop — which
    * is what a carrier under pressure does to exactly this tier — was
    * indistinguishable from an ordinary turn.
+   * @param {WireEvent} event
    */
   noted(event) {
     // On the SAME queue as `apply`, because it moves the same cursor. Advancing
@@ -211,7 +282,10 @@ export class SessionWindow {
     this.queue = this.queue.then(advance, advance)
   }
 
-  /** A live event, applied in arrival order. Already-seen is dropped; a hole is repaired first. */
+  /**
+   * A live event, applied in arrival order. Already-seen is dropped; a hole is repaired first.
+   * @param {WireEvent} event
+   */
   apply(event) {
     // Serialized, and a failure never blocks the next event.
     this.queue = this.queue.then(
@@ -221,6 +295,7 @@ export class SessionWindow {
     return this.queue
   }
 
+  /** @param {WireEvent} event */
   async applyOne(event) {
     // Before the first page there is nothing to apply INTO, and a repair from
     // cursor -1 would ask for the whole log — the one thing paging exists to
@@ -238,9 +313,11 @@ export class SessionWindow {
    * Fetch a hole, bounded at BOTH ends and in pages. A repair is a range read,
    * not a whole-log read: asking for everything from the cursor would undo the
    * paging the rest of this client is built on.
+   * @param {number} throughSeq
    */
   async repair(throughSeq) {
     while (this.cursor < throughSeq) {
+      /** @type {EventsResult} */
       const { events } = await this.wire.request('session/events', {
         sessionId: this.sessionId,
         fromSeq: this.cursor + 1,

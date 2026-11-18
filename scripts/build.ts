@@ -14,6 +14,8 @@
  * `prepack` runs it (`npm pack`, `npm publish`); `pnpm build` runs it by hand.
  * Nothing else does: dev and tests keep running the source, and `bin/minidsh.js`
  * picks `dist/` only where `src/` is absent, which is exactly the tarball.
+ * Importing this module builds nothing (`import.meta.main`): `WEB_ASSETS` is
+ * read by `src/app/web/assets.test.ts` and `scripts/smoke-installed.sh`.
  */
 import { spawnSync } from 'node:child_process'
 import { cpSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
@@ -31,8 +33,12 @@ const WEB = join('app', 'web')
  * fails the pack. A fifth asset added there and forgotten here would otherwise
  * 404 for installed users only, with every test and every CI leg still green,
  * because a checkout serves the directory itself.
+ *
+ * The ONE list: `src/app/web/assets.test.ts` requires it to equal exactly what
+ * the page loads (index.html's references and the static import graph), and
+ * the installed-package smoke checks every entry in the installed `dist/`.
  */
-const WEB_ASSETS = ['index.html', 'style.css', 'app.js', 'rows.js', 'wire.js'] as const
+export const WEB_ASSETS = ['index.html', 'style.css', 'app.js', 'rows.js', 'wire.js'] as const
 
 function fail(message: string): never {
   process.stderr.write(`build: ${message}\n`)
@@ -53,54 +59,58 @@ const isTest = (file: string): boolean => /\.test\.(ts|js)$/.test(file)
 const isSupport = (file: string): boolean => file.includes(`${sep}test-support${sep}`)
 const isWebAsset = (file: string): boolean => WEB_ASSETS.some((asset) => file.endsWith(join(WEB, asset)))
 
-rmSync(DIST, { recursive: true, force: true })
+function build(): void {
+  rmSync(DIST, { recursive: true, force: true })
 
-// The compiler, resolved from node_modules rather than PATH: `prepack` runs
-// under whatever package manager the publisher used, and `tsc` on PATH is not
-// something npm promises.
-const tsc = spawnSync(process.execPath, [join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(ROOT, 'tsconfig.build.json')], {
-  cwd: ROOT,
-  stdio: 'inherit',
-})
-if (tsc.status !== 0) fail(`tsc exited ${tsc.status ?? tsc.signal}`)
+  // The compiler, resolved from node_modules rather than PATH: `prepack` runs
+  // under whatever package manager the publisher used, and `tsc` on PATH is not
+  // something npm promises.
+  const tsc = spawnSync(process.execPath, [join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(ROOT, 'tsconfig.build.json')], {
+    cwd: ROOT,
+    stdio: 'inherit',
+  })
+  if (tsc.status !== 0) fail(`tsc exited ${tsc.status ?? tsc.signal}`)
 
-const shipped = readdirSync(join(SRC, WEB)).filter((name) => !isTest(name))
-const unlisted = shipped.filter((name) => !(WEB_ASSETS as readonly string[]).includes(name))
-if (unlisted.length > 0) fail(`src/${WEB} holds an asset the emit does not copy: ${unlisted.join(', ')} — add it to WEB_ASSETS`)
-for (const asset of WEB_ASSETS) cpSync(join(SRC, WEB, asset), join(DIST, WEB, asset))
+  const shipped = readdirSync(join(SRC, WEB)).filter((name) => !isTest(name))
+  const unlisted = shipped.filter((name) => !(WEB_ASSETS as readonly string[]).includes(name))
+  if (unlisted.length > 0) fail(`src/${WEB} holds an asset the emit does not copy: ${unlisted.join(', ')} — add it to WEB_ASSETS`)
+  for (const asset of WEB_ASSETS) cpSync(join(SRC, WEB, asset), join(DIST, WEB, asset))
 
-// What must not be in the emit: a test, the test harness, or a `.ts` specifier
-// the rewrite missed — Node would fail to resolve that at the install, not here.
-const emitted = walk(DIST)
-const stray = emitted.filter((file) => isTest(file) || isSupport(file))
-if (stray.length > 0) fail(`test code reached dist/: ${stray.join(', ')}`)
-// A browser asset is copied verbatim, so the rewrite never saw it, and `rows.js`
-// is typed against the core event kinds through JSDoc `import('….ts')` types,
-// which are comments. So an asset is held to the STATIC form alone: a type
-// import is never `from '….ts'`, and a runtime import in those files always is.
-// Nothing else would catch one. No test loads `app.js` as a module, and Node
-// resolves a `.ts` specifier happily when `rows.test.ts` imports `rows.js`.
-const RUNTIME_TS = /(?:from|import\()\s*['"]\.[^'"]*\.ts['"]/
-const STATIC_TS = /from\s*['"]\.[^'"]*\.ts['"]/
-const unrewritten = emitted.filter((file) => file.endsWith('.js') && (isWebAsset(file) ? STATIC_TS : RUNTIME_TS).test(readFileSync(file, 'utf8')))
-if (unrewritten.length > 0) fail(`a .ts import specifier survived the emit: ${unrewritten.join(', ')}`)
+  // What must not be in the emit: a test, the test harness, or a `.ts` specifier
+  // the rewrite missed — Node would fail to resolve that at the install, not here.
+  const emitted = walk(DIST)
+  const stray = emitted.filter((file) => isTest(file) || isSupport(file))
+  if (stray.length > 0) fail(`test code reached dist/: ${stray.join(', ')}`)
+  // A browser asset is copied verbatim, so the rewrite never saw it, and `rows.js`
+  // is typed against the core event kinds through JSDoc `import('….ts')` types,
+  // which are comments. So an asset is held to the STATIC form alone: a type
+  // import is never `from '….ts'`, and a runtime import in those files always is.
+  // Nothing else would catch one. No test loads `app.js` as a module, and Node
+  // resolves a `.ts` specifier happily when `rows.test.ts` imports `rows.js`.
+  const RUNTIME_TS = /(?:from|import\()\s*['"]\.[^'"]*\.ts['"]/
+  const STATIC_TS = /from\s*['"]\.[^'"]*\.ts['"]/
+  const unrewritten = emitted.filter((file) => file.endsWith('.js') && (isWebAsset(file) ? STATIC_TS : RUNTIME_TS).test(readFileSync(file, 'utf8')))
+  if (unrewritten.length > 0) fail(`a .ts import specifier survived the emit: ${unrewritten.join(', ')}`)
 
-// Every implementation file has exactly one emitted twin: the count is what
-// checks that the build's include/exclude describes the tree rather than a
-// subset of it, since a module tsc never saw is a module the install lacks.
-const sources = walk(SRC).filter((file) => file.endsWith('.ts') && !isTest(file) && !isSupport(file))
-const modules = emitted.filter((file) => file.endsWith('.js') && !isWebAsset(file))
-if (sources.length !== modules.length) fail(`${sources.length} implementation files under src/ but ${modules.length} modules in dist/`)
+  // Every implementation file has exactly one emitted twin: the count is what
+  // checks that the build's include/exclude describes the tree rather than a
+  // subset of it, since a module tsc never saw is a module the install lacks.
+  const sources = walk(SRC).filter((file) => file.endsWith('.ts') && !isTest(file) && !isSupport(file))
+  const modules = emitted.filter((file) => file.endsWith('.js') && !isWebAsset(file))
+  if (sources.length !== modules.length) fail(`${sources.length} implementation files under src/ but ${modules.length} modules in dist/`)
 
-// The entry, loaded once in THIS Node with no type stripper in the path. It
-// imports the whole default composition, so every rewritten specifier is
-// resolved for real before anything is packed.
-const entry = pathToFileURL(join(DIST, 'app', 'cli.js')).href
-const smoke = spawnSync(
-  process.execPath,
-  ['--input-type=module', '-e', `const m = await import(${JSON.stringify(entry)}); if (typeof m.main !== 'function') throw new Error('dist/app/cli.js exports no main')`],
-  { cwd: ROOT, stdio: 'inherit' },
-)
-if (smoke.status !== 0) fail('the emitted entry did not load')
+  // The entry, loaded once in THIS Node with no type stripper in the path. It
+  // imports the whole default composition, so every rewritten specifier is
+  // resolved for real before anything is packed.
+  const entry = pathToFileURL(join(DIST, 'app', 'cli.js')).href
+  const smoke = spawnSync(
+    process.execPath,
+    ['--input-type=module', '-e', `const m = await import(${JSON.stringify(entry)}); if (typeof m.main !== 'function') throw new Error('dist/app/cli.js exports no main')`],
+    { cwd: ROOT, stdio: 'inherit' },
+  )
+  if (smoke.status !== 0) fail('the emitted entry did not load')
 
-process.stdout.write(`build: ${modules.length} modules + ${WEB_ASSETS.length} browser assets -> dist/\n`)
+  process.stdout.write(`build: ${modules.length} modules + ${WEB_ASSETS.length} browser assets -> dist/\n`)
+}
+
+if (import.meta.main) build()

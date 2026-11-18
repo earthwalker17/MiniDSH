@@ -154,6 +154,38 @@ export function readsPayloadByCast(source: string): boolean {
   return PAYLOAD_CASTS.some((pattern) => pattern.test(source))
 }
 
+/** The browser client's own modules: plain JS the host serves from one flat directory. */
+const WEB_MODULE = /^app\/web\/[^/]+\.js$/
+/** The one runtime import a browser module may make: a sibling, by its served name. */
+const WEB_SIBLING = /^\.\/[\w.-]+\.js$/
+
+/**
+ * Every module specifier a browser module asks the BROWSER to load — static,
+ * re-exported, side-effect and string-literal dynamic imports, relative or not
+ * (`collectImports` sees only relative ones, and a bare `'lit'` is exactly what
+ * must not pass). `import type` is not valid JavaScript, and a JSDoc
+ * `import('….ts').T` is a type position inside a comment, never a fetch.
+ */
+export function webImports(source: string): string[] {
+  const found: string[] = []
+  for (const match of source.matchAll(/(?:^|\n)[ \t]*(?:import|export)\s+(?:(?!\n[ \t]*(?:import|export)\s)[^'"])*?from\s*['"]([^'"]+)['"]/g)) found.push(match[1]!)
+  for (const match of source.matchAll(/(?:^|\n)[ \t]*import\s*['"]([^'"]+)['"]/g)) found.push(match[1]!)
+  for (const match of source.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)(?!\s*\.)/g)) found.push(match[1]!)
+  return found
+}
+
+/**
+ * Rule 4: a browser module imports at runtime only a SIBLING by its served
+ * name (`./rows.js`). The host serves one flat directory of named assets
+ * (`app/web.ts`) and ships exactly `WEB_ASSETS` (scripts/build.ts): a `.ts`
+ * specifier, a path out of the directory or a bare package resolves in a
+ * checkout's tests (Node strips types, resolves packages) and 404s in every
+ * browser. `undefined` when the specifier is allowed, otherwise the reason.
+ */
+export function webImportViolation(spec: string): string | undefined {
+  return WEB_SIBLING.test(spec) ? undefined : 'a browser module may import at runtime only a sibling .js module, as "./<name>.js" (the host serves one flat directory)'
+}
+
 export interface TreeReport {
   readonly violations: string[]
   /** How many core files the acyclicity rule saw. */
@@ -161,7 +193,7 @@ export interface TreeReport {
 }
 
 /**
- * All three rules over a tree: `files` maps each source file's path relative
+ * All four rules over a tree: `files` maps each source file's path relative
  * to `src/` (posix) to its text. Test files are the caller's to leave out —
  * they mount real compositions across layers.
  */
@@ -172,6 +204,15 @@ export function checkTree(files: ReadonlyMap<string, string>): TreeReport {
   for (const [file, source] of files) {
     const importer = layerOf(file)
     const fail = (why: string): void => void violations.push(`${file}: ${why}`)
+    // A browser module is held to rule 4 alone: it is app-layer (rule 1 allows
+    // anything there), and its payload reads are JSDoc, not `as` casts.
+    if (WEB_MODULE.test(file)) {
+      for (const spec of new Set(webImports(source))) {
+        const why = webImportViolation(spec)
+        if (why !== undefined) fail(`-> ${spec}: ${why}`)
+      }
+      continue
+    }
     if (importer === 'core') coreGraph.set(file, new Set())
     const seen = new Set<string>()
     for (const ref of collectImports(source)) {

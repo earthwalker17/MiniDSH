@@ -1,0 +1,18 @@
+// The browser client: plain ES modules with JSDoc types, checked against the
+// DOM. A file opts in with `// @ts-check` (checkJs stays off, so an unported
+// file is not held to a standard it was not written for). Node's types stay
+// on because a JSDoc `import('….ts')` pulls core files in, and those are
+// checked as written. The main project excludes these files and still checks
+// any its tests import.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2024", "dom", "dom.iterable"],
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/app/web/*.js"],
+  "exclude": []
+}

@@ -159,6 +159,51 @@ describe('the web surface trust fence', () => {
     expect(await status(host.port, { cookie, 'sec-fetch-dest': 'document' })).toBe(200)
   })
 
+  /**
+   * The page renders model- and tool-written text on an authority surface, so
+   * its policy admits only this host's own script, style and sockets, and no
+   * HTML-string sink at all (`trusted-types 'none'`). Parsed directive by
+   * directive, from what the server SENDS — on the page, on an asset, and on a
+   * refusal — so a dropped or widened directive fails by name.
+   */
+  it('sends a strict content security policy on every response', async () => {
+    const { origin, token } = await web()
+    const expected: Record<string, string> = {
+      'default-src': "'self'",
+      'script-src': "'self'",
+      'style-src': "'self'",
+      'img-src': "'self' blob: data:",
+      'connect-src': "'self'",
+      'font-src': "'self'",
+      'base-uri': "'none'",
+      'form-action': "'none'",
+      'frame-ancestors': "'none'",
+      'require-trusted-types-for': "'script'",
+      'trusted-types': "'none'",
+    }
+    const unauthenticated = await fetch(`${origin}/`)
+    const cookie = await signIn(origin, token)
+    for (const response of [unauthenticated, await fetch(`${origin}/`, { headers: { cookie } }), await fetch(`${origin}/app.js`, { headers: { cookie } })]) {
+      const header = response.headers.get('content-security-policy')
+      expect(header, `no policy on ${response.url} (${response.status})`).not.toBeNull()
+      const directives = new Map(
+        header!
+          .split(';')
+          .map((part) => part.trim())
+          .filter((part) => part.length > 0)
+          .map((part) => {
+            const [name, ...values] = part.split(/\s+/)
+            return [name!, values.join(' ')] as const
+          }),
+      )
+      for (const [name, value] of Object.entries(expected)) expect(directives.get(name), `${name} on ${response.url}`).toBe(value)
+      // Nothing beyond the list: an added source is a widening, and widening is a decision.
+      expect([...directives.keys()].toSorted()).toEqual(Object.keys(expected).toSorted())
+      expect(response.headers.get('x-frame-options')).toBe('DENY')
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    }
+  })
+
   it('serves no path but its own flat assets', async () => {
     const { host, origin, token } = await web()
     const cookie = await signIn(origin, token)

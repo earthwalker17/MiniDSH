@@ -1,5 +1,5 @@
 /**
- * Source-shape gates. Three rules, one script:
+ * Source-shape gates. Four rules, one script:
  *
  * 1. Dependency direction, from docs/ARCHITECTURE.md §1, as a whitelist per
  *    layer: kernel imports only kernel; core imports kernel + core (but
@@ -24,6 +24,11 @@
  *    erased and do not count — an inline `{ type A }` specifier keeps the
  *    import and evaluates the module under Node's type stripping.
  *
+ * 4. A browser module (`src/app/web/*.js`) imports at runtime only a sibling,
+ *    as `./<name>.js`: the host serves one flat directory and ships exactly
+ *    `WEB_ASSETS`, so anything else works under a checkout's Node and 404s in
+ *    every browser. JSDoc type imports are comments and are not counted.
+ *
  * Test files are exempt (they mount real compositions across layers). The
  * rules themselves live in `deps-graph.ts`, pure, and are tested there.
  */
@@ -33,12 +38,13 @@ import { checkTree } from './deps-graph.ts'
 
 const SRC = resolve(import.meta.dirname, '..', 'src')
 
+/** Source files, tests left out: every `.ts`, and the browser client's `.js` modules (rule 4). */
 function walk(dir: string): string[] {
   const out: string[] = []
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry)
     if (statSync(full).isDirectory()) out.push(...walk(full))
-    else if (full.endsWith('.ts') && !full.endsWith('.test.ts')) out.push(full)
+    else if (/\.(ts|js)$/.test(full) && !/\.test\.(ts|js)$/.test(full)) out.push(full)
   }
   return out
 }
@@ -50,4 +56,4 @@ if (violations.length > 0) {
   process.stderr.write(`source-shape violations:\n${violations.map((v) => `  ${v}`).join('\n')}\n`)
   process.exit(1)
 }
-process.stdout.write(`check-deps: dependency direction, payload discipline and core acyclicity OK (${coreFiles} core files)\n`)
+process.stdout.write(`check-deps: dependency direction, payload discipline, core acyclicity and browser-module imports OK (${coreFiles} core files)\n`)

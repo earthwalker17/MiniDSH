@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkTree, collectImports, directionViolation, findCycle, readsPayloadByCast, unresolvableImports } from './deps-graph.ts'
+import { checkTree, collectImports, directionViolation, findCycle, readsPayloadByCast, unresolvableImports, webImports, webImportViolation } from './deps-graph.ts'
 
 describe('the source-shape gate', () => {
   it('reads every relative import form and tells a type-only statement from a value one', () => {
@@ -134,5 +134,32 @@ describe('the rules, over synthetic trees', () => {
     }
     const { violations } = checkTree(tree({ 'capabilities/x/index.ts': 'const x = (event.data) as Foo', 'test-support/y.ts': 'const x = event.data as Foo' }))
     expect(violations).toEqual(['capabilities/x/index.ts: reads an event payload through a type assertion; narrow with matches(event, KIND) so a renamed field is a type error'])
+  })
+
+  it('lets a browser module import at runtime only a sibling by its served name, and counts no JSDoc type import', () => {
+    const source = [
+      `// @ts-check`,
+      `/** @typedef {import('../../core/session/types.ts').EventEnvelope} EventEnvelope */`,
+      `/** @typedef {typeof import('../../core/session/types.ts').USER_MESSAGE} UserMessage */`,
+      ` * @import { Thing } from '../../core/thing.ts'`,
+      `import { ok } from './rows.js'`,
+      `export { again } from './wire.js'`,
+      `import { core } from '../../core/session/types.ts'`,
+      `import { typed } from './rows.ts'`,
+      `import lit from 'lit'`,
+      `import './side.css.js'`,
+      `import '../escape.js'`,
+      `const lazy = await import('./theme.js')`,
+      `const far = await import('../web.js')`,
+    ].join('\n')
+    expect(webImports(source)).toEqual(['./rows.js', './wire.js', '../../core/session/types.ts', './rows.ts', 'lit', './side.css.js', '../escape.js', './theme.js', '../web.js'])
+    // Only a browser module is held to it: an app-layer `.ts` importing one is rule 1's, which allows it.
+    const { violations } = checkTree(tree({ 'app/web/app.js': source, 'app/other.ts': `import { y } from './web/rows.js'` }))
+    expect(violations).toEqual(
+      ['../../core/session/types.ts', './rows.ts', 'lit', '../escape.js', '../web.js'].map(
+        (spec) => `app/web/app.js: -> ${spec}: a browser module may import at runtime only a sibling .js module, as "./<name>.js" (the host serves one flat directory)`,
+      ),
+    )
+    expect(webImportViolation('./rows.js')).toBeUndefined()
   })
 })
