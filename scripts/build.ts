@@ -38,7 +38,28 @@ const WEB = join('app', 'web')
  * the page loads (index.html's references and the static import graph), and
  * the installed-package smoke checks every entry in the installed `dist/`.
  */
-export const WEB_ASSETS = ['index.html', 'style.css', 'app.js', 'rows.js', 'wire.js'] as const
+export const WEB_ASSETS = [
+  'index.html',
+  'style.css',
+  'theme.js',
+  'app.js',
+  'approval.js',
+  'cards.js',
+  'composer.js',
+  'conversation.js',
+  'format.js',
+  'highlight.js',
+  'icons.js',
+  'markdown.js',
+  'md.js',
+  'panel.js',
+  'rows.js',
+  'settings.js',
+  'sidebar.js',
+  'transcript.js',
+  'ui.js',
+  'wire.js',
+] as const
 
 function fail(message: string): never {
   process.stderr.write(`build: ${message}\n`)

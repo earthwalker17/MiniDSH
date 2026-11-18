@@ -1,371 +1,701 @@
+// @ts-check
 /**
- * The browser surface. It renders durable events and drives the same control
- * plane the terminal does — and holds no semantics of its own:
+ * The browser surface: wiring only. It renders durable events and drives the
+ * same control plane the terminal does, and holds no semantics of its own:
  *
- * - Context pressure, the open approvals, the authority, the route and the
- *   background jobs all arrive in `SessionView`, because a client holding one
- *   PAGE cannot fold them; what every OTHER session wants from a person
- *   arrives as `control.summary`.
- * - The transcript is the log in seq order, not model history. Nothing here
- *   folds the surface; a compaction shows as the record it is, and the messages
- *   it shadowed are still there when you page back.
- * - Every switch it asks for becomes a durable event it then reads back, like
- *   any other surface.
- * - No test imports this file: the DOM rendering is untested. The window rules
- *   (`wire.js`) and the row projection (`rows.js`) are what the unit tests cover.
+ * - The transcript is the log in seq order, grouped for reading by
+ *   `conversation.js` (presentation, never a fold of the surface), drawn by
+ *   `transcript.js`.
+ * - Context pressure, the open approvals, the authority, the route, the jobs
+ *   and whether a session may be driven arrive in `SessionView`, because a
+ *   client holding one PAGE cannot fold them; what every OTHER session wants
+ *   from a person arrives as `control.summary`.
+ * - Every switch it asks for becomes a durable event it then reads back; a
+ *   refused one appends nothing, so the controls redraw from what the runtime
+ *   last published.
+ * - Which card a tool's call draws is the TOOL's declaration (`display`, in
+ *   `initialize` and `session/attach`), never a name this file knows.
  */
-import { describeRow, jobEnded, subjectText, tokens } from './rows.js'
+import { createApproval } from './approval.js'
+import { createComposer } from './composer.js'
+import { shortId } from './format.js'
+import { icon, mark } from './icons.js'
+import { createPanel } from './panel.js'
+import { tokens } from './rows.js'
+import { createSettings } from './settings.js'
+import { createSidebar } from './sidebar.js'
+import { createTranscript } from './transcript.js'
+import { announce, byId, closeMenus, confirmDialog, copyText, fail, h, iconButton, showMenu, toast } from './ui.js'
 import { SessionWindow, Wire } from './wire.js'
 
-const $ = (id) => document.getElementById(id)
-const el = (tag, className, text) => {
-  const node = document.createElement(tag)
-  if (className) node.className = className
-  if (text !== undefined) node.textContent = text
-  return node
-}
+/** @typedef {import('../../capabilities/protocol/frames.ts').InitializeResult} InitializeResult */
+/** @typedef {import('../../capabilities/protocol/frames.ts').SessionSummary} SessionSummary */
+/** @typedef {import('../../capabilities/protocol/frames.ts').SessionView} SessionView */
+/** @typedef {import('../../capabilities/protocol/frames.ts').ControlSummary} ControlSummary */
+/** @typedef {import('../../core/tools/types.ts').ToolDisplay} ToolDisplay */
+/** @typedef {import('../../core/approval/events.ts').OpenApproval} OpenApproval */
 
 const state = {
-  wire: undefined,
+  /** @type {Wire} */
+  wire: /** @type {any} */ (undefined),
+  /** @type {InitializeResult | undefined} */
   init: undefined,
+  /** @type {SessionWindow | undefined} */
   window: undefined,
-  /** The growing assistant row, while text is streaming into it. */
-  streaming: undefined,
-  /** The "… thinking" row, while a reasoning route is between prompt and first token. */
-  thinking: undefined,
-  /**
-   * Every row streamed since the last durable assistant message — usually one,
-   * two when a retried attempt abandoned its partial text. They are removed
-   * when the message that replaces them arrives, so nothing else has to.
-   */
-  streamRows: [],
-  pendingApproval: undefined,
-  workspaceId: undefined,
-  /**
-   * The latest `control.summary` per session: whole-state and superseding, so
-   * the newest one is all there is to know. What the session list's badges
-   * read — never a fold of this client's own.
-   */
+  /** @type {SessionSummary[]} */
+  sessions: [],
+  /** The latest `control.summary` per session: whole-state and superseding. @type {Map<string, ControlSummary>} */
   summaries: new Map(),
-  /** The badge holder of each listed session, so a summary updates it in place. */
-  badges: new Map(),
-  /** Jobs whose stop this client asked for and has no answer to yet. */
-  stopping: new Set(),
-  /**
-   * The live status, kept beside the view: `session.status` flips at turn end,
-   * but the last `session.view` was published mid-turn and still says
-   * `running`. Re-rendering from the view alone would put a finished turn back
-   * into "running" and leave it there.
-   */
+  /** The live status, kept beside the view (a flip publishes both since S22, but `session.status` is the faster). @type {string | undefined} */
   status: undefined,
+  /** Each tool's declared presentation: the catalog, overlaid by the open agent's own. @type {Map<string, ToolDisplay | undefined>} */
+  tools: new Map(),
+  /** @type {Map<string, ToolDisplay | undefined>} */
+  sessionTools: new Map(),
+  /** Jobs whose stop this client asked for and has no answer to yet. @type {Set<string>} */
+  stopping: new Set(),
+  /** What the next NEW session starts with, chosen before its first message. */
+  pendingNew: /** @type {{ agentOptions?: { provider: string, model: string, reasoningEffort?: string }, authority?: { preset?: string, sandbox?: string, approval?: string, accepts?: string }, workspaceId?: string }} */ ({}),
+  /** Messages sent and not yet in the log, by the id `session/prompt` returned. @type {Map<string, HTMLElement>} */
+  pending: new Map(),
+  connected: false,
+  wasOffline: false,
+  panelOpen: false,
+  /** @type {Map<string, Promise<string>>} */
+  images: new Map(),
+  imageQueue: Promise.resolve(),
 }
 
-// ---- rendering -------------------------------------------------------------
+// ---- the parts ------------------------------------------------------------------
 
-/**
- * One row per event. WHAT a row says lives in `rows.js`, DOM-free and typed
- * against the core event kinds, where a test holds it to the visibility of the
- * plain-text projection; this only builds the nodes.
- *
- * The projection is typed against THIS host's kinds and no longer guards every
- * field with `?.`, so an event shaped by a different host version can throw in
- * it. That costs one row that says so, never the transcript: both render loops
- * call this with no guard of their own.
- */
-function row(event) {
-  let described
-  try {
-    described = describeRow(event)
-  } catch (error) {
-    described = { cls: 'row denied', text: `[unreadable ${event?.type ?? 'event'}: ${error instanceof Error ? error.message : String(error)}]` }
-  }
-  if (!described) return undefined
-  if (described.who === undefined) return el('div', described.cls, described.text)
-  const node = el('div', described.cls)
-  node.append(el('div', 'who', described.who), el('div', 'body', described.text))
-  return node
+const main = byId('main')
+const sidebar = createSidebar({
+  app: byId('app'),
+  sidebar: byId('sidebar'),
+  brand: byId('brand'),
+  newButton: /** @type {HTMLButtonElement} */ (byId('new')),
+  listHead: byId('list-head'),
+  filter: /** @type {HTMLInputElement} */ (byId('filter')),
+  list: byId('sessions'),
+  foot: byId('sidebar-foot'),
+  scrim: byId('scrim'),
+  onOpen: (id) => void openSession(id).catch(fail),
+  onNew: () => newSession(),
+  onSettings: () => settings.open(),
+})
+
+const transcript = createTranscript({
+  rows: byId('rows'),
+  live: byId('live'),
+  working: byId('working'),
+  scroller: byId('log'),
+  more: /** @type {HTMLButtonElement} */ (byId('more')),
+  historyStart: byId('history-start'),
+  toBottom: /** @type {HTMLButtonElement} */ (byId('to-bottom')),
+  display: (name) => (state.sessionTools.has(name) ? state.sessionTools.get(name) : state.tools.get(name)),
+  loadImage,
+  openSession: (id) => void openSession(id).catch(fail),
+  loadOlder: () => void state.window?.older().catch(fail),
+})
+
+const composer = createComposer({
+  form: /** @type {HTMLFormElement} */ (byId('composer')),
+  textarea: /** @type {HTMLTextAreaElement} */ (byId('prompt')),
+  bar: byId('composer-bar'),
+  meta: byId('composer-meta'),
+  onSend: (text, mode) => void send(text, mode),
+  onStop: () => cancelTurn(),
+  onPlus: (anchor) => plusMenu(anchor),
+  onPermission: (anchor) => permissionMenu(anchor),
+  onModel: (anchor) => modelMenu(anchor),
+})
+
+const approval = createApproval({ host: byId('approval'), onAnswer: answer })
+
+const panel = createPanel({
+  host: byId('panel'),
+  onRevoke: (grantId) => void revoke(grantId),
+  onStopJob: (jobId) => void stopJob(jobId),
+  onOpen: (id) => {
+    togglePanel(false)
+    void openSession(id).catch(fail)
+  },
+})
+
+const settings = createSettings({ dialog: /** @type {HTMLDialogElement} */ (byId('settings')), wire: () => state.wire, init: () => state.init })
+
+// ---- the top bar ------------------------------------------------------------------
+
+const topbar = byId('topbar')
+const drawerOpener = iconButton('panel-left', 'Open sessions', () => sidebar.openDrawer(), 'icon-btn drawer-opener')
+const crumbs = h('nav', { class: 'crumbs', attrs: { 'aria-label': 'Session' } })
+const chips = h('div', { class: 'chip-row' })
+const panelToggle = iconButton('sliders', 'Session details', () => togglePanel())
+panelToggle.setAttribute('aria-expanded', 'false')
+panelToggle.setAttribute('aria-controls', 'panel')
+const more = iconButton('more', 'More', () => moreMenu(more))
+more.setAttribute('aria-haspopup', 'menu')
+more.setAttribute('aria-expanded', 'false')
+topbar.append(drawerOpener, crumbs, chips, h('span', { class: 'spacer' }), panelToggle, more)
+
+/** @param {boolean} [open] */
+function togglePanel(open = !state.panelOpen) {
+  state.panelOpen = open && state.window !== undefined
+  byId('panel').hidden = !state.panelOpen
+  panelToggle.setAttribute('aria-expanded', String(state.panelOpen))
+  if (state.panelOpen) renderPanel()
+}
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.panelOpen && !document.querySelector('dialog[open], .menu')) togglePanel(false)
+})
+document.addEventListener('pointerdown', (event) => {
+  const target = /** @type {Node} */ (event.target)
+  if (state.panelOpen && !byId('panel').contains(target) && !panelToggle.contains(target) && !document.querySelector('.menu')?.contains(target)) togglePanel(false)
+})
+
+// ---- rendering what the host published ----------------------------------------------
+
+/** The open session's listing entry, when the list has it. */
+const currentSummary = () => state.sessions.find((session) => session.id === state.window?.sessionId)
+
+function isLive() {
+  const id = state.window?.sessionId
+  if (!id) return false
+  const control = state.summaries.get(id)
+  if (control) return control.status !== 'closed'
+  return currentSummary()?.live === true || state.status !== undefined
 }
 
-/**
- * Within this of the bottom counts as "reading the tail", so the transcript
- * follows. Further up means the reader went looking for something, and yanking
- * them back is the defect this number exists to avoid.
- */
-const STICK_SLACK_PX = 40
+/** The open session's view, as the host publishes it: whole (frames.ts `SessionView`). */
+const viewOf = () => /** @type {SessionView | undefined} */ (state.window?.view)
 
-const atBottom = () => {
-  const log = $('log')
-  return log.scrollHeight - log.scrollTop - log.clientHeight <= STICK_SLACK_PX
-}
-
-/**
- * Scroll ownership is sampled just BEFORE each mutation and never stored.
- *
- * The reference implementation needs a ledger of its own scroll writes to tell
- * them from the reader's, because it keeps bottom-ownership as state driven by
- * scroll events. Nothing here listens to a scroll event at all, so there is
- * nothing to confuse: the question "was the reader at the bottom a moment ago"
- * is answered by reading the geometry a moment ago.
- *
- * That only stays true if the write happens in the same tick as the sample. A
- * first version deferred it to an animation frame, which reads better and is
- * wrong: a delta arriving between the sample and the frame measures a deficit
- * this code created and has not paid back yet, so a reader following at the
- * bottom is dropped mid-answer. One synchronous write per delta is what the
- * old code did, and the streaming path was never where the cost was.
- */
-function toBottom() {
-  const log = $('log')
-  log.scrollTop = log.scrollHeight
-}
-
-/** Drops any partially streamed rows: the durable message replaces them, and a failed attempt leaves none. */
-function dropStreamRows() {
-  for (const node of state.streamRows.splice(0)) node.remove()
-  state.streaming = undefined
-  state.thinking = undefined
-}
-
-/** A fresh page replaces the window, so it replaces the rows. Everything else extends them. */
-function resetTranscript() {
+function renderAll() {
   const window_ = state.window
-  $('rows').replaceChildren()
-  dropStreamRows()
-  $('damaged').hidden = !window_?.damaged
-  $('more').hidden = !window_?.hasMore
+  const view = viewOf()
+  const empty = window_ === undefined
+  main.toggleAttribute('data-empty', empty && transcript.empty)
+  main.toggleAttribute('data-started', !empty)
+  panelToggle.hidden = empty
+  byId('damaged').hidden = !window_?.damaged
+  renderHero()
+  renderCrumbs()
+  renderChips()
+  const pending = view?.pendingApprovals ?? []
+  const asking = approval.render(pending)
+  const readOnly = view?.drivable === false
+  const readonlyBar = byId('readonly')
+  readonlyBar.hidden = !readOnly || asking
+  if (readOnly && !asking) {
+    const parent = view?.drivenBy
+    const openParent = h('button', { class: 'text-btn', text: 'Open parent', attrs: { type: 'button' } })
+    openParent.addEventListener('click', () => {
+      if (parent) void openSession(parent).catch(fail)
+    })
+    readonlyBar.replaceChildren(icon('users', { size: 16 }), h('span', { class: 'grow', text: 'Running as a subagent — read-only while its parent drives it.' }), parent ? openParent : '')
+  }
+  byId('composer').hidden = asking || readOnly
+  byId('composer-meta').hidden = asking || readOnly
+  composer.render(composerState(view))
+  const dock = byId('dock')
+  main.style.setProperty('--dock-h', `${dock.offsetHeight}px`)
+  if (state.panelOpen) renderPanel()
+}
+
+function renderHero() {
+  const hero = byId('hero')
+  const empty = state.window === undefined
+  hero.hidden = !empty
+  const workspaceRow = byId('workspace-row')
+  workspaceRow.hidden = !empty || (state.init?.workspaces.length ?? 0) < 2
+  if (!empty) return
+  const version = state.init?.serverInfo.version
+  const workspace = chosenWorkspace()
+  hero.replaceChildren(
+    h('div', { class: 'hero-title' }, mark(34), h('span', { text: 'MiniDSH' }), version ? h('span', { class: 'version-pill', text: version }) : undefined),
+    h('p', { class: 'hero-line', text: workspace ? `A new session works in ${workspace.name}. Its log is kept; nothing it does is hidden from you.` : 'Connecting to the host…' }),
+  )
+  if (!workspaceRow.hidden && workspace) {
+    const chip = h('button', { class: 'chip', attrs: { type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `Workspace: ${workspace.name}` } }, icon('folder', { size: 14 }), h('span', { class: 'value', text: workspace.name }), icon('chevron-down', { size: 12, className: 'chev' }))
+    chip.addEventListener('click', () =>
+      showMenu(
+        chip,
+        (state.init?.workspaces ?? []).map((entry) => ({
+          label: entry.name,
+          desc: entry.root,
+          checked: entry.id === workspace.id,
+          onSelect: () => {
+            state.pendingNew.workspaceId = entry.id
+            renderAll()
+          },
+        })),
+        { label: 'Workspace for the new session' },
+      ),
+    )
+    workspaceRow.replaceChildren(chip)
+  }
+}
+
+function chosenWorkspace() {
+  const workspaces = state.init?.workspaces ?? []
+  return workspaces.find((workspace) => workspace.id === state.pendingNew.workspaceId) ?? workspaces[0]
+}
+
+function renderCrumbs() {
+  crumbs.replaceChildren()
+  const window_ = state.window
   if (!window_) return
-  appendRows(window_.events)
-  toBottom()
+  const summary = currentSummary()
+  const title = summary?.title ?? `Session ${shortId(window_.sessionId)}`
+  const parentId = window_.header?.delegatedBy ?? summary?.delegatedBy
+  if (parentId) {
+    const parent = state.sessions.find((session) => session.id === parentId)
+    const crumb = h('button', { class: 'crumb', text: parent?.title ?? `Session ${shortId(parentId)}`, attrs: { type: 'button', title: parentId } })
+    crumb.addEventListener('click', () => void openSession(parentId).catch(fail))
+    crumbs.append(crumb, h('span', { class: 'crumb-sep', text: '/', attrs: { 'aria-hidden': 'true' } }))
+  }
+  crumbs.append(h('span', { class: 'crumb current', text: title, attrs: { title: window_.sessionId, 'aria-current': 'page' } }))
+  document.title = `${title} — MiniDSH`
 }
 
-function appendRows(events) {
-  const stick = atBottom()
-  const rows = $('rows')
-  for (const event of events) {
-    // A committed assistant message is what the streamed rows were previewing.
-    if (event.type === 'assistant/message' || event.type === 'turn/end') dropStreamRows()
-    const node = row(event)
-    if (node) rows.append(node)
+function renderChips() {
+  chips.replaceChildren()
+  const view = viewOf()
+  if (!view) return
+  const running = view.jobs.filter((job) => job.state === 'running').length
+  if (running > 0) chips.append(h('span', { class: 'status-chip' }, h('span', { class: 'state-dot jobs' }), h('span', { text: running === 1 ? '1 background job' : `${running} background jobs` })))
+  const children = state.sessions.filter((session) => session.delegatedBy === state.window?.sessionId && session.live).length
+  if (children > 0) chips.append(h('span', { class: 'status-chip' }, icon('users', { size: 12 }), h('span', { text: children === 1 ? '1 subagent' : `${children} subagents` })))
+  if (view.drivable === false) chips.append(h('span', { class: 'status-chip', text: 'Read-only' }))
+}
+
+/** @param {SessionView | undefined} view */
+function composerState(view) {
+  const live = isLive()
+  const window_ = state.window
+  const running = (state.status ?? view?.status) === 'running' && live
+  const authority = view?.authority ?? state.init?.defaultAuthority
+  const fresh = window_ === undefined
+  const pendingAuthority = state.pendingNew.authority
+  const sandbox = (fresh ? pendingAuthority?.sandbox : undefined) ?? authority?.sandbox ?? 'workspace-write'
+  const approvalPolicy = (fresh ? pendingAuthority?.approval : undefined) ?? authority?.approval ?? 'ask'
+  const accepts = (fresh ? pendingAuthority?.accepts : undefined) ?? authority?.accepts ?? 'full'
+  const preset = fresh ? (pendingAuthority?.preset ?? (pendingAuthority ? undefined : authority?.preset)) : authority?.preset
+  const options = (fresh ? state.pendingNew.agentOptions : undefined) ?? view?.options ?? (fresh ? state.init?.defaultAgentOptions : undefined)
+  const stored = !fresh && !live
+  const sub = [approvalPolicy === 'never' ? 'no prompts' : undefined, accepts !== 'full' ? `shell ${accepts}` : undefined].filter(Boolean).join(' · ')
+  const placeholder = fresh ? 'Describe what you want MiniDSH to do…' : stored ? 'Send a message to resume this session…' : running ? 'Steer the running turn, or queue for after it (Ctrl+Enter)…' : 'Reply, or ask for the next thing…'
+  return {
+    canSend: state.connected && view?.drivable !== false,
+    running,
+    permission: {
+      label: preset && preset !== 'custom' ? humanPreset(preset) : humanSandbox(sandbox),
+      ...(sub ? { sub } : {}),
+      warn: sandbox === 'danger-full-access' || accepts !== 'full',
+      disabled: stored || view?.drivable === false,
+      ...(stored ? { title: 'Send a message to resume this session; its authority can change once it is live.' } : {}),
+    },
+    model: {
+      label: options ? modelName(options.provider, options.model) : 'Model',
+      ...(options?.reasoningEffort ? { sub: options.reasoningEffort } : {}),
+      disabled: stored || view?.drivable === false || !state.init,
+      ...(stored ? { title: 'Send a message to resume this session; its model can change once it is live.' } : {}),
+    },
+    ...(view?.context && view.context.budgetTokens > 0
+      ? { context: { ratio: view.context.ratio, label: `${tokens(view.context.projectedTokens)} of ${tokens(view.context.budgetTokens)} tokens of context` } }
+      : {}),
+    held: view?.jobs.filter((job) => job.held).length ?? 0,
+    placeholder,
   }
-  if (stick) toBottom()
+}
+
+/** @param {string} provider @param {string} model */
+function modelName(provider, model) {
+  const entry = state.init?.providers.find((one) => one.id === provider)?.models.find((one) => one.id === model)
+  return entry?.name ?? model
+}
+
+/** @param {string} mode */
+const humanSandbox = (mode) => (mode === 'read-only' ? 'Read only' : mode === 'workspace-write' ? 'Workspace write' : mode === 'danger-full-access' ? 'Full access' : mode)
+/** @param {string} name */
+const humanPreset = (name) => (name === 'workspace-write' ? 'Workspace write' : name === 'danger-full-access' ? 'Full access' : name)
+
+function renderPanel() {
+  const window_ = state.window
+  if (!window_) return
+  const view = viewOf()
+  const summary = currentSummary()
+  const workspace = summary?.workspaceId === undefined ? undefined : state.init?.workspaces.find((one) => one.id === summary.workspaceId)?.name
+  panel.render({
+    sessionId: window_.sessionId,
+    ...(window_.header ? { header: window_.header } : {}),
+    ...(view ? { view } : {}),
+    ...(summary ? { summary } : {}),
+    children: state.sessions.filter((session) => session.delegatedBy === window_.sessionId),
+    stopping: state.stopping,
+    ...(workspace ? { workspace } : {}),
+  })
+}
+
+// ---- menus ---------------------------------------------------------------------------
+
+/** @param {HTMLElement} anchor */
+function plusMenu(anchor) {
+  const live = isLive()
+  showMenu(
+    anchor,
+    [
+      { label: 'Compact the context', desc: live ? 'Summarize older history so the model keeps working room' : 'Available while the session is live', icon: 'compact', disabled: !live, onSelect: () => compact() },
+      ...(state.window ? [{ label: 'Session details', icon: 'sliders', onSelect: () => togglePanel(true) }] : []),
+    ],
+    { above: true, label: 'Actions' },
+  )
+}
+
+/** @param {HTMLElement} anchor */
+function moreMenu(anchor) {
+  const window_ = state.window
+  showMenu(
+    anchor,
+    [
+      ...(window_
+        ? [
+            { label: 'Copy session id', desc: 'What `minidsh resume` takes', icon: 'copy', onSelect: () => void copyText(window_.sessionId).then((ok) => toast(ok ? 'Session id copied.' : 'Copying is not available here.')) },
+            { label: 'Compact the context', icon: 'compact', disabled: !isLive(), onSelect: () => compact() },
+            { separator: /** @type {const} */ (true) },
+          ]
+        : []),
+      { label: 'Settings', icon: 'settings', onSelect: () => settings.open() },
+    ],
+    { align: 'end' },
+  )
+}
+
+/** @param {HTMLElement} anchor */
+function permissionMenu(anchor) {
+  const view = viewOf()
+  const authority = view?.authority ?? state.init?.defaultAuthority
+  const chosen = state.window === undefined ? state.pendingNew.authority : undefined
+  const sandbox = chosen?.sandbox ?? authority?.sandbox
+  const policy = chosen?.approval ?? authority?.approval
+  const accepts = chosen?.accepts ?? authority?.accepts ?? 'full'
+  const preset = chosen ? chosen.preset : authority?.preset
+  /** @type {import('./ui.js').MenuEntry[]} */
+  const entries = [{ heading: 'Presets' }]
+  for (const entry of state.init?.presets ?? []) {
+    entries.push({
+      label: humanPreset(entry.name),
+      desc: entry.description ?? `${entry.sandbox} · approvals ${entry.approval}`,
+      checked: preset === entry.name,
+      warn: entry.sandbox === 'danger-full-access',
+      onSelect: () => void switchAuthority({ preset: entry.name }, entry.sandbox === 'danger-full-access'),
+    })
+  }
+  entries.push({ separator: true }, { heading: 'Sandbox (file effects)' })
+  for (const mode of ['read-only', 'workspace-write', 'danger-full-access']) {
+    entries.push({ label: humanSandbox(mode), checked: sandbox === mode, warn: mode === 'danger-full-access', onSelect: () => void switchAuthority({ sandbox: mode }, mode === 'danger-full-access') })
+  }
+  entries.push({ separator: true }, { heading: 'Approvals' })
+  entries.push({ label: 'Ask before wider access', checked: policy === 'ask', onSelect: () => void switchAuthority({ approval: 'ask' }, false) })
+  entries.push({ label: 'Never ask', desc: 'Anything wider than the sandbox is refused', checked: policy === 'never', onSelect: () => void switchAuthority({ approval: 'never' }, false) })
+  entries.push({ separator: true }, { heading: `Shell (this host enforces ${authority?.enforcement ?? '…'})` })
+  entries.push({ label: 'Require an enforced shell', checked: accepts === 'full', onSelect: () => void switchAuthority({ accepts: 'full' }, false) })
+  entries.push({ label: 'Accept an unconfined shell', desc: 'Commands run without a sandbox; only the file fence stays', checked: accepts === 'none', warn: true, onSelect: () => void switchAuthority({ accepts: 'none' }, true) })
+  showMenu(anchor, entries, { above: true, label: 'Permissions' })
 }
 
 /**
- * An older page goes in at the head, and the reader stays where they were.
- *
- * The height delta is exact here because the prepend is the only mutation in
- * this frame — nothing else resizes, and no image loads late into a row. That
- * is why this needs no anchor element: with one mutation, "how much taller did
- * the content get above me" and "which row was I looking at" are the same
- * answer.
+ * One switch, held to the runtime's own rules: a live session's is its
+ * durable event (read back from the view); a new session's waits for its
+ * first message, which creates the session with it before any turn.
+ * @param {{ preset?: string, sandbox?: string, approval?: string, accepts?: string }} change
+ * @param {boolean} risky
  */
-function prependRows(events) {
-  const log = $('log')
-  const rows = $('rows')
-  const before = log.scrollHeight
-  const top = log.scrollTop
-  const fragment = document.createDocumentFragment()
-  for (const event of events) {
-    const node = row(event)
-    if (node) fragment.append(node)
+async function switchAuthority(change, risky) {
+  if (risky) {
+    const ok = await confirmDialog({
+      title: change.accepts === 'none' ? 'Accept an unconfined shell?' : 'Allow full access?',
+      text:
+        change.accepts === 'none'
+          ? 'Shell commands will run without a sandbox on this host. The file fence still refuses writes outside the workspace, but a command can reach anything your account can.'
+          : 'The agent may write anywhere your account can, without the workspace fence. Every switch is recorded in the session log.',
+      confirm: change.accepts === 'none' ? 'Accept unconfined' : 'Allow full access',
+    })
+    if (!ok) return
   }
-  rows.prepend(fragment)
-  // Hidden BEFORE the height is read, not after: the button sits above the
-  // rows, so on the last page — the one that flips `hasMore` — removing it
-  // afterwards takes its height off the content above the reader and undoes
-  // the compensation just written.
-  $('more').hidden = !state.window?.hasMore
-  log.scrollTop = top + (log.scrollHeight - before)
-}
-
-function renderView() {
-  const view = state.window?.view
-  // Session-scoped controls mean nothing without a session, and a knob showing
-  // its first option reads as a setting that is in force. Disable until there
-  // is something for them to act on.
-  for (const id of ['sandbox', 'approval', 'accepts', 'compact', 'cancel']) $(id).disabled = !view
-  $('status').textContent = view ? (state.status ?? view.status) : ''
-  $('context').textContent =
-    view?.context && view.context.budgetTokens > 0
-      ? `ctx ${Math.round(view.context.ratio * 100)}% · ${tokens(view.context.projectedTokens)}/${tokens(view.context.budgetTokens)}`
-      : ''
-  $('route').textContent = view?.route ? `${view.route.provider}/${view.route.model}` : view?.options ? `${view.options.provider}/${view.options.model}` : ''
-  // The accepted enforcement is shown only when it is weaker than the
-  // default: saying what a host CAN do without saying what this session
-  // agreed to accept from it would hide the decision that matters.
-  const accepted = view && view.authority.accepts !== 'full' ? ` · shell ${view.authority.accepts}` : ''
-  $('authority').textContent = view ? `${view.authority.sandbox} · approvals ${view.authority.approval}${accepted}${view.authority.preset ? ` · ${view.authority.preset}` : ''}` : ''
-  $('sandbox').value = view?.authority.sandbox ?? ''
-  $('approval').value = view?.authority.approval ?? ''
-  $('accepts').value = view?.authority.accepts ?? ''
-  renderJobs(view?.jobs ?? [])
-
-  const open = view?.pendingApprovals?.[0]
-  state.pendingApproval = open
-  $('approval-bar').hidden = !open
-  if (open) {
-    // The runtime's account of the call leads; the model's `reason` follows in
-    // parentheses, where it reads as the claim it is.
-    const says = open.subject ? ` — ${subjectText(open.subject)}` : ''
-    $('approval-text').textContent = `allow ${open.toolName}${says}${open.reason ? ` (${open.reason})` : ''}?`
-    // And the literal record beside it. A bound that fired SAYS so and points
-    // at the whole thing, rather than showing a shortened call as if it were
-    // the call.
-    // The extra button appears only where the fold said the scope is
-    // available: the browser renders offers, it does not decide them.
-    $('allow-session').hidden = open.offers?.includes('grant-session') !== true
-    const call = open.call
-    $('approval-call').hidden = !call
-    if (call) {
-      const omitted = call.omittedChars ? `\n…${call.omittedChars} more characters — read the whole call with \`minidsh sessions show --json\`` : ''
-      $('approval-call').textContent = `${call.name} ${call.arguments}${omitted}`
-    }
-  }
-}
-
-/** How many ended jobs the strip keeps beside the live ones; the transcript has every end. */
-const ENDED_JOBS_SHOWN = 3
-
-/**
- * The open session's background jobs, as the host folded them (`view.jobs`):
- * a compact strip under the header. A running job gets a stop button, which is
- * a PERSON's stop over the wire; the end it causes arrives as a durable event
- * and a view push like any other, so the button only asks.
- */
-function renderJobs(jobs) {
-  const strip = $('jobs')
-  const live = jobs.filter((job) => job.state !== 'ended' || job.held)
-  const ended = jobs.filter((job) => job.state === 'ended' && !job.held).slice(-ENDED_JOBS_SHOWN)
-  const shown = jobs.filter((job) => live.includes(job) || ended.includes(job))
-  strip.replaceChildren()
-  strip.hidden = shown.length === 0
-  for (const job of shown) {
-    const item = el('span', `job ${job.state}`)
-    item.title = `${job.label}\n${job.jobId}${job.pid === undefined ? '' : `\npid ${job.pid}`}`
-    item.append(el('span', 'label', job.label), el('span', 'state', job.end ? jobEnded(job.end) : job.state === 'running' ? 'running' : 'no end recorded'))
-    if (job.held) item.append(el('span', 'held', 'notice held: your next message delivers it'))
-    if (job.state === 'running') {
-      const stop = el('button', 'stop', 'stop')
-      stop.title = 'stop this job (the agent is told at its next message)'
-      // Every view push rebuilds the strip, so a stop in flight is remembered
-      // here rather than on a button the next push replaces.
-      stop.disabled = state.stopping.has(job.jobId)
-      stop.addEventListener('click', () => {
-        if (!state.window) return
-        state.stopping.add(job.jobId)
-        stop.disabled = true
-        void state.wire
-          .request('job/cancel', { sessionId: state.window.sessionId, jobId: job.jobId })
-          .then((result) => {
-            if (result.state !== 'ended') notice(`job ${job.jobId}: a stop was requested, but it has not ended yet`)
-          })
-          .catch(fail)
-          .finally(() => {
-            state.stopping.delete(job.jobId)
-            renderView()
-          })
-      })
-      item.append(stop)
-    }
-    strip.append(item)
-  }
-}
-
-/**
- * Live text goes straight into a growing row, so the answer types itself out.
- *
- * The rows live in `state.streamRows` rather than being rebuilt away: the
- * durable `assistant/message` that replaces them is what removes them, so a
- * `tool/call` or a view push arriving mid-stream no longer wipes the answer a
- * reader is in the middle of.
- */
-function stream(event) {
-  const chunk = event.data?.chunk
-  if (!chunk) return
-  if (chunk.type === 'reasoning-delta') {
-    // The same decision the terminal already made, in a different form: a
-    // reasoning route can think for a long time, and a surface that shows
-    // nothing while it does looks broken rather than busy.
-    if (!state.thinking) {
-      // Sampled BEFORE the append, like every other mutation here: appending
-      // the row is itself what would make the answer wrong afterwards.
-      const stick = atBottom()
-      state.thinking = el('div', 'row note thinking', '… thinking')
-      state.streamRows.push(state.thinking)
-      $('rows').append(state.thinking)
-      if (stick) toBottom()
-    }
+  if (!state.window) {
+    const current = state.pendingNew.authority ?? {}
+    state.pendingNew.authority = change.preset ? { preset: change.preset } : { ...(current.preset ? {} : current), ...change }
+    renderAll()
     return
   }
-  if (chunk.type === 'text-delta') {
-    const stick = atBottom()
-    if (!state.streaming) {
-      state.streaming = el('div', 'row assistant streaming')
-      state.streaming.append(el('div', 'who', 'assistant'), el('div', 'body', ''))
-      state.streamRows.push(state.streaming)
-      $('rows').append(state.streaming)
+  try {
+    await state.wire.request('session/authority', { sessionId: state.window.sessionId, ...change })
+  } catch (error) {
+    fail(error)
+  }
+  renderAll()
+}
+
+/** @param {HTMLElement} anchor */
+function modelMenu(anchor) {
+  const view = viewOf()
+  const current = (state.window ? view?.options : state.pendingNew.agentOptions) ?? state.init?.defaultAgentOptions
+  /** @type {import('./ui.js').MenuEntry[]} */
+  const entries = []
+  for (const provider of state.init?.providers ?? []) {
+    entries.push({ heading: provider.id })
+    for (const model of provider.models) {
+      entries.push({
+        label: model.name,
+        desc: `${tokens(model.contextWindow)} window${model.inputModalities?.includes('image') ? ' · images' : ''}`,
+        checked: current?.provider === provider.id && current?.model === model.id,
+        onSelect: () => void switchModel({ provider: provider.id, model: model.id }),
+      })
     }
-    state.streaming.querySelector('.body').textContent += chunk.text
-    // A reader who scrolled away STAYS away. This was the loudest defect the
-    // real-browser pass found: parked 200 px down a long transcript, the first
-    // delta of the next answer threw the view to the bottom and held it there.
-    if (stick) toBottom()
-  } else if (chunk.type === 'finish') {
-    // The row STAYS until its durable message lands; clearing the handle only
-    // means the next attempt opens a row of its own instead of appending to a
-    // finished one.
-    state.streaming = undefined
-    state.thinking = undefined
+  }
+  const entry = state.init?.providers.find((one) => one.id === current?.provider)?.models.find((one) => one.id === current?.model)
+  const efforts = entry?.reasoning?.efforts ?? []
+  if (efforts.length > 0) {
+    entries.push({ separator: true }, { heading: 'Reasoning effort' })
+    for (const effort of efforts) {
+      entries.push({ label: effort, ...(effort === entry?.reasoning?.defaultEffort ? { desc: 'default' } : {}), checked: (current?.reasoningEffort ?? entry?.reasoning?.defaultEffort) === effort, onSelect: () => void switchModel({ reasoningEffort: effort }) })
+    }
+  }
+  showMenu(anchor, entries, { above: true, align: 'end', label: 'Model' })
+}
+
+/** @param {{ provider?: string, model?: string, reasoningEffort?: string }} change */
+async function switchModel(change) {
+  if (!state.window) {
+    const base = state.pendingNew.agentOptions ?? state.init?.defaultAgentOptions
+    if (!base) return
+    const next = { provider: change.provider ?? base.provider, model: change.model ?? base.model }
+    const effort = change.reasoningEffort ?? (change.model === undefined ? base.reasoningEffort : undefined)
+    state.pendingNew.agentOptions = effort ? { ...next, reasoningEffort: effort } : next
+    renderAll()
+    return
+  }
+  try {
+    await state.wire.request('session/model', { sessionId: state.window.sessionId, ...change })
+  } catch (error) {
+    fail(error)
+  }
+  renderAll()
+}
+
+// ---- commands ----------------------------------------------------------------------------
+
+/**
+ * A message is shown the moment it is sent, dimmed, and replaced by the
+ * durable one when the log holds it — keyed by the id `session/prompt`
+ * returns, since a steer lands at a step boundary and a followup at the next
+ * turn, either of which can be a while.
+ * @param {string} text @param {'auto' | 'followup'} mode
+ */
+async function send(text, mode) {
+  const window_ = state.window
+  const bubble = h('div', { class: 'bubble-wrap' }, h('div', { class: 'bubble pending', text, attrs: { 'aria-label': `Sending: ${text}` } }))
+  if (window_) showPending(bubble)
+  try {
+    /** @type {Record<string, unknown>} */
+    const params = window_
+      ? { sessionId: window_.sessionId, text, mode }
+      : {
+          text,
+          ...(state.pendingNew.agentOptions ? { agentOptions: state.pendingNew.agentOptions } : {}),
+          ...(state.pendingNew.authority ? { authority: state.pendingNew.authority } : {}),
+          ...(chosenWorkspace() ? { workspaceId: chosenWorkspace()?.id } : {}),
+        }
+    const result = await state.wire.request('session/prompt', params)
+    if (!window_) {
+      state.pendingNew = {}
+      await openSession(result.sessionId)
+      const opened = state.window
+      if (opened && opened.sessionId === result.sessionId && !holds(opened, result.messageId)) showPending(bubble)
+    }
+    const now = state.window
+    if (!now || now.sessionId !== result.sessionId || holds(now, result.messageId)) bubble.remove()
+    else state.pending.set(result.messageId, bubble)
+  } catch (error) {
+    bubble.remove()
+    composer.restore(text)
+    fail(error)
   }
 }
 
-// ---- session plumbing ------------------------------------------------------
+/** @param {SessionWindow} window_ @param {string} messageId */
+const holds = (window_, messageId) => window_.events.some((event) => event.type === 'user/message' && /** @type {any} */ (event.data)?.message?.id === messageId)
 
-function flash(text, kind) {
-  const node = $('error')
-  node.className = `banner ${kind}`
-  node.textContent = text
-  node.hidden = false
-  setTimeout(() => void (node.hidden = true), 6000)
+/** @param {HTMLElement} bubble */
+function showPending(bubble) {
+  const scroller = byId('log')
+  const stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 40
+  byId('live').prepend(bubble)
+  if (stick) scroller.scrollTop = scroller.scrollHeight
 }
 
-const fail = (error) => flash(String(error?.message ?? error), 'error')
-/** An ordinary outcome worth saying out loud. A command that answers nothing reads as a broken button. */
-const notice = (text) => flash(text, 'notice')
+function cancelTurn() {
+  // Another client's queued prompts are not this one's to discard.
+  if (state.window) void state.wire.request('session/cancel', { sessionId: state.window.sessionId, keepQueued: true }).catch(fail)
+}
 
+function compact() {
+  if (!state.window) return
+  // The same three outcomes the terminal reports, in the same words: two of
+  // them write no durable event, and a silent click reads as a broken button.
+  void state.wire
+    .request('session/compact', { sessionId: state.window.sessionId })
+    .then((result) => {
+      if (result.kind === 'compacted') toast(`Compacted ${result.shadowedNodes} messages (~${tokens(result.surfaceTokensBefore)} → ~${tokens(result.surfaceTokensAfter)} tokens).`)
+      else if (result.kind === 'scheduled') toast('The turn is still running; compaction runs before its next step.')
+      else toast('Nothing worth compacting yet.')
+    })
+    .catch(fail)
+}
+
+/** @param {OpenApproval} open @param {'allowed-once' | 'rejected'} outcome @param {'grant-session'} [offer] */
+async function answer(open, outcome, offer) {
+  if (!state.window) return
+  try {
+    const result = await state.wire.request('approval/answer', { sessionId: state.window.sessionId, id: open.id, outcome, ...(offer ? { offer } : {}) })
+    // Another client may have answered first; the durable decision is the truth.
+    if (result.outcome === 'not-pending') toast('That approval was already answered.')
+    composer.focus()
+  } catch (error) {
+    fail(error)
+  }
+}
+
+/** @param {string} grantId */
+async function revoke(grantId) {
+  if (!state.window) return
+  try {
+    await state.wire.request('approval/revoke', { sessionId: state.window.sessionId, grantId })
+    toast('Grant revoked. The next such action asks again.')
+  } catch (error) {
+    fail(error)
+    renderAll()
+  }
+}
+
+/** @param {string} jobId */
+async function stopJob(jobId) {
+  if (!state.window) return
+  state.stopping.add(jobId)
+  try {
+    const result = await state.wire.request('job/cancel', { sessionId: state.window.sessionId, jobId })
+    if (result.state !== 'ended') toast(`Job ${jobId}: a stop was requested, but it has not ended yet.`)
+  } catch (error) {
+    fail(error)
+  } finally {
+    state.stopping.delete(jobId)
+    renderAll()
+  }
+}
+
+/**
+ * An image a call or a person attached, read through the host — one read at
+ * a time (a burst of screenshots must not fill the socket's send queue) and
+ * once per attachment id (ids are content addresses).
+ * @param {Record<string, any>} ref
+ * @returns {Promise<string>}
+ */
+function loadImage(ref) {
+  const id = String(ref.id)
+  const cached = state.images.get(id)
+  if (cached) return cached
+  const sessionId = state.window?.sessionId
+  if (!sessionId) return Promise.reject(new Error('no session'))
+  const read = state.imageQueue.then(async () => {
+    const result = await state.wire.request('attachment/read', { sessionId, attachmentId: id })
+    const binary = atob(result.data)
+    const bytes = new Uint8Array(binary.length)
+    for (let at = 0; at < binary.length; at++) bytes[at] = binary.charCodeAt(at)
+    return URL.createObjectURL(new Blob([bytes], { type: result.mediaType }))
+  })
+  state.imageQueue = read.then(
+    () => undefined,
+    () => undefined,
+  )
+  state.images.set(id, read)
+  read.catch(() => state.images.delete(id))
+  return read
+}
+
+// ---- sessions ------------------------------------------------------------------------------
+
+/** @param {string} sessionId */
 async function openSession(sessionId) {
-  if (state.window && state.window.sessionId !== sessionId) await state.wire.request('session/detach', { sessionId: state.window.sessionId }).catch(() => undefined)
-  // The header moves with the window, BEFORE the attach that can fail: a
-  // rejected attach (the host is down, and nothing in the sidebar says so)
-  // would otherwise leave the previous session's id above a window that is
-  // already this one, and the reconnect then paints this session's transcript
-  // under that name.
-  $('session-id').textContent = sessionId
-  nameSession(undefined)
+  if (state.window?.sessionId === sessionId) return
+  if (state.window) await state.wire.request('session/detach', { sessionId: state.window.sessionId }).catch(() => undefined)
+  closeMenus()
   state.status = undefined
+  state.sessionTools = new Map()
+  for (const node of state.pending.values()) node.remove()
+  state.pending.clear()
   // Its own identity, so a change from a window this client has moved on from
-  // cannot paint into the transcript that replaced it — a backward page still
-  // in flight when `new` is clicked used to render the old session's rows into
-  // an empty "new session".
+  // cannot paint into the transcript that replaced it (S7).
   const opened = new SessionWindow(state.wire, sessionId, (change) => {
-    if (state.window === opened) renderAll(change)
+    if (state.window === opened) onWindowChange(opened, change)
   })
   state.window = opened
-  await opened.attach()
+  sidebar.setCurrent(sessionId)
+  renderAll()
+  const attached = await opened.attach()
+  if (state.window === opened) {
+    state.sessionTools = new Map((attached.tools ?? []).map((tool) => [tool.name, tool.display]))
+    transcript.refreshCards()
+  }
   await refreshSessions()
 }
 
+function newSession() {
+  // Detach FIRST: a connection still watching the old session would be
+  // counted as an answerer for its approvals and park a question no window
+  // here could display (S7).
+  const previous = state.window?.sessionId
+  if (previous) void state.wire.request('session/detach', { sessionId: previous }).catch(() => undefined)
+  state.window = undefined
+  state.status = undefined
+  state.pendingNew = {}
+  for (const node of state.pending.values()) node.remove()
+  state.pending.clear()
+  togglePanel(false)
+  transcript.clear()
+  sidebar.setCurrent(undefined)
+  document.title = 'MiniDSH'
+  renderAll()
+  composer.focus()
+}
+
 /**
- * One dispatch over what the window says it did. A `view` push moves the pills
- * and nothing else — it used to rebuild the entire transcript, which is how a
- * mid-turn status update could delete a half-streamed answer.
+ * @param {SessionWindow} opened
+ * @param {{ kind: string, events?: readonly any[] }} change
  */
-function renderAll(change) {
-  const kind = change?.kind ?? 'reset'
-  if (kind === 'reset') resetTranscript()
-  else if (kind === 'append') appendRows(change.events)
-  else if (kind === 'prepend') prependRows(change.events)
-  renderView()
+function onWindowChange(opened, change) {
+  if (change.kind === 'reset') {
+    transcript.reset(opened.events, { ...(opened.header?.seedLength ? { seedLength: opened.header.seedLength } : {}), cwd: opened.header?.cwd ?? '', hasMore: opened.hasMore, live: isLive() })
+    transcript.setView(viewOf(), isLive())
+    // A reconnect's fresh page may already hold what was pending.
+    for (const [id, node] of state.pending) {
+      if (!holds(opened, id)) continue
+      node.remove()
+      state.pending.delete(id)
+    }
+  } else if (change.kind === 'append' && change.events) {
+    transcript.append(change.events)
+    for (const event of change.events) {
+      if (event.type !== 'user/message') continue
+      const id = event.data?.message?.id
+      const node = id === undefined ? undefined : state.pending.get(id)
+      if (node) {
+        node.remove()
+        state.pending.delete(id)
+      }
+    }
+  } else if (change.kind === 'prepend' && change.events) transcript.prepend(change.events, opened.hasMore)
+  else if (change.kind === 'view') transcript.setView(viewOf(), isLive())
+  renderAll()
 }
 
 /** One list refresh for a burst of summaries about sessions the list does not show yet. */
@@ -380,297 +710,105 @@ function refreshSoon() {
 }
 
 async function refreshSessions() {
-  const { sessions } = await state.wire.request('sessions/list', state.workspaceId ? { workspaceId: state.workspaceId } : undefined)
-  const list = $('sessions')
-  list.replaceChildren()
-  state.badges.clear()
-  for (const session of sessions) {
-    const item = el('button', `session${session.id === state.window?.sessionId ? ' current' : ''}`)
-    const short = session.id.replace(/^session-/, '').slice(0, 8)
-    // The name first, the id demoted beside the date: a list of ids is a list
-    // nobody can pick from, and the id still has to be here because it is what
-    // `minidsh resume` takes.
-    item.append(el('span', 'name', session.title ?? short), el('span', 'when', `${short} · ${new Date(session.createdAt).toLocaleString()}`))
-    item.title = session.title ? `${session.title}\n${session.id}\n${session.cwd}` : `${session.id}\n${session.cwd}`
-    if (session.live) item.append(el('span', 'live', 'live'))
-    if (session.delegatedBy) item.append(el('span', 'tag', 'child'))
-    const badges = el('span', 'badges')
-    item.append(badges)
-    state.badges.set(session.id, badges)
-    renderBadges(session.id)
-    item.addEventListener('click', () => void openSession(session.id).catch(fail))
-    list.append(item)
-    if (session.id === state.window?.sessionId) nameSession(session.title)
-  }
+  const { sessions } = await state.wire.request('sessions/list')
+  state.sessions = sessions
+  sidebar.render({ sessions, workspaces: state.init?.workspaces ?? [], current: state.window?.sessionId, summaries: state.summaries })
+  renderAll()
 }
 
-/**
- * What a session wants from a person, read off its latest `control.summary`:
- * running jobs, notices held for the next message, questions waiting for an
- * answer. A session this client is not watching still says so here — that is
- * what the control subscription is for.
- */
-function renderBadges(sessionId) {
-  const holder = state.badges.get(sessionId)
-  if (!holder) return
-  const summary = state.summaries.get(sessionId)
-  holder.replaceChildren()
-  if (!summary) return
-  const badge = (count, cls, one, many) => {
-    if (count > 0) holder.append(el('span', `badge ${cls}`, count === 1 ? one : `${count} ${many}`))
-  }
-  badge(summary.pendingApprovals, 'ask', '1 question', 'questions')
-  badge(summary.heldNotices, 'held', '1 held notice', 'held notices')
-  badge(summary.runningJobs, 'jobs', '1 job running', 'jobs running')
-  // A closed session is no longer live, whatever the listing said when it was drawn.
-  if (summary.status === 'closed') holder.parentElement?.querySelector('.live')?.remove()
-}
+// ---- wiring ----------------------------------------------------------------------------------
 
-/** The open session's name, in the header and in the tab — one window per session, so the tab can say which. */
-function nameSession(title) {
-  $('session-name').textContent = title ?? ''
-  document.title = title ? `${title} — MiniDSH` : 'MiniDSH'
-}
-
-async function send() {
-  const box = $('prompt')
-  const text = box.value.trim()
-  if (!text) return
-  box.value = ''
-  try {
-    const params = state.window
-      ? { sessionId: state.window.sessionId, text, mode: 'auto' }
-      : { text, ...(state.workspaceId ? { workspaceId: state.workspaceId } : {}) }
-    const result = await state.wire.request('session/prompt', params)
-    if (!state.window || state.window.sessionId !== result.sessionId) await openSession(result.sessionId)
-  } catch (error) {
-    fail(error)
-  }
-}
-
-// ---- settings --------------------------------------------------------------
-
-async function openSettings() {
-  const described = await state.wire.request('settings/describe')
-  // A save that finished while this read was in flight already closed the
-  // pane; re-opening it here would undo that and look like the save failed.
-  if (state.settingsClosed) return
-  const pane = $('settings-fields')
-  pane.replaceChildren()
-  for (const namespace of described.namespaces) {
-    const properties = namespace.schema?.properties ?? {}
-    for (const [key, spec] of Object.entries(properties)) {
-      const line = el('label', 'field')
-      line.append(el('span', 'key', `${namespace.ns}.${key}`))
-      const input = el('input')
-      input.dataset.ns = namespace.ns
-      input.dataset.key = key
-      input.dataset.revision = String(namespace.revision)
-      input.dataset.kind = Array.isArray(spec.type) ? spec.type[0] : (spec.type ?? 'string')
-      // The USER layer is what a field holds; the resolved value is only a
-      // placeholder. Showing the resolved value would turn "save" into "pin
-      // today's defaults forever", and a later deployment change would stop
-      // reaching this user.
-      input.value = namespace.user?.[key] ?? ''
-      input.placeholder = namespace.value?.[key] ?? ''
-      line.append(input)
-      pane.append(line)
-    }
-  }
-  $('settings').hidden = false
-}
-
-async function saveSettings() {
-  state.settingsClosed = false
-  const byNamespace = new Map()
-  for (const input of $('settings-fields').querySelectorAll('input')) {
-    const entry = byNamespace.get(input.dataset.ns) ?? { patch: {}, revision: Number(input.dataset.revision) }
-    const raw = input.value.trim()
-    if (raw.length > 0) entry.patch[input.dataset.key] = input.dataset.kind === 'number' || input.dataset.kind === 'integer' ? Number(raw) : raw
-    byNamespace.set(input.dataset.ns, entry)
-  }
-  try {
-    for (const [ns, entry] of byNamespace) {
-      // `replace` so clearing a field means clearing the override, and the
-      // revision is the one this pane read — a stale write is refused, not
-      // silently applied over someone else edit.
-      await state.wire.request('settings/set', { ns, patch: entry.patch, expectedRevision: entry.revision, replace: true })
-    }
-    state.settingsClosed = true
-    $('settings').hidden = true
-  } catch (error) {
-    fail(error)
-    await openSettings()
-  }
-}
-
-// ---- wiring ----------------------------------------------------------------
-
-async function start() {
-  state.wire = new Wire(`ws://${location.host}/ws`, {
+function start() {
+  state.wire = new Wire(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`, {
     onOpen: async () => {
-      $('offline').hidden = true
+      state.connected = true
+      sidebar.setConnection(state.wasOffline ? 'back' : 'online')
+      drawerOpener.querySelector('.badge-dot')?.remove()
+      if (state.wasOffline) {
+        announce('Connected again.')
+        setTimeout(() => sidebar.setConnection('online'), 2000)
+      }
+      state.wasOffline = false
       try {
         state.init = await state.wire.request('initialize')
-        // The browser narrows its EVENT stream to the open session, but stays a
-        // control subscriber for all of them: one session's transcript is what
-        // it renders, and every session's running jobs, held notices and open
-        // questions are what its list shows. `control.summary` ignores the
-        // narrowing, so a question parked on a session this client is not
-        // watching is one its list still points a person to.
+        state.tools = new Map((state.init?.tools ?? []).map((tool) => [tool.name, tool.display]))
+        // The browser narrows its EVENT stream to the open session, but stays
+        // a control subscriber for all of them: one session's transcript is
+        // what it renders, every session's wants are what its list shows.
         await state.wire.request('session/detach')
-        // A fresh connection's baseline REPLACES what an old one pushed — but a
-        // push that lands before the answer is no older than the baseline, so
-        // it is kept.
-        state.summaries = new Map()
-        const { sessions: summaries } = await state.wire.request('control/subscribe', {})
-        for (const summary of summaries) if (!state.summaries.has(summary.sessionId)) state.summaries.set(summary.sessionId, summary)
-        const picker = $('workspace')
-        picker.replaceChildren(el('option', undefined, 'every workspace'))
-        picker.firstChild.value = ''
-        for (const workspace of state.init.workspaces) {
-          const option = el('option', undefined, workspace.name)
-          option.value = workspace.id
-          picker.append(option)
-        }
-        picker.value = state.workspaceId ?? ''
-        // A reconnect re-attaches and REPLACES the window; there is no
+        // A fresh connection's baseline replaces what an old one pushed — but
+        // a push that lands before the answer is no older than it, so it stays.
+        const fresh = new Map()
+        const { sessions: baseline } = await state.wire.request('control/subscribe', {})
+        for (const summary of baseline) fresh.set(summary.sessionId, summary)
+        for (const [id, summary] of state.summaries) if (!fresh.has(id) && pushedSinceOpen.has(id)) fresh.set(id, summary)
+        state.summaries = fresh
+        pushedSinceOpen.clear()
+        // A reconnect re-attaches and REPLACES the window: there is no
         // resume-from-seq in the protocol, by design.
-        if (state.window) await state.window.attach()
+        if (state.window) {
+          const attached = await state.window.attach()
+          state.sessionTools = new Map((attached.tools ?? []).map((tool) => [tool.name, tool.display]))
+        }
+        transcript.refreshCards()
         await refreshSessions()
       } catch (error) {
         fail(error)
       }
     },
-    onClose: () => void ($('offline').hidden = false),
+    onClose: () => {
+      if (state.connected) announce('Disconnected from the host. Reconnecting.')
+      state.connected = false
+      state.wasOffline = true
+      sidebar.setConnection('offline')
+      if (!drawerOpener.querySelector('.badge-dot')) drawerOpener.append(h('span', { class: 'badge-dot' }))
+      renderAll()
+    },
     onNotification: (method, params) => {
-      // Before the filter below, which keeps only the open session's frames: a
-      // summary is about ANY session, and that is the point of it.
+      // Before the filter below: a summary is about ANY session.
       if (method === 'control.summary') {
         state.summaries.set(params.sessionId, params)
-        // A live session the list was drawn without (another client made it)
-        // gets a row: a question parked only for this tab must be findable.
-        if (!state.badges.has(params.sessionId) && params.status !== 'closed') refreshSoon()
-        else renderBadges(params.sessionId)
+        pushedSinceOpen.add(params.sessionId)
+        // A live session the list was drawn without (another client made it) gets a row.
+        if (!sidebar.has(params.sessionId) && params.status !== 'closed') refreshSoon()
+        else sidebar.updateRow(params.sessionId)
+        if (params.sessionId === state.window?.sessionId) renderAll()
+        return
+      }
+      if (method === 'settings.changed') {
+        settings.changed()
         return
       }
       if (params?.sessionId && params.sessionId !== state.window?.sessionId) return
       if (method === 'session.event') {
         if (params.event.type === 'assistant/chunk') {
-          stream(params.event)
+          transcript.chunk(params.event)
           // Seen, not stored: the window must still count it, or the next
           // event looks like a hole and pays for a repair that returns nothing.
           state.window?.noted(params.event)
-        } else {
-          // A session is named a moment AFTER it is created: `session/prompt`
-          // answers before the driver has entered the prompt, so the listing
-          // this client just refreshed had nothing to name it by. The title's
-          // own event is when a name exists, and it arrives once per session.
-          if (params.event.type === 'session/title') void refreshSessions().catch(fail)
-          void state.window?.apply(params.event).catch(fail)
+          return
         }
+        // A session is named a moment after it is created: its title event is
+        // when a name exists, and it arrives once per session.
+        if (params.event.type === 'session/title') void refreshSessions().catch(fail)
+        void state.window?.apply(params.event).catch(fail)
       } else if (method === 'session.view') {
+        const before = state.window?.view?.pendingApprovals?.length ?? 0
         state.window?.setView(params.view)
+        const after = params.view?.pendingApprovals?.length ?? 0
+        if (after > before) announce('Approval needed.')
       } else if (method === 'session.status') {
+        const was = state.status
         state.status = params.status
-        $('status').textContent = params.status
-      } else if (method === 'settings.changed') {
-        if (!$('settings').hidden) void openSettings().catch(fail)
+        if (was === 'running' && params.status === 'idle') announce('The turn finished.')
+        transcript.setView(viewOf(), isLive())
+        renderAll()
       }
     },
   })
-
-  $('prompt').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault()
-      void send()
-    }
-  })
-  $('send').addEventListener('click', () => void send())
-  $('more').addEventListener('click', () => void state.window?.older().catch(fail))
-  $('new').addEventListener('click', () => {
-    // Detach FIRST. Dropping the window locally left this connection watching
-    // the old session with nothing to show it: the host still counted it as an
-    // answerer for that session's approvals, and would park a question no
-    // window here could ever display — the hazard `onOpen`'s own comment names.
-    const previous = state.window?.sessionId
-    if (previous) void state.wire.request('session/detach', { sessionId: previous }).catch(() => undefined)
-    state.window = undefined
-    $('session-id').textContent = 'new session'
-    nameSession(undefined)
-    renderAll({ kind: 'reset' })
-    void refreshSessions().catch(fail)
-  })
-  $('cancel').addEventListener('click', () => {
-    // Another client's queued prompts are not this one's to discard.
-    if (state.window) void state.wire.request('session/cancel', { sessionId: state.window.sessionId, keepQueued: true }).catch(fail)
-  })
-  $('compact').addEventListener('click', () => {
-    if (!state.window) return
-    // The same three outcomes the terminal reports, in the same words. Two of
-    // them write no durable event at all, so a browser that only rendered the
-    // log showed nothing whatever for a click that had worked.
-    void state.wire
-      .request('session/compact', { sessionId: state.window.sessionId })
-      .then((result) => {
-        if (result.kind === 'compacted') {
-          notice(`compacted ${result.shadowedNodes} messages (~${tokens(result.surfaceTokensBefore)} → ~${tokens(result.surfaceTokensAfter)})`)
-        } else if (result.kind === 'scheduled') {
-          notice('the turn is still running; compaction will run before its next step')
-        } else {
-          notice('nothing worth compacting yet')
-        }
-      })
-      .catch(fail)
-  })
-  $('workspace').addEventListener('change', (event) => {
-    state.workspaceId = event.target.value || undefined
-    void refreshSessions().catch(fail)
-  })
-  for (const knob of ['sandbox', 'approval', 'accepts']) {
-    $(knob).addEventListener('change', (event) => {
-      if (!state.window) return
-      // A refused change appends nothing, so no view push arrives to correct
-      // the control: re-render from what the runtime last published, or the
-      // knob keeps showing the value the runtime rejected.
-      void state.wire.request('session/authority', { sessionId: state.window.sessionId, [knob]: event.target.value }).catch((error) => {
-        fail(error)
-        renderView()
-      })
-    })
-  }
-  $('allow').addEventListener('click', () => void answer('allowed-once'))
-  $('allow-session').addEventListener('click', () => void answer('allowed-once', 'grant-session'))
-  $('deny').addEventListener('click', () => void answer('rejected'))
-  $('settings-open').addEventListener('click', () => {
-    state.settingsClosed = false
-    void openSettings().catch(fail)
-  })
-  $('settings-save').addEventListener('click', () => void saveSettings())
-  $('settings-close').addEventListener('click', () => {
-    state.settingsClosed = true
-    $('settings').hidden = true
-  })
 }
+/** Sessions whose summary was pushed since the last (re)connect began. @type {Set<string>} */
+const pushedSinceOpen = new Set()
 
-/**
- * @param {'allowed-once' | 'rejected'} outcome
- * @param {'grant-session'} [offer] A scope the HOST offered on this approval. Never a third outcome:
- *   the decision is still one-shot, and the scope is a second durable fact beside it.
- */
-async function answer(outcome, offer) {
-  const open = state.pendingApproval
-  if (!open || !state.window) return
-  $('approval-bar').hidden = true
-  try {
-    const params = { sessionId: state.window.sessionId, id: open.id, outcome, ...(offer ? { offer } : {}) }
-    const result = await state.wire.request('approval/answer', params)
-    // Another client may have answered first; the durable decision is the truth.
-    if (result.outcome === 'not-pending') fail(new Error('that approval was already answered'))
-  } catch (error) {
-    fail(error)
-  }
-}
-
-renderView()
-void start()
+renderAll()
+start()

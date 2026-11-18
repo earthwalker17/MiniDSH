@@ -5,9 +5,8 @@
  * reaches the model and its answer the transcript, and a streamed answer shows
  * while its message is not yet durable.
  *
- * The selectors are TODAY's page (`#prompt`, `#log`, the workspace picker as
- * the sign that `initialize` has answered); a redesign of the page updates
- * them here, and should keep them few.
+ * The selectors are few on purpose: `#prompt`, `#log`, and the hero's version
+ * pill as the sign that `initialize` has answered.
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -19,8 +18,8 @@ import { startWebUi, type WebUi } from '../../test-support/web-ui.ts'
 
 expectBrowserSuite('web UI')
 
-/** The page has connected and `initialize` has answered: the picker it fills exists. */
-const READY = `document.querySelector('#workspace option') !== null`
+/** The page has connected and `initialize` has answered: the version it names is shown. */
+const READY = `document.querySelector('.version-pill') !== null`
 const logHas = (text: string): string => `document.querySelector('#log').textContent.includes(${JSON.stringify(text)})`
 
 describe.runIf(testBrowser)('the web UI in a real browser', () => {

@@ -2,99 +2,70 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
+    <meta name="color-scheme" content="light dark" />
     <title>MiniDSH</title>
+    <!-- MiniDSH's mark, as a data: URL (the CSP allows data: images and no other origin). -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='7' fill='%230f1115'/%3E%3Cpath d='M6.5 16.5V9.5a2.5 2.5 0 0 1 5 0v7M11.5 9.5a2.5 2.5 0 0 1 5 0v7' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='17.75' cy='6.25' r='1.6' fill='%233cc2b0'/%3E%3C/svg%3E"
+    />
+    <!-- Before the stylesheet and synchronous: the theme is set before first paint. -->
+    <script src="/theme.js"></script>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <aside>
-      <div class="pane-head">
-        <select id="workspace" title="workspace"></select>
-        <button id="new" title="start a new session">new</button>
-      </div>
-      <div id="sessions" class="sessions"></div>
-      <button id="settings-open" class="ghost">settings</button>
-    </aside>
+    <div class="app" id="app">
+      <aside class="sidebar" id="sidebar" aria-label="Sessions">
+        <div class="brand" id="brand"></div>
+        <button class="new-session" id="new" type="button"></button>
+        <div class="list-head" id="list-head"></div>
+        <input class="filter" id="filter" type="search" placeholder="Filter sessions" aria-label="Filter sessions" hidden />
+        <nav class="session-list" id="sessions" aria-label="Session list"></nav>
+        <div class="sidebar-foot" id="sidebar-foot"></div>
+      </aside>
+      <div class="scrim" id="scrim" hidden></div>
 
-    <main>
-      <header>
-        <span id="session-name" class="name"></span>
-        <span id="session-id" class="mono">new session</span>
-        <span id="status" class="pill"></span>
-        <span id="context" class="pill"></span>
-        <span id="route" class="pill"></span>
-        <span id="authority" class="pill"></span>
-        <span class="spacer"></span>
-        <select id="sandbox" title="sandbox mode">
-          <option value="read-only">read-only</option>
-          <option value="workspace-write">workspace-write</option>
-          <option value="danger-full-access">danger-full-access</option>
-        </select>
-        <select id="approval" title="approval policy">
-          <option value="ask">ask</option>
-          <option value="never">never</option>
-        </select>
-        <!--
-          What this session accepts from its execution world. `partial` is not
-          offered: no shipped backend reports it, so it would be a control with
-          nothing behind it.
-        -->
-        <select id="accepts" title="shell enforcement this session accepts">
-          <option value="full">enforced shell</option>
-          <option value="none">unconfined shell</option>
-        </select>
-        <button id="compact" title="shrink the model's context">compact</button>
-        <button id="cancel" title="stop the running turn">cancel</button>
-        <!-- The open session's background jobs, from `view.jobs`; a line of its own under the controls. -->
-        <div id="jobs" class="jobs" hidden></div>
-      </header>
-
-      <div id="offline" class="banner offline" hidden>the host is not reachable — reconnecting</div>
-      <div id="error" class="banner error" hidden></div>
-      <div id="approval-bar" class="banner ask" hidden>
-        <span id="approval-text"></span>
-        <!--
-          The call is scrollable rather than truncated: hiding its tail would
-          ask somebody to consent to text they cannot read. `tabindex` so a
-          keyboard user can reach the scroll region before the buttons.
-        -->
-        <pre id="approval-call" class="call" tabindex="0" hidden></pre>
-        <button id="allow">allow once</button>
-        <!-- Shown only when the runtime OFFERS the scope; a surface invents none. -->
-        <button id="allow-session" hidden>allow for this session</button>
-        <button id="deny">deny</button>
-      </div>
-
-      <div id="log" class="log">
-        <div id="damaged" class="row note" hidden>[the stored log is damaged: what follows is the readable prefix, not the whole session]</div>
-        <!-- No number on the button: `oldest` is an inclusive lower SEQ bound, not a
-             count, and seq space includes the trace tier a page never carries — so on
-             exactly the chunk-heavy sessions paging exists for, a count overstated it by
-             two orders of magnitude. One click fetches one more page either way. -->
-        <button id="more" class="more" hidden>load earlier events</button>
-        <!-- `display: contents`, so the rows stay the flex items of `.log` and keep its
-             gap, while being addressable as one group to append to, prepend to and clear. -->
-        <div id="rows"></div>
-      </div>
-
-      <footer>
-        <textarea id="prompt" rows="3" placeholder="say something — Enter sends, Shift+Enter is a newline"></textarea>
-        <button id="send">send</button>
-      </footer>
-    </main>
-
-    <div id="settings" class="modal" hidden>
-      <div class="sheet">
-        <h2>settings</h2>
-        <p class="hint">Defaults for the next session. A session already running keeps what its log recorded.</p>
-        <div id="settings-fields"></div>
-        <div class="actions">
-          <button id="settings-save">save</button>
-          <button id="settings-close" class="ghost">close</button>
+      <main class="main" id="main" data-empty="">
+        <header class="topbar" id="topbar"></header>
+        <div class="strip damaged" id="damaged" role="status" hidden>
+          The stored log is damaged: what follows is its readable prefix, not the whole session.
         </div>
-      </div>
+        <!--
+          `role=log` with live announcements OFF: a streaming answer would be
+          read out token by token. Status changes go to the announcer below.
+        -->
+        <div class="scroller" id="log" role="log" aria-live="off" aria-label="Conversation">
+          <div class="column">
+            <section class="hero" id="hero" aria-label="New session"></section>
+            <button class="load-earlier" id="more" type="button" hidden>Load earlier</button>
+            <div class="history-start" id="history-start" hidden>Start of the conversation</div>
+            <div class="transcript" id="rows"></div>
+            <div id="live"></div>
+            <div class="working" id="working" hidden></div>
+          </div>
+        </div>
+        <button class="to-bottom" id="to-bottom" type="button" aria-label="Back to bottom" title="Back to bottom" hidden></button>
+        <div class="dock" id="dock">
+          <div class="dock-inner">
+            <div class="workspace-chip-row" id="workspace-row" hidden></div>
+            <section class="approval" id="approval" aria-labelledby="approval-head" hidden></section>
+            <div class="readonly-bar" id="readonly" hidden></div>
+            <form class="composer" id="composer" autocomplete="off">
+              <label class="sr-only" for="prompt">Message</label>
+              <textarea id="prompt" rows="1" placeholder="Ask MiniDSH to work on something…"></textarea>
+              <div class="composer-bar" id="composer-bar"></div>
+            </form>
+            <div class="composer-meta" id="composer-meta"></div>
+          </div>
+        </div>
+        <aside class="panel" id="panel" aria-label="Session details" hidden></aside>
+      </main>
     </div>
 
+    <dialog class="modal" id="settings" aria-label="Settings"></dialog>
+    <div class="toasts" id="toasts"></div>
+    <div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
