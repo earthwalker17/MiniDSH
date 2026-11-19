@@ -71,6 +71,8 @@ interface LeaseHolder {
   readonly pid: number
   readonly host: string
   readonly acquiredAt: number
+  /** The machine's `os.uptime()` (seconds) when the lease was taken; absent in locks written before S22.2. */
+  readonly uptime?: number
 }
 
 export interface PersistenceConfig {
@@ -197,32 +199,30 @@ function readLeaseHolder(lock: string): LeaseHolder | undefined {
   }
 }
 
-/**
- * How far before this boot a holder's `acquiredAt` must lie to be read as a
- * previous boot's. A wide margin, because both ends are estimates: `os.uptime()`
- * has whole-second resolution on some hosts, and the boot it implies is a
- * subtraction from a wall clock that may have been stepped since.
- */
-const BOOT_MARGIN_MS = 60_000
+/** Seconds the machine's uptime must have FALLEN by to read as a reboot: `os.uptime()` is whole seconds on some hosts. */
+const REBOOT_MARGIN_S = 60
 
 /**
  * Dead means provably dead, and only ever on THIS host (another cannot be
- * probed): the signal-0 probe reports ESRCH, OR the lease was taken before this
- * machine last booted.
+ * probed): the signal-0 probe reports ESRCH, OR the machine has rebooted since
+ * the lease was taken.
  *
- * The boot rule exists because the pid rule alone strands logs. A runtime the
+ * The reboot rule exists because the pid rule alone strands logs. A runtime the
  * OS hard-kills — a Windows logoff, a crash, a supervisor's deadline kill —
  * leaves its lock behind, and after a reboot its pid is often reused by an
  * unrelated live process, which the probe reads as alive forever: every resume
- * of that log was refused with "remove …lock". No process alive now can have
- * acquired anything before this boot, so the rule never steals a live holder;
- * a clock stepped BACK since the lease only makes it more conservative. A
- * holder with no numeric `acquiredAt` (a hand-written lock, an old writer)
- * keeps the pid rule alone.
+ * of that log was refused with "remove …lock". The evidence is the machine's
+ * UPTIME, recorded at acquisition: it only grows within one boot, so a smaller
+ * uptime now means a reboot happened in between, and no process alive now can
+ * be that holder. Uptime is monotonic — no NTP step, VM resume or person moving
+ * the wall clock can fake it (S22.2: a wall-clock form of this rule could steal
+ * a LIVE lease after a forward step). Windows Fast Startup does not reset it,
+ * so after such a shutdown the pid rule alone applies. A holder with no
+ * recorded uptime (an older writer, a hand-written lock) keeps the pid rule.
  */
 function holderIsDead(holder: LeaseHolder): boolean {
   if (holder.host !== hostname()) return false
-  if (typeof holder.acquiredAt === 'number' && holder.acquiredAt < Date.now() - uptime() * 1000 - BOOT_MARGIN_MS) return true
+  if (typeof holder.uptime === 'number' && Number.isFinite(holder.uptime) && uptime() + REBOOT_MARGIN_S < holder.uptime) return true
   try {
     process.kill(holder.pid, 0)
     return false
@@ -567,7 +567,7 @@ class JsonlArchive implements Persistence {
    */
   private acquireLease(session: Session, file: string): void {
     const lock = `${file}.lock`
-    const payload = JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: Date.now() } satisfies LeaseHolder)
+    const payload = JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: Date.now(), uptime: uptime() } satisfies LeaseHolder)
     const tryCreate = (): boolean => {
       try {
         writeFileSync(lock, payload, { flag: 'wx' })

@@ -6,7 +6,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { hostname, tmpdir } from 'node:os'
+import { hostname, tmpdir, uptime } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
@@ -120,21 +120,27 @@ describe('persistence-jsonl: the session write lease', () => {
     const livePid = process.ppid
     expect(() => process.kill(livePid, 0), `pid ${livePid} must be alive for this test to mean anything`).not.toThrow()
 
-    // The same live pid, acquired NOW: refused, so the rule never steals a live holder.
-    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: Date.now() }))
+    // The same live pid, taken during THIS boot (uptime then <= uptime now): refused, so the rule never steals a live holder.
+    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: Date.now(), uptime: Math.max(0, uptime() - 5) }))
     const refused = resumeStored(rootA, 'reboot')
     await expect(refused.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
     await rootA.get(SESSIONS).detach(refused)
 
-    // Acquired at the epoch, long before any boot: reclaimed.
-    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: 0 }))
+    // A wall clock moved FORWARD by a day since the lease must not read as a reboot: refused.
+    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: Date.now() - 86_400_000, uptime: Math.max(0, uptime() - 5) }))
+    const stepped = resumeStored(rootA, 'reboot')
+    await expect(stepped.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
+    await rootA.get(SESSIONS).detach(stepped)
+
+    // Taken when the machine had been up LONGER than it has now: it rebooted since. Reclaimed.
+    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: Date.now(), uptime: uptime() + 3_600 }))
     const resumed = resumeStored(rootA, 'reboot')
     await expect(resumed.flush()).resolves.toBeUndefined()
     expect(JSON.parse(readFileSync(lock, 'utf8')).pid).toBe(process.pid)
     await rootA.get(SESSIONS).detach(resumed)
 
-    // No numeric acquiredAt: the pid rule alone, and the pid is alive.
-    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname() }))
+    // No recorded uptime (an older writer): the pid rule alone, and the pid is alive.
+    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: 0 }))
     const legacy = resumeStored(rootA, 'reboot')
     await expect(legacy.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
   })
