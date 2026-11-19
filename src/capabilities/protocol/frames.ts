@@ -242,6 +242,37 @@ export interface PromptResult {
   readonly messageId: string
 }
 
+/**
+ * Continue a session WITHOUT a prompt: a stored one is resumed (its restored
+ * inbox may wake it), a live one is returned as it is — upstream's SDK
+ * refuses an occupied session instead; here a live session is already this
+ * host's to drive or refused as a running child. Either way the caller then
+ * attaches to watch it. `agentOptions` are the same durable route switch a
+ * prompt's are; a surface reopening a session it only listed sends none.
+ */
+export interface ResumeParams {
+  readonly sessionId: string
+  readonly agentOptions?: Partial<AgentOptions>
+}
+
+/**
+ * Branch a live or stored session into a NEW one and leave it idle (a fork
+ * never wakes). `atSeq` is the inclusive boundary (`agents.fork`); absent,
+ * the source's whole log, which must not end inside an open turn. `salvage`
+ * forks a damaged STORED log's readable prefix and is refused for a live one.
+ */
+export interface ForkParams {
+  readonly sessionId: string
+  readonly atSeq?: number
+  readonly salvage?: boolean
+  readonly agentOptions?: Partial<AgentOptions>
+}
+
+/** The session `session/resume` continued, or the one `session/fork` made. */
+export interface ContinueResult {
+  readonly sessionId: string
+}
+
 export interface EventsParams {
   readonly sessionId: string
   readonly fromSeq?: number

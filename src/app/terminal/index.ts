@@ -16,12 +16,10 @@
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
-import { AGENTS, type Agent, type AgentOptions } from '../../core/agent/index.ts'
+import type { AgentOptions } from '../../core/agent/index.ts'
 import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
 import type { ApprovalOfferId, ApprovedCall, OpenApproval } from '../../core/approval/index.ts'
 import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
-import { asSessionId } from '../../core/ids.ts'
-import { LLM } from '../../core/llm/index.ts'
 import { formatTokens } from '../../core/metering/index.ts'
 import { matches, type SessionEventFrame } from '../../core/session/index.ts'
 import { printableText } from '../../core/text.ts'
@@ -30,6 +28,7 @@ import type {
   AttachResult,
   AuthorityView,
   CompactResult,
+  ContinueResult,
   InitializeResult,
   JobCancelResult,
   JobSummary,
@@ -40,7 +39,7 @@ import type {
   SessionsListResult,
 } from '../../capabilities/protocol/index.ts'
 import { jobStatus } from '../../capabilities/tool-jobs/index.ts'
-import { applyAuthority, type BootOptions } from '../headless.ts'
+import type { BootOptions } from '../headless.ts'
 import { preview } from '../present.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
@@ -105,17 +104,6 @@ export interface TerminalOptions extends BootOptions {
   readonly agentPreset?: string
   /** Injected for tests; defaults to process stdin/stdout. */
   readonly io?: { readonly input: NodeJS.ReadableStream; readonly output: NodeJS.WritableStream }
-}
-
-/** The window an adapter answers with for a route, or nothing when none here can. */
-function windowOf(root: Context, provider: string, model: string): number | undefined {
-  const llm = root.tryGet(LLM)
-  if (llm === undefined || !llm.hasProvider(provider)) return undefined
-  try {
-    return llm.resolveModel(provider, model).contextWindow
-  } catch {
-    return undefined
-  }
 }
 
 export async function runTerminal(options: TerminalOptions): Promise<number> {
@@ -696,32 +684,30 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     const init = await client.request<InitializeResult>('initialize')
     const provider = overrides.provider ?? init.defaultAgentOptions.provider
     const model = overrides.model ?? init.defaultAgentOptions.model
-    // Asked of the adapter, not looked up in the advertised list: a retired
-    // alias an adapter still resolves (`deepseek-v4-flash`, the 1.0.0 default)
-    // is deliberately unlisted. The catalog is the fallback for a route no
-    // adapter here can answer.
-    const contextWindow = windowOf(host.root, provider, model) ?? init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
+    // From the advertised catalog: this client reads the wire, never the
+    // host's registry. A retired alias an adapter still resolves is unlisted,
+    // so it shows no window here until the view's context reports one.
+    const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
     const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
     out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /jobs lists background jobs, /exit quits, Ctrl+C cancels)\n`)
 
     if (attaching) {
-      const agents = host.root.get(AGENTS)
-      const continueOptions = {
-        agentOptions: overrides,
-        defaults: init.defaultAgentOptions,
-        ...(options.agentWorld === undefined ? {} : { world: options.agentWorld }),
-        ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
-        // An explicitly requested authority is a durable switch here too: a
-        // resumed session keeps what it recorded unless someone says otherwise.
-        // Inside the continuation's transaction, so it lands before a restored
-        // prompt can wake a turn (`ResumeAgentOptions.opening`).
-        opening: (agent: Agent) => applyAuthority(host.root, agent, options),
-      }
-      const handle =
+      // Over the wire, like every other client: the host composes the
+      // continuation under its own world and preset and opens it with this
+      // run's explicit authority flags (`onContinued`, inside the creation
+      // transaction, before a restored prompt can wake a turn), and OWNS it,
+      // so its shutdown sweeps it. The launch's model flags are this command's
+      // explicit request, so they go with it.
+      const continued =
         options.resumeId !== undefined
-          ? await agents.resume(host.root, asSessionId(options.resumeId), continueOptions)
-          : await agents.fork(host.root, asSessionId(options.forkId!), options.boundary, { ...continueOptions, ...(options.salvage === true ? { salvage: true } : {}) })
-      sessionId = handle.agent.id
+          ? await client.request<ContinueResult>('session/resume', { sessionId: options.resumeId, agentOptions: overrides })
+          : await client.request<ContinueResult>('session/fork', {
+              sessionId: options.forkId,
+              agentOptions: overrides,
+              ...(options.boundary === undefined ? {} : { atSeq: options.boundary }),
+              ...(options.salvage === true ? { salvage: true } : {}),
+            })
+      sessionId = continued.sessionId
       // Attach first; live rendering starts at the seq after the cursor, and
       // the backlog replays whatever streamed while we attached (a resumed
       // session may have woken on its restored inbox already).

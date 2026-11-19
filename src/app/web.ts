@@ -253,7 +253,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
     serverVersion: VERSION,
     // An explicit authority flag is a durable switch on every session this
     // process continues, a wire resume included (ARCHITECTURE §9).
-    onResumed: (agent, ctx) => applyAuthority(ctx, agent, options),
+    onContinued: (agent, ctx) => applyAuthority(ctx, agent, options),
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
     ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),

@@ -148,6 +148,8 @@ async function startHost(
     patches?: readonly Patch[]
     /** Mounts the attachment store there; omitted, the composition has none. */
     attachmentsRoot?: string
+    /** An explicit `--sandbox` flag: the host applies it to every session it continues. */
+    sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access'
   },
 ): Promise<{ host: ProtocolHostHandle; client: TestClient; clients: TestClient[]; sessionsRoot: string }> {
   const clients = Array.from({ length: 1 + (extra?.extraClients ?? 0) }, () => new TestClient())
@@ -164,6 +166,7 @@ async function startHost(
     ...(extra?.agentDefaults === undefined ? {} : { agentDefaults: extra.agentDefaults }),
     ...(extra?.accepts === undefined ? {} : { accepts: extra.accepts }),
     ...(extra?.attachmentsRoot === undefined ? {} : { attachmentsRoot: extra.attachmentsRoot }),
+    ...(extra?.sandbox === undefined ? {} : { sandbox: extra.sandbox }),
     patches: [{ id: 'llm-deepseek', disabled: true }, ...(extra?.patches ?? [])],
     prepare: (root) => {
       root.get(LLM).registerAdapter(root, adapter)
@@ -440,6 +443,144 @@ describe('protocol: resume over the wire', () => {
     // fromSeq slices the tail.
     const tail = await second.client.result<{ events: { seq: number }[] }>('session/events', { sessionId, fromSeq: 3 })
     expect(tail.events[0]?.seq).toBe(3)
+  })
+})
+
+describe('protocol: session/resume and session/fork', () => {
+  /** A stored session with one finished turn, its host gone: what a later process continues. */
+  async function storedSession(): Promise<{ sessionId: string; sessionsRoot: string }> {
+    const first = await startHost(new ScriptedAdapter().script(assistantText('one')))
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(sessionId)
+    await first.host.dispose()
+    return { sessionId, sessionsRoot: first.sessionsRoot }
+  }
+
+  const turnsOf = async (client: TestClient, sessionId: string): Promise<number> =>
+    (await client.result<{ events: { type: string }[] }>('session/events', { sessionId })).events.filter((event) => event.type === 'turn/start').length
+
+  it('resumes a stored session without a prompt, owns it, and starts no turn', async () => {
+    const stored = await storedSession()
+    const { host, client } = await startHost(new ScriptedAdapter().script(assistantText('two')), { sessionsRoot: stored.sessionsRoot })
+    const reply = await client.result<{ sessionId: string }>('session/resume', { sessionId: stored.sessionId })
+    expect(reply).toEqual({ sessionId: stored.sessionId })
+    expect(host.root.get(AGENTS).get(asSessionId(stored.sessionId))).toBeDefined()
+    expect(await turnsOf(client, stored.sessionId)).toBe(1)
+    // Live now, so a second resume returns it as it is, and a prompt drives it.
+    expect(await client.result('session/resume', { sessionId: stored.sessionId })).toEqual({ sessionId: stored.sessionId })
+    await client.result('session/prompt', { sessionId: stored.sessionId, text: 'more' })
+    await client.waitForIdle(stored.sessionId)
+    expect(await turnsOf(client, stored.sessionId)).toBe(2)
+    // Owned: the host's shutdown sweeps it, as it sweeps a prompt's resume.
+    await client.result('shutdown')
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+  })
+
+  it("opens a continuation with the host's explicit authority flags, resume and fork alike", async () => {
+    const stored = await storedSession()
+    const { client } = await startHost(new ScriptedAdapter(), { sessionsRoot: stored.sessionsRoot, sandbox: 'read-only' })
+    await client.result('session/resume', { sessionId: stored.sessionId })
+    expect(await client.result('session/authority', { sessionId: stored.sessionId })).toMatchObject({ sandbox: 'read-only' })
+    const { sessionId: forked } = await client.result<{ sessionId: string }>('session/fork', { sessionId: stored.sessionId })
+    expect(await client.result('session/authority', { sessionId: forked })).toMatchObject({ sandbox: 'read-only' })
+  })
+
+  it('forks a stored session into a new idle one this host owns, and the fork can be driven', async () => {
+    const stored = await storedSession()
+    const { host, client } = await startHost(new ScriptedAdapter().script(assistantText('the fork answers')), { sessionsRoot: stored.sessionsRoot })
+    const { sessionId: forked } = await client.result<{ sessionId: string }>('session/fork', { sessionId: stored.sessionId })
+    expect(forked).not.toBe(stored.sessionId)
+    const attached = await client.result<AttachResult>('session/attach', { sessionId: forked })
+    expect(attached.header.parentId).toBe(stored.sessionId)
+    expect(attached.header.seedLength).toBeGreaterThan(0)
+    // A fork never wakes: nothing runs until someone prompts it.
+    expect(attached.view.status).toBe('idle')
+    expect(await turnsOf(client, forked)).toBe(1)
+    await client.result('session/prompt', { sessionId: forked, text: 'go on' })
+    await client.waitForIdle(forked)
+    expect(await turnsOf(client, forked)).toBe(2)
+    // The source was read, not continued.
+    expect(host.root.get(AGENTS).get(asSessionId(stored.sessionId))).toBeUndefined()
+    await client.result('shutdown')
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+  })
+
+  it('forks at an inclusive boundary, and refuses one that cuts a turn open', async () => {
+    const stored = await storedSession()
+    const { client } = await startHost(new ScriptedAdapter(), { sessionsRoot: stored.sessionsRoot })
+    const { events } = await client.result<{ events: { type: string; seq: number }[] }>('session/events', { sessionId: stored.sessionId })
+    const turnStart = events.find((event) => event.type === 'turn/start')!.seq
+    const inside = await client.call('session/fork', { sessionId: stored.sessionId, atSeq: turnStart })
+    expect(inside.error?.code).toBe(-32602)
+    const { sessionId: forked } = await client.result<{ sessionId: string }>('session/fork', { sessionId: stored.sessionId, atSeq: turnStart - 1 })
+    expect(await turnsOf(client, forked)).toBe(0)
+  })
+
+  it("refuses what it cannot do as the caller's error, creating nothing", async () => {
+    const stored = await storedSession()
+    const { host, client } = await startHost(new ScriptedAdapter().script(assistantTextPaused('held ', 'open', new Promise(() => {}))), { sessionsRoot: stored.sessionsRoot })
+    const refused = async (method: string, params: unknown, pattern: RegExp): Promise<void> => {
+      const reply = await client.call(method, params)
+      expect(reply.error?.code, `${method} ${JSON.stringify(params)}`).toBe(-32602)
+      expect(reply.error?.message).toMatch(pattern)
+    }
+    await refused('session/resume', {}, /sessionId/)
+    await refused('session/resume', { sessionId: 'session-nope' }, /no stored session/)
+    await refused('session/fork', { sessionId: 'session-nope' }, /no stored session/)
+    await refused('session/fork', { sessionId: stored.sessionId, atSeq: -1 }, /atSeq/)
+    await refused('session/fork', { sessionId: stored.sessionId, atSeq: 'three' }, /atSeq/)
+    await refused('session/fork', { sessionId: stored.sessionId, salvage: 'yes' }, /salvage/)
+    await refused('session/resume', { sessionId: stored.sessionId, agentOptions: { provider: 'nowhere' } }, /no adapter/)
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+    // A live source: salvage reads a damaged stored log only, and a running
+    // turn cannot be forked whole.
+    const { sessionId: running } = await client.result<{ sessionId: string }>('session/prompt', { text: 'start', agentOptions: SCRIPTED })
+    await client.waitFor(() => client.statuses().find((entry) => entry.sessionId === running && entry.status === 'running'), 'the turn to run')
+    await refused('session/fork', { sessionId: running, salvage: true }, /live/)
+    await refused('session/fork', { sessionId: running }, /turn/i)
+    expect(host.root.get(AGENTS).list().map((agent) => agent.id)).toEqual([running])
+  })
+
+  it('refuses a session composed under another preset, before anything is published', async () => {
+    const stored = await storedSession()
+    const { host, client } = await startHost(new ScriptedAdapter(), { sessionsRoot: stored.sessionsRoot, agentPreset: 'reviewer', agentWorld: () => {} })
+    for (const method of ['session/resume', 'session/fork']) {
+      const reply = await client.call(method, { sessionId: stored.sessionId })
+      expect(reply.error?.code, method).toBe(-32602)
+      expect(reply.error?.message, method).toMatch(/preset/)
+    }
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+  })
+
+  it('rolls a continuation back when its opening flags exceed a child’s ceiling', async () => {
+    const delegating = new ScriptedAdapter().script(assistantToolCall('c1', 'subagent', { description: 'find it', prompt: 'answer' }), assistantText('the child'), assistantText('the parent'))
+    const first = await startHost(delegating)
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'delegate', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(sessionId)
+    const childId = first.client.frames('subagent/start', sessionId)[0]!.event.data.childId as string
+    await first.host.dispose()
+
+    const { host, client } = await startHost(new ScriptedAdapter(), { sessionsRoot: first.sessionsRoot, sandbox: 'danger-full-access' })
+    for (const method of ['session/resume', 'session/fork']) {
+      const reply = await client.call(method, { sessionId: childId })
+      expect(reply.error?.code, method).toBe(-32602)
+      expect(reply.error?.message, method).toMatch(/ceiling|cannot be widened|authority flags/i)
+    }
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+  })
+
+  it('leaves nothing live when a shutdown races a resume or a fork', async () => {
+    const stored = await storedSession()
+    const { host, client } = await startHost(new ScriptedAdapter(), { sessionsRoot: stored.sessionsRoot })
+    // Not awaited: the connection closes once `shutdown` is answered, so a
+    // reply that loses the race is never sent. What must hold is the end
+    // state — `shutdown` drains both acquires before it answers, and a
+    // continuation that finished after it began is disposed, not left live.
+    void client.call('session/resume', { sessionId: stored.sessionId })
+    void client.call('session/fork', { sessionId: stored.sessionId })
+    await client.result('shutdown')
+    await host.closed
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
   })
 })
 
@@ -1836,8 +1977,9 @@ describe('protocol: the control plane', () => {
     const { header } = await client.result<AttachResult>('session/attach', { sessionId })
     await client.result('control/subscribe', {})
 
-    // As the terminal's fork and resume do: an agent no wire method created,
-    // which no prompt will start.
+    // An agent no wire method created, which no prompt will start: what any
+    // in-process creator beside the wire makes (the terminal's resume and fork
+    // did until S22.1 moved them onto `session/resume` and `session/fork`).
     const created = await host.root.get(AGENTS).create(host.root, { cwd: header.cwd, agentOptions: SCRIPTED })
     await client.waitFor(() => summariesOf(client, created.agent.id)[0], 'the new session summary')
     expect(summariesOf(client, created.agent.id)).toEqual([{ sessionId: created.agent.id, status: 'idle', runningJobs: 0, heldNotices: 0, pendingApprovals: 0 }])

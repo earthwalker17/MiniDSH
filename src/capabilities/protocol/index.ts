@@ -94,8 +94,8 @@ export interface ProtocolConfig {
   readonly world?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, recorded in each session's header so a resume can compose the same world. */
   readonly agentPreset?: string
-  /** Called on a session this host resumes, inside its creation transaction (the app applies its explicit authority flags). */
-  readonly onResumed?: (agent: Agent, ctx: Context) => void
+  /** Called on a session this host resumes or forks, inside its creation transaction (the app applies its explicit authority flags). */
+  readonly onContinued?: (agent: Agent, ctx: Context) => void
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
   readonly onClose?: () => void
 }
@@ -136,7 +136,7 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
       closeWithLastClient: carriers.every((carrier) => carrier.kind === 'stream'),
       ...(config.world === undefined ? {} : { world: config.world }),
       ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }),
-      ...(config.onResumed === undefined ? {} : { onResumed: config.onResumed }),
+      ...(config.onContinued === undefined ? {} : { onContinued: config.onContinued }),
       ...(config.onClose === undefined ? {} : { onClose: config.onClose }),
     })
     ctx.on(SESSION_EVENT, (session, event) => host.onSessionEvent(session, event))

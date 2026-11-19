@@ -90,6 +90,7 @@ import {
   type AttachResult,
   type AuthorityView,
   type CompactResult,
+  type ContinueResult,
   type ControlSubscribeResult,
   type ControlSummary,
   type EventsResult,
@@ -192,17 +193,19 @@ export interface ProtocolServerConfig {
   /** The name of the preset `world` composes, recorded in each session's header. */
   readonly agentPreset?: string
   /**
-   * Called on a session this host resumes, INSIDE its creation transaction
-   * (`ResumeAgentOptions.opening`): the app applies the operator's EXPLICIT
-   * authority flags here as the durable switch they are on every other path
-   * (§9), after publication and before any wake, so a prompt the restored
-   * inbox owes cannot start a turn ahead of them — and a refusal rolls the resume back with that
-   * prompt still queued (S21.1). Without it a `web --sandbox read-only` host
-   * continued a stored session at its recorded wider mode. It is handed the
-   * host's own context: a hook that read a root the app filled only after
-   * boot could meet a resume that arrived first (S20.5).
+   * Called on a session this host CONTINUES — resumes (`session/prompt`,
+   * `session/resume`) or forks (`session/fork`) — INSIDE its creation
+   * transaction (`ResumeAgentOptions.opening`): the app applies the operator's
+   * EXPLICIT authority flags here as the durable switch they are on every
+   * other path (§9), after publication and before any wake, so a prompt the
+   * restored inbox owes cannot start a turn ahead of them — and a refusal
+   * rolls the continuation back with that prompt still queued (S21.1).
+   * Without it a `web --sandbox read-only` host continued a stored session at
+   * its recorded wider mode. It is handed the host's own context: a hook that
+   * read a root the app filled only after boot could meet a resume that
+   * arrived first (S20.5).
    */
-  readonly onResumed?: (agent: Agent, ctx: Context) => void
+  readonly onContinued?: (agent: Agent, ctx: Context) => void
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
   /**
@@ -221,6 +224,21 @@ function requireString(params: Record<string, unknown>, key: string, method: str
   const value = params[key]
   if (typeof value !== 'string' || value.length === 0) throw new RpcFailure(INVALID_PARAMS, `${method}: "${key}" must be a non-empty string`)
   return value
+}
+
+/**
+ * A resume or fork that cannot happen is the CALLER's to resolve, not a host
+ * failure: the session it named is missing, damaged, held by another process,
+ * composed under another preset, forked inside an open turn or below a child's
+ * delegation opening, or in a format this host cannot continue — each thrown
+ * by `core/agent` or the store with a message that names the session. As
+ * `-32603` a retry policy keyed on it would retry forever (the `settings/*`
+ * rule, `asCallerError`).
+ */
+function continuationFailure(method: string, error: unknown): RpcFailure {
+  if (error instanceof RpcFailure) return error
+  if (error instanceof SessionFormatError) return new RpcFailure(INVALID_PARAMS, error.message)
+  return new RpcFailure(INVALID_PARAMS, `${method}: ${error instanceof Error ? error.message : String(error)}`)
 }
 
 /** An optional non-negative integer, refused rather than coerced. */
@@ -713,6 +731,10 @@ export class ProtocolHost {
         return this.initialize()
       case 'session/prompt':
         return this.prompt(record)
+      case 'session/resume':
+        return this.resumeSession(record)
+      case 'session/fork':
+        return this.forkSession(record)
       case 'sessions/list':
         return this.sessionsList(record)
       case 'session/events':
@@ -1123,15 +1145,16 @@ export class ProtocolHost {
   }
 
   /**
-   * This host's own authority flags on a session it resumes, as the resume's
-   * `opening`: inside the creation transaction, so a refusal (a child's pin,
-   * refused whole before any append by `authoritySwitchRefusal`) rolls the
-   * resume back with nothing published and the restored prompt still queued.
-   * The caller's to resolve, as a format this host cannot continue is.
+   * This host's own authority flags on a session it continues, as the
+   * continuation's `opening`: inside the creation transaction, so a refusal (a
+   * child's pin, refused whole before any append by `authoritySwitchRefusal`)
+   * rolls the resume or fork back with nothing published and the restored
+   * prompt still queued. The caller's to resolve, as a format this host cannot
+   * continue is.
    */
-  private applyResumeFlags(agent: Agent): void {
+  private applyContinueFlags(agent: Agent): void {
     try {
-      this.config.onResumed?.(agent, this.ctx)
+      this.config.onContinued?.(agent, this.ctx)
     } catch (error) {
       throw new RpcFailure(INVALID_PARAMS, `this host's authority flags cannot apply to session "${agent.id}": ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -1172,24 +1195,7 @@ export class ProtocolHost {
     if (mode !== 'followup' && mode !== 'steer' && mode !== 'auto') {
       throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "mode" must be "followup", "steer" or "auto"')
     }
-    const acquiring = this.acquire(params)
-    this.inflight.add(acquiring)
-    let agent: Agent
-    try {
-      agent = await acquiring
-    } finally {
-      this.inflight.delete(acquiring)
-    }
-    // A shutdown that raced this acquire has already swept `owned`: dispose the
-    // straggler instead of starting a turn after shutdown was answered.
-    if (this.shuttingDown) {
-      const handle = this.owned.get(agent.id)
-      if (handle) {
-        this.owned.delete(agent.id)
-        await handle.dispose()
-      }
-      throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
-    }
+    const agent = await this.untilShutdown(this.acquire(params))
     const message = createUserMessage(text)
     // `auto` is resolved HERE, against the live agent, in the same tick it is
     // delivered. A client choosing from an observed `session.status` is racing
@@ -1256,49 +1262,143 @@ export class ProtocolHost {
       this.owned.set(handle.agent.id, handle)
       return handle.agent
     }
+    return this.continueById(requested, options.partial, 'session/prompt')
+  }
+
+  /**
+   * An existing session by id, for a method that drives it: a resume already
+   * in flight is joined, a live agent returned (options are the same durable
+   * switch `session/model` makes), a stored one resumed and owned. Shared by
+   * `session/prompt` and `session/resume`, so the two cannot drift.
+   */
+  private continueById(requested: string, partial: Partial<AgentOptions>, method: string): Promise<Agent> {
     // A resume of this id already in flight is joined FIRST: its agent is
     // published (and so found below) before its `opening` — this host's
     // authority flags — has run, and a prompt delivered to it then would start
     // the turn the opening exists to precede.
     const pending = this.resuming.get(requested)
     if (pending) return pending
-    const live = agents.get(asSessionId(requested))
+    const live = this.ctx.get(AGENTS).get(asSessionId(requested))
     if (live) {
-      this.assertDrivable(live, 'session/prompt')
-      // Options on a prompt to a LIVE session are the same durable switch
-      // `session/model` makes: merged over the base, logged iff they differ.
-      if (Object.keys(options.partial).length > 0) live.configure(options.partial)
-      return live
+      this.assertDrivable(live, method)
+      // Options to a LIVE session are the same durable switch `session/model`
+      // makes: merged over the base, logged iff they differ.
+      if (Object.keys(partial).length > 0) live.configure(partial)
+      return Promise.resolve(live)
     }
-    let inflight = this.resuming.get(requested)
-    if (!inflight) {
-      inflight = agents
-        // The preset this host composes is named, so a session composed under
-        // another one is refused rather than run under a world its header does
-        // not name (core/agent `assertSamePreset`).
-        .resume(this.ctx, asSessionId(requested), {
-          agentOptions: options.partial,
-          defaults: this.agentDefaults(),
-          ...world,
-          ...preset,
-          ...(this.config.onResumed === undefined ? {} : { opening: (agent: Agent) => this.applyResumeFlags(agent) }),
-        })
-        .then(
-          (handle) => {
-            this.owned.set(handle.agent.id, handle)
-            return handle.agent
-          },
-          (error: unknown) => {
-            // The same answer `session/attach` gives: the session exists and
-            // this host cannot continue it, which is the caller's to fix.
-            if (error instanceof SessionFormatError) throw new RpcFailure(INVALID_PARAMS, error.message)
-            throw error
-          },
-        )
-        .finally(() => this.resuming.delete(requested))
-      this.resuming.set(requested, inflight)
-    }
+    const inflight = this.ctx
+      .get(AGENTS)
+      // The preset this host composes is named, so a session composed under
+      // another one is refused rather than run under a world its header does
+      // not name (core/agent `assertSamePreset`).
+      .resume(this.ctx, asSessionId(requested), { agentOptions: partial, defaults: this.agentDefaults(), ...this.continuation() })
+      .then(
+        (handle) => {
+          this.owned.set(handle.agent.id, handle)
+          return handle.agent
+        },
+        (error: unknown) => {
+          throw continuationFailure(method, error)
+        },
+      )
+      .finally(() => this.resuming.delete(requested))
+    this.resuming.set(requested, inflight)
     return inflight
+  }
+
+  /** What every continuation this host makes is composed and opened with: its world, its preset, its flags. */
+  private continuation(): { world?: (agentCtx: Context) => void | Promise<void>; agentPreset?: string; opening?: (agent: Agent) => void } {
+    return {
+      ...(this.config.world === undefined ? {} : { world: this.config.world }),
+      ...(this.config.agentPreset === undefined ? {} : { agentPreset: this.config.agentPreset }),
+      ...(this.config.onContinued === undefined ? {} : { opening: (agent: Agent) => this.applyContinueFlags(agent) }),
+    }
+  }
+
+  /**
+   * The shutdown discipline for every method that may make an agent this host
+   * owns: the acquire is registered so `shutdown` drains it, and one that lost
+   * the race is disposed rather than left live after shutdown was answered.
+   *
+   * The disposal is INSIDE what `shutdown` drains. It used to follow the
+   * `inflight` removal, so `shutdown` could find nothing in flight and nothing
+   * owned, answer, and leave the straggler still disposing — a live agent
+   * after "the host is done" (found by S22.1's race test, on `prompt()`'s path
+   * as much as the new methods').
+   */
+  private async untilShutdown(acquiring: Promise<Agent>): Promise<Agent> {
+    const settled = (async (): Promise<Agent> => {
+      const agent = await acquiring
+      // A shutdown that raced this acquire: dispose the straggler (unless the
+      // sweep already took it) instead of starting a turn after the answer.
+      if (this.shuttingDown) {
+        const handle = this.owned.get(agent.id)
+        if (handle) {
+          this.owned.delete(agent.id)
+          await handle.dispose()
+        }
+        throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+      }
+      return agent
+    })()
+    this.inflight.add(settled)
+    try {
+      return await settled
+    } finally {
+      this.inflight.delete(settled)
+    }
+  }
+
+  /**
+   * Continue a session with no prompt (`ResumeParams`): what a surface opening
+   * a stored session uses, where `session/prompt` would have to invent one.
+   */
+  private async resumeSession(params: Record<string, unknown>): Promise<ContinueResult> {
+    if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+    const sessionId = requireString(params, 'sessionId', 'session/resume')
+    const options = readAgentOptions(this.agentDefaults(), params.agentOptions, 'session/resume')
+    this.assertRoutable(options.partial, 'session/resume')
+    const agent = await this.untilShutdown(this.continueById(sessionId, options.partial, 'session/resume'))
+    return { sessionId: agent.id }
+  }
+
+  /**
+   * Branch a session into a new one this host owns (`ForkParams`). It never
+   * wakes (the factory's rule), so the caller attaches and prompts it.
+   */
+  private async forkSession(params: Record<string, unknown>): Promise<ContinueResult> {
+    if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+    const method = 'session/fork'
+    const sessionId = requireString(params, 'sessionId', method)
+    const atSeq = optionalCount(params, 'atSeq', method)
+    if (params.salvage !== undefined && typeof params.salvage !== 'boolean') throw new RpcFailure(INVALID_PARAMS, `${method}: "salvage" must be a boolean`)
+    const salvage = params.salvage === true
+    const agents = this.ctx.get(AGENTS)
+    // Salvage reads a damaged STORED log's readable prefix; a live source is
+    // whole, and `agents.fork` would ignore the flag rather than say so.
+    if (salvage && agents.get(asSessionId(sessionId)) !== undefined) {
+      throw new RpcFailure(INVALID_PARAMS, `${method}: "salvage" forks a damaged stored log, and "${sessionId}" is live`)
+    }
+    const options = readAgentOptions(this.agentDefaults(), params.agentOptions, method)
+    this.assertRoutable(options.partial, method)
+    const forking = agents
+      .fork(this.ctx, asSessionId(sessionId), atSeq, {
+        agentOptions: options.partial,
+        defaults: this.agentDefaults(),
+        ...this.continuation(),
+        ...(salvage ? { salvage: true } : {}),
+      })
+      .then(
+        (handle) => {
+          this.owned.set(handle.agent.id, handle)
+          return handle.agent
+        },
+        (error: unknown) => {
+          throw continuationFailure(method, error)
+        },
+      )
+    const agent = await this.untilShutdown(forking)
+    return { sessionId: agent.id }
   }
 
   private events(params: Record<string, unknown>): EventsResult {
