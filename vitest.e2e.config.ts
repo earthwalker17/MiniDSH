@@ -22,7 +22,7 @@ import { defineConfig } from 'vitest/config'
  */
 export default defineConfig({
   test: {
-    include: ['src/**/*.e2e.test.ts'],
+    include: ['src/**/*.e2e.test.ts', 'desktop/e2e/**/*.e2e.test.ts'],
     // An arc's own diagnostics reach the terminal on a PASSING run too. What a
     // live arc measured is the point of running it — the routing arc's flake
     // rate is a number the route to V1 reports rather than hides, and a green

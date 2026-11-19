@@ -7,9 +7,14 @@
 ; the uninstaller REFUSE instead, naming what to do; a silent run exits 2.
 ; (Measured in S22.2's spike: install and uninstall both refused while the
 ; app ran, and the app lived.)
+;
+; The check excludes this installer's own process: an uninstaller run in place
+; (`_?=`) lives in the install directory and would otherwise refuse itself.
 !macro customCheckAppRunning
   System::Call 'Kernel32::SetEnvironmentVariable(t "MINIDSH_INSTDIR", t "$INSTDIR")'
-  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command "$$d = [IO.Path]::GetFullPath($$env:MINIDSH_INSTDIR).TrimEnd([char]92) + [char]92; if (@(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { exit 3 } else { exit 0 }"'
+  System::Call 'Kernel32::GetCurrentProcessId() i .r0'
+  System::Call 'Kernel32::SetEnvironmentVariable(t "MINIDSH_INSTALLER_PID", t "$0")'
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command "$$d = [IO.Path]::GetFullPath($$env:MINIDSH_INSTDIR).TrimEnd([char]92) + [char]92; $$self = [int]$$env:MINIDSH_INSTALLER_PID; if (@(Get-CimInstance Win32_Process | Where-Object { $$_.ProcessId -ne $$self -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { exit 3 } else { exit 0 }"'
   Pop $0
   Pop $1
   ${if} $0 == 3

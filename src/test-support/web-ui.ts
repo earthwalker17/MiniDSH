@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Logger } from '../kernel/index.ts'
 import { LLM } from '../core/llm/index.ts'
-import type { CdpEvent } from '../capabilities/tool-browser/cdp.ts'
+import type { CdpConnection, CdpEvent } from '../capabilities/tool-browser/cdp.ts'
 import { launchBrowser, type LaunchedBrowser } from '../capabilities/tool-browser/launch.ts'
 import { startWebHost, type WebHostHandle } from '../app/web.ts'
 import { testBrowser } from './browser-fixture.ts'
@@ -121,7 +121,7 @@ function consoleText(args: unknown): string {
 }
 
 /** What one CDP event says went wrong on a page, if anything. */
-function problemOf(event: CdpEvent): UiProblem | undefined {
+export function problemOf(event: CdpEvent): UiProblem | undefined {
   const params = event.params as Record<string, never>
   if (event.method === 'Runtime.consoleAPICalled') {
     const level = String(params.type)
@@ -138,6 +138,83 @@ function problemOf(event: CdpEvent): UiProblem | undefined {
     return { source: 'log', level: entry.level, text: `[${entry.source ?? 'log'}] ${entry.text ?? ''}`, ...(entry.url ? { url: entry.url } : {}) }
   }
   return undefined
+}
+
+/**
+ * The page object over ONE attached CDP session: evaluate, wait, click, type,
+ * press, viewport, screenshot and the tripwire's record. Shared with the
+ * desktop driver (`desktop-app.ts`), which attaches to the targets the app
+ * opened itself rather than creating and navigating its own.
+ */
+export function pageFor(cdp: CdpConnection, sessionId: string, problems: UiProblem[], close: () => Promise<void>): UiPage {
+  const on = { sessionId }
+  const evaluate = async <T>(expression: string): Promise<T> => {
+    const reply = await cdp.send<{ result: { value?: unknown }; exceptionDetails?: { text: string; exception?: { description?: string } } }>(
+      'Runtime.evaluate',
+      { expression, returnByValue: true, awaitPromise: true },
+      on,
+    )
+    if (reply.exceptionDetails !== undefined) throw new Error(`the page threw evaluating ${expression}: ${reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text}`)
+    return reply.result.value as T
+  }
+  return {
+    problems,
+    evaluate,
+    async waitFor(predicate, timeoutMs = 10_000) {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        if (await evaluate<boolean>(`Boolean(${predicate})`)) return
+        if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for ${predicate}`)
+        await pause(50)
+      }
+    },
+    async click(selector) {
+      const point = await evaluate<{ x: number; y: number } | null>(
+        `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el === null) return null; el.scrollIntoView({ block: 'center', inline: 'center' }); const box = el.getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 } })()`,
+      )
+      if (point === null) throw new Error(`no element matches ${selector}`)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y }, on)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 }, on)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 }, on)
+    },
+    async type(selector, text) {
+      const found = await evaluate<boolean>(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el === null) return false; el.focus(); return true })()`)
+      if (!found) throw new Error(`no element matches ${selector}`)
+      await cdp.send('Input.insertText', { text }, on)
+    },
+    async press(chord) {
+      const parts = chord.split('+')
+      // `+` itself is a key: "Shift++" ends with an empty part.
+      const key = chord.endsWith('++') ? '+' : parts.at(-1)!
+      let modifiers = 0
+      for (const name of parts.slice(0, chord.endsWith('++') ? -2 : -1)) {
+        const bit = MODIFIERS[name]
+        if (bit === undefined) throw new Error(`unknown modifier ${name} in ${chord}`)
+        modifiers |= bit
+      }
+      const named = KEYS[key]
+      if (named === undefined && [...key].length !== 1) throw new Error(`press: no key named ${key}`)
+      const code = named?.code ?? (/^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : /^\d$/.test(key) ? `Digit${key}` : '')
+      const keyCode = named?.keyCode ?? key.toUpperCase().charCodeAt(0)
+      // Text only when no command modifier is held: Control+A selects, it types nothing.
+      const text = modifiers & (MODIFIERS.Control! | MODIFIERS.Meta! | MODIFIERS.Alt!) ? undefined : (named === undefined ? key : named.text)
+      const base = { key, code, modifiers, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode }
+      await cdp.send('Input.dispatchKeyEvent', { ...base, type: text === undefined ? 'rawKeyDown' : 'keyDown', ...(text === undefined ? {} : { text, unmodifiedText: text }) }, on)
+      await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' }, on)
+    },
+    async setViewport(width, height, deviceScaleFactor = 1) {
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile: false }, on)
+    },
+    async screenshot(path) {
+      const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' }, on)
+      writeFileSync(path, Buffer.from(data, 'base64'))
+    },
+    async unexpectedProblems() {
+      const linksIcon = await evaluate<boolean>(`document.querySelector('link[rel~="icon"]') !== null`)
+      return problems.filter((problem) => linksIcon || !`${problem.url ?? ''} ${problem.text}`.includes('/favicon.ico'))
+    },
+    close,
+  }
 }
 
 /**
@@ -203,68 +280,11 @@ function pageOpener(launched: LaunchedBrowser, signInUrl: string): { openPage: (
     const at = await evaluate<string>('location.href')
     if (at !== `${origin}/`) throw new Error(`signing in landed on ${at}, not ${origin}/`)
 
-    const page: UiPage = {
-      problems,
-      evaluate,
-      async waitFor(predicate, timeoutMs = 10_000) {
-        const deadline = Date.now() + timeoutMs
-        for (;;) {
-          if (await evaluate<boolean>(`Boolean(${predicate})`)) return
-          if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for ${predicate}`)
-          await pause(50)
-        }
-      },
-      async click(selector) {
-        const point = await evaluate<{ x: number; y: number } | null>(
-          `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el === null) return null; el.scrollIntoView({ block: 'center', inline: 'center' }); const box = el.getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 } })()`,
-        )
-        if (point === null) throw new Error(`no element matches ${selector}`)
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y }, on)
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 }, on)
-        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 }, on)
-      },
-      async type(selector, text) {
-        const found = await evaluate<boolean>(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el === null) return false; el.focus(); return true })()`)
-        if (!found) throw new Error(`no element matches ${selector}`)
-        await cdp.send('Input.insertText', { text }, on)
-      },
-      async press(chord) {
-        const parts = chord.split('+')
-        // `+` itself is a key: "Shift++" ends with an empty part.
-        const key = chord.endsWith('++') ? '+' : parts.at(-1)!
-        let modifiers = 0
-        for (const name of parts.slice(0, chord.endsWith('++') ? -2 : -1)) {
-          const bit = MODIFIERS[name]
-          if (bit === undefined) throw new Error(`unknown modifier ${name} in ${chord}`)
-          modifiers |= bit
-        }
-        const named = KEYS[key]
-        if (named === undefined && [...key].length !== 1) throw new Error(`press: no key named ${key}`)
-        const code = named?.code ?? (/^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : /^\d$/.test(key) ? `Digit${key}` : '')
-        const keyCode = named?.keyCode ?? key.toUpperCase().charCodeAt(0)
-        // Text only when no command modifier is held: Control+A selects, it types nothing.
-        const text = modifiers & (MODIFIERS.Control! | MODIFIERS.Meta! | MODIFIERS.Alt!) ? undefined : (named === undefined ? key : named.text)
-        const base = { key, code, modifiers, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode }
-        await cdp.send('Input.dispatchKeyEvent', { ...base, type: text === undefined ? 'rawKeyDown' : 'keyDown', ...(text === undefined ? {} : { text, unmodifiedText: text }) }, on)
-        await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' }, on)
-      },
-      async setViewport(width, height, deviceScaleFactor = 1) {
-        await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor, mobile: false }, on)
-      },
-      async screenshot(path) {
-        const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' }, on)
-        writeFileSync(path, Buffer.from(data, 'base64'))
-      },
-      async unexpectedProblems() {
-        const linksIcon = await evaluate<boolean>(`document.querySelector('link[rel~="icon"]') !== null`)
-        return problems.filter((problem) => linksIcon || !`${problem.url ?? ''} ${problem.text}`.includes('/favicon.ico'))
-      },
-      async close() {
-        if (!pages.delete(page)) return
-        tripwires.delete(sessionId)
-        await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined)
-      },
-    }
+    const page: UiPage = pageFor(cdp, sessionId, problems, async () => {
+      if (!pages.delete(page)) return
+      tripwires.delete(sessionId)
+      await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined)
+    })
     pages.add(page)
     return page
   }

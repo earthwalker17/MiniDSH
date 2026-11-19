@@ -9,6 +9,6 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["desktop/src/**/*.ts", "desktop/scripts/**/*.ts"],
+  "include": ["desktop/src/**/*.ts", "desktop/scripts/**/*.ts", "desktop/e2e/**/*.ts"],
   "exclude": []
 }
