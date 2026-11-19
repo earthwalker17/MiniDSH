@@ -3,7 +3,7 @@
  * store, blank is absent at every layer, and the store is re-read per call so
  * a rotation needs no reload.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -254,5 +254,65 @@ describe('the deepseek consumer', () => {
       if (!(error instanceof LlmError) || error.code !== 'MISSING_CREDENTIAL') return false
       return error.message.includes('MINIDSH_TEST_SECRET environment variable') && error.message.includes(store)
     })
+  })
+})
+
+describe('the store writer under concurrency, links and odd names (S22.2 review)', () => {
+  it('loses no key when four processes save at once: one read-modify-write at a time', { timeout: 60_000 }, async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-race-'))
+    const store = join(dir, 'credentials.json')
+    const module = new URL('./index.ts', import.meta.url).href
+    const { spawn } = await import('node:child_process')
+    const names = ['RACE_A', 'RACE_B', 'RACE_C', 'RACE_D']
+    const runs = names.map(
+      (name) =>
+        new Promise<number | null>((resolve) => {
+          const script = `const { updateCredentialStore } = await import(${JSON.stringify(module)}); for (let i = 0; i < 5; i++) updateCredentialStore(${JSON.stringify(store)}, ${JSON.stringify(name)}, 'value-' + i)`
+          const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'ignore' })
+          child.on('exit', (code) => resolve(code))
+        }),
+    )
+    expect(await Promise.all(runs)).toEqual([0, 0, 0, 0])
+    const saved = JSON.parse(readFileSync(store, 'utf8')) as Record<string, string>
+    expect(Object.keys(saved).toSorted(), JSON.stringify(saved)).toEqual(names)
+    expect(Object.values(saved).every((value) => value === 'value-4')).toBe(true)
+    expect(existsSync(`${store}.lock`)).toBe(false)
+  })
+
+  it('takes over a lock a crashed writer left, and writes through a symlinked store to its target', () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-lock-'))
+    const target = join(dir, 'dotfiles', 'credentials.json')
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, '{ "KEPT": "k" }\n')
+    const store = join(dir, 'credentials.json')
+    let linked = true
+    try {
+      symlinkSync(target, store, 'file')
+    } catch {
+      linked = false
+    }
+    if (!linked) writeFileSync(store, '{ "KEPT": "k" }\n')
+    const lockOf = linked ? `${target}.lock` : `${store}.lock`
+    writeFileSync(lockOf, '')
+    const old = new Date(Date.now() - 120_000)
+    utimesSync(lockOf, old, old)
+    expect(updateCredentialStore(store, REF, 'v')).toBe(true)
+    if (linked) {
+      // The link still names the target, and the target holds both keys.
+      expect(lstatSync(store).isSymbolicLink()).toBe(true)
+      expect(JSON.parse(readFileSync(target, 'utf8'))).toEqual({ KEPT: 'k', MINIDSH_TEST_SECRET: 'v' })
+    } else {
+      expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ KEPT: 'k', MINIDSH_TEST_SECRET: 'v' })
+    }
+    expect(existsSync(lockOf)).toBe(false)
+  })
+
+  it('reads a reference named after an Object.prototype member as absent, never a crash', () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-proto-'))
+    const store = join(dir, 'credentials.json')
+    expect(credentialSources(store, [credentialRef('constructor'), credentialRef('toString')]).sources).toEqual([
+      { name: 'constructor', source: 'absent' },
+      { name: 'toString', source: 'absent' },
+    ])
   })
 })

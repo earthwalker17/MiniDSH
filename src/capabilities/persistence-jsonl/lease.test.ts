@@ -135,8 +135,13 @@ describe('persistence-jsonl: the session write lease', () => {
     // Taken when the machine had been up LONGER than it has now: it rebooted since. Reclaimed.
     writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: Date.now(), uptime: uptime() + 3_600 }))
     const resumed = resumeStored(rootA, 'reboot')
-    await expect(resumed.flush()).resolves.toBeUndefined()
-    expect(JSON.parse(readFileSync(lock, 'utf8')).pid).toBe(process.pid)
+    if (process.platform === 'darwin') {
+      // macOS derives uptime from the wall clock, so the rule is off there: the pid rule alone, and the pid is alive.
+      await expect(resumed.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
+    } else {
+      await expect(resumed.flush()).resolves.toBeUndefined()
+      expect(JSON.parse(readFileSync(lock, 'utf8')).pid).toBe(process.pid)
+    }
     await rootA.get(SESSIONS).detach(resumed)
 
     // No recorded uptime (an older writer): the pid rule alone, and the pid is alive.

@@ -23,6 +23,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, extname, join } from 'node:path'
 import type { Context } from '../kernel/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
+import type { Agent } from '../core/agent/index.ts'
 import { canonicalPath } from '../core/sandbox/paths.ts'
 import { protocolPlugin, upgradeWasHandled, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
@@ -54,10 +55,11 @@ export interface WebHostHandle {
   readonly closed: Promise<void>
   dispose(): Promise<void>
   /**
-   * The graceful stop: every running turn ends `cancelled` and is flushed
-   * FIRST, all at once, and only then does the sequential disposal run — so a
-   * stop that a supervisor bounds loses no turn's ending to the order the
-   * agents happen to unwind in. Each phase is bounded (`cancelBoundMs`, default
+   * The graceful stop: every turn running when it begins (or started while
+   * it cancels: the agents are re-listed until no new one appears) ends
+   * `cancelled` and is flushed FIRST, all at once, and only then does the
+   * sequential disposal run — so a stop that a supervisor bounds loses no
+   * turn's ending to the order the agents happen to unwind in. Each phase is bounded (`cancelBoundMs`, default
    * 5 s; `disposeBoundMs`, default 20 s); `'deadline'` says one ran out, and
    * the caller then owns what is left (the CLI exits 1). Idempotent.
    */
@@ -366,11 +368,26 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
       // `turn/end` would be lost to a repair on the next open. Top-level only:
       // a delegated child is cancelled by its parent's call ending, which is
       // the one order its parent's log can explain.
-      const live = disposed === undefined ? (root.tryGet(AGENTS)?.list() ?? []) : []
-      const agents = live.filter((agent) => agent.session.header.delegatedBy === undefined && agent.session.header.delegatedByCallId === undefined)
-      for (const agent of agents) agent.cancel({ kind: 'disposed' })
+      //
+      // Re-listed until the set holds still: a client can still create a
+      // session while phase 1 waits (the WebSocket stays open until disposal),
+      // and that agent's turn is owed the same first closer. Bounded together.
+      const cancelled = new Set<Agent>()
+      const topLevel = (): Agent[] =>
+        (disposed === undefined ? (root.tryGet(AGENTS)?.list() ?? []) : []).filter((agent) => agent.session.header.delegatedBy === undefined && agent.session.header.delegatedByCallId === undefined)
+      const cancelAll = async (): Promise<void> => {
+        for (;;) {
+          const fresh = topLevel().filter((agent) => !cancelled.has(agent))
+          if (fresh.length === 0) return
+          for (const agent of fresh) {
+            cancelled.add(agent)
+            agent.cancel({ kind: 'disposed' })
+          }
+          await Promise.allSettled(fresh.map((agent) => agent.whenIdle()))
+        }
+      }
       const idle = await within(
-        Promise.allSettled(agents.map((agent) => agent.whenIdle())).then(() => 'idle' as const),
+        cancelAll().then(() => 'idle' as const),
         bounds.cancelBoundMs ?? CANCEL_BOUND_MS,
       )
       const done = await within(dispose(), bounds.disposeBoundMs ?? DISPOSE_BOUND_MS)

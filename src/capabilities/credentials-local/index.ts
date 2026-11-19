@@ -12,7 +12,7 @@
  * (`updateCredentialStore`, for `minidsh credentials set|unset`), beside the
  * reader whose rules it must not contradict.
  */
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import type { Logger, Plugin } from '../../kernel/index.ts'
@@ -26,8 +26,8 @@ export interface CredentialsLocalConfig {
 const configSchema = z.strictObject({ path: z.string().min(1).optional() }).optional()
 
 /** Blank is absent: a value that is empty after trimming never resolves. */
-function present(value: string | undefined): string | undefined {
-  const trimmed = value?.trim()
+function present(value: unknown): string | undefined {
+  const trimmed = typeof value === 'string' ? value.trim() : undefined
   return trimmed !== undefined && trimmed.length > 0 ? trimmed : undefined
 }
 
@@ -146,6 +146,66 @@ const RENAME_RETRY_MS = 50
  * an error.
  */
 export function updateCredentialStore(path: string, name: CredentialRef, value: string | undefined): boolean {
+  // A store that is a link (a dotfiles checkout) is written where it points:
+  // renaming over the link would silently detach it.
+  const target = storeTarget(path)
+  // Removing from a store that does not exist writes nothing: not even the
+  // directory the lock would need.
+  if (value === undefined && !existsSync(target)) return false
+  return underStoreLock(target, () => writeStore(target, name, value))
+}
+
+/** The file a link at `path` names, followed; `path` itself when it is no link or does not exist yet. */
+function storeTarget(path: string): string {
+  try {
+    return lstatSync(path).isSymbolicLink() ? realpathSync(path) : path
+  } catch {
+    return path
+  }
+}
+
+/** How long a writer waits for another, and when a lock is too old to belong to a live one. */
+const LOCK_WAIT_MS = 5_000
+const LOCK_STALE_MS = 30_000
+
+/**
+ * One read-modify-write at a time over the store, across processes: two saves
+ * in flight (the desktop's key form and a terminal's `credentials set`) would
+ * otherwise both read the old store and the second rename would drop the
+ * first key. An exclusive `<store>.lock`, waited for briefly; one older than
+ * any write could take is a crashed writer's and is removed.
+ */
+function underStoreLock<T>(path: string, body: () => T): T {
+  const lock = `${path}.lock`
+  mkdirSync(dirname(path), { recursive: true })
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    try {
+      closeSync(openSync(lock, 'wx', 0o600))
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock)
+      } catch {
+        // Released between the two calls.
+      }
+      if (Date.now() > deadline) throw new Error(`credentials store ${path} is being written by another process (${lock}); try again`, { cause: error })
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    }
+  }
+  try {
+    return body()
+  } finally {
+    try {
+      unlinkSync(lock)
+    } catch {
+      // Removed as stale by a waiter that gave up on us: nothing to release.
+    }
+  }
+}
+
+function writeStore(path: string, name: CredentialRef, value: string | undefined): boolean {
   const current = readStore(path)
   if (current.state === 'unusable') throw new Error(`credentials store ${path} ${current.why}; fix or remove it by hand — it is not rewritten`)
   // No prototype: `__proto__` is a valid reference name, and on an ordinary

@@ -18,6 +18,7 @@ import { repairTail } from '../core/agent/index.ts'
 import { persistenceJsonlPlugin, unreadableHeader } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
+import { constants as osConstants } from 'node:os'
 import { fstatSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { canonicalPath, isInside } from '../core/sandbox/paths.ts'
@@ -712,6 +713,17 @@ async function webCommand(args: ParsedArgs): Promise<number> {
     if (json) process.stdout.write(`${JSON.stringify({ type: 'error', code, message })}\n`)
     return before ? 2 : 1
   }
+  // Until `ready`, a signal ends the process at once, as it always did, but
+  // a supervisor is still owed its one record (armStop takes over after).
+  const preReady = (signal: NodeJS.Signals): void => {
+    if (json) process.stdout.write(`${JSON.stringify({ type: 'error', code: 'BOOT', message: `stopped by ${signal} before ready` })}\n`)
+    process.exit(exitCodeFor(signal))
+  }
+  const signals = stopSignals()
+  for (const signal of signals) process.on(signal, preReady)
+  const unarm = (): void => {
+    for (const signal of signals) process.off(signal, preReady)
+  }
   const plan = await planBoot(args, 'none')
   if ('refused' in plan) return refuse(plan.refused, plan.message)
   const port = args.flags.get('port')
@@ -753,6 +765,7 @@ async function webCommand(args: ParsedArgs): Promise<number> {
   if (host !== undefined && host !== '127.0.0.1' && host !== 'localhost') {
     process.stderr.write(`warning: bound to ${host}; whoever reaches this url first drives an agent on this machine\n`)
   }
+  unarm()
   armStop(web, json)
   await web.closed
   await web.dispose()
@@ -817,7 +830,7 @@ function armStop(web: WebHostHandle, json: boolean): void {
   let begun = false
   const begin = (why: string, force: boolean): void => {
     if (begun) {
-      if (force) process.exit(130)
+      if (force) process.exit(exitCodeFor(why))
       return
     }
     begun = true
@@ -832,8 +845,7 @@ function armStop(web: WebHostHandle, json: boolean): void {
       () => process.exit(1),
     )
   }
-  const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP', ...(process.platform === 'win32' ? (['SIGBREAK'] as const) : [])]
-  for (const signal of signals) process.on(signal, () => begin(signal, true))
+  for (const signal of stopSignals()) process.on(signal, () => begin(signal, true))
   if (!json || !stdinIsAStream()) return
   let ended = false
   const onEnd = (): void => {
@@ -847,6 +859,17 @@ function armStop(web: WebHostHandle, json: boolean): void {
   // A parent that died can surface as a read error rather than an end.
   process.stdin.on('error', onEnd)
   process.stdin.resume()
+}
+
+/** The signals that stop `web`: SIGBREAK is Windows' Ctrl+Break. */
+function stopSignals(): NodeJS.Signals[] {
+  return ['SIGINT', 'SIGTERM', 'SIGHUP', ...(process.platform === 'win32' ? (['SIGBREAK'] as const) : [])]
+}
+
+/** The conventional status of a process a signal ended: 128 + its number (130 for SIGINT, 143 for SIGTERM). */
+function exitCodeFor(signal: string): number {
+  const number = (osConstants.signals as Record<string, number | undefined>)[signal]
+  return number === undefined ? 1 : 128 + number
 }
 
 /** A failed write to stdout or stderr is dropped, never a reason to exit. */
@@ -1228,8 +1251,10 @@ async function credentialsCommand(args: ParsedArgs): Promise<number> {
   let ref: CredentialRef
   try {
     ref = credentialRef(name!)
-  } catch (error) {
-    return usage(error instanceof Error ? error.message : String(error))
+  } catch {
+    // The rule, never the input: the commonest slip is a key pasted where its
+    // NAME goes, and this message would print it back.
+    return usage('the NAME must be an environment-variable name (letters, digits and _, not starting with a digit), such as DEEPSEEK_API_KEY')
   }
   if (store === undefined) {
     process.stderr.write(`error: this composition reads no credentials store (no enabled credentials-local row names a path); set ${ref} in the environment instead\n`)

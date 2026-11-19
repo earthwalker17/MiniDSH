@@ -201,6 +201,8 @@ function readLeaseHolder(lock: string): LeaseHolder | undefined {
 
 /** Seconds the machine's uptime must have FALLEN by to read as a reboot: `os.uptime()` is whole seconds on some hosts. */
 const REBOOT_MARGIN_S = 60
+/** Where `os.uptime()` is a tick no clock change moves (see `holderIsDead`). */
+const UPTIME_IS_MONOTONIC = process.platform === 'win32' || process.platform === 'linux'
 
 /**
  * Dead means provably dead, and only ever on THIS host (another cannot be
@@ -214,15 +216,19 @@ const REBOOT_MARGIN_S = 60
  * of that log was refused with "remove …lock". The evidence is the machine's
  * UPTIME, recorded at acquisition: it only grows within one boot, so a smaller
  * uptime now means a reboot happened in between, and no process alive now can
- * be that holder. Uptime is monotonic — no NTP step, VM resume or person moving
- * the wall clock can fake it (S22.2: a wall-clock form of this rule could steal
- * a LIVE lease after a forward step). Windows Fast Startup does not reset it,
- * so after such a shutdown the pid rule alone applies. A holder with no
- * recorded uptime (an older writer, a hand-written lock) keeps the pid rule.
+ * be that holder. On Windows and Linux uptime is a monotonic tick
+ * (GetTickCount64, /proc/uptime): no NTP step, VM resume or person moving the
+ * wall clock can fake it (S22.2: a wall-clock form of this rule could steal a
+ * LIVE lease after a forward step). On macOS libuv derives it FROM the wall
+ * clock (now minus kern.boottime), so there the rule is off and the pid rule
+ * alone applies, as it does after a Windows Fast Startup shutdown, which does
+ * not reset uptime. A holder with no recorded uptime (an older writer, a
+ * hand-written lock) keeps the pid rule.
  */
+
 function holderIsDead(holder: LeaseHolder): boolean {
   if (holder.host !== hostname()) return false
-  if (typeof holder.uptime === 'number' && Number.isFinite(holder.uptime) && uptime() + REBOOT_MARGIN_S < holder.uptime) return true
+  if (UPTIME_IS_MONOTONIC && typeof holder.uptime === 'number' && Number.isFinite(holder.uptime) && uptime() + REBOOT_MARGIN_S < holder.uptime) return true
   try {
     process.kill(holder.pid, 0)
     return false
