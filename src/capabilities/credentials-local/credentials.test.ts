@@ -3,15 +3,15 @@
  * store, blank is absent at every layer, and the store is re-read per call so
  * a rotation needs no reload.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { CREDENTIALS, credentialRef } from '../../core/credentials/index.ts'
 import { LlmError } from '../../core/llm/index.ts'
 import { DeepSeekAdapter } from '../llm-deepseek/adapter.ts'
-import { credentialsLocalPlugin } from './index.ts'
+import { credentialSources, credentialsLocalPlugin, updateCredentialStore } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const REF = credentialRef('MINIDSH_TEST_SECRET')
@@ -136,6 +136,90 @@ describe('credentials-local', () => {
     expect(() => credentialRef('')).toThrow(/not an environment-variable name/)
     expect(() => credentialRef('9LEADING')).toThrow(/not an environment-variable name/)
     expect(credentialRef('_OK_2')).toBe('_OK_2')
+  })
+})
+
+describe('the store writer (updateCredentialStore)', () => {
+  function storePath(): string {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-'))
+    // A home that does not exist yet: the writer creates it.
+    return join(dir, 'home', 'credentials.json')
+  }
+
+  it('writes exactly the key, atomically, owner-only on POSIX, and leaves no temporary behind', () => {
+    const store = storePath()
+    expect(updateCredentialStore(store, REF, 'v1')).toBe(true)
+    expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ MINIDSH_TEST_SECRET: 'v1' })
+    if (process.platform !== 'win32') expect((statSync(store).mode & 0o777).toString(8)).toBe('600')
+    expect(readdirSync(dirname(store))).toEqual(['credentials.json'])
+    // Another key is kept, in order, when one is replaced.
+    writeFileSync(store, JSON.stringify({ OTHER_KEY: 'kept', MINIDSH_TEST_SECRET: 'v1' }))
+    updateCredentialStore(store, REF, 'v2')
+    expect(Object.entries(JSON.parse(readFileSync(store, 'utf8')))).toEqual([
+      ['OTHER_KEY', 'kept'],
+      ['MINIDSH_TEST_SECRET', 'v2'],
+    ])
+  })
+
+  it('removes a key, and removing an absent one writes nothing', () => {
+    const store = storePath()
+    expect(updateCredentialStore(store, REF, undefined)).toBe(false)
+    expect(existsSync(dirname(store))).toBe(false)
+    mkdirSync(dirname(store))
+    writeFileSync(store, JSON.stringify({ OTHER_KEY: 'kept', MINIDSH_TEST_SECRET: 'v1' }))
+    expect(updateCredentialStore(store, REF, undefined)).toBe(true)
+    expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ OTHER_KEY: 'kept' })
+  })
+
+  it('keeps a hand-written key named __proto__, which an ordinary object would silently drop', () => {
+    const store = storePath()
+    mkdirSync(dirname(store), { recursive: true })
+    writeFileSync(store, '{"__proto__": "kept"}')
+    updateCredentialStore(store, REF, 'v1')
+    expect(readFileSync(store, 'utf8')).toContain('"__proto__": "kept"')
+  })
+
+  it('refuses a store it cannot read back exactly, leaves it byte for byte, and never quotes a value', () => {
+    const store = storePath()
+    mkdirSync(dirname(store), { recursive: true })
+    for (const content of [`{ "MINIDSH_TEST_SECRET": 'sk-live-SECRETVALUE123' }`, '["sk-live-SECRETVALUE123"]', '{"MINIDSH_TEST_SECRET": 42}']) {
+      writeFileSync(store, content)
+      let message = ''
+      try {
+        updateCredentialStore(store, REF, 'new-value')
+      } catch (error) {
+        message = (error as Error).message
+      }
+      expect(message, `no refusal for ${content.slice(0, 2)}…`).toContain(store)
+      expect(message).toMatch(/not rewritten/)
+      expect(message).not.toContain('sk-live')
+      expect(readFileSync(store, 'utf8')).toBe(content)
+      expect(readdirSync(dirname(store))).toEqual(['credentials.json'])
+    }
+  })
+})
+
+describe('the source report (credentialSources)', () => {
+  it('names the layer resolve would use, by the same rules, and the store problem once', () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-'))
+    const store = join(dir, 'credentials.json')
+    const OTHER = credentialRef('MINIDSH_TEST_OTHER')
+    expect(credentialSources(store, [REF, OTHER])).toEqual({ sources: [{ name: REF, source: 'absent' }, { name: OTHER, source: 'absent' }] })
+    writeFileSync(store, JSON.stringify({ MINIDSH_TEST_SECRET: 'from-file', MINIDSH_TEST_OTHER: '  ' }))
+    // A blank stored value is absent, exactly as resolve reads it.
+    expect(credentialSources(store, [REF, OTHER]).sources).toEqual([{ name: REF, source: 'store' }, { name: OTHER, source: 'absent' }])
+    process.env.MINIDSH_TEST_SECRET = 'from-env'
+    expect(credentialSources(store, [REF]).sources).toEqual([{ name: REF, source: 'env' }])
+    // A blank environment value falls through to the store.
+    process.env.MINIDSH_TEST_SECRET = ' '
+    expect(credentialSources(store, [REF]).sources).toEqual([{ name: REF, source: 'store' }])
+    writeFileSync(store, `{ "MINIDSH_TEST_SECRET": 'sk-live-SECRETVALUE123' }`)
+    const broken = credentialSources(store, [REF])
+    expect(broken.sources).toEqual([{ name: REF, source: 'absent' }])
+    expect(broken.problem).toMatch(/is not valid JSON/)
+    expect(broken.problem).not.toContain('sk-live')
+    // No store at all: the environment alone.
+    expect(credentialSources(undefined, [REF]).sources).toEqual([{ name: REF, source: 'absent' }])
   })
 })
 
