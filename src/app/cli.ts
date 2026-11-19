@@ -18,8 +18,11 @@ import { repairTail } from '../core/agent/index.ts'
 import { persistenceJsonlPlugin, unreadableHeader } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
-import { statSync } from 'node:fs'
+import { fstatSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { canonicalPath, isInside } from '../core/sandbox/paths.ts'
+import { CREDENTIALS, credentialRef, isHeaderSafe, type CredentialRef } from '../core/credentials/index.ts'
+import { credentialSources, credentialsLocalPlugin, updateCredentialStore } from '../capabilities/credentials-local/index.ts'
 import { presetTable } from '../core/presets/index.ts'
 import type { AuthorityPresetsConfig } from '../capabilities/authority-presets/index.ts'
 import type { Context } from '../kernel/index.ts'
@@ -39,7 +42,7 @@ import {
   type EffectiveComposition,
   type NamedLayer,
 } from './config.ts'
-import { forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
+import { bootComposition, forkTask, resumeTask, runTask, type ContinueOptions, type EventListener, type TaskResult } from './headless.ts'
 import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
@@ -48,7 +51,7 @@ import { auditLines, CallNames, describeEvent } from './present.ts'
 import { inspectLines, inspectStored, verdictExitCode, verifyAttachments, verifyLines, verifyStored } from './inspect.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
-import { startWebHost } from './web.ts'
+import { startWebHost, type WebHostHandle } from './web.ts'
 import { runTerminal } from './terminal/index.ts'
 import { VERSION } from './version.ts'
 
@@ -60,6 +63,8 @@ interface ParsedArgs {
   readonly flags: Map<string, string | true>
   /** `--patch <file>` is repeatable; the flags map is last-wins, so it collects here. */
   readonly patchFiles: string[]
+  /** `--workspace <dir>` is repeatable too, and collects here as well as in the flags map (`parseArgs`). */
+  readonly workspaceDirs: string[]
 }
 
 /**
@@ -81,6 +86,7 @@ const FLAGS = {
   'agent-preset': '--agent-preset name',
   port: '--port n',
   host: '--host addr',
+  workspace: '--workspace dir',
   patch: '--patch file',
   approve: '--approve',
   json: '--json',
@@ -99,10 +105,11 @@ const COMMANDS: Readonly<Record<string, { readonly positional: string; readonly 
   resume: { positional: '<id> ["<task>"]', flags: ['headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json', 'plain'] },
   fork: { positional: '<id> ["<task>"]', flags: ['at', 'salvage', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json', 'plain'] },
   serve: { positional: '', flags: ['cwd', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
-  web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
+  web: { positional: '', flags: ['cwd', 'workspace', 'port', 'host', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve', 'json'] },
   config: { positional: '', flags: ['sandbox', 'ask', 'accept', 'json'] },
   sessions: { positional: 'list | show <id> | inspect <id> | verify <id>', flags: ['json', 'audit'] },
   skills: { positional: '', flags: ['cwd', 'json'] },
+  credentials: { positional: 'list | set <NAME> | unset <NAME>', flags: ['json'] },
 }
 
 /**
@@ -130,6 +137,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = []
   const flags = new Map<string, string | true>()
   const patchFiles: string[] = []
+  const workspaceDirs: string[] = []
   const first = argv[0]
   // `--help`/`-h` ANYWHERE make this the help command, and help is never a
   // usage error. Anywhere, because `minidsh run -h` used to start a paid run
@@ -137,10 +145,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   // Before help, and anywhere, for the reason help is anywhere: `minidsh run
   // -h` used to start a paid run whose task was "-h", and `--version` on a
   // command that does not list it would otherwise be a usage error.
-  if (argv.some(isVersion)) return { command: 'version', positional, flags, patchFiles }
+  if (argv.some(isVersion)) return { command: 'version', positional, flags, patchFiles, workspaceDirs }
   if (first === undefined || argv.some(isHelp)) {
     const helpFor = first !== undefined && !isHelp(first) && first in COMMANDS ? first : undefined
-    return { command: 'help', ...(helpFor === undefined ? {} : { helpFor }), positional, flags, patchFiles }
+    return { command: 'help', ...(helpFor === undefined ? {} : { helpFor }), positional, flags, patchFiles, workspaceDirs }
   }
   const command = first
   for (let i = 1; i < argv.length; i++) {
@@ -148,13 +156,19 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     if (token.startsWith('--')) {
       const name = token.slice(2)
       if (name === 'patch') patchFiles.push(argv[++i] ?? '')
-      else if (VALUE_FLAGS.has(name)) flags.set(name, argv[++i] ?? '')
-      else flags.set(name, true)
+      else if (VALUE_FLAGS.has(name)) {
+        const value = argv[++i] ?? ''
+        flags.set(name, value)
+        // Repeatable like --patch, and ALSO in the flags map: --patch is every
+        // command's, --workspace is web's alone, so a command that does not
+        // list it has to see it to refuse it.
+        if (name === 'workspace') workspaceDirs.push(value)
+      } else flags.set(name, true)
     } else {
       positional.push(token)
     }
   }
-  return { command, positional, flags, patchFiles }
+  return { command, positional, flags, patchFiles, workspaceDirs }
 }
 
 const stderrLogger: Logger = {
@@ -276,22 +290,40 @@ function baseRows(home: HomeLayout, authority: AuthorityFlags = {}): Row[] {
 }
 
 /**
+ * Why a command was refused before anything booted: its own flags (`USAGE`), or
+ * a file a boot reads — settings, a composition layer, a `--patch` (`CONFIG`).
+ * Both exit 2; the split is for a supervisor reading `web --json`, which must
+ * tell "my argv is wrong" from "the user's config is broken".
+ */
+interface BootRefusal {
+  readonly refused: 'USAGE' | 'CONFIG'
+  readonly message: string
+}
+
+/**
  * `settings: 'optional'` is for commands that only read stored logs: a broken
  * settings.json must not stand between a user and `sessions show --audit`.
  */
 async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'required' | 'optional' = 'required'): Promise<BootPlan | string> {
+  const plan = await planBoot(args, presets, settingsUse)
+  return 'refused' in plan ? plan.message : plan
+}
+
+async function planBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'required' | 'optional' = 'required'): Promise<BootPlan | BootRefusal> {
+  const usageError = (message: string): BootRefusal => ({ refused: 'USAGE', message })
+  const configError = (message: string): BootRefusal => ({ refused: 'CONFIG', message })
   const unknown = refuseUnknownFlags(args)
-  if (unknown !== undefined) return unknown
+  if (unknown !== undefined) return usageError(unknown)
   const malformed = refuseMalformedFlags(args)
-  if (malformed !== undefined) return malformed
+  if (malformed !== undefined) return usageError(malformed)
   const authority = authorityFlags(args)
-  if (typeof authority === 'string') return authority
+  if (typeof authority === 'string') return usageError(authority)
   const loadedSettings = loadSettings()
-  if (typeof loadedSettings === 'string' && settingsUse === 'required') return loadedSettings
+  if (typeof loadedSettings === 'string' && settingsUse === 'required') return configError(loadedSettings)
   if (typeof loadedSettings === 'string') stderrLogger.warn(loadedSettings)
   const settings = typeof loadedSettings === 'string' ? resolveSettings() : loadedSettings
   const loaded = await loadConfigLayers(args.patchFiles)
-  if (typeof loaded === 'string') return loaded
+  if (typeof loaded === 'string') return configError(loaded)
   const home = homeLayout()
   // Layered ONCE: every later reader of the effective composition — `--preset`
   // validation, `config`, `sessions` — reads this, so none can disagree.
@@ -307,15 +339,15 @@ async function prepareBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'r
       home.skillRoots,
     )
   } catch (error) {
-    return error instanceof Error ? error.message : String(error)
+    return configError(error instanceof Error ? error.message : String(error))
   }
   // A command that cannot apply a preset says so before it looks one up.
-  if (args.flags.get('preset') !== undefined && presets === 'none') return `--preset is not a flag of "${args.command}"`
+  if (args.flags.get('preset') !== undefined && presets === 'none') return usageError(`--preset is not a flag of "${args.command}"`)
   const preset = presetFlag(args, authority, effective)
-  if (typeof preset === 'object') return preset.error
-  if (preset !== undefined && presets === 'interactive') return '--preset works with --headless; in the interactive terminal use /preset'
+  if (typeof preset === 'object') return usageError(preset.error)
+  if (preset !== undefined && presets === 'interactive') return usageError('--preset works with --headless; in the interactive terminal use /preset')
   const agentWorld = await agentPresetFlag(args, loaded)
-  if (typeof agentWorld === 'object') return agentWorld.error
+  if (typeof agentWorld === 'object') return { refused: agentWorld.refused, message: agentWorld.error }
   return {
     home,
     settings,
@@ -389,22 +421,29 @@ async function loadConfigLayers(patchFiles: readonly string[]): Promise<LoadedCo
   }
 }
 
-/** `--agent-preset`: a named per-agent row list from the config files, resolved to a setup for the agent scope. */
-async function agentPresetFlag(args: ParsedArgs, loaded: LoadedConfig): Promise<((agentCtx: Context) => void) | { error: string } | undefined> {
+/**
+ * `--agent-preset`: a named per-agent row list from the config files, resolved
+ * to a setup for the agent scope. A name that is not there is the flag's
+ * fault; a preset that is there and cannot be resolved is the file's.
+ */
+async function agentPresetFlag(
+  args: ParsedArgs,
+  loaded: LoadedConfig,
+): Promise<((agentCtx: Context) => void) | { error: string; refused: BootRefusal['refused'] } | undefined> {
   const raw = args.flags.get('agent-preset')
   if (raw === undefined) return undefined
-  if (typeof raw !== 'string' || raw.trim().length === 0) return { error: '--agent-preset expects a preset name' }
+  if (typeof raw !== 'string' || raw.trim().length === 0) return { error: '--agent-preset expects a preset name', refused: 'USAGE' }
   const spec = loaded.agentPresets.get(raw)
   if (!spec) {
     const known = [...loaded.agentPresets.keys()]
-    return { error: `unknown agent preset "${raw}"${known.length > 0 ? ` (known: ${known.join(', ')})` : ' (no agentPresets configured)'}` }
+    return { error: `unknown agent preset "${raw}"${known.length > 0 ? ` (known: ${known.join(', ')})` : ' (no agentPresets configured)'}`, refused: 'USAGE' }
   }
   try {
     const rows: Row[] = []
     for (const row of spec.rows) rows.push(await toRow(row, spec.baseDir))
     return agentPresetWorld(rows)
   } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) }
+    return { error: error instanceof Error ? error.message : String(error), refused: 'CONFIG' }
   }
 }
 
@@ -647,6 +686,9 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
+/** What a supervisor of `web --json` is told an exit before `ready` was: a code it can act on, never a parse of the words. */
+type WebErrorCode = 'USAGE' | 'CONFIG' | 'EADDRINUSE' | 'EACCES' | 'WORKSPACE' | 'BOOT'
+
 /**
  * `minidsh web` — the same protocol over a WebSocket, plus the browser client.
  *
@@ -654,17 +696,35 @@ async function serveCommand(args: ParsedArgs): Promise<number> {
  * `--host` says otherwise: this surface can write files and run commands, so
  * reaching it is a deliberate act. There is no per-user identity — many
  * windows, one principal, whoever ran this.
+ *
+ * `--json` is the PROCESS CONTRACT for a supervisor (the desktop app, a
+ * service manager): stdout carries only JSON records, one per line — `ready`
+ * once, with the launch token in it and nowhere else, or exactly one `error`
+ * for every exit before it. Then the stop (`armStop`).
  */
 async function webCommand(args: ParsedArgs): Promise<number> {
-  const plan = await prepareBoot(args, 'none')
-  if (typeof plan === 'string') return usage(plan)
+  const json = args.flags.get('json') === true
+  // Refusals before anything booted exit 2, as every command's usage errors
+  // do; a boot or a listen that failed exits 1, as it always has.
+  const refuse = (code: WebErrorCode, message: string): number => {
+    const before = code === 'USAGE' || code === 'CONFIG' || code === 'WORKSPACE'
+    process.stderr.write(`${before ? '' : 'error: '}${message}\n`)
+    if (json) process.stdout.write(`${JSON.stringify({ type: 'error', code, message })}\n`)
+    return before ? 2 : 1
+  }
+  const plan = await planBoot(args, 'none')
+  if ('refused' in plan) return refuse(plan.refused, plan.message)
   const port = args.flags.get('port')
-  if (port !== undefined && (typeof port !== 'string' || !/^\d+$/.test(port))) return usage('--port takes a number')
+  if (port !== undefined && (typeof port !== 'string' || !/^\d+$/.test(port))) return refuse('USAGE', '--port takes a number')
   const host = args.flags.get('host')
-  if (host !== undefined && typeof host !== 'string') return usage('--host takes an address')
+  if (host !== undefined && typeof host !== 'string') return refuse('USAGE', '--host takes an address')
+  const where = webWorkspaces(args)
+  if (typeof where === 'string') return refuse('WORKSPACE', where)
+  let web: WebHostHandle
   try {
-    const web = await startWebHost({
-      cwd: cwdFlag(args),
+    web = await startWebHost({
+      cwd: where.cwd,
+      ...(where.roots === undefined ? {} : { workspaceRoots: where.roots }),
       ...bootFields(plan),
       ...(plan.agentWorld === undefined ? {} : { agentWorld: plan.agentWorld }),
       ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
@@ -672,15 +732,128 @@ async function webCommand(args: ParsedArgs): Promise<number> {
       ...(port === undefined ? {} : { port: Number(port) }),
       ...(host === undefined ? {} : { host }),
     })
-    process.stdout.write(`minidsh web — open this once:\n\n  ${web.url}\n\n`)
-    if (host !== undefined && host !== '127.0.0.1' && host !== 'localhost') {
-      process.stderr.write(`warning: bound to ${host}; whoever reaches this url first drives an agent on this machine\n`)
-    }
-    await web.closed
-    await web.dispose()
-    return 0
   } catch (error) {
-    return reportError(error)
+    // By errno, so a supervisor can pick another port on exactly the two
+    // failures another port cures (Windows reserves whole port ranges for
+    // Hyper-V and answers EACCES there, not EADDRINUSE).
+    const errno = (error as NodeJS.ErrnoException | undefined)?.code
+    return refuse(errno === 'EADDRINUSE' || errno === 'EACCES' ? errno : 'BOOT', error instanceof Error ? error.message : String(error))
+  }
+  if (json) {
+    const url = new URL(web.url)
+    const ready = { type: 'ready', host: url.hostname, port: web.port, token: url.searchParams.get('token'), version: VERSION, home: resolveHome(), workspaces: web.workspaces }
+    process.stdout.write(`${JSON.stringify(ready)}\n`)
+  } else {
+    process.stdout.write(`minidsh web — open this once:\n\n  ${web.url}\n\n`)
+  }
+  if (host !== undefined && host !== '127.0.0.1' && host !== 'localhost') {
+    process.stderr.write(`warning: bound to ${host}; whoever reaches this url first drives an agent on this machine\n`)
+  }
+  armStop(web, json)
+  await web.closed
+  await web.dispose()
+  return 0
+}
+
+/**
+ * Where `web` lets sessions open. Without `--workspace` it is `--cwd` (or the
+ * process's directory) alone, as before. With it, each must be an existing
+ * directory, named canonically as the protocol names roots; `--cwd` defaults
+ * to the first and otherwise must be one of them, since a default session
+ * outside every root is one no client could have opened.
+ *
+ * A root that holds MiniDSH's home is refused: the home's `composition.json`
+ * is code-equivalent trust (§9), and a workspace is where an agent writes. A
+ * bare `--cwd` is not held to this, because it never was.
+ */
+function webWorkspaces(args: ParsedArgs): { cwd: string; roots?: string[] } | string {
+  if (args.workspaceDirs.length === 0) return { cwd: cwdFlag(args) }
+  const home = resolveHome()
+  try {
+    const canonicalHome = canonicalPath(home)
+    const roots: string[] = []
+    for (const dir of args.workspaceDirs) {
+      if (dir.trim() === '') return '--workspace takes a directory'
+      const absolute = resolve(dir)
+      if (statSync(absolute, { throwIfNoEntry: false })?.isDirectory() !== true) return `--workspace is not an existing directory: ${absolute}`
+      const root = canonicalPath(absolute)
+      // Without case on win32, where the filesystem has none: refusing a
+      // spelling that only might be the home is the safe direction here.
+      const holdsHome = process.platform === 'win32' ? isInside(root.toLowerCase(), canonicalHome.toLowerCase()) : isInside(root, canonicalHome)
+      if (holdsHome) return `a workspace may not contain MiniDSH's home (${home}): its composition.json is code-equivalent trust`
+      if (!roots.includes(root)) roots.push(root)
+    }
+    const cwd = args.flags.get('cwd')
+    if (typeof cwd !== 'string') return { cwd: roots[0]!, roots }
+    const chosen = canonicalPath(resolve(cwd))
+    if (!roots.includes(chosen)) return `--cwd must be one of the --workspace roots (${roots.join(', ')}); got ${chosen}`
+    return { cwd: chosen, roots }
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+}
+
+/**
+ * The triggers of `web`'s graceful stop (`WebHostHandle.stop`). SIGINT,
+ * SIGTERM, SIGHUP and (Windows) SIGBREAK in every mode; a second trigger exits
+ * at once with 130. Under `--json` only, the end of stdin too — a supervisor's
+ * pipe, so its death or its deliberate `end()` stops this process — and only
+ * when fd 0 IS such a stream. By exclusion, because Windows reports a Node
+ * pipe as neither FIFO nor socket (measured: mode 0x1000, `isFIFO()` false):
+ * a terminal, `/dev/null` or `NUL` (character devices), a file or a directory
+ * never stop it, so `minidsh web --json </dev/null` under systemd runs. The
+ * stdin trigger only ever STARTS a stop: a parent that signals and then dies
+ * must not turn its own hang-up into the force.
+ *
+ * Exit is explicit (0 stopped, 1 a bound ran out), so a stray handle cannot
+ * hold the process open after its runtime is gone.
+ */
+function armStop(web: WebHostHandle, json: boolean): void {
+  let begun = false
+  const begin = (why: string, force: boolean): void => {
+    if (begun) {
+      if (force) process.exit(130)
+      return
+    }
+    begun = true
+    // From here on a closed stdout or stderr is no reason to stop part way:
+    // the bin's EPIPE handler exits 0 on the first failed write, and a
+    // supervisor that died is the commonest reason to be stopping at all —
+    // exiting mid-disposal is what would strand its leases and its turns.
+    for (const stream of [process.stdout, process.stderr]) {
+      stream.removeAllListeners('error')
+      stream.on('error', () => undefined)
+    }
+    process.stderr.write(json ? `minidsh web: stopping (${why})\n` : 'minidsh web: stopping… (again to force)\n')
+    void web.stop().then(
+      (outcome) => process.exit(outcome === 'stopped' ? 0 : 1),
+      () => process.exit(1),
+    )
+  }
+  const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP', ...(process.platform === 'win32' ? (['SIGBREAK'] as const) : [])]
+  for (const signal of signals) process.on(signal, () => begin(signal, true))
+  if (!json || !stdinIsAStream()) return
+  let ended = false
+  const onEnd = (): void => {
+    if (ended) return
+    ended = true
+    begin('stdin closed', false)
+  }
+  process.stdin.on('data', () => undefined)
+  process.stdin.on('end', onEnd)
+  process.stdin.on('close', onEnd)
+  // A parent that died can surface as a read error rather than an end.
+  process.stdin.on('error', onEnd)
+  process.stdin.resume()
+}
+
+/** fd 0 is something whose writer can hang up: not a character device, not a file, not a directory, and there at all. */
+function stdinIsAStream(): boolean {
+  try {
+    const stat = fstatSync(0)
+    return !stat.isCharacterDevice() && !stat.isFile() && !stat.isDirectory()
+  } catch {
+    return false
   }
 }
 
@@ -1010,6 +1183,148 @@ function skillLines(cwd: string, found: SkillDiscovery): string[] {
   return lines
 }
 
+/**
+ * `minidsh credentials` — the provider keys a person sets once, without an
+ * editor and without a value ever on a command line.
+ *
+ * `list` reports, for every reference the deployment DECLARES, which layer
+ * would answer it now (`env`, `store`, `absent`), by the provider's own
+ * lookup (`credentialSources`), and never a value or any part of one. The
+ * declared set is only known once each row has minted its own reference — a
+ * layer may rename one (`apiKeyEnv`) — so it mounts the effective composition
+ * on a throwaway root, as a boot would, with no agent, no session and no
+ * surface, and reads `declaredRefs()`.
+ *
+ * `set NAME` reads the value from stdin alone (argv lands in shell history
+ * and in every process listing; an environment is inherited): hidden on a
+ * terminal, otherwise everything on stdin less one trailing newline. `unset
+ * NAME` removes it. Both write through the store's owner
+ * (`updateCredentialStore`), at the store the deployment's `credentials-local`
+ * row READS, so a layer that moved it does not leave a key saved where nothing
+ * looks. Settings choose a model, which this command never touches: a broken
+ * settings.json must not stand between a person and their key.
+ */
+async function credentialsCommand(args: ParsedArgs): Promise<number> {
+  const [sub, name, ...rest] = args.positional
+  const shape = sub === 'list' ? name === undefined : (sub === 'set' || sub === 'unset') && name !== undefined && rest.length === 0
+  if (!shape) return usage(`usage: ${usageFor('credentials')}`)
+  const plan = await prepareBoot(args, 'none', 'optional')
+  if (typeof plan === 'string') return usage(plan)
+  const json = args.flags.get('json') === true
+  const row = plan.effective.rows.find((entry) => entry.plugin === credentialsLocalPlugin && entry.disabled !== true)
+  const store = (row?.config as { path?: string } | undefined)?.path
+  if (sub === 'list') return listCredentials(plan, store, json)
+
+  let ref: CredentialRef
+  try {
+    ref = credentialRef(name!)
+  } catch (error) {
+    return usage(error instanceof Error ? error.message : String(error))
+  }
+  if (store === undefined) {
+    process.stderr.write(`error: this composition reads no credentials store (no enabled credentials-local row names a path); set ${ref} in the environment instead\n`)
+    return 1
+  }
+  if (sub === 'unset') {
+    let removed: boolean
+    try {
+      removed = updateCredentialStore(store, ref, undefined)
+    } catch (error) {
+      return reportError(error)
+    }
+    // Absent is not an error: the state asked for is the state it is in.
+    if (json) process.stdout.write(`${JSON.stringify({ removed: ref, store })}\n`)
+    process.stderr.write(removed ? `removed ${ref} from ${store}\n` : `${ref} was not in ${store}; nothing to remove\n`)
+    return 0
+  }
+  const value = await readSecret(ref)
+  if (value === undefined) {
+    process.stderr.write('aborted; nothing was saved\n')
+    return 130
+  }
+  // Which rule, never the value: a refusal message is exactly where a pasted
+  // key would otherwise be echoed back.
+  if (value.length === 0) return usage(`${ref}: the value is empty; nothing was saved`)
+  if (!isHeaderSafe(value)) {
+    return usage(`${ref}: the value holds a character a request header cannot carry (a space, a line break, a control or a non-ASCII character); nothing was saved`)
+  }
+  try {
+    updateCredentialStore(store, ref, value)
+  } catch (error) {
+    return reportError(error)
+  }
+  if (json) process.stdout.write(`${JSON.stringify({ saved: ref, store })}\n`)
+  process.stderr.write(`saved ${ref} to ${store}\n`)
+  return 0
+}
+
+async function listCredentials(plan: BootPlan, store: string | undefined, json: boolean): Promise<number> {
+  let refs: readonly CredentialRef[]
+  try {
+    const root = await bootComposition({ ...bootFields(plan) })
+    try {
+      refs = root.tryGet(CREDENTIALS)?.declaredRefs() ?? []
+    } finally {
+      await root.dispose()
+    }
+  } catch (error) {
+    return reportError(error)
+  }
+  const { sources, problem } = credentialSources(store, refs)
+  if (problem !== undefined) stderrLogger.warn(problem)
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ home: resolveHome(), store: store ?? null, refs: sources })}\n`)
+    return 0
+  }
+  if (sources.length === 0) process.stdout.write('this composition declares no credential\n')
+  const width = Math.max(0, ...sources.map((entry) => entry.name.length))
+  for (const entry of sources) process.stdout.write(`${entry.name.padEnd(width)}  ${entry.source}\n`)
+  process.stdout.write(`store: ${store ?? 'none (no enabled credentials-local row names a path)'}\n`)
+  return 0
+}
+
+/** The secret, from stdin alone; `undefined` when a person aborted the prompt. */
+async function readSecret(ref: CredentialRef): Promise<string | undefined> {
+  if (process.stdin.isTTY) return promptHidden(`${ref}: `)
+  const chunks: Buffer[] = []
+  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+  // ONE trailing newline is how `echo` and every editor end a value; anything
+  // more is part of what was given, and the header rule refuses it.
+  return Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/u, '')
+}
+
+const CTRL_C = String.fromCharCode(3)
+const CTRL_D = String.fromCharCode(4)
+const BACKSPACE = String.fromCharCode(8)
+const DELETE = String.fromCharCode(127)
+
+/** One line from the terminal with echo off: raw mode, so nothing typed is drawn; Ctrl+C aborts. */
+function promptHidden(prompt: string): Promise<string | undefined> {
+  const stdin = process.stdin
+  process.stderr.write(prompt)
+  stdin.setRawMode(true)
+  stdin.resume()
+  return new Promise((answer) => {
+    let value = ''
+    const finish = (result: string | undefined): void => {
+      stdin.off('data', onData)
+      stdin.setRawMode(false)
+      stdin.pause()
+      process.stderr.write('\n')
+      answer(result)
+    }
+    const onData = (chunk: Buffer | string): void => {
+      for (const char of String(chunk)) {
+        if (char === '\r' || char === '\n' || char === CTRL_D) return finish(value)
+        if (char === CTRL_C) return finish(undefined)
+        if (char === BACKSPACE || char === DELETE) value = [...value].slice(0, -1).join('')
+        else value += char
+      }
+    }
+    stdin.on('data', onData)
+  })
+}
+
 async function sessionsCommand(args: ParsedArgs): Promise<number> {
   const sub = args.positional[0]
   // A reader of stored logs: a broken settings file is a warning here, because
@@ -1144,6 +1459,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       return sessionsCommand(args)
     case 'skills':
       return skillsCommand(args)
+    case 'credentials':
+      return credentialsCommand(args)
     case 'version':
       process.stdout.write(`minidsh ${VERSION}\n`)
       return 0
@@ -1165,6 +1482,8 @@ export async function main(argv: readonly string[]): Promise<number> {
           '           --accept full|none: what a session accepts from a host that cannot confine the shell (default full)',
           'skills:    ~/.minidsh/skills/<name>/SKILL.md, the bundled skills, and the repository\'s .agents/skills and .claude/skills;',
           '           `minidsh skills` shows what a session in the cwd is offered, and what was not listed and why',
+          'keys:      `minidsh credentials set DEEPSEEK_API_KEY` reads a key from stdin (hidden on a terminal) into',
+          '           ~/.minidsh/credentials.json; the environment still wins; `credentials list` says which answers',
           '',
         ].join('\n'),
       )

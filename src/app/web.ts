@@ -20,8 +20,10 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { extname, join } from 'node:path'
+import { basename, extname, join } from 'node:path'
 import type { Context } from '../kernel/index.ts'
+import { AGENTS } from '../core/agent/index.ts'
+import { canonicalPath } from '../core/sandbox/paths.ts'
 import { protocolPlugin, upgradeWasHandled, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
 import { VERSION } from './version.ts'
@@ -46,10 +48,30 @@ export interface WebHostHandle {
   /** The URL to open, launch token included. */
   readonly url: string
   readonly port: number
+  /** The workspaces this host serves, exactly as `initialize` names them: a supervisor's `ready` record reports these. */
+  readonly workspaces: readonly WorkspaceRecord[]
   /** Resolves when the surface is done (an authorized shutdown, or `dispose()`). */
   readonly closed: Promise<void>
   dispose(): Promise<void>
+  /**
+   * The graceful stop: every running turn ends `cancelled` and is flushed
+   * FIRST, all at once, and only then does the sequential disposal run — so a
+   * stop that a supervisor bounds loses no turn's ending to the order the
+   * agents happen to unwind in. Each phase is bounded (`cancelBoundMs`, default
+   * 5 s; `disposeBoundMs`, default 20 s); `'deadline'` says one ran out, and
+   * the caller then owns what is left (the CLI exits 1). Idempotent.
+   */
+  stop(options?: { readonly cancelBoundMs?: number; readonly disposeBoundMs?: number }): Promise<'stopped' | 'deadline'>
 }
+
+export interface WorkspaceRecord {
+  readonly id: string
+  readonly name: string
+  readonly root: string
+}
+
+const CANCEL_BOUND_MS = 5_000
+const DISPOSE_BOUND_MS = 20_000
 
 /** Header terminator, spelled out so no editor or tool can eat the escape. */
 const CRLF = String.fromCharCode(13, 10)
@@ -167,6 +189,31 @@ const CONTENT_SECURITY_POLICY = [
 /** `Sec-Fetch-Dest` values a browser sends when this page is being put inside another one. */
 const EMBEDDING_DESTINATIONS: ReadonlySet<string> = new Set(['iframe', 'frame', 'embed', 'object', 'fencedframe'])
 
+/**
+ * The workspaces this host serves, named ONCE here and handed to the protocol
+ * as declared, so what a `ready` record reports is what `initialize` answers by
+ * construction rather than by a second derivation that could drift. Ids and
+ * names are the protocol's own defaults (a digest of the canonical root, its
+ * basename), so a host that declares nothing serves the same ids it always did.
+ */
+function workspaceRecords(options: WebOptions): WorkspaceRecord[] {
+  const declared: NonNullable<WebOptions['workspaces']> = options.workspaces ?? (options.workspaceRoots ?? [options.cwd]).map((root) => ({ root }))
+  return declared.map((workspace) => {
+    const root = canonicalPath(workspace.root)
+    return { id: workspace.id ?? createHash('sha256').update(root).digest('hex').slice(0, 12), name: workspace.name ?? (basename(root) || root), root }
+  })
+}
+
+/** `promise`, or `'deadline'` once `ms` pass first; the timer never outlives the race. */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | 'deadline'> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([promise, new Promise<'deadline'>((resolve) => (timer = setTimeout(() => resolve('deadline'), ms)))])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function startWebHost(options: WebOptions): Promise<WebHostHandle> {
   const token = options.token ?? randomBytes(24).toString('base64url')
   const secret = randomBytes(32)
@@ -249,6 +296,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
     }
   })
 
+  const workspaces = workspaceRecords(options)
   const protocolConfig: ProtocolConfig = {
     serverVersion: VERSION,
     // An explicit authority flag is a durable switch on every session this
@@ -256,7 +304,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
     onContinued: (agent, ctx) => applyAuthority(ctx, agent, options),
     cwd: options.cwd,
     workspaceRoots: options.workspaceRoots ?? [options.cwd],
-    ...(options.workspaces === undefined ? {} : { workspaces: options.workspaces }),
+    workspaces,
     defaultAgentOptions: options.agentDefaults ?? defaultAgentOptions(),
     ...(options.agentOverrides === undefined ? {} : { agentOverrides: options.agentOverrides }),
     onClose: () => resolveClosed(),
@@ -302,16 +350,39 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   const port = typeof address === 'object' && address !== null ? address.port : 0
   authorities = authoritiesFor(bind, port)
   let disposed: Promise<void> | undefined
+  const dispose = (): Promise<void> =>
+    (disposed ??= (async () => {
+      await root.dispose()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      resolveClosed()
+    })())
+  let stopped: Promise<'stopped' | 'deadline'> | undefined
+  const stop = (bounds: { readonly cancelBoundMs?: number; readonly disposeBoundMs?: number } = {}): Promise<'stopped' | 'deadline'> =>
+    (stopped ??= (async () => {
+      // Phase 1 is exactly the first step of every agent's own disposal
+      // (`core/loop/factory.ts`), taken for all of them at once: disposal runs
+      // agent by agent, so without it the last agent's turn could still be
+      // running when a supervisor's deadline kills the process, and its
+      // `turn/end` would be lost to a repair on the next open. Top-level only:
+      // a delegated child is cancelled by its parent's call ending, which is
+      // the one order its parent's log can explain.
+      const live = disposed === undefined ? (root.tryGet(AGENTS)?.list() ?? []) : []
+      const agents = live.filter((agent) => agent.session.header.delegatedBy === undefined && agent.session.header.delegatedByCallId === undefined)
+      for (const agent of agents) agent.cancel({ kind: 'disposed' })
+      const idle = await within(
+        Promise.allSettled(agents.map((agent) => agent.whenIdle())).then(() => 'idle' as const),
+        bounds.cancelBoundMs ?? CANCEL_BOUND_MS,
+      )
+      const done = await within(dispose(), bounds.disposeBoundMs ?? DISPOSE_BOUND_MS)
+      return idle === 'deadline' || done === 'deadline' ? 'deadline' : 'stopped'
+    })())
   return {
     root,
     port,
     url: `http://${printableAuthority(bind, port)}/?token=${token}`,
+    workspaces,
     closed,
-    dispose: () =>
-      (disposed ??= (async () => {
-        await root.dispose()
-        await new Promise<void>((resolve) => server.close(() => resolve()))
-        resolveClosed()
-      })()),
+    dispose,
+    stop,
   }
 }

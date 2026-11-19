@@ -6,8 +6,10 @@
  *
  * The preference is this BROWSER's (light, dark, or follow the system) and
  * lives in localStorage: client presentation, never runtime truth. It is
- * per origin, so a host on a new port starts from "system" (S22.2 decides a
- * stable home for client preferences).
+ * per origin, so a host on a new port starts from "system". The desktop app
+ * keeps its origin stable (it persists the port it binds); a plain
+ * `minidsh web` without `--port` binds a new one each launch, and so forgets
+ * the theme across launches.
  *
  * It also sets the hairline: DSH's 0.5px lines, as max(1, ⌊0.5·dpr⌋)/dpr, so a
  * 1× screen gets a real 1px line rather than an anti-aliased smear.

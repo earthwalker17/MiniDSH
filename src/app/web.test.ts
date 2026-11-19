@@ -7,7 +7,7 @@
  * cases that matter are the ones where someone reaches it WITHOUT the token, or
  * from another page.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -15,7 +15,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import { LLM } from '../core/llm/index.ts'
-import { assistantText, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
+import { assistantText, gate, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
+import { WebClient } from '../test-support/web-process.ts'
 import { startWebHost, type WebHostHandle } from './web.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -297,6 +298,107 @@ describe('the web surface trust fence', () => {
       socket.addEventListener('close', () => resolve('closed'), { once: true })
     })
     expect(outcome).not.toBe('opened')
+  })
+})
+
+/** The stored events of one session, header line skipped. */
+function storedEvents(sessionsRoot: string, sessionId: string): { type: string; data: unknown }[] {
+  return readFileSync(join(sessionsRoot, `${encodeURIComponent(sessionId)}.jsonl`), 'utf8')
+    .trim()
+    .split('\n')
+    .slice(1)
+    .map((line) => JSON.parse(line) as { type: string; data: unknown })
+}
+
+describe('the graceful stop (WebHostHandle.stop)', () => {
+  it('ends a running turn cancelled and flushed, then disposes and releases its lease', async () => {
+    const sessionsRoot = tempDir('minidsh-web-sessions-')
+    let streaming!: () => void
+    const started = new Promise<void>((resolve) => (streaming = resolve))
+    // A stream held open until the turn is cancelled: the stop, not a model, ends it.
+    const adapter = new ScriptedAdapter().script((request) => {
+      streaming()
+      return [gate(new Promise((resolve) => request.signal?.addEventListener('abort', resolve, { once: true }))), ...assistantText('never reached')]
+    })
+    const host = await startWebHost({
+      cwd: tempDir('minidsh-web-cwd-'),
+      sessionsRoot,
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (root) => {
+        root.get(LLM).registerAdapter(root, adapter)
+      },
+    })
+    hosts.push(host)
+    const cookie = await signIn(`http://127.0.0.1:${host.port}`, new URL(host.url).searchParams.get('token')!)
+    const client = await WebClient.open(`ws://127.0.0.1:${host.port}/ws`, cookie)
+    sockets.push(client.socket)
+    const init = await client.request<{ workspaces: unknown[] }>('initialize')
+    // What a supervisor's `ready` record reports is what the wire answers.
+    expect(init.workspaces).toEqual(host.workspaces)
+    const { sessionId } = await client.request<{ sessionId: string }>('session/prompt', { text: 'hold on', agentOptions: SCRIPTED })
+    await started
+    const lock = join(sessionsRoot, `${encodeURIComponent(sessionId)}.jsonl.lock`)
+    expect(existsSync(lock), 'the running session holds its lease').toBe(true)
+
+    const stopping = host.stop({ cancelBoundMs: 5_000, disposeBoundMs: 10_000 })
+    expect(host.stop(), 'the stop is one stop').toBe(stopping)
+    expect(await stopping).toBe('stopped')
+
+    const ends = storedEvents(sessionsRoot, sessionId).filter((event) => event.type === 'turn/end')
+    expect(ends.map((event) => (event.data as { reason: { kind: string } }).reason.kind), 'the turn ends recorded').toEqual(['cancelled'])
+    expect(readdirSync(sessionsRoot).filter((name) => name.endsWith('.lock')), 'locks left behind').toEqual([])
+    await host.closed
+  })
+
+  // Why the cancel is a phase of its own: disposal runs agent by agent, so an
+  // agent whose unwind hangs held every later agent's turn open behind it, and
+  // a supervisor's deadline kill then lost those turns' endings.
+  it('answers "deadline" within its bound when a disposal hangs — with every turn already ended', async () => {
+    const sessionsRoot = tempDir('minidsh-web-sessions-')
+    let release!: () => void
+    const hung = new Promise<void>((resolve) => (release = resolve))
+    let streams = 0
+    const held = (request: { signal?: AbortSignal }) => {
+      streams += 1
+      return [gate(new Promise((resolve) => request.signal?.addEventListener('abort', resolve, { once: true }))), ...assistantText('never reached')]
+    }
+    const adapter = new ScriptedAdapter().script(held, held)
+    const host = await startWebHost({
+      cwd: tempDir('minidsh-web-cwd-'),
+      sessionsRoot,
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (root) => {
+        root.get(LLM).registerAdapter(root, adapter)
+      },
+      // Every agent's scope gets a disposer that never finishes.
+      agentWorld: (agentCtx) => {
+        agentCtx.effect(() => () => hung, 'a disposer that never finishes')
+      },
+    })
+    hosts.push(host)
+    const cookie = await signIn(`http://127.0.0.1:${host.port}`, new URL(host.url).searchParams.get('token')!)
+    const client = await WebClient.open(`ws://127.0.0.1:${host.port}/ws`, cookie)
+    sockets.push(client.socket)
+    const first = await client.request<{ sessionId: string }>('session/prompt', { text: 'hold one', agentOptions: SCRIPTED })
+    const second = await client.request<{ sessionId: string }>('session/prompt', { text: 'hold two', agentOptions: SCRIPTED })
+    await client.waitFor(() => (streams === 2 ? true : undefined), 'both turns to be streaming', 10_000)
+
+    const began = Date.now()
+    const outcome = await host.stop({ cancelBoundMs: 2_000, disposeBoundMs: 500 })
+    const took = Date.now() - began
+    expect(outcome).toBe('deadline')
+    expect(took, `the stop took ${took} ms against a 500 ms disposal bound`).toBeGreaterThanOrEqual(450)
+    expect(took, `the stop took ${took} ms against a 500 ms disposal bound`).toBeLessThan(5_000)
+    for (const { sessionId } of [first, second]) {
+      const ends = storedEvents(sessionsRoot, sessionId).filter((event) => event.type === 'turn/end')
+      expect(ends.map((event) => (event.data as { reason: { kind: string } }).reason.kind), `the turn ends ${sessionId} recorded`).toEqual(['cancelled'])
+    }
+    // Released, the disposal the deadline gave up on still finishes.
+    release()
+    await host.dispose()
+    await host.closed
   })
 })
 

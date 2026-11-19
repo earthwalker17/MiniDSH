@@ -24,6 +24,33 @@ export interface WebHostOptions {
   readonly approve?: boolean
   readonly sandbox?: string
   readonly args?: readonly string[]
+  /**
+   * Run `web --json`, the supervisor contract: stdout is JSON records, the URL
+   * is built from the `ready` record (`records`, `ready()`), and ending stdin
+   * stops the host (`stop()`).
+   */
+  readonly json?: boolean
+  /** What fd 0 is: a pipe (default), or `ignore` — the null device, as a service manager gives. */
+  readonly stdin?: 'pipe' | 'ignore'
+  /** Leave out `--cwd` (default: the `cwd` argument is passed as `--cwd`). */
+  readonly noCwd?: boolean
+}
+
+/** The `ready` record of `web --json`. */
+export interface WebReadyRecord {
+  readonly type: 'ready'
+  readonly host: string
+  readonly port: number
+  readonly token: string
+  readonly version: string
+  readonly home: string
+  readonly workspaces: readonly { readonly id: string; readonly name: string; readonly root: string }[]
+}
+
+/** How the child ended. */
+export interface WebHostExit {
+  readonly code: number | null
+  readonly signal: NodeJS.Signals | null
 }
 
 /**
@@ -43,32 +70,88 @@ export class WebHostProcess {
   readonly child: ChildProcess
   stdout = ''
   stderr = ''
+  /** Under `json`: every record stdout carried, in order (a line that is not JSON fails `ready()`). */
+  readonly records: Record<string, unknown>[] = []
+  /** Settles when the child exits, however it does. */
+  readonly exited: Promise<WebHostExit>
   private urlPromise: Promise<string>
+  private readyPromise: Promise<WebReadyRecord>
   private session: Promise<{ origin: string; cookie: string }> | undefined
 
   constructor(cwd: string, home: string, options: WebHostOptions = {}) {
-    const argv = [WEB_BIN, 'web', '--cwd', cwd, '--port', '0']
+    const argv = [WEB_BIN, 'web', ...(options.noCwd ? [] : ['--cwd', cwd]), '--port', '0']
+    if (options.json) argv.push('--json')
     if (options.approve) argv.push('--approve')
     if (options.sandbox) argv.push('--sandbox', options.sandbox)
     if (options.args) argv.push(...options.args)
-    this.child = spawn(process.execPath, argv, { env: childEnv(home), stdio: ['pipe', 'pipe', 'pipe'] })
+    this.child = spawn(process.execPath, argv, { env: childEnv(home), stdio: [options.stdin ?? 'pipe', 'pipe', 'pipe'] })
     spawned.push(this.child)
+    this.exited = new Promise((resolve) => this.child.on('exit', (code, signal) => resolve({ code, signal })))
     this.child.stderr!.on('data', (chunk: Buffer) => {
       this.stderr += String(chunk)
     })
-    this.urlPromise = new Promise((resolve, reject) => {
-      const onData = (chunk: Buffer): void => {
+    this.readyPromise = new Promise((resolve, reject) => {
+      let pending = ''
+      this.child.stdout!.on('data', (chunk: Buffer) => {
         this.stdout += String(chunk)
-        const match = /(http:\/\/\S+\?token=\S+)/.exec(this.stdout)
-        if (match) resolve(match[1]!)
-      }
-      this.child.stdout!.on('data', onData)
-      this.child.on('exit', () => reject(new Error(`the web host exited before printing a url\nstderr: ${this.stderr}`)))
+        if (!options.json) return
+        pending += String(chunk)
+        for (let nl = pending.indexOf('\n'); nl >= 0; nl = pending.indexOf('\n')) {
+          const line = pending.slice(0, nl)
+          pending = pending.slice(nl + 1)
+          let record: Record<string, unknown>
+          try {
+            record = JSON.parse(line) as Record<string, unknown>
+          } catch {
+            reject(new Error(`web --json wrote a line that is not JSON: ${JSON.stringify(line)}`))
+            continue
+          }
+          this.records.push(record)
+          if (record.type === 'ready') resolve(record as unknown as WebReadyRecord)
+        }
+      })
+      this.child.on('exit', () => reject(new Error(`the web host exited before its ready record\nrecords: ${JSON.stringify(this.records)}\nstderr: ${this.stderr}`)))
     })
+    this.urlPromise = options.json
+      ? this.readyPromise.then((ready) => `http://${ready.host}:${ready.port}/?token=${ready.token}`)
+      : new Promise((resolve, reject) => {
+          this.child.stdout!.on('data', () => {
+            const match = /(http:\/\/\S+\?token=\S+)/.exec(this.stdout)
+            if (match) resolve(match[1]!)
+          })
+          this.child.on('exit', () => reject(new Error(`the web host exited before printing a url\nstderr: ${this.stderr}`)))
+        })
+    // A host refused before it was ready is a case some tests are ABOUT; the
+    // promises still reject for whoever awaits them, never as unhandled.
+    this.readyPromise.catch(() => undefined)
+    this.urlPromise.catch(() => undefined)
   }
 
   url(): Promise<string> {
     return this.urlPromise
+  }
+
+  ready(): Promise<WebReadyRecord> {
+    return this.readyPromise
+  }
+
+  /** Waits for the exit, bounded: a host that does not stop is a failure that says so. */
+  async waitForExit(timeoutMs: number): Promise<WebHostExit> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`the web host did not exit within ${timeoutMs} ms\nstderr: ${this.stderr}`)), timeoutMs)
+    })
+    try {
+      return await Promise.race([this.exited, deadline])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** The supervisor's stop under `--json`: end stdin, then wait (bounded) for the exit. */
+  stop(timeoutMs = 30_000): Promise<WebHostExit> {
+    this.child.stdin?.end()
+    return this.waitForExit(timeoutMs)
   }
 
   /**
