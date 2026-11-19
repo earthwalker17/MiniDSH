@@ -299,15 +299,31 @@ async function stopRuntime(restarting: boolean): Promise<void> {
   log(`runtime stop: graceful=${String(result.graceful)} killed=${String(result.killed)}`)
 }
 
-/** One serialized lifecycle action at a time; a second request while one runs only shows the window. */
-function serialize(action: () => Promise<void>): void {
+/**
+ * One lifecycle action at a time (start, restart, quit), and NOTHING dropped:
+ * a request arriving while one runs waits in a single slot, the latest
+ * replacing an earlier one, except that a quit is never replaced. Dropping
+ * was a defect the packaged E2E found: a close or a SIGTERM landing while
+ * the start was still loading the page was ignored, and the app never quit
+ * (a folder change in that window was lost the same way, its settings
+ * already saved).
+ */
+let queued: { readonly action: () => Promise<void>; readonly quit: boolean } | undefined
+
+function serialize(action: () => Promise<void>, quit = false): void {
   if (busy) {
+    if (quit || !queued?.quit) queued = { action, quit }
     showWindow()
     return
   }
-  busy = action().finally(() => {
-    busy = undefined
-  })
+  busy = action()
+    .catch((error: unknown) => log(`lifecycle action failed: ${error instanceof Error ? error.message : String(error)}`))
+    .finally(() => {
+      busy = undefined
+      const next = queued
+      queued = undefined
+      if (next) serialize(next.action, next.quit)
+    })
 }
 
 function requestQuit(): void {
@@ -316,7 +332,7 @@ function requestQuit(): void {
     await stopRuntime(false)
     exiting = true
     app.quit()
-  })
+  }, true)
 }
 
 function restartRuntime(confirm: boolean): void {

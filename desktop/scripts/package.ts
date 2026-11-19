@@ -105,6 +105,9 @@ function stageRuntime(): void {
   const assets = [...(webAssets ?? '').matchAll(/'([^']+)'/g)].map((match) => match[1]!)
   if (assets.length < 10) fail('could not read WEB_ASSETS from scripts/build.ts')
   for (const asset of assets) if (!existsSync(join(minidsh, 'dist', 'app', 'web', asset))) fail(`the staged runtime lacks the browser asset ${asset}`)
+  // npm's `.bin` shims are for a shell's PATH; the app runs `bin/minidsh.js`
+  // by path, and on POSIX they are symlinks, which the check below refuses.
+  rmSync(join(stage, 'node_modules', '.bin'), { recursive: true, force: true })
   // A link (pnpm's, a junction) works on the build host only.
   walk(join(stage, 'node_modules'), (path) => {
     if (lstatSync(path).isSymbolicLink()) fail(`the staged runtime holds a link: ${path}`)

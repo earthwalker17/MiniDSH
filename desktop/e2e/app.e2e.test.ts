@@ -79,8 +79,12 @@ async function hangingModel(): Promise<{ url: string; requests: () => number }> 
 function launchApp(launch: ConstructorParameters<typeof DesktopApp>[0]): DesktopApp {
   const app = new DesktopApp(launch)
   cleanup.push(async () => {
-    if (app.child.exitCode === null && app.child.signalCode === null) app.child.kill()
-    await app.exited
+    // Forceful and bounded: cleanup tests nothing, and a quit that asks (a
+    // native confirm nobody answers) must not hold the hook.
+    if (app.child.exitCode === null && app.child.signalCode === null) app.child.kill('SIGKILL')
+    await Promise.race([app.exited, new Promise((resolve) => setTimeout(resolve, 10_000))])
+    const runtime = app.runtimePid()
+    if (runtime !== undefined && alive(runtime)) process.kill(runtime, 'SIGKILL')
     await new Promise((resolve) => setTimeout(resolve, 500))
   })
   return app
@@ -143,6 +147,21 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     expect((await app.waitForExit(30_000)).code).toBe(0)
   })
 
+  // Found by this suite: a close landing while the start was still loading
+  // the page was dropped, and the app never quit. The window shows once the
+  // shell is drawn, while the runtime is still booting: close right then.
+  it('a close while the runtime is still starting is honoured, never dropped', { timeout: 120_000 }, async () => {
+    const userData = scratch('minidsh-e2e-ud-')
+    const home = scratch('minidsh-e2e-home-')
+    seed(userData, [scratch('minidsh-e2e-ws-')])
+    const app = launchApp({ exe, userData, home, drop: KEYS })
+    await app.page('minidsh-shell:')
+    app.closeWindow()
+    const end = await app.waitForExit(60_000)
+    expect(end.code, app.mainLog()).toBe(0)
+    expect(locksUnder(home)).toEqual([])
+  })
+
   it('a folder: the Web UI with the credential injected; busy close asks, Cancel keeps, Quit stops gracefully; a second launch defers', { timeout: 240_000 }, async () => {
     const userData = scratch('minidsh-e2e-ud-')
     const home = scratch('minidsh-e2e-home-')
@@ -159,7 +178,6 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     expect(port).toBeGreaterThanOrEqual(20_000)
     expect(port).toBeLessThan(45_000)
     expect(await web.evaluate<string>('location.origin')).toBe(`http://127.0.0.1:${port}`)
-    await web.evaluate(`localStorage.setItem('minidsh.theme', 'dark')`)
 
     // A second launch of the same install defers to this one and exits.
     const second = spawn(exe, [], { env: { ...process.env, MINIDSH_DESKTOP_DATA: userData, MINIDSH_HOME: home }, stdio: 'ignore' })
@@ -181,46 +199,65 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
       expect(alive(app.pid)).toBe(true)
       app.closeWindow()
       expect(answerNativeDialog(app.pid, 'Quit').clicked).toBe(true)
+      const end = await app.waitForExit(60_000)
+      expect(end.code, app.mainLog()).toBe(0)
+      expect(app.mainLog()).toMatch(/runtime stop: graceful=true killed=false/)
     } else {
-      // No UI Automation off Windows: SIGTERM is a quit, and the confirm is Windows-proven.
-      app.closeWindow()
+      // No UI Automation to answer the confirm off Windows. What POSIX proves
+      // instead is the parent-death path: the app killed outright, its runtime
+      // sees its stdin end and stops gracefully on its own (on Windows a
+      // kill-on-close Job ends it at once; repair covers that, §13).
+      const orphan = app.runtimePid()
+      expect(orphan, 'the runtime child was not found').toBeDefined()
+      app.child.kill('SIGKILL')
+      await app.waitForExit(15_000)
+      await waitUntil('the orphaned runtime to stop on its own', () => !alive(orphan!), 60_000)
     }
-    const end = await app.waitForExit(60_000)
-    expect(end.code, app.mainLog()).toBe(0)
-    expect(app.mainLog()).toMatch(/runtime stop: graceful=true killed=false/)
     expect(turnEnds(home)).toContain('cancelled')
     expect(locksUnder(home)).toEqual([])
 
-    // Relaunch: the same origin, so the page's own preference survived.
-    const again = launchApp({ exe, userData, home, drop: KEYS, env: { DEEPSEEK_BASE_URL: model.url, DEEPSEEK_API_KEY: 'sk-e2e-dummy' } })
+    // Relaunch: the same origin. A preference set there survives a quit and
+    // the next launch (the page writes localStorage lazily, so it is set
+    // before a GRACEFUL quit: a killed app loses an unflushed write, as any
+    // Chromium does).
+    const relaunch = (): DesktopApp => launchApp({ exe, userData, home, drop: KEYS, env: { DEEPSEEK_BASE_URL: model.url, DEEPSEEK_API_KEY: 'sk-e2e-dummy' } })
+    const again = relaunch()
     const page = await again.page('http://127.0.0.1')
     await page.waitFor(`document.querySelector('#hero') !== null`, 60_000)
     expect(await page.evaluate<string>('location.origin')).toBe(`http://127.0.0.1:${port}`)
-    expect(await page.evaluate<string>(`document.documentElement.dataset.theme`)).toBe('dark')
+    await page.evaluate(`localStorage.setItem('minidsh.theme', 'dark')`)
+    again.closeWindow()
+    expect((await again.waitForExit(60_000)).code, again.mainLog()).toBe(0)
+
+    const third = relaunch()
+    const themed = await third.page('http://127.0.0.1')
+    await themed.waitFor(`document.querySelector('#hero') !== null`, 60_000)
+    expect(await themed.evaluate<string>('location.origin')).toBe(`http://127.0.0.1:${port}`)
+    expect(await themed.evaluate<string>(`document.documentElement.dataset.theme`)).toBe('dark')
 
     // The runtime dies under the window: the stopped view, then Restart.
-    const runtime = again.runtimePid()
+    const runtime = third.runtimePid()
     expect(runtime, 'the runtime child was not found').toBeDefined()
-    process.kill(runtime!)
-    const shell = await again.page('minidsh-shell:')
+    process.kill(runtime!, 'SIGKILL')
+    const shell = await third.page('minidsh-shell:')
     await shell.waitFor(`document.querySelector('h1')?.textContent.includes('stopped unexpectedly')`, 30_000)
     await shell.click('button.primary')
-    const back = await again.page('http://127.0.0.1')
+    const back = await third.page('http://127.0.0.1')
     await back.waitFor(`document.querySelector('#hero') !== null && location.port === '${port}'`, 60_000)
-    expect(again.runtimePid()).not.toBe(runtime)
+    expect(third.runtimePid()).not.toBe(runtime)
 
-    // The app is killed: its runtime goes with it (a kill-on-close Job on
-    // Windows; stdin's end elsewhere), and the next launch reclaims the lease.
-    const orphan = again.runtimePid()!
-    again.child.kill()
-    await again.waitForExit(15_000)
+    // The app is killed outright: its runtime goes with it (a kill-on-close
+    // Job on Windows; its stdin's end elsewhere), and the next launch
+    // reclaims the lease and lists the stored session.
+    const orphan = third.runtimePid()!
+    third.child.kill('SIGKILL')
+    await third.waitForExit(15_000)
     await waitUntil('the runtime to end with its app', () => !alive(orphan), 30_000)
-    const third = launchApp({ exe, userData, home, drop: KEYS, env: { DEEPSEEK_BASE_URL: model.url, DEEPSEEK_API_KEY: 'sk-e2e-dummy' } })
-    const resumed = await third.page('http://127.0.0.1')
+    const fourth = relaunch()
+    const resumed = await fourth.page('http://127.0.0.1')
     await resumed.waitFor(`document.querySelectorAll('#sessions .session-row').length > 0`, 60_000)
-    third.closeWindow()
-    if (win) answerNativeDialog(third.pid, 'Quit', 5_000)
-    expect((await third.waitForExit(60_000)).code).toBe(0)
+    fourth.closeWindow()
+    expect((await fourth.waitForExit(60_000)).code, fourth.mainLog()).toBe(0)
     expect(locksUnder(home)).toEqual([])
   })
 })
