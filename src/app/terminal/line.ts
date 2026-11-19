@@ -86,7 +86,7 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
   /** When the standing question was printed, and when one was last settled elsewhere under the person's hands. */
   let askedAt = Number.NEGATIVE_INFINITY
   let settledElsewhereAt = Number.NEGATIVE_INFINITY
-  /** Resolved whenever the session goes idle (the end of input waits on it). */
+  /** Resolved whenever the session goes idle, asks, or the view exits: the end of input waits on them. */
   const idleWaiters: (() => void)[] = []
   const untilIdle = (): Promise<void> => new Promise<void>((resolve) => idleWaiters.push(resolve))
   const stillWorking = (): boolean => !exiting && controller.status === 'running' && pendingAsk === undefined
@@ -153,6 +153,8 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
       write(`approve ${ask.toolName}${says}${ask.reason ? ` (${ask.reason})` : ''}? ${ask.offered ? '[y/N/a] ' : '[y/N] '}`)
       promptStanding = true
       askedAt = Date.now()
+      // Nobody can answer once input has ended: wake the end-of-input wait.
+      for (const wake of idleWaiters.splice(0)) wake()
     },
     onDecided: (id) => {
       if (pendingAsk?.id !== id) return
@@ -173,6 +175,7 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
   async function exitWith(code: number): Promise<void> {
     if (exiting) return
     exiting = true
+    for (const wake of idleWaiters.splice(0)) wake()
     if (options.handleSigint) process.removeListener('SIGINT', onSigint)
     rl.close()
     await options.exit(code)
@@ -379,6 +382,7 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
       rl.on('close', () => {
         void chain.then(async () => {
           while (stillWorking()) await untilIdle()
+          if (pendingAsk !== undefined && !exiting) write('\n(input ended with this question open; it stays unanswered)\n')
           await exitWith(0)
         })
       })

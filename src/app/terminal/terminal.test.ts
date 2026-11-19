@@ -226,6 +226,37 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     expect(driver.text()).toContain('piped and answered')
   })
 
+  it('exits, leaving it unanswered, when a piped task asks a question nobody can answer', async () => {
+    // The pre-push review's catch: the end-of-input wait waited for an idle
+    // that a standing question never reaches.
+    const touchy = defineTool({
+      name: 'touchy',
+      description: 'needs approval',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'touchy', {}), assistantText('never reached'))
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      confinement: 'none',
+      ...scriptedBoot(adapter, (root) => {
+        root.get(TOOLS).register(root, touchy)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'touchy' ? { kind: 'ask', reason: 'careful' } : next()))
+      }),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    driver.input.end('use the tool\n')
+    expect(await exitCode).toBe(0)
+    expect(driver.text()).toContain('approve touchy (careful)? [y/N] ')
+    expect(driver.text()).toContain('it stays unanswered')
+    expect(adapter.calls).toHaveLength(1)
+  })
+
   it('asks for approval on the durable frame and applies the typed answer', async () => {
     const touchy = defineTool({
       name: 'touchy',

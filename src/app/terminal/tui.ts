@@ -234,7 +234,7 @@ class FullScreenView {
     // On the main screen again: what to come back to.
     const id = this.controller.sessionId
     const out = this.options.io?.output ?? process.stdout
-    if (error !== undefined) out.write(`error: ${error}\n`)
+    if (error !== undefined) out.write(`error: ${cleanKeepingLines(error)}\n`)
     if (id !== undefined) out.write(`session ${id}\nresume it with: minidsh resume ${id}\n`)
     await this.options.exit(code)
   }
@@ -1160,7 +1160,7 @@ class FullScreenView {
     if (held > 0) posture.push({ line: [span(`${held} notice${held === 1 ? '' : 's'} held`, { ink: 'warn' })], priority: 45 })
     const hint =
       this.ask !== undefined
-        ? 'y / n answer'
+        ? this.ask.offered ? 'y / a / n answer' : 'y / n answer'
         : this.now() - this.quitArmedAt < 2000
           ? 'Ctrl+C again to quit'
           : this.controller.status === 'running'

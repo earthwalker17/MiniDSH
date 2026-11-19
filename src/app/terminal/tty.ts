@@ -24,6 +24,7 @@
  * treats as scrolling when the draft is empty.
  */
 import { writeSync } from 'node:fs'
+import { cleanKeepingLines } from './width.ts'
 
 /** Each mode the full-screen view sets, with the sequence that undoes it. */
 const MODES: readonly (readonly [set: string, reset: string])[] = [
@@ -172,8 +173,9 @@ export class Tty {
     process.removeListener('warning', this.onWarning)
     for (const listener of this.warningListeners) process.on('warning', listener)
     this.warningListeners = []
-    // What was said while the screen was ours is said now, on the real screen.
+    // What was said while the screen was ours is said now, on the real screen,
+    // cleaned: a log line can quote a name a model chose.
     const held = this.drainCaptured()
-    for (const text of held) process.stderr.write(text)
+    for (const text of held) process.stderr.write(cleanKeepingLines(text))
   }
 }
