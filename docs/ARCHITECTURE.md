@@ -166,12 +166,12 @@ A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval
 | `settings/describe`, `settings/get`, `settings/set` | `expectedRevision` REQUIRED |
 | `shutdown` | refused on a socket unless its carrier says `allowShutdown` |
 
-Notifications: `session.event` (`{sessionId, event}`, verbatim; headless `--json` too), `session.status`, `session.view`, `settings.changed`, `control.summary`. An ask is its durable frame; no DTO layer or protocol version until a client ships apart (`frames.ts`).
+Notifications: `session.event` (`{sessionId, event}`, verbatim; headless `--json` too), `session.status`, `session.view` (also on every status flip and a child's disposal), `settings.changed`, `control.summary`. An ask is its durable frame; no DTO layer or protocol version until a client ships apart (`frames.ts`).
 
 - **Attach contract.** A message-aligned tail page at a `cursor` (`core/session/page.ts`), never trace (§4); a reconnect re-attaches (no lower-bound cursor, by design). No client folds the surface; a cold read never resumes.
 - **Multi-client** (`protocol/host.ts`). A connection owns only its sink, its watch set (narrowed by its first attach) and its control subscription; a disconnect disposes nothing. An ask parks while a watcher or control subscriber COULD answer it, else settles `unavailable`.
 - **One presentation model, two renderers.** `app/web/conversation.js` folds the log into blocks joined by logged ids (presentation, never a surface fold; authority, decisions and failures top-level) for the browser and the full-screen terminal (`blocks.ts`); it grows, never rebuilds (`transcript.js`); `rows.test.ts` gates visibility parity with plain text.
-- **No composer key answers a consent** (subject first, else the joined call): a click does in the browser (`approval.js`), a lone `y`/`a`/`n` in the full-screen view, armed only once the band has been on screen, the keyboard quiet and every row of the question seen (`tui.ts`).
+- **No composer key answers a consent** (subject first, else the joined call): a click does in the browser (`approval.js`), a lone `y`/`a`/`n` in the full-screen view, armed only once the band has been on screen, the keyboard quiet and every row of the question seen (`tui.ts`); the line view asks on a `[y/N]` line of its own (`line.ts`).
 - **The terminal** (`app/terminal`) continues sessions only over the wire (`session/resume`, `session/fork`). Its controller (`controller.ts`, under `tui.ts` and the line view `line.ts`) attaches its own session first and subscribes to the control plane, so an early ask parks. The full-screen view writes cells only via `screen.ts` (neutralizing) and undoes every mode it sets on any exit (`tty.ts`).
 - **`app/web.ts` is an authority surface**: loopback unless `--host`, a one-shot token for a signed cookie, a Host/Origin fence, no framing, a CSP with Trusted Types.
 
@@ -246,7 +246,7 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | model know-how | `SKILL.md` directory: data, never code or authority |
 | surface | `app/` or a package under the §8 contract; no semantics |
 | terminal key, view, panel | `terminal/tui.ts`; wire calls `controller.ts`, commands `commands.ts` |
-| carrier | protocol `Carrier`: framing, tier-aware flow control (`transport-ws.ts`) |
+| carrier | protocol `Carrier`: framing and tier-aware flow control only (`transport-ws.ts`) |
 | named place to work | `workspaces` entry: addressing, not a grant |
 | remote client | the §8 attach contract |
 | per-agent variant | `agent.ctx` (`world` if inherited, else `setup`) or liftable `TOOLS.restrict` |
@@ -292,7 +292,7 @@ Upstream facts and verdicts at the pin: `references/assumptions.md`.
 - **Confinement.** bwrap and Seatbelt, each probed even alone; no Landlock (needs a native launcher) or Windows backend (§13); a shell child's scrub by declared name (§9).
 - **The ceiling.** The workspace root alone (why: `core/sandbox/index.ts`; DSH adds temp, operator roots).
 - **Durability.** A durable `tool/dispatch` after the gate, recorded effects, a write lease and per-lifecycle writer claims over plain JSONL (DSH: no top-level dispatch; checksummed generations name no writer).
-- **Delegation and routing.** An enforced ceiling (DSH: a seeded pin); a continuation re-applies the child's RECORDED narrowing (DSH: the saved preset's descriptor, else the host's); `subagent/start|end` in the parent's log, closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
+- **Delegation and routing.** An enforced ceiling (DSH: a seeded pin); a continuation re-applies the child's RECORDED narrowing (DSH: its descriptor under the saved preset, else the host's composition); `subagent/start|end` in the parent's log, closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
 - **Context.** No tool-result pruner (tools bound their output); recall gated, not opt-in (§6).
 - **Surfaces.** A full-screen terminal ships (§8); DSH has none in-tree, only an installable `--profile tui` example.
 - **Providers.** Snapshot catalogs, conservative facts for an unknown id (§5; DSH: live `GET /models`).
@@ -306,7 +306,7 @@ Upstream facts and verdicts at the pin: `references/assumptions.md`.
 
 - No Windows confinement backend, by decision (DSH's is `partial`: a hard-link escape, standing ACL changes): each command escalates to unfenced `danger-full-access` until a session accepts `none` (§7); a child runs none.
 - A tree kill misses a timed-out or backgrounded POSIX command's descendants under an unwrapped persistent child.
-- On Windows a kill-on-close Job per pwsh ends an approved one-shot's descendants with the call, the persistent shell's with the shell; WMI, Task Scheduler and break-away processes escape it, and under Constrained Language Mode it is not applied (one warning); each start logs its body as suspicious, which security tooling may flag (`shell-stdio/process.ts`).
+- On Windows a kill-on-close Job per pwsh ends an approved one-shot's descendants with the call, the persistent shell's with the shell; WMI, Task Scheduler and break-away processes escape it, and under Constrained Language Mode it is not applied (one warning); each start logs the containment body, never the command, as suspicious, which security tooling may flag (`shell-stdio/process.ts`).
 - A job's tree outlives a killed host (SIGKILL, a `serve`/`web` stop) except under bwrap and on Windows: it reads `lost`, never re-adopted or killed.
 - **The fs fence races a concurrent process**: a link swapped in mid-write can leave an EMPTY file or directory outside (never content on Linux; best effort elsewhere).
 - **A hard link defeats both fences**: an outside inode linked into the workspace is written through by the fs fence and a confined shell; linking one in, or writing its outside path, stays refused (`confine.test.ts`).
@@ -316,7 +316,7 @@ Upstream facts and verdicts at the pin: `references/assumptions.md`.
 - Composition changes need a restart; after a live `reconfigure` of `shell` (outside the spine, §9), `enforcementFor` and stamps describe a world no command runs in.
 - A shell child's environment withholds variables, not credentials (§9; `core/process.ts`): undeclared secrets, `SSH_AUTH_SOCK` and proxies pass; `credentials.json` is readable, the network open.
 - A network tool is consented, never confined or recorded (§7); headless, only `--approve` allows one.
-- `tool-browser` reaches EVERY loopback service, in any mode and from a child, unconsented, unrecorded and unconfined (§7); each may act or relay on its own authority. It shows no cross-origin frame's content and uploads no file.
+- `tool-browser` reaches EVERY loopback service, in any mode and from a child, unconsented, unrecorded and unwrapped by a shell backend (§7); each may act or relay on its own authority. It shows no cross-origin frame's content and uploads no file.
 - On Windows a project marker above the cwd is never owner-checked; only a filesystem root's is refused (§9).
 - A module-loaded plugin is arbitrary code; `minidsh config`'s warnings are advisory.
 
@@ -365,6 +365,7 @@ Upstream facts and verdicts at the pin: `references/assumptions.md`.
 - A replay reproduces decisions, not the workspace: an absolute path misses a fresh root, yet `assertConsumed()` passes (arcs pin relative paths).
 - An installed-package plugin (§9) reaches seams only by deep path into `dist/`, proven only by an in-repo fixture.
 - An Anthropic id lacking its minor version's row gets 200K with images; an account enforcing an unedited prefix before signed thinking may refuse a compacted 5.x session's later steps.
+- OpenAI's drift probe holds only effort sets and defaults; windows and caps are hand-verified (`catalog.ts`).
 - `deepseek-v4-pro` accepts an image and ignores it: admission is the catalog's. Retired `deepseek-v4-flash` names resolve to `deepseek-flash` while DeepSeek routes them.
 
 ## 14. File map
