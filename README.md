@@ -58,6 +58,8 @@ minidsh --help
 
 In the terminal: Enter sends (mid-turn, it steers); Ctrl+J, Ctrl+Enter on Windows or `\` then Enter is a new line; `/` opens the command palette, `/help` lists every key; Esc stops a turn; Ctrl+O opens what a finished turn folded. An approval takes the composer's place: `y`, `n`, or `a` when offered, which allows that exact call until the session ends or its authority changes (`/grants`, `/revoke <id>`); it arms once read to its end with the keyboard quiet, so typing never answers it. `/sandbox`, `/ask`, `/accept` and `/preset` switch authority, `/model` the model; `/resume`, `/new` and `/fork` switch sessions in place.
 
+**Or the desktop app** (Windows, Linux, macOS on Apple silicon): download `MiniDSH-Setup-x.y.z.exe`, the `.AppImage` or the `-mac-arm64.zip` from [Releases](https://github.com/earthwalker17/MiniDSH/releases). It brings its own Node and runs the same runtime and web UI in a window: File › Open Folder chooses where it works, and its welcome view saves a provider key. It is unsigned for now, so Windows SmartScreen asks (More info › Run anyway), Smart App Control must be off, and macOS needs System Settings › Privacy & Security › Open Anyway. Closing it asks first if work is running; everything it keeps is in the same `~/.minidsh`.
+
 Everything MiniDSH keeps lives under `~/.minidsh` (override with `MINIDSH_HOME`): `sessions/` (one JSONL log per session), `spill/` (oversized tool output, swept after 30 days), `attachments/` (images, never swept), `composition.json`, `settings.json`, `credentials.json`, `skills/` (your own skills), and an optional `AGENTS.md` that every session reads. Nothing in the harness deletes a log.
 
 From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs natively on Node 24, so there is no build step to run it; `pnpm build` only emits the `dist/` the tarball ships) and `pnpm check` for the whole verification suite. See [`CONTRIBUTING.md`](CONTRIBUTING.md), and read [Status and limitations](#status-and-limitations) before relying on it.
@@ -84,7 +86,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 **Composition from disk.** The default composition is a list of forty-one plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` flags any authority-sensitive row a file changed.
 
-**One runtime, three ways in.** The headless CLI, the terminal and the web UI are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record. The web UI draws each tool call as a card its tool describes, asks each approval in a card naming exactly what would run, and from the page switches model, effort and permissions, revokes a grant, stops a job or opens a subagent.
+**One runtime, four ways in.** The headless CLI, the terminal, the web UI and the desktop app (the web UI in a window, over the same `minidsh web`) are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record. The web UI draws each tool call as a card its tool describes, asks each approval in a card naming exactly what would run, and from the page switches model, effort and permissions, revokes a grant, stops a job or opens a subagent.
 
 ![The web UI asking for an approval](https://raw.githubusercontent.com/earthwalker17/MiniDSH/main/docs/images/web-ui.png)
 
@@ -98,7 +100,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 - Only delegations run in parallel; every other tool call runs alone, in order. Parallel children share the workspace: give them separate files. A child is foreground: a message to the parent waits until its slowest child is done, and stopping the parent's turn stops all of them. A background job's process can outlive a MiniDSH process that is killed (on macOS, and unconfined on Linux): the resume reports it lost and does not stop it. On Windows a job runs only in a session that accepts an unconfined shell (`--accept none`); there, whatever a job or a shell command starts ends with it, a program started through WMI or the Task Scheduler excepted.
 - Nothing confines the network: web search is consent per query, and there is no `web_fetch`. The browser is fenced from the internet, not from localhost: it reaches every local service, from any sandbox mode and a delegated child. No session deletion, search or rename; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
 
-What comes next: an installable desktop app over the same runtime and web UI, then the V2 release candidate ([BLUEPRINT §2](docs/BLUEPRINT.md)).
+What comes next: the V2 release candidate ([BLUEPRINT §2](docs/BLUEPRINT.md)).
 
 ## The question it investigates
 

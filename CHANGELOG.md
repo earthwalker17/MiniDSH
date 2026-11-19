@@ -6,6 +6,19 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ### Added
 
+- **A desktop app** for Windows, Linux (AppImage) and macOS on Apple silicon: the same runtime and web UI in a window of its own, installed per user with no npm and no Node required (it carries its own):
+  - **Folders:** File › Open Folder chooses where it works, and several folders can be remembered.
+  - **Provider keys:** the welcome view (and File › Provider Keys…) saves a key without editing a file.
+  - **Closing:** closing asks first only when a turn, a job or an approval would be interrupted, then stops gracefully: every session is kept and resumes.
+  - **Failures:** a runtime that dies is shown with its last output and a Restart button; a second launch brings the open window forward.
+  - **Updates and signing:** Help › Check for Updates opens the release page; the installers are unsigned for now.
+- **`minidsh web --json`**, a process contract for a supervisor:
+  - one JSON `ready` record (port, one-shot token, version, home, folders), or one `error` record with a code for any exit before it;
+  - a graceful stop on Ctrl+C, SIGTERM or (with `--json`) the end of a piped stdin: every running turn is cancelled and saved, then the host shuts down, each step bounded.
+- **`minidsh web --workspace <dir>`** (repeatable): several folders a session may start in, refused if one holds or lies inside MiniDSH's home.
+- **`minidsh credentials list | set NAME | unset NAME`**:
+  - `list` says where each provider key comes from (the environment, the store, or nowhere), never the value;
+  - `set` reads the value from stdin (hidden on a terminal) into `~/.minidsh/credentials.json`, atomically and one writer at a time.
 - **A full-screen terminal.** `minidsh chat`, `resume` and `fork` now own the terminal on a real TTY:
   - the conversation drawn like the web UI: your message, the reply as markdown with highlighted code and tables, each tool call as a card (a command with the tail of its output, an edit as a diff), a finished turn's work folded to one line (Ctrl+O opens it), approvals and permission changes always in view;
   - parallel subagents shown live, each card following what its child is doing;
@@ -41,6 +54,8 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ### Changed
 
+- **`minidsh web` stops gracefully** on Ctrl+C or SIGTERM: running turns end as cancelled in their logs and every lease is released, where before the next process had to repair and reclaim them.
+- **A session lock taken before a reboot is reclaimed** on Windows and Linux even when its process id now belongs to another program, instead of refusing the resume with "remove …lock".
 - **A resumed or forked delegated child keeps what its delegation narrowed:** its tool filter, the tools hidden from every child (network tools, and delegation at the depth cap, a preset's own included) and its persona. A child's log records them once, and every continuation re-applies them; before, only its authority came back. A child delegated by an earlier version continues as it did.
 - **On Windows, what a shell starts ends with it.** Every PowerShell the harness starts — a background job, an approved command, the session's shell — holds its descendants in a Job of its own, so a program it `Start-Process`'d no longer outlives the job's end, its stop, an approved command's end, or a MiniDSH process that is killed. Where Constrained Language Mode forbids that, one warning says so and the command runs as before.
 - **A `/compact` run while the agent is idle is stopped by quitting**, recorded as cancelled, instead of running on and paying for a summary nobody would see.

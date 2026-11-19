@@ -15,6 +15,7 @@ This is the map: what each layer owns and must not own, and where a new thing go
 | `capabilities/<x>`: providers + consumers (§3) | `kernel`, `core` except `core/loop`; no other capability, no `app`, no `test-support` |
 | `app`: assembly + surfaces (§14) | anything |
 | `test-support` (adapters + harness, §14), `*.test.ts` | anything |
+| `desktop/src` (§8) | `electron`, `node:*`, itself: never `src/`, `dist/` or `minidsh` |
 
 In `kernel`, `core` and capabilities a non-literal `import()` or a path out of `src/` fails. **Payloads** are read via `matches(event, KIND)`, never a type assertion on `event.data`, outside tests. **Core is acyclic at file level**: each package's `events.ts`/`types.ts` sits below its service. A capability is a directory, not a package; the browser client shares only the wire with the host.
 
@@ -174,6 +175,8 @@ Notifications: `session.event` (`{sessionId, event}`, verbatim; headless `--json
 - **No composer key answers a consent** (subject first, else the joined call): a click does in the browser (`approval.js`), a lone `y`/`a`/`n` in the full-screen view, armed only once the band has been on screen, the keyboard quiet and every row of the question seen (`tui.ts`); the line view asks on a `[y/N]` line of its own (`line.ts`).
 - **The terminal** (`app/terminal`) continues sessions only over the wire (`session/resume`, `session/fork`). Its controller (`controller.ts`, under `tui.ts` and the line view `line.ts`) attaches its own session first and subscribes to the control plane, so an early ask parks. The full-screen view writes cells only via `screen.ts` (neutralizing) and undoes every mode it sets on any exit (`tty.ts`).
 - **`app/web.ts` is an authority surface**: loopback unless `--host`, a one-shot token for a signed cookie, a Host/Origin fence, no framing, a CSP with Trusted Types.
+- **`web --json` is a supervisor's process contract** (`app/cli.ts`): stdout is one `ready` (port, one-shot token, version, home, workspaces) or one `error{code}` per exit before it. A stop (SIGINT/TERM/HUP/BREAK; under `--json` a piped stdin's end) cancels every top-level turn at once, then disposes, each bounded, then exits (`WebHostHandle.stop`). `--workspace` roots never overlap the home.
+- **The desktop** (`desktop/`) spawns the bundled CLI's `web --json` on a bundled Node and never imports the runtime. Main spends the token and injects the cookie into its web view's requests to that origin alone (`guards.ts`), nothing in the jar. The Web UI's webContents has no preload; the shell overlay (own webContents, own scheme) is the only desktop API. Busy is asked over the wire on demand (a standing `control/subscribe` parks asks forever); close, quit and folder changes are one serialized `reconcile`: confirm, then save, then stop by stdin's end. Folders come from a native dialog and are re-admitted per start (`folders.ts`).
 
 ## 9. Composition, configuration and packaging
 
@@ -187,7 +190,7 @@ MiniDSH IS data: composition rows plus disk layers (`app/compose.ts`, `app/confi
 - **Agent presets.** `agentPresets` in `composition.json` mount per-agent worlds on the agent scope, named in the session header so a resume or delegated child composes the same world (§7 for what they cannot reach).
 - **Settings.** `agent` defaults: flags → `MINIDSH_MODEL` → `settings.json` → built-ins, read live per new session by a wire host (§8); on resume the log's route wins, and an explicit flag overrides it as `agent/options{resume}` (`core/agent/index.ts`).
 - **Defaults.** Authority `workspace-write` + `ask`; `shell-stdio` `confinement: auto`. A shell child's environment is built, not inherited: the credential refs the mounted rows declared and `MINIDSH_*` removed, nothing for a name's shape (`core/process.ts`; §13). `tool-browser` is a default row that registers its tools only where Chrome, Edge or Chromium is found.
-- **Packaging.** npm ships the `scripts/build.ts` emit as a binary, with no `main` or `exports` (BLUEPRINT §3).
+- **Packaging.** npm ships the `scripts/build.ts` emit as a binary, with no `main` or `exports` (BLUEPRINT §3). The desktop (`desktop/scripts/package.ts`) ships that package npm-installed from `pnpm pack` (a release: the gate's tarball) beside a SHA-256-pinned official Node, both outside the asar; Electron main runs no user code (RunAsNode, NODE_OPTIONS, inspect and file-privilege fuses off). electron-builder is `desktop/`'s own dependency; the root gates cover `desktop/src` without it.
 
 **Retention: content is never swept; an affordance may expire.** `spill-local` sweeps spill once at load, never on disposal (a fork inherits its parent's locators).
 
@@ -197,13 +200,14 @@ MiniDSH IS data: composition rows plus disk layers (`app/compose.ts`, `app/confi
 | `attachments/v1/objects/` | content, shared by address | never removed |
 | `spill/<session>/` (a job's output too) | affordance | age-swept at load, `cleanupPeriodDays` (default 30) |
 | `browser/p-*` (a launch's profile) | affordance | removed at close; a dead owner's swept at the next launch here |
+| desktop `userData` (`settings.json`, logs, the web view's storage) | launcher state; its folders are AUTHORITY (main writes them from a native dialog only) | kept by uninstall; logs rotate per launch |
 
 ## 10. Verification
 
 Tests mount real compositions; only the model is scripted or replayed (`test-support/llm-replay.ts`). E2E asserts the world where one exists.
 
 - **Runtime invariants run in every test and live**; cross-capability claims on the full composition (`app.test.ts`); old real logs (`test-support/fixtures/`) are verified, repaired, salvaged, replayed.
-- **Gates.** `pnpm check` and a packed-install smoke on 3 OSes (`check.yml`); a tag publishes (`release.yml`) only after it and an unfiltered `live.yml` passed its commit; a `MINIDSH_EXPECT_*` flag fails the skip it names.
+- **Gates.** `pnpm check` and a packed-install smoke on 3 OSes (`check.yml`), plus a desktop leg each that smokes the runtime out of its artifact, and on Windows drives the app keyless (`desktop/e2e`); a tag publishes (`release.yml`) only after it and an unfiltered `live.yml` passed its commit; a `MINIDSH_EXPECT_*` flag fails the skip it names.
 - **Live arcs** (`pnpm test:e2e`): the OpenAI leg, its drift probe and `search` are LOCAL (`live.yml` holds no OpenAI or Tavily key).
 
 | arc | what it proves |
@@ -221,6 +225,7 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | `jobs` | an own end wakes the idle owner; host killed mid-job: cold `verify` predicts `lost`, the model told; the Windows worker dies too |
 | `skills` | PDF + CSV → `report.docx` via the office skill, read first; an outside reader agrees; replay byte-identical |
 | `browser` | a runtime-only bug seen, fixed, re-verified via CDP; a verifier child screenshots test-drawn pixels |
+| `desktop` | the INSTALLED app (Windows, local): a fix through the window, approvals clicked; a killed runtime restarted and resumed (`interrupted`, `completed`); a quit mid-turn confirmed (`cancelled`, no lease); a key saved by the form; the agent's `node` the bundled one |
 
 **An arc's premise decays silently**: for its ONE separating assertion on model text, ask what a model knowing nothing would answer.
 
@@ -244,8 +249,12 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | event's human line | `app/present.ts` AND `app/web/rows.js` |
 | context for the model | `agent.inject()`/`agent/pre-step`, never prompt text |
 | model know-how | `SKILL.md` directory: data, never code or authority |
-| surface | `app/` or a package under the §8 contract; no semantics |
+| surface | `app/` or a package under the §8 contract (`desktop/`); no semantics |
 | terminal key, view, panel | `terminal/tui.ts`; wire calls `controller.ts`, commands `commands.ts` |
+| desktop window, menu, lifecycle | `desktop/src/main.ts` (wiring); a rule in a pure `desktop/src/<x>.ts` |
+| a view before, around or after the Web UI | `desktop/shell/` (the overlay), never the Web UI |
+| what a supervisor of `web` needs | its `--json` contract (`app/cli.ts`) |
+| a secret a person types | `minidsh credentials set` (stdin) → `credentials-local` |
 | carrier | protocol `Carrier`: framing and tier-aware flow control only (`transport-ws.ts`) |
 | named place to work | `workspaces` entry: addressing, not a grant |
 | remote client | the §8 attach contract |
@@ -295,6 +304,7 @@ Upstream facts and verdicts at the pin: `references/assumptions.md`.
 - **Delegation and routing.** An enforced ceiling (DSH: a seeded pin); a continuation re-applies the child's RECORDED narrowing (DSH: its descriptor under the saved preset, else the host's composition); `subagent/start|end` in the parent's log, closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
 - **Context.** No tool-result pruner (tools bound their output); recall gated, not opt-in (§6).
 - **Surfaces.** A full-screen terminal ships (§8); DSH has none in-tree, only an installable `--profile tui` example.
+- **Desktop.** An official Node beside Electron (RunAsNode off), the stdout `ready` and main's own token exchange with per-request injection on loopback; close quits after a runtime-informed confirm; a release-page update check (DSH: an Electron-as-Node child with an IPC secret, a `dsh-app://` scheme forwarding HTTP, close hides to the tray, signed-only updates).
 - **Providers.** Snapshot catalogs, conservative facts for an unknown id (§5; DSH: live `GET /models`).
 - **Web.** One opt-in search tool, consent per query, structured sources, no fetch (DSH: both default, unconsented).
 - **Browser.** Default where found, a pipe, fenced and proved per launch (§7; DSH: experimental, unfenced).
@@ -351,9 +361,13 @@ Upstream facts and verdicts at the pin: `references/assumptions.md`.
 - The full-screen terminal captures no mouse (`tty.ts`) and its screen, scrollback included, goes at exit; on Windows Shift/Alt+Enter arrive as Enter (`keys.ts`).
 - A session the terminal switches away from stays live, idle and leased until it exits; a fork never messaged is not saved.
 - An unconfined POSIX shell shares the terminal: a command opening /dev/tty (sudo, ssh) draws over the screen and competes for keys; Ctrl+L repaints (`tty.ts`).
-- `minidsh web` has no graceful stop: the next process repairs and reclaims the lease.
+- On Windows a killed or logged-off desktop app ends its runtime at once (libuv's kill-on-close Job): the next resume repairs, and reclaims the lease by pid, or by uptime after a reboot (Windows and Linux only; not after a Fast Startup shutdown).
+- The desktop is unsigned: SmartScreen warns, Smart App Control blocks it, Gatekeeper refuses the ad-hoc-signed macOS zip (Apple silicon only) until opened by hand; updates are a release page.
+- Its per-user install is user-writable (code-equivalent, like `composition.json`); DevTools (Help) show the injected cookie; the runtime inherits `NODE_OPTIONS`, as the CLI does; `credentials.json` keeps its folder's ACL on Windows.
+- A macOS or Linux GUI launch lacks the login shell's environment (keys via `credentials.json`); where unprivileged user namespaces are off, an AppImage's renderer runs without Chromium's sandbox (logged), and SIGTERM stops its wrapper, not the app's graceful path.
+- The agent's `node` is the person's own when one is on PATH (an old one fails the bundled skills), the bundled one otherwise.
 - `workspaceRoots` is always `[cwd]` and bounds only a session first CREATED: a wire client may resume or fork one outside it (a fork keeps its source's root).
-- One principal, no accounts. The browser changes a stored session's route and authority only once a message resumes it (`app.js`); its theme is per origin, so forgotten across launches without a fixed `--port`.
+- One principal, no accounts. The browser changes a stored session's route and authority only once a message resumes it (`app.js`); its theme is per origin, so `web` forgets it without a fixed `--port` (the desktop keeps its port; a port another program took loses it once).
 - Windows needs `pwsh` 7, never 5.1; a command reading stdin blocks until its deadline.
 
 **Delegation and providers**
@@ -388,7 +402,8 @@ src/capabilities/
   protocol/ (frames · host · connection · transport-*)
 src/app/     cli · home · compose · config · settings · version · headless · serve · web · present · inspect
              web/ (conversation · cards · transcript · rows · wire …) · terminal/ (controller · tui · line · tty · keys · blocks · layout · screen …) · *.e2e.test.ts
-src/test-support/ scripted-adapter · harness · llm-replay · serve-process · web-process · fixtures/ (logs, plugins)
+src/test-support/ scripted-adapter · harness · llm-replay · serve-process · web-process · desktop-app · fixtures/ (logs, plugins)
+desktop/     src/ (main · runtime · inspect · settings · folders · guards · env · menu · credentials · update · text) · shell/ · scripts/ (package · smoke-runtime) · e2e/ · installer.nsh
 skills/      office/ · pdf/: bundled skills (README)
 scripts/     build · check-deps (+ deps-graph) · check-docs · doc-registers · count-lines · smoke-installed.sh
 .github/     workflows/ (check, live, release) · ISSUE_TEMPLATE/ · PULL_REQUEST_TEMPLATE
