@@ -1509,7 +1509,10 @@ export class ProtocolHost {
       // names a weakened default since S16 (`stampAcceptance`) — a cold read
       // must not borrow the reading host's deployment default.
       accepts: source.agent === undefined ? acceptanceFor(facts, mode) : sandbox.acceptsFor(source.agent.session, mode),
-      grants: [...liveGrants(facts).values()],
+      // A consent never outlives its lifecycle (§7): a stored session holds
+      // none, whatever its last lifecycle granted — a resume starts without
+      // them, and `approval/revoke` refuses one that is not live.
+      grants: source.agent === undefined ? [] : [...liveGrants(facts).values()],
     })
     const route = foldRequestContext(facts)
     const options = source.agent?.options ?? foldAgentOptions(facts)

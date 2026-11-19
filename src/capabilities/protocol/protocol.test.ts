@@ -1926,6 +1926,44 @@ describe('protocol: what a surface is told to draw', () => {
     expect(cold.tools).toBeUndefined()
   })
 
+  it("shows a stored session's view with no standing grant: a consent ended with the lifecycle that gave it", async () => {
+    const risky = defineTool({
+      name: 'risky',
+      description: 'asks for itself',
+      input: z.object({ command: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      execute: async (args, exec) => {
+        await riskyApproval!.request({
+          agent: exec.agent!,
+          toolName: 'risky',
+          callId: exec.callId,
+          subject: { effect: 'shell-command', command: args.command, mode: 'danger-full-access', enforcement: 'none' },
+        })
+        return { ok: true }
+      },
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const first = await startHost(new ScriptedAdapter().script(assistantToolCall('g1', 'risky', { command: 'pnpm check' }), assistantText('done')), {
+      prepare: (root) => {
+        riskyApproval = root.get(APPROVAL)
+        root.get(TOOLS).register(root, risky)
+      },
+    })
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    const asked = await first.client.waitFor(() => first.client.frames('approval/asked', sessionId)[0], 'the ask')
+    await first.client.result('approval/answer', { sessionId, id: asked.event.data.id, outcome: 'allowed-once', offer: 'grant-session' })
+    await first.client.waitForIdle(sessionId)
+    const live = await first.client.result<AttachResult>('session/attach', { sessionId })
+    expect(live.view.authority.grants).toHaveLength(1)
+    await first.host.dispose()
+
+    // Read cold by the next host: the log still records the grant, the view
+    // offers nothing to revoke — `approval/revoke` would refuse it (S22 review).
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot: first.sessionsRoot })
+    const cold = await second.client.result<AttachResult>('session/attach', { sessionId })
+    expect(cold.view.authority.grants).toEqual([])
+  })
+
   it('dates each session by its last change — a live one by its last event, a stored one by its store — and keeps the order', async () => {
     const first = await startHost(new ScriptedAdapter().script(assistantText('one')))
     const { sessionId: stored } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'first', agentOptions: SCRIPTED })

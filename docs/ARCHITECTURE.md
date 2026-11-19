@@ -294,7 +294,7 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 - **Durability.** A durable `tool/dispatch` after the gate, recorded effects, a write lease and per-lifecycle writer claims over plain JSONL (DSH: no top-level dispatch; checksummed generations naming no writer).
 - **Delegation and routing.** An enforced ceiling (DSH: a seeded pin); a continuation re-applies the child's RECORDED narrowing (DSH: its descriptor under the saved preset, else the host's composition); `subagent/start|end` in the parent's log, closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
 - **Context.** No tool-result pruner (tools bound their output); recall gated, not opt-in (§6).
-- **Surfaces.** A terminal ships (§8); DSH deleted its own.
+- **Surfaces.** A terminal ships (§8); DSH deleted its own (2026-08-04; its 0.2.2 help names one again, S22.1 rechecks).
 - **Providers.** Snapshot catalogs, conservative facts for an unknown id (§5; DSH: live `GET /models`).
 - **Web.** One opt-in search tool, consent per query, structured sources, no fetch (DSH: both default, unconsented).
 - **Browser.** Default where found, a pipe, fenced and proved per launch (§7; DSH: experimental, unfenced).
@@ -352,7 +352,7 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 - A pooled step's result lines match calls by order, not name, on plain-text surfaces (S22.1). A tool with no `display` in reach (a preset's on a cold read, the other shell dialect's) draws the generic card.
 - `minidsh web` has no graceful stop: the next process repairs and reclaims the lease.
 - `workspaceRoots` is always `[cwd]` and bounds only NEW sessions: a wire client may resume one outside it.
-- One principal, no accounts. A stored session's route and authority change only once a message resumes it; the browser's theme is per origin.
+- One principal, no accounts. A stored session's route and authority change only once a message resumes it; the browser's theme is per origin, so forgotten across launches without a fixed `--port` (S22.2).
 - Windows needs `pwsh` 7, never 5.1; a command reading stdin blocks until its deadline.
 
 **Delegation and providers**

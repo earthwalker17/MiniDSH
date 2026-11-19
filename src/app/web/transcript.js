@@ -86,6 +86,8 @@ export function createTranscript(options) {
   const itemNodes = new Map()
   /** Expand state by key; absent means the block's default. @type {Map<string, boolean>} */
   const open = new Map()
+  /** The session the expand state belongs to. @type {string | undefined} */
+  let shownSession
   /** @type {ViewLike | undefined} */
   let view
   let liveSession = false
@@ -101,6 +103,8 @@ export function createTranscript(options) {
   const toBottom = () => {
     scroller.scrollTop = scroller.scrollHeight
     lastTop = scroller.scrollTop
+    lastClient = scroller.clientHeight
+    lastHeight = scroller.scrollHeight
   }
   /**
    * Whether the reader follows the bottom: at it, or was and has not LEFT it.
@@ -113,6 +117,9 @@ export function createTranscript(options) {
    */
   let stuck = true
   let lastTop = 0
+  /** The geometry at the last scroll: a clamp always changes one of them, the reader never does. */
+  let lastClient = 0
+  let lastHeight = 0
   /** When the reader last touched, dragged or pressed a key: a scroll up soon after is theirs. */
   let inputAt = Number.NEGATIVE_INFINITY
   const following = () => stuck || atBottom()
@@ -744,17 +751,26 @@ export function createTranscript(options) {
     { passive: true },
   )
   for (const type of ['pointerdown', 'touchmove']) scroller.addEventListener(type, () => (inputAt = performance.now()), { passive: true })
+  // Only a key that can move the log: one pressed inside it, or on the page
+  // itself. An arrow in a menu, Enter on the approval card, a key in the
+  // panel move nothing here (S22 pre-push review).
   document.addEventListener('keydown', (event) => {
-    if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement) return
+    if (!(event.target === document.body || (event.target instanceof Node && scroller.contains(event.target)))) return
     if (['PageUp', 'ArrowUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) stuck = false
     inputAt = performance.now()
   })
   scroller.addEventListener(
     'scroll',
     () => {
+      // Up, and either just after the reader's input or with nothing resized
+      // (find-in-page, a screen reader's cursor): the reader's. A clamp moves
+      // up only as the view or the content changes size.
+      const sameGeometry = scroller.clientHeight === lastClient && scroller.scrollHeight === lastHeight
       if (atBottom()) stuck = true
-      else if (scroller.scrollTop < lastTop && performance.now() - inputAt < 1000) stuck = false
+      else if (scroller.scrollTop < lastTop && (performance.now() - inputAt < 1000 || sameGeometry)) stuck = false
       lastTop = scroller.scrollTop
+      lastClient = scroller.clientHeight
+      lastHeight = scroller.scrollHeight
       syncToBottom()
     },
     { passive: true },
@@ -773,7 +789,6 @@ export function createTranscript(options) {
   function forget() {
     blockNodes.clear()
     itemNodes.clear()
-    open.clear()
     observer?.disconnect()
     observer = undefined
   }
@@ -796,10 +811,13 @@ export function createTranscript(options) {
     /**
      * A fresh window: the attach's page replaces everything held.
      * @param {readonly EventEnvelope[]} events
-     * @param {{ seedLength?: number, cwd?: string, hasMore: boolean, live: boolean }} meta
+     * @param {{ sessionId?: string, seedLength?: number, cwd?: string, hasMore: boolean, live: boolean }} meta
      */
     reset(events, meta) {
       clearLive()
+      // A reconnect re-attaches the same session: what the person opened stays open.
+      if (meta.sessionId !== shownSession) open.clear()
+      shownSession = meta.sessionId
       forget()
       cwd = meta.cwd ?? ''
       liveSession = meta.live
@@ -912,6 +930,8 @@ export function createTranscript(options) {
     clear() {
       clearLive()
       forget()
+      open.clear()
+      shownSession = undefined
       model = createConversation()
       rows.replaceChildren()
       view = undefined

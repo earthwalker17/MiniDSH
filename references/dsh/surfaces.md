@@ -24,13 +24,13 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 
 ## Open for the route
 
-- **S22.1, a TUI.** `dsh --help` (0.2.2-rc.5) lists `dsh tui --resume <session>` among its examples; `apps/cli/README.md` says none ships. Check which is true.
+- **S22.1, a TUI.** `dsh --help` (0.2.2-rc.5) lists `dsh tui --resume <session>` among its examples; `apps/cli/README.md` says none ships. Check which is true. `apps/cli/`
 - **S22.1, following a child.** Only through its direct-parent address: header `origin: 'subagent'` and `parentSession` must match, and the `subagent` projection must lie in the child's own range. `packages/api/session-controller/src/history.ts`
 - **S22.1, fork on the wire.** An explicit `atSeq` copies the exact inclusive prefix, even inside an open turn; omitted, the latest completed turn and its tail. Since rc.3 an ordinary fork records no source (no `parentSession`); subagents keep their creator. `docs/upgrade-guide/v0.2.1-rc.3/independent-session-forks/guide.md`
 - **S22.1, resume without a prompt.** SDK `session/resume` restores a persisted session without input, refusing a missing, incompatible or occupied one. `packages/sdk/protocol/README.md`
 - **later, prompt retries.** Idempotent on a client-minted `requestId`, echoed as the user source's `rpcId`, which also binds the prompt's upload receipts. `packages/api/session-controller/src/commands.ts`
 - **later, uploads.** One streaming request per file, not resumable; an image is bounded by the per-image and per-message limits and stored via `ctx.attachments` before any prompt. `packages/client/file-upload/README.md`
-- **S22.1, tool presentation.** Core `ToolCallKind` from each tool's `presentCall` serves non-web hosts; the Web client derives its cards from raw events and keys views by wire name (`packages/client/ui-tool/README.md`). MiniDSH carries a tool-owned `display` instead.
+- **S22.1, tool presentation.** Core `ToolCallKind` from each tool's `presentCall` (`packages/core/tools/src/presentation.ts`) serves non-web hosts; the Web client derives its cards from raw events and keys views by wire name (`packages/client/ui-tool/README.md`). MiniDSH carries a tool-owned `display` instead.
 - **later, paging and the wire's bounds.** `turnWindow` asks 50 messages and two `turn/start` minima; the cap is the CLIENT's `maxMessages` (Web 500; Host default 50, no maximum); the uplink overflows at `streamInboxBytes` (`gateway/uplink-overflow`); the downlink awaits each socket write. `packages/api/gateway/src/stream-server.ts`
 - **later, display facts.** `command/run` and `command/done` bracket the handler; `command/done.sourceEventSeq` joins a projection without parsing text. `docs/subsystems/commands.md`
 - **later, an unseen approval.** It waits in the Gateway's Host-wide pending map, reaches each owner client that connects, and ends only on an answer, a cancel or the Agent's release: no timeout. `packages/api/gateway/src/index.ts`
@@ -54,7 +54,7 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 - `history.ts` still reads the deprecated `snapshotEvents`.
 - `packages/host/webserver/README.md` says Electron loads `file://` over IPC, against `apps/desktop/README.md`; `packages/api/remotes/README.md` says a listener set per Client stream, against the single source `registerRemoteEvents()` consumes.
 - Remote access is new (10-12); the Web cookie still has no logout.
-- The Web client's look (its tokens, the `deepseek-*` accent ramp, Chat vs Trajectory views, process-group titles) moves weekly; the repository holds no image of a live conversation, only onboarding composites and design-review crops.
+- The Web client's look (its tokens, the `deepseek-*` accent ramp, Chat vs Trajectory views, process-group titles) moves weekly; the repository holds no image of a live conversation, only onboarding composites and design-review crops. `packages/client/ui-theme/`
 
 ## Not read
 

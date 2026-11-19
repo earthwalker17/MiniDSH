@@ -115,9 +115,11 @@ export function showMenu(anchor, entries, options = {}) {
       anchor.focus()
       return
     }
-    // Tab leaves the menu, so the menu leaves with it.
+    // Tab leaves the menu, so the menu leaves with it — from the control
+    // that opened it, or focus would fall off the end of the page.
     if (event.key === 'Tab') {
       close()
+      if (anchor.isConnected) anchor.focus()
       return
     }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return

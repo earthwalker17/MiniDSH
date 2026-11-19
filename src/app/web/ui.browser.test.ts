@@ -215,7 +215,13 @@ describe.runIf(testBrowser)('the web UI in a real browser', () => {
     for (const round of [1, 2]) {
       await page.waitFor(APPROVAL_ARMED, 20_000)
       expect(await page.evaluate<number>(gap), `approval ${round} shown`).toBeLessThanOrEqual(40)
-      await page.click('#approval .btn.primary')
+      // The second by keyboard, an arrow first: keys outside the log never leave the bottom.
+      if (round === 1) await page.click('#approval .btn.primary')
+      else {
+        await page.evaluate("document.querySelector('#approval .btn.primary').focus()")
+        await page.press('ArrowUp')
+        await page.press('Enter')
+      }
       await page.waitFor("document.querySelector('#approval').hidden || document.querySelectorAll('#rows .system').length >= " + round, 20_000)
     }
     await page.waitFor(logHas('Followed to the end.'), 20_000)

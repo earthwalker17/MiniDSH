@@ -222,6 +222,7 @@ function renderAttention() {
   let count = 0
   for (const summary of state.summaries.values()) {
     if (summary.sessionId === state.window?.sessionId || summary.status === 'closed') continue
+    if (state.sessions.find((session) => session.id === summary.sessionId)?.delegatedBy) continue
     if (summary.pendingApprovals > 0 || summary.heldNotices > 0) count++
   }
   sidebar.setAttention(count)
@@ -473,7 +474,7 @@ async function switchAuthority(change, risky) {
     // acceptance is no part of a preset, so choosing it keeps the preset.
     if (change.preset) state.pendingNew.authority = { preset: change.preset, ...(current.accepts ? { accepts: current.accepts } : {}) }
     else if (change.accepts && current.preset) state.pendingNew.authority = { preset: current.preset, accepts: change.accepts }
-    else state.pendingNew.authority = { ...(current.preset ? {} : current), ...change }
+    else state.pendingNew.authority = { ...(current.preset ? (current.accepts ? { accepts: current.accepts } : {}) : current), ...change }
     renderAll()
     return
   }
@@ -692,12 +693,21 @@ function dropImages() {
  * quick clicks must not leave the first session attached behind the second.
  */
 let openTicket = 0
+/** The session a navigation in flight is detaching, while it waits. @type {string | undefined} */
+let leaving
 
 /** @param {string} sessionId */
 async function openSession(sessionId) {
-  if (state.window?.sessionId === sessionId) return
   const ticket = ++openTicket
+  if (state.window?.sessionId === sessionId) {
+    // Back to the session a newer click was leaving: that click's detach may
+    // already have gone out, so this one re-attaches what it shows.
+    if (leaving === sessionId) await state.window.attach()
+    return
+  }
+  leaving = state.window?.sessionId
   if (state.window) await state.wire.request('session/detach', { sessionId: state.window.sessionId }).catch(() => undefined)
+  leaving = undefined
   if (ticket !== openTicket) return
   closeMenus()
   dropImages()
@@ -751,7 +761,7 @@ function newSession() {
  */
 function onWindowChange(opened, change) {
   if (change.kind === 'reset') {
-    transcript.reset(opened.events, { ...(opened.header?.seedLength ? { seedLength: opened.header.seedLength } : {}), cwd: opened.header?.cwd ?? '', hasMore: opened.hasMore, live: isLive() })
+    transcript.reset(opened.events, { sessionId: opened.sessionId, ...(opened.header?.seedLength ? { seedLength: opened.header.seedLength } : {}), cwd: opened.header?.cwd ?? '', hasMore: opened.hasMore, live: isLive() })
     transcript.setView(viewOf(), isLive())
     // A reconnect's fresh page may already hold what was pending.
     for (const [id, node] of state.pending) {

@@ -109,6 +109,9 @@ export function createSidebar(options) {
     const words = PHONE.matches ? 'Close sessions' : rail ? 'Expand sidebar' : 'Collapse sidebar'
     toggle.setAttribute('aria-label', attention > 0 && rail ? `${words} — ${attentionWords()}` : words)
     toggle.setAttribute('title', words)
+    // The rail hides the list, so its toggle carries the dot.
+    toggle.querySelector('.attention-dot')?.remove()
+    if (attention > 0 && rail) toggle.append(h('span', { class: 'attention-dot', attrs: { 'aria-hidden': 'true' } }))
   }
   for (const query of [NARROW, PHONE]) {
     query.addEventListener('change', () => {
@@ -278,8 +281,6 @@ export function createSidebar(options) {
      */
     setAttention(count) {
       attention = count
-      toggle.querySelector('.attention-dot')?.remove()
-      if (count > 0 && app.dataset.sidebar === 'rail') toggle.append(h('span', { class: 'attention-dot', attrs: { 'aria-hidden': 'true' } }))
       layout()
     },
   }
