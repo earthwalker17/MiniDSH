@@ -56,12 +56,14 @@ export class VtScreen {
       const ch = bytes[i]!
       if (ch === '\x1b') {
         const rest = bytes.slice(i)
+        // oxlint-disable-next-line no-control-regex
         const osc = /^\x1b\](\d+);([^\x07\x1b]*)(?:\x07|\x1b\\)/.exec(rest)
         if (osc) {
           if (osc[1] === '52') this.clipboard.push(Buffer.from(osc[2]!.replace(/^[a-z]*;/, ''), 'base64').toString('utf8'))
           i += osc[0].length
           continue
         }
+        // oxlint-disable-next-line no-control-regex
         const csi = /^\x1b\[([?]?)([\d;]*)([A-Za-z])/.exec(rest)
         if (!csi) throw new Error(`an escape this model does not know: ${JSON.stringify(rest.slice(0, 10))}`)
         const [whole, priv, params, final] = csi
