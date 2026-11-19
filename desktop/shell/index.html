@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- The shell is the desktop's own page, never the Web UI: it may run only
+         its own script, load only its own style and mark, and nothing it shows
+         can become markup (Trusted Types with no policy). -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>MiniDSH</title>
+    <link rel="stylesheet" href="shell.css" />
+    <script src="shell.js" defer></script>
+  </head>
+  <body>
+    <main id="shell" class="shell" aria-live="polite"></main>
+  </body>
+</html>

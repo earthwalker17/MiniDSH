@@ -8,3 +8,7 @@ dist/
 .DS_Store
 Thumbs.db
 *.tgz
+
+# the desktop package (desktop/scripts/package.ts)
+desktop/build/
+.claude/worktrees/

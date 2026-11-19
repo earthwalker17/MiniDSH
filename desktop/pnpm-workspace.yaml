@@ -1,0 +1,4 @@
+# electron-builder pulls Squirrel.Windows tooling it never uses here (NSIS is the
+# Windows target): its install script stays off.
+allowBuilds:
+  electron-winstaller: false

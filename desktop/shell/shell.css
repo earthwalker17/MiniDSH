@@ -1,0 +1,296 @@
+/*
+ * The desktop shell's views (starting, welcome, keys, stopping, stopped): the
+ * Web UI's tokens (src/app/web/style.css), so the window looks like one app
+ * before, around and after the Web UI it hosts. Light and dark follow the
+ * system, as the Web UI's own default does.
+ */
+:root {
+  color-scheme: light;
+  --font-text: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-code: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+  --bg: #ffffff;
+  --bg-module: #f5f6f7;
+  --bg-code: #f9fafb;
+  --ink: #0f1115;
+  --ink-2: #61666b;
+  --ink-3: #6e7278;
+  --line-2: rgba(0, 0, 0, 0.1);
+  --line-3: rgba(0, 0, 0, 0.12);
+  --primary: #0f1115;
+  --primary-hover: #43454a;
+  --ink-on-primary: #ffffff;
+  --accent: #0e7c70;
+  --accent-soft: #e7f4f2;
+  --focus: #0e7c70;
+  --ok-ink: #15803d;
+  --ok-soft: #e6faed;
+  --warn-ink: #a95a07;
+  --warn-soft: #fef5e7;
+  --bad-ink: #c81e1e;
+  --bad-soft: #fdecec;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #151517;
+    --bg-module: #232324;
+    --bg-code: #1b1b1c;
+    --ink: #f9fafb;
+    --ink-2: #cfd3d6;
+    --ink-3: #adb2b8;
+    --line-2: rgba(255, 255, 255, 0.1);
+    --line-3: rgba(255, 255, 255, 0.14);
+    --primary: #f9fafb;
+    --primary-hover: #ebeef2;
+    --ink-on-primary: #0f1115;
+    --accent: #3cc2b0;
+    --accent-soft: #1f302e;
+    --focus: #3cc2b0;
+    --ok-ink: #4ade80;
+    --ok-soft: #14291c;
+    --warn-ink: #fbbf24;
+    --warn-soft: #2e2412;
+    --bad-ink: #f87171;
+    --bad-soft: #301818;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/24px var(--font-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+.shell {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 40px 24px;
+}
+
+.card {
+  width: min(560px, 100%);
+}
+
+.mark {
+  width: 44px;
+  height: 44px;
+  display: block;
+  margin-bottom: 20px;
+}
+
+h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  line-height: 30px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0 0 16px;
+  color: var(--ink-2);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0 8px;
+}
+
+button {
+  font: inherit;
+  font-weight: 500;
+  border-radius: 10px;
+  padding: 7px 16px;
+  border: 0;
+  cursor: pointer;
+  color: var(--ink);
+  background: var(--bg-module);
+  box-shadow: 0 0 0 0.5px var(--line-3);
+}
+
+button.primary {
+  background: var(--primary);
+  color: var(--ink-on-primary);
+  box-shadow: none;
+}
+
+button.primary:hover {
+  background: var(--primary-hover);
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.section {
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 0.5px solid var(--line-2);
+}
+
+.section h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.section h2 + * ~ h2 {
+  margin-top: 22px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px 0;
+}
+
+.row + .row {
+  border-top: 0.5px solid var(--line-2);
+}
+
+.row .name {
+  font-family: var(--font-code);
+  font-size: 13px;
+}
+
+.row .hint {
+  grid-column: 1 / -1;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.badge {
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.badge.ok {
+  color: var(--ok-ink);
+  background: var(--ok-soft);
+}
+
+.badge.warn {
+  color: var(--warn-ink);
+  background: var(--warn-soft);
+}
+
+.badge.bad {
+  color: var(--bad-ink);
+  background: var(--bad-soft);
+}
+
+.keyform {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.keyform input {
+  flex: 1;
+  min-width: 0;
+  font: 13px/20px var(--font-code);
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 0;
+  color: var(--ink);
+  background: var(--bg-code);
+  box-shadow: 0 0 0 0.5px var(--line-3);
+}
+
+.note {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--ink-3);
+}
+
+.error {
+  color: var(--bad-ink);
+}
+
+code {
+  font-family: var(--font-code);
+  font-size: 12.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--bg-code);
+  box-shadow: 0 0 0 0.5px var(--line-2);
+}
+
+pre.tail {
+  margin: 12px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-code);
+  box-shadow: 0 0 0 0.5px var(--line-2);
+  font: 12px/18px var(--font-code);
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.progress {
+  height: 3px;
+  width: 160px;
+  border-radius: 2px;
+  background: var(--bg-module);
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.progress::after {
+  content: '';
+  display: block;
+  height: 100%;
+  width: 40%;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: slide 1.2s ease-in-out infinite;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress::after {
+    animation: none;
+    width: 100%;
+  }
+}

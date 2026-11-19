@@ -1,0 +1,18 @@
+{
+  "name": "minidsh-desktop",
+  "productName": "MiniDSH",
+  "version": "1.2.0",
+  "private": true,
+  "description": "The MiniDSH desktop app: one window over the minidsh runtime and its Web UI",
+  "license": "MIT",
+  "author": "MiniDSH contributors",
+  "homepage": "https://github.com/earthwalker17/MiniDSH#readme",
+  "type": "module",
+  "packageManager": "pnpm@11.1.3",
+  "scripts": {
+    "package": "node scripts/package.ts"
+  },
+  "devDependencies": {
+    "electron-builder": "26.18.1"
+  }
+}
