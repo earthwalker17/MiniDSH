@@ -59,12 +59,12 @@
             <div class="composer-meta" id="composer-meta"></div>
           </div>
         </div>
-        <aside class="panel" id="panel" aria-label="Session details" hidden></aside>
+        <aside class="panel" id="panel" aria-label="Session details" hidden tabindex="-1"></aside>
       </main>
     </div>
 
     <dialog class="modal" id="settings" aria-label="Settings"></dialog>
-    <div class="toasts" id="toasts"></div>
+    <div class="toasts" id="toasts" aria-live="polite"></div>
     <div class="sr-only" id="announcer" role="status" aria-live="polite"></div>
     <script type="module" src="/app.js"></script>
   </body>

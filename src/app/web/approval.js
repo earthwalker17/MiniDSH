@@ -11,7 +11,7 @@
  * scope. No key answers it: an authority prompt is answered with a button
  * the person chose, never an Enter meant for the composer.
  */
-import { subjectText } from './rows.js'
+import { subjectParts } from './rows.js'
 import { h } from './ui.js'
 
 /** @typedef {import('../../core/approval/events.ts').OpenApproval} OpenApproval */
@@ -24,6 +24,7 @@ export function createApproval(options) {
   /** @type {string | undefined} */
   let shownId
   let answering = false
+  let arming = 0
 
   /**
    * @param {readonly OpenApproval[]} pending
@@ -42,7 +43,7 @@ export function createApproval(options) {
     answering = false
     host.hidden = false
     const head = h('h2', { class: 'approval-head', attrs: { id: 'approval-head', tabindex: '-1' } })
-    if (open.subject) head.append(...withCode(capitalize(subjectText(open.subject))))
+    if (open.subject) head.append(...headline(subjectParts(open.subject)))
     else head.append(document.createTextNode(`Allow ${open.toolName} to run?`))
     const body = h('div', { class: 'approval-body' }, head)
     if (open.reason) body.append(h('p', { class: 'approval-reason', text: open.reason }))
@@ -56,15 +57,31 @@ export function createApproval(options) {
     actions.append(reject)
     if (open.offers?.includes('grant-session')) {
       const session = h('button', { class: 'btn outline', text: 'Allow for this session', attrs: { type: 'button', title: 'Allow this exact action again until the session ends or its authority changes' } })
-      session.addEventListener('click', () => void answer(open, 'allowed-once', 'grant-session'))
+      session.addEventListener('click', (event) => {
+        if (event.detail <= 1) void answer(open, 'allowed-once', 'grant-session')
+      })
       actions.append(session)
     }
     actions.append(once)
-    reject.addEventListener('click', () => void answer(open, 'rejected'))
-    once.addEventListener('click', () => void answer(open, 'allowed-once'))
+    reject.addEventListener('click', (event) => {
+      if (event.detail <= 1) void answer(open, 'rejected')
+    })
+    once.addEventListener('click', (event) => {
+      if (event.detail <= 1) void answer(open, 'allowed-once')
+    })
     const count = pending.length > 1 ? h('span', { class: 'count', text: `1 of ${pending.length}` }) : undefined
     host.replaceChildren(h('div', { class: 'approval-strip' }, h('span', { class: 'state-dot' }), h('span', { text: 'Waiting for your approval' }), count), body, actions)
     head.focus()
+    // Armed after a beat. The answer button sits on the same pixels for every
+    // card, and the next card arrives within a double-click of the last answer:
+    // live at once, a second click would allow a call nobody read (S22 review).
+    // A double click's second press (`detail > 1`) never answers either.
+    const buttons = [...actions.querySelectorAll('button')]
+    for (const button of buttons) button.disabled = true
+    clearTimeout(arming)
+    arming = window.setTimeout(() => {
+      if (shownId === open.id && !answering) for (const button of buttons) button.disabled = false
+    }, ARM_MS)
     return true
   }
 
@@ -86,16 +103,19 @@ export function createApproval(options) {
   return { render }
 }
 
-/** @param {string} text */
-const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1)
+/** How long a new card's buttons stay disabled: longer than a double-click, shorter than reading it. */
+const ARM_MS = 600
 
 /**
- * The subject's words with its backticked parts as code — what the runtime
- * will run, set apart from the words about it.
- * @param {string} text
+ * The subject as the runtime built it: its words as text, the model-chosen
+ * value as code — from its parts, never by splitting text on backticks.
+ * @param {readonly ({ text: string } | { code: string })[]} parts
  * @returns {Node[]}
  */
-function withCode(text) {
-  const parts = text.split('`')
-  return parts.map((part, index) => (index % 2 === 1 ? h('code', { text: part }) : document.createTextNode(part)))
+function headline(parts) {
+  return parts.map((part, index) => {
+    if ('code' in part) return h('code', { text: part.code })
+    const text = index === 0 ? part.text.charAt(0).toUpperCase() + part.text.slice(1) : part.text
+    return document.createTextNode(text)
+  })
 }

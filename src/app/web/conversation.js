@@ -688,6 +688,9 @@ export function prepend(model, older) {
     markFork(head, event, [])
     apply(head, event, [], adopt)
   }
+  // A head that crossed the boundary drew the marker itself: the window's own
+  // live path must not draw a second one (S22 review).
+  if (head.forkMarked) model.forkMarked = true
   // The fork marker sits between the last inherited event and the first own one.
   if (model.seedLength > 0 && !model.forkMarked && head.lastSeq < model.seedLength && model.firstSeq >= model.seedLength) {
     model.forkMarked = true
@@ -741,7 +744,8 @@ export function prepend(model, older) {
     model.blocksByKey.delete(key)
     adopt.removed.add(key)
   }
-  for (const key of adopt.removed) after.push({ op: 'remove', key })
+  // A bracket the head reclaimed keeps its key: it is redrawn there, never removed.
+  for (const key of adopt.removed) if (!head.blocks.some((block) => block.key === key)) after.push({ op: 'remove', key })
   // The two halves meet. A group the newer window opened without a closing
   // block before it continues the older half's still-open group; an opening
   // continues an opening.

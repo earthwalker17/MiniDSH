@@ -36,6 +36,13 @@ const silent: Logger = { warn: () => {}, error: () => {} }
 /** The model every page talks to: the scripted adapter, under these names. */
 export const UI_ROUTE = { provider: 'scripted', model: 'scripted-model' } as const
 
+/**
+ * An approval card that can be answered: shown, and its buttons armed (a new
+ * card's are disabled for a beat, `approval.js`). Clicking before this is a
+ * click on a disabled button, which answers nothing.
+ */
+export const APPROVAL_ARMED = "!document.querySelector('#approval').hidden && document.querySelector('#approval .btn.primary') !== null && ![...document.querySelectorAll('#approval .btn')].some((button) => button.disabled)"
+
 /** One thing the page said went wrong. */
 export interface UiProblem {
   readonly source: 'console' | 'exception' | 'log'
@@ -134,47 +141,12 @@ function problemOf(event: CdpEvent): UiProblem | undefined {
 }
 
 /**
- * Boots the host and launches the browser. Call it only where `testBrowser`
- * is defined (`describe.runIf(testBrowser)`); a launch takes seconds, so give
- * the hook a long timeout.
+ * Signed-in pages over one launched browser, against the host the sign-in URL
+ * names: the first page trades the one-shot token, every later one rides the
+ * cookie it minted. Every page carries the tripwire.
  */
-export async function startWebUi(options: { readonly window?: { readonly width: number; readonly height: number } } = {}): Promise<WebUi> {
-  if (testBrowser === undefined) throw new Error('startWebUi needs a Chrome, Edge or Chromium (guard the suite with describe.runIf(testBrowser))')
-  const root = mkdtempSync(join(tmpdir(), 'minidsh-web-ui-'))
-  const workspace = join(root, 'workspace')
-  mkdirSync(workspace)
-  const adapter = new ScriptedAdapter()
-  let host: WebHostHandle | undefined
-  let browser: LaunchedBrowser | undefined
-  try {
-    host = await startWebHost({
-      cwd: workspace,
-      sessionsRoot: join(root, 'sessions'),
-      attachmentsRoot: join(root, 'attachments'),
-      logger: silent,
-      // A stamp's recorded shape must not depend on whether this machine can confine a shell.
-      confinement: 'none',
-      agentDefaults: UI_ROUTE,
-      patches: [{ id: 'llm-deepseek', disabled: true }],
-      prepare: (composed) => void composed.get(LLM).registerAdapter(composed, adapter),
-    })
-    browser = await launchBrowser({
-      executablePath: testBrowser.path,
-      profileRoot: join(root, 'profiles'),
-      headless: true,
-      allowHosts: [],
-      declared: [],
-      window: options.window ?? { width: 1280, height: 800 },
-    })
-  } catch (error) {
-    await browser?.close()
-    await host?.dispose()
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
-    throw error
-  }
-  const launched = browser
-  const served = host
-  const origin = new URL(served.url).origin
+function pageOpener(launched: LaunchedBrowser, signInUrl: string): { openPage: () => Promise<UiPage>; closePages: () => Promise<void> } {
+  const origin = new URL(signInUrl).origin
   /** Tripwires by CDP session id: one listener for the whole browser, routed per page. */
   const tripwires = new Map<string, UiProblem[]>()
   launched.cdp.onEvent((event) => {
@@ -184,7 +156,6 @@ export async function startWebUi(options: { readonly window?: { readonly width: 
   })
   const pages = new Set<UiPage>()
   let signedIn = false
-  let closed: Promise<void> | undefined
 
   const openPage = async (): Promise<UiPage> => {
     const cdp = launched.cdp
@@ -227,7 +198,7 @@ export async function startWebUi(options: { readonly window?: { readonly width: 
 
     // The token is spent by the first exchange; every later page rides the
     // cookie it minted. The token URL redirects to a clean `/`.
-    await navigate(signedIn ? `${origin}/` : served.url)
+    await navigate(signedIn ? `${origin}/` : signInUrl)
     signedIn = true
     const at = await evaluate<string>('location.href')
     if (at !== `${origin}/`) throw new Error(`signing in landed on ${at}, not ${origin}/`)
@@ -303,6 +274,54 @@ export async function startWebUi(options: { readonly window?: { readonly width: 
     for (const page of pages) await page.close()
   }
 
+  return { openPage, closePages }
+}
+
+/**
+ * Boots the host and launches the browser. Call it only where `testBrowser`
+ * is defined (`describe.runIf(testBrowser)`); a launch takes seconds, so give
+ * the hook a long timeout.
+ */
+export async function startWebUi(options: { readonly window?: { readonly width: number; readonly height: number } } = {}): Promise<WebUi> {
+  if (testBrowser === undefined) throw new Error('startWebUi needs a Chrome, Edge or Chromium (guard the suite with describe.runIf(testBrowser))')
+  const root = mkdtempSync(join(tmpdir(), 'minidsh-web-ui-'))
+  const workspace = join(root, 'workspace')
+  mkdirSync(workspace)
+  const adapter = new ScriptedAdapter()
+  let host: WebHostHandle | undefined
+  let browser: LaunchedBrowser | undefined
+  try {
+    host = await startWebHost({
+      cwd: workspace,
+      sessionsRoot: join(root, 'sessions'),
+      attachmentsRoot: join(root, 'attachments'),
+      logger: silent,
+      // A stamp's recorded shape must not depend on whether this machine can confine a shell.
+      confinement: 'none',
+      agentDefaults: UI_ROUTE,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (composed) => void composed.get(LLM).registerAdapter(composed, adapter),
+    })
+    browser = await launchBrowser({
+      executablePath: testBrowser.path,
+      profileRoot: join(root, 'profiles'),
+      headless: true,
+      allowHosts: [],
+      declared: [],
+      window: options.window ?? { width: 1280, height: 800 },
+    })
+  } catch (error) {
+    await browser?.close()
+    await host?.dispose()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    throw error
+  }
+  const launched = browser
+  const served = host
+  const origin = new URL(served.url).origin
+  const { openPage, closePages } = pageOpener(launched, served.url)
+  let closed: Promise<void> | undefined
+
   return {
     host: served,
     adapter,
@@ -318,5 +337,33 @@ export async function startWebUi(options: { readonly window?: { readonly width: 
         await served.dispose()
         rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
       })()),
+  }
+}
+
+/**
+ * A real browser on a web host this process did NOT boot — a `minidsh web`
+ * child, a real model behind it — for a live run: the same signed-in pages
+ * and tripwire as `startWebUi`, nothing scripted.
+ */
+export async function browseWebUi(signInUrl: string, options: { readonly window?: { readonly width: number; readonly height: number }; readonly headless?: boolean } = {}): Promise<{ readonly browser: LaunchedBrowser; page(): Promise<UiPage>; close(): Promise<void> }> {
+  if (testBrowser === undefined) throw new Error('browseWebUi needs a Chrome, Edge or Chromium')
+  const root = mkdtempSync(join(tmpdir(), 'minidsh-web-live-'))
+  const browser = await launchBrowser({
+    executablePath: testBrowser.path,
+    profileRoot: join(root, 'profiles'),
+    headless: options.headless ?? true,
+    allowHosts: [],
+    declared: [],
+    window: options.window ?? { width: 1440, height: 900 },
+  })
+  const { openPage, closePages } = pageOpener(browser, signInUrl)
+  return {
+    browser,
+    page: openPage,
+    close: async () => {
+      await closePages()
+      await browser.close()
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    },
   }
 }

@@ -21,7 +21,7 @@ import type { LlmRequest, StreamChunk } from '../../core/llm/types.ts'
 import { TOOLS } from '../../core/tools/index.ts'
 import { expectBrowserSuite, testBrowser } from '../../test-support/browser-fixture.ts'
 import { assistantMessage, assistantText, type MessagePart } from '../../test-support/scripted-adapter.ts'
-import { startWebUi, type UiPage, type WebUi } from '../../test-support/web-ui.ts'
+import { APPROVAL_ARMED, startWebUi, type UiPage, type WebUi } from '../../test-support/web-ui.ts'
 
 expectBrowserSuite('web UI gallery')
 
@@ -116,13 +116,13 @@ describe.runIf(testBrowser)('the web UI, walked through a session', () => {
     await page.press('Enter')
 
     // The model asks to run the tests outside the sandbox: the approval takes the composer's place.
-    await page.waitFor(`!document.querySelector('#approval').hidden`, 20_000)
+    await page.waitFor(APPROVAL_ARMED, 20_000)
     await check('02-approval', ['#approval .approval-head code', '#approval .btn.primary', '.process .row', '.bubble'])
     expect(await page.evaluate<boolean>(`document.querySelector('#composer').hidden`)).toBe(true)
     await page.click('#approval .btn.primary')
 
     // The edit lands, the second run asks again: allowed for the session this time.
-    await page.waitFor(`!document.querySelector('#approval').hidden && document.querySelectorAll('.system').length >= 1`, 30_000)
+    await page.waitFor(`${APPROVAL_ARMED} && document.querySelectorAll('.system').length >= 1`, 30_000)
     const sessionButton = await page.evaluate<boolean>(`[...document.querySelectorAll('#approval .btn')].some((b) => b.textContent === 'Allow for this session')`)
     expect(sessionButton, 'the host offered a session grant').toBe(true)
     await page.evaluate(`[...document.querySelectorAll('#approval .btn')].find((b) => b.textContent === 'Allow for this session').click()`)
@@ -169,5 +169,34 @@ describe.runIf(testBrowser)('the web UI, walked through a session', () => {
       await check('06-panel', ['#panel .panel-section', '#panel .btn.sm', '.child-link'])
       expect(await page.evaluate<string>(`document.querySelector('#panel').textContent`)).toMatch(/node -e/)
     }
+
+    // The phone's drawer: the whole sidebar (never the rail's icons), each row
+    // the drawer's width, and the page behind it out of reach.
+    await page.click('#topbar [aria-label="Session details"]')
+    for (const theme of ['light', 'dark'] as const) {
+      await page.evaluate(`window.minidshTheme.set(${JSON.stringify(theme)})`)
+      await page.setViewport(390, 844)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      await page.click('.drawer-opener')
+      await page.waitFor(`document.querySelector('#app').dataset.drawer === 'open'`)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const shape = await page.evaluate<{ mode: string; list: string; rowWidth: number; listWidth: number; inert: boolean; label: string; newWidth: number }>(
+        `(() => { const row = document.querySelector('.session-row'); const list = document.querySelector('#sessions'); return { mode: document.querySelector('#app').dataset.sidebar, list: getComputedStyle(list).display, rowWidth: row.getBoundingClientRect().width, listWidth: list.getBoundingClientRect().width, inert: document.querySelector('#main').inert, label: document.querySelector('#brand .icon-btn').getAttribute('aria-label'), newWidth: document.querySelector('#new').getBoundingClientRect().width } })()`,
+      )
+      expect(shape.mode).toBe('full')
+      expect(shape.list).toBe('flex')
+      expect(shape.rowWidth).toBeGreaterThanOrEqual(shape.listWidth - 24)
+      expect(shape.newWidth).toBeGreaterThan(120)
+      expect(shape.inert).toBe(true)
+      expect(shape.label).toBe('Close sessions')
+      if (SHOTS) await page.screenshot(join(SHOTS, `07-drawer-${theme}-390.png`))
+      await page.press('Escape')
+      await page.waitFor(`document.querySelector('#app').dataset.drawer === undefined && !document.querySelector('#main').inert`)
+      // Focus returns to the control that opened the drawer.
+      expect(await page.evaluate<boolean>(`document.activeElement === document.querySelector('.drawer-opener')`)).toBe(true)
+    }
+    await page.evaluate(`window.minidshTheme.set('light')`)
+    await page.setViewport(1440, 900)
+    expect(await page.unexpectedProblems(), '07-drawer').toEqual([])
   }, 240_000)
 })

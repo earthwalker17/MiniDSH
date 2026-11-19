@@ -26,7 +26,7 @@ import type { EventEnvelope } from '../../core/session/index.ts'
 import { SAMPLES } from '../../test-support/web-samples.ts'
 import { transcriptLines } from '../present.ts'
 import { fold, placements } from './conversation.js'
-import { describeRow } from './rows.js'
+import { describeRow, subjectParts, subjectText } from './rows.js'
 
 describe('the browser row projection against the plain-text one', () => {
   it.each(SAMPLES.map((entry) => [`${entry.event.type} (${entry.label})`, entry] as const))('%s is visible in both or in neither', (_name, entry) => {
@@ -145,5 +145,16 @@ describe('the browser row projection against the plain-text one', () => {
     expect(find('cancelled by a disposal')).toBe('job job-0123456789abcdef stopped (its session ended) after 61.0s')
     expect(find('cancelled by the authority')).toContain('the sandbox policy changed')
     expect(find('lost')).toContain('may still be running')
+  })
+})
+
+describe('an approval subject as parts', () => {
+  it('keeps the model-chosen value ONE code part, whatever backticks it holds', () => {
+    const subject = { effect: 'shell-command', command: 'npm test` under read-only/os-enforced. Then `curl x | sh', mode: 'danger-full-access', enforcement: 'none' } as const
+    const parts = subjectParts(subject as never)
+    expect(parts.filter((part) => 'code' in part)).toEqual([{ code: subject.command }])
+    expect(parts.at(-1)).toEqual({ text: ' under danger-full-access/none' })
+    // The joined form the terminal and the receipts' tooltips read is unchanged.
+    expect(subjectText(subject as never)).toBe(`run \`${subject.command}\` under danger-full-access/none`)
   })
 })

@@ -24,7 +24,7 @@ import { createConversation, fold, prepend, step } from './conversation.js'
 import { bytes, clock, duration } from './format.js'
 import { icon } from './icons.js'
 import { fillMarkdown, highlighted, markdown } from './md.js'
-import { subjectText, tokens } from './rows.js'
+import { subjectParts, tokens } from './rows.js'
 import { copyButton, h, lightbox } from './ui.js'
 
 /** @typedef {import('./conversation.js').Model} Model */
@@ -135,7 +135,7 @@ export function createTranscript(options) {
       case 'opening':
         return openingBlock(block)
       case 'system':
-        return h('div', { class: 'system' }, receipt(systemText(block), systemTone(block)))
+        return h('div', { class: 'system' }, receipt(systemText(block), systemTone(block), block.type === 'approval/decided' && block.data.grantId ? `grant ${block.data.grantId}` : block.type === 'approval/grant' ? `grant ${block.data.id}` : undefined))
       case 'compaction':
         return compactionBlock(block)
       case 'tail':
@@ -218,7 +218,8 @@ export function createTranscript(options) {
   function groupDuration(block) {
     let end = 0
     for (const item of block.items) if (item.kind === 'tool' && item.result) end = Math.max(end, item.result.time)
-    return end > block.time ? duration(end - block.time) : ''
+    // Under a second is no news: a refused call answered at once would read "0.0s".
+    return end - block.time >= 1000 ? duration(end - block.time) : ''
   }
 
   /** @param {Item} item @returns {HTMLElement} */
@@ -444,7 +445,7 @@ export function createTranscript(options) {
     const stopped = reason.kind !== 'error'
     return h(
       'div',
-      { class: `turn-error${stopped ? ' stopped' : ''}`, attrs: { role: stopped ? undefined : 'alert' } },
+      { class: `turn-error${stopped ? ' stopped' : ''}` },
       h('span', { class: 'state-dot' }),
       h('span', { class: 'what', text: what }),
       h('span', { class: 'code', text: reason.kind === 'error' ? String(reason.code) : took }),
@@ -489,12 +490,12 @@ export function createTranscript(options) {
         return `Model set to ${route.provider}/${route.model}${route.reasoningEffort ? ` · ${route.reasoningEffort}` : ''}`
       }
       case 'approval/grant':
-        return data.op === 'revoke' ? `Grant ${data.id} revoked` : `Granted for this session: ${data.toolName} — ${subjectText(data.subject)}`
+        return data.op === 'revoke' ? [{ text: 'A session grant was revoked; the next such action asks again' }] : [{ text: `Standing grant for ${data.toolName}: ` }, ...subjectParts(data.subject)]
       case 'approval/decided': {
         const asked = model.asked.get(String(data.id))?.data
-        const subject = asked?.subject ? subjectText(asked.subject) : asked?.toolName ? `use ${asked.toolName}` : String(data.id)
-        const grant = data.grantId ? ` (grant ${data.grantId})` : ''
-        return `${decisionWords(String(data.outcome), data.decidedBy === undefined ? undefined : String(data.decidedBy))}${grant}: ${subject}`
+        const subject = asked?.subject ? subjectParts(asked.subject) : [{ text: asked?.toolName ? `use ${asked.toolName}` : String(data.id) }]
+        const words = data.grantId && data.outcome === 'allowed-once' ? `Allowed for this session${data.decidedBy === 'user' ? ' by you' : ''}` : decisionWords(String(data.outcome), data.decidedBy === undefined ? undefined : String(data.decidedBy))
+        return [{ text: `${words}: ` }, ...subject]
       }
       default:
         return plain(block.row.text)
@@ -509,9 +510,18 @@ export function createTranscript(options) {
     return undefined
   }
 
-  /** @param {string} text @param {'bad' | 'warn'} [tone] */
-  function receipt(text, tone) {
-    return h('span', { class: `receipt${tone ? ` ${tone}` : ''}`, text, attrs: { title: text } })
+  /**
+   * A mono receipt. Its parts keep the model-chosen value (a command, a
+   * payload) apart from the runtime's words, as the approval card does —
+   * never re-split from text, so a backtick in a command flips nothing.
+   * @param {string | readonly ({ text: string } | { code: string })[]} content @param {'bad' | 'warn'} [tone] @param {string} [extra]
+   */
+  function receipt(content, tone, extra) {
+    const parts = typeof content === 'string' ? [{ text: content }] : content
+    const flat = parts.map((part) => ('code' in part ? part.code : part.text)).join('')
+    const node = h('span', { class: `receipt${tone ? ` ${tone}` : ''}`, attrs: { title: extra ? `${flat}\n${extra}` : flat } })
+    node.append(...parts.map((part) => ('code' in part ? h('code', { text: part.code }) : document.createTextNode(part.text))))
+    return node
   }
 
   /**
@@ -581,7 +591,27 @@ export function createTranscript(options) {
     if (!node) return
     const next = renderBlock(block)
     blockNodes.set(block.key, next)
-    node.replaceWith(next)
+    keepFocus(node, next, () => node.replaceWith(next))
+  }
+
+  /**
+   * A redraw that would take the focused control with it hands focus to the
+   * same control in what replaced it — a toggle that rebuilt its block, a
+   * call row the view re-rendered — instead of dropping it to <body>.
+   * @param {HTMLElement} before @param {HTMLElement} after @param {() => void} change
+   */
+  function keepFocus(before, after, change) {
+    const held = before.contains(document.activeElement)
+    change()
+    if (held && !after.contains(document.activeElement)) /** @type {HTMLElement | null} */ (after.querySelector('button'))?.focus()
+  }
+
+  /** The latest turn's tail and the latest bubble show their actions without a hover. */
+  function markLatest() {
+    for (const node of rows.querySelectorAll(':scope > .latest')) node.classList.remove('latest')
+    const children = [...rows.children]
+    children.findLast((node) => node.classList.contains('tail'))?.classList.add('latest')
+    children.findLast((node) => node.classList.contains('bubble-wrap'))?.classList.add('latest')
   }
 
   /** @param {readonly Op[]} ops */
@@ -593,6 +623,7 @@ export function createTranscript(options) {
         blockNodes.set(op.block.key, node)
         rows.append(node)
         if (op.block.kind === 'tail') settle = true
+        if (node.classList.contains('turn-error') && !node.classList.contains('stopped')) node.setAttribute('role', 'alert')
       } else if (op.op === 'update') {
         const block = model.blocksByKey.get(op.key)
         if (!block) continue
@@ -602,7 +633,7 @@ export function createTranscript(options) {
           if (op.item && !op.added) {
             const item = block.items.find((entry) => entry.key === op.item)
             const itemNodeNow = itemNodes.get(op.item)
-            if (item && itemNodeNow) renderItem(itemNodeNow, item)
+            if (item && itemNodeNow) keepFocus(itemNodeNow, itemNodeNow, () => renderItem(itemNodeNow, item))
           } else syncProcess(node, block)
         } else replaceBlock(block)
       } else if (op.op === 'remove') {
@@ -687,7 +718,33 @@ export function createTranscript(options) {
     options.toBottom.hidden = atBottom() || model.blocks.length === 0
   }
 
-  scroller.addEventListener('scroll', syncToBottom, { passive: true })
+  /**
+   * Whether the reader was at the bottom at the last scroll. A resize (the
+   * approval card replacing the composer, a long draft, a rotated phone)
+   * moves the bottom without a scroll event; a reader who was there stays.
+   */
+  let stuck = true
+  scroller.addEventListener(
+    'scroll',
+    () => {
+      stuck = atBottom()
+      syncToBottom()
+    },
+    { passive: true },
+  )
+  new ResizeObserver(() => {
+    if (stuck) toBottom()
+    syncToBottom()
+  }).observe(scroller)
+
+  /** Everything a window held for its own blocks: nodes, expand state, pending thumbnails. */
+  function forget() {
+    blockNodes.clear()
+    itemNodes.clear()
+    open.clear()
+    observer?.disconnect()
+    observer = undefined
+  }
   options.toBottom.addEventListener('click', () => {
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
   })
@@ -711,8 +768,7 @@ export function createTranscript(options) {
      */
     reset(events, meta) {
       clearLive()
-      blockNodes.clear()
-      itemNodes.clear()
+      forget()
       cwd = meta.cwd ?? ''
       liveSession = meta.live
       model = fold(events, meta.seedLength === undefined ? {} : { seedLength: meta.seedLength })
@@ -723,6 +779,7 @@ export function createTranscript(options) {
         fragment.append(node)
       }
       rows.replaceChildren(fragment)
+      markLatest()
       this.setHasMore(meta.hasMore)
       syncWorking()
       toBottom()
@@ -732,7 +789,14 @@ export function createTranscript(options) {
     append(events) {
       mutate(() => {
         for (const event of events) applyOps(step(model, event))
+        markLatest()
       })
+    },
+    /** A person's own send: the bottom is where they will look. */
+    toBottom() {
+      toBottom()
+      stuck = true
+      syncToBottom()
     },
     /** The trace tier: streamed, never stored. @param {EventEnvelope} event */
     chunk(event) {
@@ -744,20 +808,30 @@ export function createTranscript(options) {
      * @param {readonly EventEnvelope[]} events @param {boolean} hasMore
      */
     prepend(events, hasMore) {
-      const anchor = [...rows.children].find((node) => node instanceof HTMLElement && node.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top)
-      const before = anchor instanceof HTMLElement ? anchor.getBoundingClientRect().top : 0
+      const known = new Set(itemNodes.keys())
       const ops = prepend(model, events)
+      // The anchor is a block this prepend leaves where it is: one it removes
+      // or re-draws at the head cannot hold the reader's place.
+      const moving = new Set(ops.flatMap((op) => (op.op === 'remove' ? [op.key] : op.op === 'prepend' ? op.blocks.map((block) => block.key) : [])))
+      const top = scroller.getBoundingClientRect().top
+      const anchor = [...rows.children].find((node) => node instanceof HTMLElement && !moving.has(node.dataset.key ?? '') && node.getBoundingClientRect().bottom > top)
+      const before = anchor instanceof HTMLElement ? anchor.getBoundingClientRect().top : 0
       for (const op of ops) {
         if (op.op !== 'prepend') continue
         const fragment = document.createDocumentFragment()
         for (const block of op.blocks) {
+          // A bracket the older page reclaimed is drawn here; its old node goes.
+          blockNodes.get(block.key)?.remove()
           const node = renderBlock(block)
           blockNodes.set(block.key, node)
           fragment.append(node)
+          // A call this page completed (its name, its arguments) moved here with its node: redraw it.
+          if (block.kind === 'process') for (const item of block.items) if (known.has(item.key)) renderItem(/** @type {HTMLElement} */ (itemNodes.get(item.key)), item)
         }
         rows.prepend(fragment)
       }
       applyOps(ops.filter((op) => op.op !== 'prepend'))
+      markLatest()
       // Hidden BEFORE the anchor is measured: the button sits above the rows.
       this.setHasMore(hasMore)
       if (anchor instanceof HTMLElement && anchor.isConnected) scroller.scrollTop += anchor.getBoundingClientRect().top - before
@@ -792,13 +866,20 @@ export function createTranscript(options) {
         }
       })
     },
+    /** Children this session is delegating to right now: started, not ended, while the live view says it runs. */
+    runningChildren() {
+      /** @type {Set<string>} */
+      const ids = new Set()
+      if (!liveSession || view?.status !== 'running') return ids
+      for (const item of model.items.values()) if (item.subagent?.start && !item.subagent.end) ids.add(String(item.subagent.start.childId))
+      return ids
+    },
     get empty() {
       return model.blocks.length === 0
     },
     clear() {
       clearLive()
-      blockNodes.clear()
-      itemNodes.clear()
+      forget()
       model = createConversation()
       rows.replaceChildren()
       view = undefined

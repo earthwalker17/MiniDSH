@@ -24,10 +24,13 @@ import { h, iconButton } from './ui.js'
 /**
  * @typedef {{
  *   app: HTMLElement, sidebar: HTMLElement, brand: HTMLElement, newButton: HTMLButtonElement,
- *   listHead: HTMLElement, filter: HTMLInputElement, list: HTMLElement, foot: HTMLElement, scrim: HTMLElement,
+ *   listHead: HTMLElement, filter: HTMLInputElement, list: HTMLElement, foot: HTMLElement, scrim: HTMLElement, main: HTMLElement,
  *   onOpen: (id: string) => void, onNew: () => void, onSettings: () => void,
  * }} SidebarOptions
  */
+
+const NARROW = window.matchMedia('(max-width: 1023px)')
+const PHONE = window.matchMedia('(max-width: 767px)')
 
 /** @param {SidebarOptions} options */
 export function createSidebar(options) {
@@ -48,13 +51,14 @@ export function createSidebar(options) {
   // ---- the frame ----------------------------------------------------------
 
   const toggle = iconButton('panel-left', 'Collapse sidebar', () => {
-    if (window.matchMedia('(max-width: 767px)').matches) {
+    if (PHONE.matches) {
       setDrawer(false)
       return
     }
     railChosen = app.dataset.sidebar !== 'rail'
     layout()
   })
+  toggle.classList.add('attention-host')
   options.brand.append(mark(22), h('span', { class: 'brand-name', text: 'MiniDSH' }), toggle)
   options.newButton.append(icon('new-chat', { size: 16 }), h('span', { class: 'label', text: 'New session' }))
   options.newButton.setAttribute('aria-label', 'New session')
@@ -63,6 +67,12 @@ export function createSidebar(options) {
     options.onNew()
   })
   const search = iconButton('search', 'Filter sessions', () => {
+    // The rail has no room for a list: filtering opens the sidebar first.
+    if (app.dataset.sidebar === 'rail') {
+      railChosen = false
+      layout()
+      options.filter.hidden = true
+    }
     options.filter.hidden = !options.filter.hidden
     search.setAttribute('aria-pressed', String(!options.filter.hidden))
     if (!options.filter.hidden) options.filter.focus()
@@ -93,26 +103,44 @@ export function createSidebar(options) {
   })
 
   function layout() {
-    const narrow = window.matchMedia('(max-width: 1023px)').matches
-    const rail = railChosen ?? narrow
+    // A phone's drawer is the whole sidebar, never the rail.
+    const rail = !PHONE.matches && (railChosen ?? NARROW.matches)
     app.dataset.sidebar = rail ? 'rail' : 'full'
-    toggle.setAttribute('aria-label', rail ? 'Expand sidebar' : 'Collapse sidebar')
-    toggle.setAttribute('title', rail ? 'Expand sidebar' : 'Collapse sidebar')
+    const words = PHONE.matches ? 'Close sessions' : rail ? 'Expand sidebar' : 'Collapse sidebar'
+    toggle.setAttribute('aria-label', attention > 0 && rail ? `${words} — ${attentionWords()}` : words)
+    toggle.setAttribute('title', words)
   }
-  window.matchMedia('(max-width: 1023px)').addEventListener('change', () => {
-    railChosen = undefined
-    layout()
-  })
-  layout()
+  for (const query of [NARROW, PHONE]) {
+    query.addEventListener('change', () => {
+      railChosen = undefined
+      setDrawer(false)
+      layout()
+    })
+  }
 
+  /** @type {HTMLElement | undefined} */
+  let returnTo
   /** @param {boolean} open */
   function setDrawer(open) {
-    if (!window.matchMedia('(max-width: 767px)').matches) open = false
+    if (!PHONE.matches) open = false
+    const was = app.dataset.drawer === 'open'
     if (open) app.dataset.drawer = 'open'
     else delete app.dataset.drawer
     options.scrim.hidden = !open
-    if (open) options.newButton.focus()
+    // While the drawer is open the page behind it takes no focus and no clicks.
+    options.main.inert = open
+    if (open && !was) {
+      returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+      options.newButton.focus()
+    }
+    if (!open && was && returnTo?.isConnected && options.sidebar.contains(document.activeElement)) returnTo.focus()
+    if (!open) returnTo = undefined
   }
+
+  /** Other sessions waiting on a person: a question, or a job update held for them. */
+  let attention = 0
+  const attentionWords = () => `${attention} other session${attention === 1 ? ' needs' : 's need'} you`
+  layout()
 
   // ---- rows -----------------------------------------------------------------
 
@@ -188,7 +216,7 @@ export function createSidebar(options) {
         state = `${summary.pendingApprovals} question${summary.pendingApprovals === 1 ? '' : 's'} waiting`
       } else if (summary.heldNotices > 0) {
         dot.append(h('span', { class: 'state-dot held' }))
-        when.textContent = 'Held'
+        when.textContent = 'Update'
         when.classList.add('wants')
         state = 'a job update waits for your next message'
       } else if (summary.status === 'running') {
@@ -242,6 +270,17 @@ export function createSidebar(options) {
     },
     openDrawer() {
       setDrawer(true)
+    },
+    /**
+     * How many OTHER sessions wait on a person. The rail and the drawer hide
+     * the list, so its toggle carries the dot and the count in its name.
+     * @param {number} count
+     */
+    setAttention(count) {
+      attention = count
+      toggle.querySelector('.attention-dot')?.remove()
+      if (count > 0 && app.dataset.sidebar === 'rail') toggle.append(h('span', { class: 'attention-dot', attrs: { 'aria-hidden': 'true' } }))
+      layout()
     },
   }
 }

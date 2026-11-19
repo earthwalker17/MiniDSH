@@ -9,7 +9,7 @@
  * compute), the header, the listing. A button only asks; its effect arrives
  * as a durable event and a view push like any other.
  */
-import { clock, compactAgo, duration } from './format.js'
+import { clock, compactAgo, duration, humanPreset, humanSandbox } from './format.js'
 import { icon } from './icons.js'
 import { jobEnded, subjectText, tokens } from './rows.js'
 import { copyButton, h } from './ui.js'
@@ -26,6 +26,7 @@ import { copyButton, h } from './ui.js'
  *   summary?: SessionSummary,
  *   children: readonly SessionSummary[],
  *   stopping: ReadonlySet<string>,
+ *   working: ReadonlySet<string>,
  *   workspace?: string,
  * }} PanelState
  */
@@ -71,12 +72,12 @@ export function createPanel(options) {
       sections.push(section('Model and context', 'gauge', kv(rows)))
 
       const authority = view.authority
-      const shell = authority.accepts === 'full' ? `enforced (${authority.enforcement} on this host)` : `accepts ${authority.accepts} · host enforces ${authority.enforcement}`
+      const shell = authority.accepts === 'full' ? `Sandboxed (${authority.enforcement} on this host)` : `Unconfined accepted (this host enforces ${authority.enforcement})`
       const authorityRows = kv([
-        ['Sandbox', authority.sandbox],
-        ['Approvals', authority.approval === 'ask' ? 'ask before wider access' : 'never ask'],
+        ['Sandbox', humanSandbox(authority.sandbox)],
+        ['Approvals', authority.approval === 'ask' ? 'Ask before wider access' : 'Never ask'],
         ['Shell', shell],
-        ...(authority.preset ? [/** @type {[string, Node | string]} */ (['Preset', authority.preset])] : []),
+        ...(authority.preset && authority.preset !== 'custom' ? [/** @type {[string, Node | string]} */ (['Preset', humanPreset(authority.preset)])] : []),
       ])
       /** @type {Node[]} */
       const grants = []
@@ -131,7 +132,7 @@ export function createPanel(options) {
     const children = []
     for (const child of state.children) {
       const took = child.updatedAt ? ` · ${duration(child.updatedAt - child.createdAt)}` : ''
-      children.push(h('div', { class: 'panel-row' }, icon('users', { size: 14 }), h('span', { class: 'grow', text: child.title ?? child.id, attrs: { title: child.id } }), h('span', { class: 'muted', text: child.live ? 'running' : `done${took}` }), openLink(child.id, 'Open')))
+      children.push(h('div', { class: 'panel-row' }, icon('users', { size: 14 }), h('span', { class: 'grow', text: child.title ?? child.id, attrs: { title: child.id } }), h('span', { class: 'muted', text: state.working.has(child.id) ? 'working' : child.live ? 'idle' : `done${took}` }), openLink(child.id, 'Open')))
     }
     sections.push(section('Subagents', 'users', children.length > 0 ? h('div', {}, ...children) : h('div', { class: 'panel-empty', text: 'None.' })))
 

@@ -68,13 +68,19 @@ export function showMenu(anchor, entries, options = {}) {
   const menu = h('div', { class: 'menu', attrs: { role: 'menu', 'aria-label': options.label ?? anchor.getAttribute('aria-label') ?? undefined } })
   /** @type {HTMLButtonElement[]} */
   const items = []
+  // Each heading opens a named group, so a radio set is announced as the set
+  // it is and two items with one label are told apart by their group.
+  /** @type {HTMLElement} */
+  let into = menu
   for (const entry of entries) {
     if ('separator' in entry) {
       menu.append(h('div', { class: 'menu-sep', attrs: { role: 'separator' } }))
+      into = menu
       continue
     }
     if ('heading' in entry) {
-      menu.append(h('div', { class: 'menu-label', text: entry.heading }))
+      into = h('div', { attrs: { role: 'group', 'aria-label': entry.heading } }, h('div', { class: 'menu-label', text: entry.heading, attrs: { 'aria-hidden': 'true' } }))
+      menu.append(into)
       continue
     }
     const radio = entry.checked !== undefined
@@ -90,10 +96,13 @@ export function showMenu(anchor, entries, options = {}) {
     )
     item.addEventListener('click', () => {
       close()
+      // Back to the control that opened it BEFORE the choice runs: the item
+      // is gone, and focus on a removed node falls to <body>.
+      if (anchor.isConnected) anchor.focus()
       entry.onSelect()
     })
     items.push(item)
-    menu.append(item)
+    into.append(item)
   }
   document.body.append(menu)
   anchor.setAttribute('aria-expanded', 'true')
@@ -104,6 +113,11 @@ export function showMenu(anchor, entries, options = {}) {
       event.preventDefault()
       close()
       anchor.focus()
+      return
+    }
+    // Tab leaves the menu, so the menu leaves with it.
+    if (event.key === 'Tab') {
+      close()
       return
     }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
@@ -206,8 +220,9 @@ export function lightbox(src, alt) {
  * @param {string} text @param {'notice' | 'error'} [kind]
  */
 export function toast(text, kind = 'notice') {
+  // The container is a live region of its own (index.html); an error interrupts.
   const host = byId('toasts')
-  const node = h('div', { class: `toast${kind === 'error' ? ' error' : ''}`, text, attrs: { role: kind === 'error' ? 'alert' : 'status' } })
+  const node = h('div', { class: `toast${kind === 'error' ? ' error' : ''}`, text, ...(kind === 'error' ? { attrs: { role: 'alert' } } : {}) })
   host.append(node)
   setTimeout(() => node.remove(), kind === 'error' ? 7000 : 4000)
 }

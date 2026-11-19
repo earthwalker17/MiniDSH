@@ -309,17 +309,8 @@ function presentTools(definitions: readonly AnyToolDefinition[]): ToolPresentati
   return definitions.map((definition) => ({ name: definition.name, ...(definition.display === undefined ? {} : { display: definition.display }) }))
 }
 
-/**
- * Sessions whose image references are kept for `attachment/read`. Each entry
- * is a small id→ref map; the bound keeps a long-lived host from holding one
- * per session it ever served.
- */
-const IMAGE_INDEX_CACHE = 16
-
-/** One session's image references, indexed as far as its facts have been scanned. */
+/** One log's image references, indexed as far as its facts have been scanned. */
 interface ImageIndex {
-  /** The facts array scanned: a different array (a resume, a fresh cold parse) is rescanned from the start. */
-  readonly facts: readonly EventEnvelope[]
   scanned: number
   readonly refs: Map<string, AttachmentRef>
 }
@@ -405,8 +396,13 @@ export class ProtocolHost {
   private readonly inflight = new Set<Promise<Agent>>()
   /** Parsed stored sessions, most recently used last (insertion order IS the LRU). */
   private readonly cold = new Map<string, SessionSource>()
-  /** `attachment/read`'s per-session index of the log's own image references, most recently used last. */
-  private readonly images = new Map<string, ImageIndex>()
+  /**
+   * `attachment/read`'s index of a log's own image references, keyed by the
+   * facts array itself: a live session's array grows in place, a resume or a
+   * fresh cold parse is a new array (and so a fresh index), and an evicted
+   * cold parse takes its index with it — the index never keeps a log alive.
+   */
+  private readonly images = new WeakMap<readonly EventEnvelope[], ImageIndex>()
   /**
    * Sessions owed a `control.summary` at the end of this tick, and whether
    * the owing was a disposal. Coalesced because a summary is whole-state: a
@@ -603,9 +599,11 @@ export class ProtocolHost {
 
   /** A session's agent is gone: its last summary says `closed`. */
   onAgentDisposed(agent: Agent): void {
-    // Its image index holds the live log's facts array; a later read indexes
-    // the stored log afresh, so nothing is lost by letting this one go.
-    this.images.delete(agent.id)
+    // Whether a session may be driven is the AGENT's state: a child whose
+    // delegation ended is disposed and drivable from here on, and a reader
+    // holding its last view would otherwise show it read-only for good. The
+    // registry has already let the agent go, so this view says so.
+    if (!this.closed) this.publishView(agent.session)
     this.oweSummary(agent.session, true)
   }
 
@@ -1429,17 +1427,16 @@ export class ProtocolHost {
    * because a surface asks once per image it draws.
    */
   private imageRefOf(sessionId: string, attachmentId: string): AttachmentRef | undefined {
-    const source = this.sourceFor(sessionId)
-    let index = this.images.get(sessionId)
-    if (index === undefined || index.facts !== source.facts) index = { facts: source.facts, scanned: 0, refs: new Map() }
-    // Recency, as the cold cache keeps it: the session being drawn stays.
-    this.images.delete(sessionId)
-    this.images.set(sessionId, index)
-    while (this.images.size > IMAGE_INDEX_CACHE) this.images.delete(this.images.keys().next().value!)
+    const facts = this.sourceFor(sessionId).facts
+    let index = this.images.get(facts)
+    if (index === undefined) {
+      index = { scanned: 0, refs: new Map() }
+      this.images.set(facts, index)
+    }
     const found = index.refs.get(attachmentId)
     if (found !== undefined) return found
-    for (; index.scanned < index.facts.length; index.scanned++) {
-      const event = index.facts[index.scanned]!
+    for (; index.scanned < facts.length; index.scanned++) {
+      const event = facts[index.scanned]!
       const message = matches(event, USER_MESSAGE) ? event.data.message : matches(event, TOOL_RESULT) ? event.data.message : undefined
       if (message === undefined) continue
       try {

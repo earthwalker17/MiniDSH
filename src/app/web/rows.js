@@ -116,6 +116,21 @@ const note = (text) => ({ cls: 'row note', text })
  * @param {EffectIntent} subject
  */
 export function subjectText(subject) {
+  return subjectParts(subject)
+    .map((part) => ('code' in part ? `\`${part.code}\`` : part.text))
+    .join('')
+}
+
+/**
+ * The same clause as parts: the model-chosen value (a command, a payload) is
+ * ONE code part, everything the runtime says about it text. A surface that
+ * styles code builds from these, never by splitting the joined string on
+ * backticks — a backtick inside the command would otherwise flip which words
+ * look like the runtime's account (S22 review).
+ * @param {EffectIntent} subject
+ * @returns {({ text: string } | { code: string })[]}
+ */
+export function subjectParts(subject) {
   // The same two notes `describeIntent` carries: without them an escaped real
   // newline reads as a typed `\n`, and a cut subject reads as whole.
   const notes = [
@@ -123,8 +138,8 @@ export function subjectText(subject) {
     ...(subject.truncated === true ? ['cut at 4000 characters'] : []),
   ]
   const said = notes.length === 0 ? '' : ` […${notes.join('; ')}]`
-  if (subject.effect === 'network-request') return `send \`${subject.payload}\` to ${subject.destination} as ${subject.credential}${said}`
-  return `run \`${subject.command}\`${said} under ${subject.mode}/${subject.enforcement}`
+  if (subject.effect === 'network-request') return [{ text: 'send ' }, { code: subject.payload }, { text: ` to ${subject.destination} as ${subject.credential}${said}` }]
+  return [{ text: 'run ' }, { code: subject.command }, { text: `${said} under ${subject.mode}/${subject.enforcement}` }]
 }
 
 /** @param {number | undefined} ms */

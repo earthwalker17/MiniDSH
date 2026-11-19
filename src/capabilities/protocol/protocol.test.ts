@@ -1974,6 +1974,11 @@ describe('protocol: what a surface is told to draw', () => {
 
     release()
     await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the parent turn to end')
+    // The delegation ended and disposed the child: its reader is TOLD it may
+    // drive it now, without re-attaching (S22 review: it stayed read-only).
+    const childViews = () => client.notifications.filter((entry) => entry.method === 'session.view' && entry.params.sessionId === childId).map((entry) => (entry.params as unknown as { view: SessionView }).view)
+    await client.waitFor(() => (childViews().at(-1)?.drivable === undefined ? true : undefined), "the child's drivable view")
+    expect(childViews().at(-1)?.drivenBy).toBeUndefined()
   })
 
   it('streams the head of an answer to a watcher while its message is not yet durable', async () => {

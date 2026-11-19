@@ -18,7 +18,7 @@ import type { LlmRequest } from '../../core/llm/types.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
 import { TOOLS } from '../../core/tools/index.ts'
 import { asSessionId } from '../../core/ids.ts'
-import { startWebUi, type WebUi } from '../../test-support/web-ui.ts'
+import { APPROVAL_ARMED, startWebUi, type WebUi } from '../../test-support/web-ui.ts'
 
 expectBrowserSuite('web UI')
 
@@ -105,7 +105,7 @@ describe.runIf(testBrowser)('the web UI in a real browser', () => {
   // ---- the controls, held to the durable fact each click must produce --------
 
   /** The open session's id: the current crumb names it. */
-  const openSessionId = (page: Awaited<ReturnType<WebUi['page']>>): Promise<string> => page.evaluate<string>("document.querySelector('.crumb.current')?.title ?? ''")
+  const openSessionId = (page: Awaited<ReturnType<WebUi['page']>>): Promise<string> => page.evaluate<string>("document.querySelector('.crumb.current')?.dataset.session ?? ''")
   const factsOf = (sessionId: string): readonly EventEnvelope[] => ui!.host.root.get(AGENTS).get(asSessionId(sessionId))?.session.facts ?? []
   /** Clicks the open menu's item whose own label is exactly the one given. */
   const choose = (label: string): string => "[...document.querySelectorAll('.menu .menu-item')].find((item) => item.querySelector('.text > span')?.textContent === " + JSON.stringify(label) + ').click()'
@@ -167,9 +167,19 @@ describe.runIf(testBrowser)('the web UI in a real browser', () => {
       assistantMessage([{ call: ['g2', 'job_start', { command: 'node -e "setInterval(() => {}, 1000)"' }] }]),
       assistantText('granted and started'),
     )
+    // What the card's answer button was the moment it was inserted, seen by
+    // the page itself: the first sight of a card is never a live button.
+    await page.evaluate(
+      "window.armedAtFirstSight = undefined; new MutationObserver((records, observer) => { const button = document.querySelector('#approval .btn.primary'); if (button) { window.armedAtFirstSight = !button.disabled; observer.disconnect() } }).observe(document.querySelector('#approval'), { childList: true, subtree: true })",
+    )
     await page.type('#prompt', 'check node and start a watcher')
     await page.press('Enter')
-    await page.waitFor("!document.querySelector('#approval').hidden", 20_000)
+    await page.waitFor(APPROVAL_ARMED, 20_000)
+    expect(await page.evaluate<boolean | undefined>('window.armedAtFirstSight')).toBe(false)
+    // A double click's second press answers nothing: the card is still asking.
+    await page.evaluate("document.querySelector('#approval .btn.primary').dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }))")
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(await page.evaluate<boolean>("!document.querySelector('#approval').hidden")).toBe(true)
     await page.evaluate("[...document.querySelectorAll('#approval .btn')].find((b) => b.textContent === 'Allow for this session').click()")
     await page.waitFor(logHas('granted and started'), 30_000)
     const sessionId = await openSessionId(page)
@@ -204,9 +214,10 @@ describe.runIf(testBrowser)('the web UI in a real browser', () => {
     expect(await page.evaluate<boolean>("document.querySelector('#composer').hidden")).toBe(true)
     expect(await page.evaluate<string>("document.querySelector('#readonly').textContent")).toMatch(/read-only/)
     release()
-    // The child answers; it stays read-only while its parent session is live (`protocol/host.ts` parentRunning).
+    // The child answers and the delegation ends: the host disposes it and says so in a view —
+    // the page can drive it now, without being re-opened (`protocol/host.ts` onAgentDisposed).
     await page.waitFor(logHas('the review, done'), 20_000)
-    expect(await page.evaluate<boolean>("document.querySelector('#readonly').hidden")).toBe(false)
+    await page.waitFor("document.querySelector('#readonly').hidden && !document.querySelector('#composer').hidden", 20_000)
     expect(await page.unexpectedProblems()).toEqual([])
   })
 })

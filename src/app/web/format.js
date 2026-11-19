@@ -138,6 +138,12 @@ export function relativePath(path, cwd) {
   return rest
 }
 
+/** A sandbox mode as a person reads it. @param {string} mode */
+export const humanSandbox = (mode) => (mode === 'read-only' ? 'Read only' : mode === 'workspace-write' ? 'Workspace write' : mode === 'danger-full-access' ? 'Full access' : mode)
+
+/** A preset as a person reads it: the shipped two read as the mode they set. @param {string} name */
+export const humanPreset = (name) => (name === 'workspace-write' ? 'Workspace write' : name === 'danger-full-access' ? 'Full access' : name)
+
 /**
  * A session or job id short enough for a list: for `session-<x>` the first
  * eight characters of `<x>`, otherwise the first eight characters.

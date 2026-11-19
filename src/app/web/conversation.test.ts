@@ -262,6 +262,13 @@ describe('the conversation model', () => {
     prepend(paged, events.slice(0, turnTwo + 2))
     expect(paged.blocks.filter((block) => block.kind === 'fork')).toHaveLength(1)
     expect(shapeOf(paged)).toEqual(shapeOf(model))
+    // And the window's own live path after that prepend draws no second
+    // marker (S22 review: the head's marker was not carried over).
+    const live = fold(events.slice(turnTwo + 2, -3), { seedLength })
+    prepend(live, events.slice(0, turnTwo + 2))
+    for (const event of events.slice(-3)) step(live, event)
+    expect(live.blocks.filter((block) => block.kind === 'fork')).toHaveLength(1)
+    expect(shapeOf(live)).toEqual(shapeOf(model))
   })
 
   it('a resumed lifecycle opens again', () => {

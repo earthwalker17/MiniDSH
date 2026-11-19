@@ -18,7 +18,7 @@
  */
 import { createApproval } from './approval.js'
 import { createComposer } from './composer.js'
-import { shortId } from './format.js'
+import { humanPreset, humanSandbox, shortId } from './format.js'
 import { icon, mark } from './icons.js'
 import { createPanel } from './panel.js'
 import { tokens } from './rows.js'
@@ -79,6 +79,7 @@ const sidebar = createSidebar({
   list: byId('sessions'),
   foot: byId('sidebar-foot'),
   scrim: byId('scrim'),
+  main: byId('main'),
   onOpen: (id) => void openSession(id).catch(fail),
   onNew: () => newSession(),
   onSettings: () => settings.open(),
@@ -140,16 +141,21 @@ topbar.append(drawerOpener, crumbs, chips, h('span', { class: 'spacer' }), panel
 
 /** @param {boolean} [open] */
 function togglePanel(open = !state.panelOpen) {
+  const panelNode = byId('panel')
+  const was = state.panelOpen
+  const held = panelNode.contains(document.activeElement)
   state.panelOpen = open && state.window !== undefined
-  byId('panel').hidden = !state.panelOpen
+  panelNode.hidden = !state.panelOpen
   panelToggle.setAttribute('aria-expanded', String(state.panelOpen))
   if (state.panelOpen) {
     renderPanel()
+    if (!was) panelNode.focus()
     void refreshSessions().catch(() => undefined)
-  }
+  } else if (was && held) panelToggle.focus()
 }
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && state.panelOpen && !document.querySelector('dialog[open], .menu')) togglePanel(false)
+  // A menu's or a dialog's Escape closes that alone (the menu marks it handled).
+  if (event.key === 'Escape' && !event.defaultPrevented && state.panelOpen && !document.querySelector('dialog[open], .menu')) togglePanel(false)
 })
 document.addEventListener('pointerdown', (event) => {
   const target = /** @type {Node} */ (event.target)
@@ -194,14 +200,36 @@ function renderAll() {
     openParent.addEventListener('click', () => {
       if (parent) void openSession(parent).catch(fail)
     })
-    readonlyBar.replaceChildren(icon('users', { size: 16 }), h('span', { class: 'grow', text: 'A subagent session: read-only while its parent session is open.' }), parent ? openParent : '')
+    readonlyBar.replaceChildren(icon('users', { size: 16 }), h('span', { class: 'grow', text: 'A subagent at work: read-only until its parent’s delegation ends.' }), parent ? openParent : '')
   }
   byId('composer').hidden = asking || readOnly
   byId('composer-meta').hidden = asking || readOnly
   composer.render(composerState(view))
-  const dock = byId('dock')
-  main.style.setProperty('--dock-h', `${dock.offsetHeight}px`)
+  renderAttention()
   if (state.panelOpen) renderPanel()
+}
+
+/** The dock's height, for what floats above it: kept on every resize, not only on a render. */
+new ResizeObserver(() => main.style.setProperty('--dock-h', `${byId('dock').offsetHeight}px`)).observe(byId('dock'))
+
+/**
+ * Sessions OTHER than the open one that wait on a person. The list says so on
+ * each row; below 1024px the list is hidden, so the control that reveals it
+ * carries the count — a question parked elsewhere must still be findable.
+ */
+let attentionShown = 0
+function renderAttention() {
+  let count = 0
+  for (const summary of state.summaries.values()) {
+    if (summary.sessionId === state.window?.sessionId || summary.status === 'closed') continue
+    if (summary.pendingApprovals > 0 || summary.heldNotices > 0) count++
+  }
+  sidebar.setAttention(count)
+  drawerOpener.querySelector('.attention-dot')?.remove()
+  if (count > 0) drawerOpener.append(h('span', { class: 'attention-dot', attrs: { 'aria-hidden': 'true' } }))
+  drawerOpener.setAttribute('aria-label', count > 0 ? `Open sessions — ${count} other session${count === 1 ? ' needs' : 's need'} you` : 'Open sessions')
+  if (count > attentionShown) announce(count === 1 ? 'Another session needs you.' : `${count} other sessions need you.`)
+  attentionShown = count
 }
 
 function renderHero() {
@@ -256,7 +284,7 @@ function renderCrumbs() {
     crumb.addEventListener('click', () => void openSession(parentId).catch(fail))
     crumbs.append(crumb, h('span', { class: 'crumb-sep', text: '/', attrs: { 'aria-hidden': 'true' } }))
   }
-  crumbs.append(h('span', { class: 'crumb current', text: title, attrs: { title: window_.sessionId, 'aria-current': 'page' } }))
+  crumbs.append(h('span', { class: 'crumb current', text: title, attrs: { title: `${title}\n${window_.sessionId}`, 'data-session': window_.sessionId, 'aria-current': 'page' } }))
   document.title = `${title} — MiniDSH`
 }
 
@@ -265,9 +293,12 @@ function renderChips() {
   const view = viewOf()
   if (!view) return
   const running = view.jobs.filter((job) => job.state === 'running').length
-  if (running > 0) chips.append(h('span', { class: 'status-chip' }, h('span', { class: 'state-dot jobs' }), h('span', { text: running === 1 ? '1 background job' : `${running} background jobs` })))
-  const children = state.sessions.filter((session) => session.delegatedBy === state.window?.sessionId && session.live).length
-  if (children > 0) chips.append(h('span', { class: 'status-chip' }, icon('users', { size: 12 }), h('span', { text: children === 1 ? '1 subagent' : `${children} subagents` })))
+  const jobsWords = running === 1 ? '1 background job' : `${running} background jobs`
+  if (running > 0) chips.append(h('span', { class: 'status-chip', attrs: { title: jobsWords } }, h('span', { class: 'state-dot jobs' }), h('span', { class: 'words', text: jobsWords })))
+  // Working now, from the delegations this session's log shows open; a child whose agent merely stays live is not one.
+  const children = transcript.runningChildren().size
+  const childWords = children === 1 ? '1 subagent working' : `${children} subagents working`
+  if (children > 0) chips.append(h('span', { class: 'status-chip', attrs: { title: childWords } }, icon('users', { size: 12 }), h('span', { class: 'words', text: childWords })))
   if (view.drivable === false) chips.append(h('span', { class: 'status-chip', text: 'Read-only' }))
 }
 
@@ -276,13 +307,12 @@ function composerState(view) {
   const live = isLive()
   const window_ = state.window
   const running = (state.status ?? view?.status) === 'running' && live
-  const authority = view?.authority ?? state.init?.defaultAuthority
   const fresh = window_ === undefined
-  const pendingAuthority = state.pendingNew.authority
-  const sandbox = (fresh ? pendingAuthority?.sandbox : undefined) ?? authority?.sandbox ?? 'workspace-write'
-  const approvalPolicy = (fresh ? pendingAuthority?.approval : undefined) ?? authority?.approval ?? 'ask'
-  const accepts = (fresh ? pendingAuthority?.accepts : undefined) ?? authority?.accepts ?? 'full'
-  const preset = fresh ? (pendingAuthority?.preset ?? (pendingAuthority ? undefined : authority?.preset)) : authority?.preset
+  const authority = fresh ? pendingAuthority() : view?.authority
+  const sandbox = authority?.sandbox ?? 'workspace-write'
+  const approvalPolicy = authority?.approval ?? 'ask'
+  const accepts = authority?.accepts ?? 'full'
+  const preset = authority?.preset
   const options = (fresh ? state.pendingNew.agentOptions : undefined) ?? view?.options ?? (fresh ? state.init?.defaultAgentOptions : undefined)
   const stored = !fresh && !live
   const sub = [approvalPolicy === 'never' ? 'no prompts' : undefined, accepts !== 'full' ? `shell ${accepts}` : undefined].filter(Boolean).join(' · ')
@@ -317,10 +347,23 @@ function modelName(provider, model) {
   return entry?.name ?? model
 }
 
-/** @param {string} mode */
-const humanSandbox = (mode) => (mode === 'read-only' ? 'Read only' : mode === 'workspace-write' ? 'Workspace write' : mode === 'danger-full-access' ? 'Full access' : mode)
-/** @param {string} name */
-const humanPreset = (name) => (name === 'workspace-write' ? 'Workspace write' : name === 'danger-full-access' ? 'Full access' : name)
+/**
+ * The authority a NEW session would open with: the person's choices so far
+ * over the deployment's default. A chosen preset brings its own sandbox and
+ * approval policy — the chip and the menu must not show the default's.
+ */
+function pendingAuthority() {
+  const base = state.init?.defaultAuthority
+  const chosen = state.pendingNew.authority
+  const preset = chosen?.preset === undefined ? undefined : state.init?.presets.find((entry) => entry.name === chosen.preset)
+  return {
+    sandbox: chosen?.sandbox ?? preset?.sandbox ?? base?.sandbox ?? 'workspace-write',
+    approval: chosen?.approval ?? preset?.approval ?? base?.approval ?? 'ask',
+    accepts: chosen?.accepts ?? base?.accepts ?? 'full',
+    preset: chosen ? chosen.preset : base?.preset,
+    enforcement: base?.enforcement,
+  }
+}
 
 function renderPanel() {
   const window_ = state.window
@@ -335,6 +378,7 @@ function renderPanel() {
     ...(summary ? { summary } : {}),
     children: state.sessions.filter((session) => session.delegatedBy === window_.sessionId),
     stopping: state.stopping,
+    working: transcript.runningChildren(),
     ...(workspace ? { workspace } : {}),
   })
 }
@@ -362,7 +406,7 @@ function moreMenu(anchor) {
     [
       ...(window_
         ? [
-            { label: 'Copy session id', desc: 'What `minidsh resume` takes', icon: 'copy', onSelect: () => void copyText(window_.sessionId).then((ok) => toast(ok ? 'Session id copied.' : 'Copying is not available here.')) },
+            { label: 'Copy session id', desc: 'To resume it from a terminal', icon: 'copy', onSelect: () => void copyText(window_.sessionId).then((ok) => toast(ok ? 'Session id copied.' : 'Copying is not available here.')) },
             { label: 'Compact the context', icon: 'compact', disabled: !isLive(), onSelect: () => compact() },
             { separator: /** @type {const} */ (true) },
           ]
@@ -375,13 +419,11 @@ function moreMenu(anchor) {
 
 /** @param {HTMLElement} anchor */
 function permissionMenu(anchor) {
-  const view = viewOf()
-  const authority = view?.authority ?? state.init?.defaultAuthority
-  const chosen = state.window === undefined ? state.pendingNew.authority : undefined
-  const sandbox = chosen?.sandbox ?? authority?.sandbox
-  const policy = chosen?.approval ?? authority?.approval
-  const accepts = chosen?.accepts ?? authority?.accepts ?? 'full'
-  const preset = chosen ? chosen.preset : authority?.preset
+  const authority = state.window === undefined ? pendingAuthority() : viewOf()?.authority
+  const sandbox = authority?.sandbox
+  const policy = authority?.approval
+  const accepts = authority?.accepts ?? 'full'
+  const preset = authority?.preset
   /** @type {import('./ui.js').MenuEntry[]} */
   const entries = [{ heading: 'Presets' }]
   for (const entry of state.init?.presets ?? []) {
@@ -427,7 +469,11 @@ async function switchAuthority(change, risky) {
   }
   if (!state.window) {
     const current = state.pendingNew.authority ?? {}
-    state.pendingNew.authority = change.preset ? { preset: change.preset } : { ...(current.preset ? {} : current), ...change }
+    // A preset replaces the sandbox and approval choices; the shell's
+    // acceptance is no part of a preset, so choosing it keeps the preset.
+    if (change.preset) state.pendingNew.authority = { preset: change.preset, ...(current.accepts ? { accepts: current.accepts } : {}) }
+    else if (change.accepts && current.preset) state.pendingNew.authority = { preset: current.preset, accepts: change.accepts }
+    else state.pendingNew.authority = { ...(current.preset ? {} : current), ...change }
     renderAll()
     return
   }
@@ -497,6 +543,7 @@ async function switchModel(change) {
  */
 async function send(text, mode) {
   const window_ = state.window
+  const ticket = openTicket
   const bubble = h('div', { class: 'bubble-wrap' }, h('div', { class: 'bubble pending', text, attrs: { 'aria-label': `Sending: ${text}` } }))
   if (window_) showPending(bubble)
   try {
@@ -511,9 +558,16 @@ async function send(text, mode) {
         }
     const result = await state.wire.request('session/prompt', params)
     if (!window_) {
+      // Opened only if the person is still on the new-session page this send started from.
+      if (ticket !== openTicket || state.window !== undefined) {
+        bubble.remove()
+        void refreshSessions().catch(() => undefined)
+        return
+      }
       state.pendingNew = {}
       await openSession(result.sessionId)
-      const opened = state.window
+      // Re-read after the await: the open replaced the window.
+      const opened = /** @type {SessionWindow | undefined} */ (state.window)
       if (opened && opened.sessionId === result.sessionId && !holds(opened, result.messageId)) showPending(bubble)
     }
     const now = state.window
@@ -531,10 +585,9 @@ const holds = (window_, messageId) => window_.events.some((event) => event.type 
 
 /** @param {HTMLElement} bubble */
 function showPending(bubble) {
-  const scroller = byId('log')
-  const stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 40
   byId('live').prepend(bubble)
-  if (stick) scroller.scrollTop = scroller.scrollHeight
+  // A person's own send: the bottom is where they look next, wherever they were.
+  transcript.toBottom()
 }
 
 function cancelTurn() {
@@ -625,13 +678,29 @@ function loadImage(ref) {
   return read
 }
 
+/** The blob URLs a window made: revoked as it goes, so a long-lived tab holds one session's images at most. */
+function dropImages() {
+  for (const read of state.images.values()) void read.then((url) => URL.revokeObjectURL(url)).catch(() => undefined)
+  state.images.clear()
+}
+
 // ---- sessions ------------------------------------------------------------------------------
+
+/**
+ * Which navigation is current: every open and every new session takes a new
+ * ticket, and one that finds a later ticket after an await stands down — two
+ * quick clicks must not leave the first session attached behind the second.
+ */
+let openTicket = 0
 
 /** @param {string} sessionId */
 async function openSession(sessionId) {
   if (state.window?.sessionId === sessionId) return
+  const ticket = ++openTicket
   if (state.window) await state.wire.request('session/detach', { sessionId: state.window.sessionId }).catch(() => undefined)
+  if (ticket !== openTicket) return
   closeMenus()
+  dropImages()
   state.status = undefined
   state.sessionTools = new Map()
   for (const node of state.pending.values()) node.remove()
@@ -645,10 +714,13 @@ async function openSession(sessionId) {
   sidebar.setCurrent(sessionId)
   renderAll()
   const attached = await opened.attach()
-  if (state.window === opened) {
-    state.sessionTools = new Map((attached.tools ?? []).map((tool) => [tool.name, tool.display]))
-    transcript.refreshCards()
+  if (state.window !== opened) {
+    // Moved on while attaching: this window's stream is nobody's.
+    if (state.window?.sessionId !== sessionId) void state.wire.request('session/detach', { sessionId }).catch(() => undefined)
+    return
   }
+  state.sessionTools = new Map((attached.tools ?? []).map((tool) => [tool.name, tool.display]))
+  transcript.refreshCards()
   await refreshSessions()
 }
 
@@ -657,7 +729,9 @@ function newSession() {
   // counted as an answerer for its approvals and park a question no window
   // here could display (S7).
   const previous = state.window?.sessionId
+  openTicket++
   if (previous) void state.wire.request('session/detach', { sessionId: previous }).catch(() => undefined)
+  dropImages()
   state.window = undefined
   state.status = undefined
   state.pendingNew = {}
@@ -726,6 +800,8 @@ async function refreshSessions() {
 function start() {
   state.wire = new Wire(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`, {
     onOpen: async () => {
+      // Only pushes that land while THIS connection subscribes outrank its baseline.
+      pushedSinceOpen.clear()
       state.connected = true
       sidebar.setConnection(state.wasOffline ? 'back' : 'online')
       drawerOpener.querySelector('.badge-dot')?.remove()
@@ -764,6 +840,8 @@ function start() {
     onClose: () => {
       if (state.connected) announce('Disconnected from the host. Reconnecting.')
       state.connected = false
+      // The re-attach's view says whether a turn runs; a flip seen before the drop is stale.
+      state.status = undefined
       state.wasOffline = true
       sidebar.setConnection('offline')
       if (!drawerOpener.querySelector('.badge-dot')) drawerOpener.append(h('span', { class: 'badge-dot' }))
@@ -778,6 +856,7 @@ function start() {
         if (!sidebar.has(params.sessionId) && params.status !== 'closed') refreshSoon()
         else sidebar.updateRow(params.sessionId)
         if (params.sessionId === state.window?.sessionId) renderAll()
+        else renderAttention()
         return
       }
       if (method === 'settings.changed') {

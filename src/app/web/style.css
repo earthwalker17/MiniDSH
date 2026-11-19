@@ -631,8 +631,21 @@ pre {
   border-bottom-color: var(--line-2);
 }
 
-.drawer-opener {
+.drawer-opener,
+.attention-host {
   position: relative;
+}
+
+/* Another session waits on a person: on the control that reveals the list. */
+.attention-dot {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 2px var(--bg);
 }
 
 .drawer-opener .badge-dot {
@@ -694,10 +707,16 @@ pre {
   overflow: hidden;
 }
 
-/* A narrow header keeps the chip's dot and drops its words (the panel has them). */
+/* A narrow header keeps the chip's dot and hides its words from sight only:
+   a screen reader still hears them, a hover still shows them. */
 @container main (max-width: 560px) {
-  .status-chip > span:not(.state-dot) {
-    display: none;
+  .status-chip > .words {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 }
 
@@ -1970,8 +1989,10 @@ button.row:focus-visible {
   color: var(--warn-ink);
 }
 
+/* A narrow composer folds the chips to icons, except a warning: wider
+   authority is never shown by colour alone. */
 @container composer (max-width: 460px) {
-  .chip .value,
+  .chip:not(.warn) .value,
   .chip .sub {
     display: none;
   }
@@ -2699,6 +2720,29 @@ dialog.modal[open] {
   .filter,
   .field input {
     font-size: 16px;
+  }
+
+  /* A finger needs about 40px: every control a touch reaches, at least that. */
+  .icon-btn,
+  .msg-actions .icon-btn,
+  .card-label .icon-btn,
+  .codeblock-bar .icon-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .chip,
+  .btn,
+  .group-head,
+  .quiet-toggle,
+  .process .row {
+    min-height: 40px;
+  }
+
+  .child-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
   }
 }
 
