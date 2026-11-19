@@ -3,6 +3,7 @@
  *
  *   node desktop/scripts/package.ts            # the installer (Windows NSIS, Linux AppImage, macOS zip)
  *   node desktop/scripts/package.ts --dir      # the unpacked app only (fast; what the E2E drives)
+ *   node desktop/scripts/package.ts --tgz <minidsh-x.y.z.tgz>   # from a packed runtime (a release's own)
  *
  * Run `pnpm install` at the root and `pnpm --dir desktop install` first.
  *
@@ -47,10 +48,17 @@ function fail(message: string): never {
   process.exit(1)
 }
 
+/**
+ * pnpm and npm are `.cmd` shims on Windows, which Node runs only through a
+ * shell, so there the command line is built here, each argument quoted: the
+ * checkout's own path may hold a space (`C:\Users\Jo Doe\…`). No argument is
+ * a person's input; none holds a quote.
+ */
 function run(command: string, args: readonly string[], cwd: string): void {
-  // pnpm and npm are `.cmd` shims on Windows, which Node runs only through a
-  // shell; every argument here is ours, none is input.
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' })
+  const result =
+    process.platform === 'win32'
+      ? spawnSync([command, ...args].map((arg) => (/[\s&()^|<>]/.test(arg) ? `"${arg}"` : arg)).join(' '), { cwd, stdio: 'inherit', shell: true })
+      : spawnSync(command, args, { cwd, stdio: 'inherit' })
   if (result.status !== 0) fail(`${command} ${args.join(' ')} exited ${result.status ?? result.signal}`)
 }
 
@@ -77,22 +85,31 @@ const electronVersion = String((rootPackage.devDependencies as Record<string, st
 if (!/^\d+\.\d+\.\d+$/.test(electronVersion)) fail(`the root's electron devDependency must be an exact version, not ${electronVersion}`)
 
 const dirOnly = process.argv.includes('--dir')
+/** A runtime tarball already packed (the release gate's), instead of packing this checkout. */
+const tgzFlag = process.argv.indexOf('--tgz')
+const givenTgz = tgzFlag === -1 ? undefined : resolve(process.argv[tgzFlag + 1] ?? fail('--tgz takes the path of a packed minidsh tarball'))
 const platformKey = `${process.platform}-${process.arch}`
 const nodeSha = NODE_SHA256[platformKey] ?? fail(`no pinned Node build for ${platformKey}`)
 
 // ---------------------------------------------------------------- the runtime
 
 function stageRuntime(): void {
-  const pack = join(BUILD, 'pack')
-  rmSync(pack, { recursive: true, force: true })
-  mkdirSync(pack, { recursive: true })
-  run('pnpm', ['pack', '--pack-destination', pack], ROOT)
-  const tarball = readdirSync(pack).find((name) => name.endsWith('.tgz')) ?? fail('pnpm pack wrote no tarball')
+  let tarballPath: string
+  if (givenTgz !== undefined) {
+    if (!existsSync(givenTgz)) fail(`no tarball at ${givenTgz}`)
+    tarballPath = givenTgz
+  } else {
+    const pack = join(BUILD, 'pack')
+    rmSync(pack, { recursive: true, force: true })
+    mkdirSync(pack, { recursive: true })
+    run('pnpm', ['pack', '--pack-destination', pack], ROOT)
+    tarballPath = join(pack, readdirSync(pack).find((name) => name.endsWith('.tgz')) ?? fail('pnpm pack wrote no tarball'))
+  }
   const stage = join(BUILD, 'runtime')
   rmSync(stage, { recursive: true, force: true })
   mkdirSync(stage, { recursive: true })
   writeFileSync(join(stage, 'package.json'), '{ "private": true }\n')
-  run('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--no-package-lock', '--ignore-scripts', join(pack, tarball)], stage)
+  run('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--no-package-lock', '--ignore-scripts', tarballPath], stage)
   const minidsh = join(stage, 'node_modules', 'minidsh')
   for (const required of ['bin/minidsh.js', 'dist/app/cli.js', 'package.json', 'skills']) {
     if (!existsSync(join(minidsh, required))) fail(`the staged runtime lacks ${required}`)
@@ -167,7 +184,9 @@ function stageApp(): void {
     join(app, 'package.json'),
     `${JSON.stringify(
       {
-        name: 'minidsh-desktop',
+        // electron-builder names the per-user install folder after this:
+        // %LOCALAPPDATA%\Programs\minidsh.
+        name: 'minidsh',
         productName: 'MiniDSH',
         version,
         description: String(desktopPackage.description),
@@ -247,6 +266,10 @@ async function bundle(): Promise<void> {
       synopsis: 'A small, local-first coding-agent harness',
       artifactName: 'MiniDSH-${version}-${arch}.${ext}',
       executableName: 'minidsh-desktop',
+      // Without this electron-builder writes `--no-sandbox` into the AppImage's
+      // desktop entry unconditionally; AppRun still adds it, itself, only where
+      // unprivileged user namespaces are unavailable (ARCHITECTURE §13).
+      executableArgs: [],
     },
     mac: {
       target: [{ target: dirOnly ? 'dir' : 'zip', arch: [process.arch === 'arm64' ? 'arm64' : 'x64'] }],

@@ -119,12 +119,14 @@ jobs:
 
   # The desktop app, packed and proved on each platform it ships for. Its
   # packaging toolchain (desktop/package.json) is installed here alone, so the
-  # gate above stays lean. Each leg packs the installer it would ship and runs
-  # the packaged runtime the way the app does (the bundled Node, `web --json`,
-  # the handoff, every asset, a graceful stop). Windows also installs it
-  # silently into a path with a space and a non-ASCII letter and drives the
-  # installed app end to end (desktop/e2e/app.e2e.test.ts, keyless).
-  # MINIDSH_EXPECT_DESKTOP turns that suite's self-skip into a failure.
+  # gate above stays lean. Each leg packs the artifact it would ship and runs
+  # the runtime out of it the way the app does (the bundled Node, `web --json`,
+  # the one-shot handoff, every asset, a leased session, a graceful stop).
+  # Windows also drives the app keyless (desktop/e2e/app.e2e.test.ts): its
+  # lifecycle on the unpacked build, then the installer itself — a silent
+  # install into a path with a space and a non-ASCII letter, a refused
+  # reinstall while it runs, a silent uninstall. MINIDSH_EXPECT_DESKTOP turns
+  # that suite's self-skip into a failure.
   desktop:
     name: desktop ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -147,14 +149,23 @@ jobs:
       - name: Package for this platform
         run: node desktop/scripts/package.ts
 
+      # The runtime as the app starts it, out of the artifact that ships: the
+      # AppImage and the zip are unpacked first, so a file the packer dropped
+      # fails here, not on a person's machine. (Windows: the unpacked build
+      # here; the installer itself is installed and driven below.)
       - name: The packaged runtime, started as the app starts it
         shell: bash
         run: |
           set -euo pipefail
           case "$RUNNER_OS" in
             Windows) RESOURCES="desktop/build/dist/win-unpacked/resources" ;;
-            Linux) RESOURCES="desktop/build/dist/linux-unpacked/resources" ;;
-            macOS) RESOURCES="$(ls -d desktop/build/dist/mac*/MiniDSH.app/Contents/Resources | head -1)" ;;
+            Linux)
+              mkdir -p "$RUNNER_TEMP/appimage" && cp desktop/build/dist/MiniDSH-*.AppImage "$RUNNER_TEMP/appimage/"
+              (cd "$RUNNER_TEMP/appimage" && chmod +x MiniDSH-*.AppImage && ./MiniDSH-*.AppImage --appimage-extract > /dev/null)
+              RESOURCES="$RUNNER_TEMP/appimage/squashfs-root/resources" ;;
+            macOS)
+              ditto -x -k desktop/build/dist/MiniDSH-*-mac-*.zip "$RUNNER_TEMP/mac"
+              RESOURCES="$RUNNER_TEMP/mac/MiniDSH.app/Contents/Resources" ;;
           esac
           node desktop/scripts/smoke-runtime.ts "$RESOURCES"
 

@@ -6,9 +6,11 @@
  *   node desktop/scripts/smoke-runtime.ts <the app's resources directory>
  *
  * Keyless and headless, so every CI leg runs it on what it packed: the
- * contract (`ready`, the one-shot handoff), every browser asset the page
- * loads, a WebSocket `initialize`, and a graceful stop (stdin's end) that
- * exits 0 and leaves no lease. It drives the app's own modules
+ * contract (`ready`, the handoff, and the token refused a second time), every
+ * browser asset the page loads, a WebSocket `initialize`, a session prompted
+ * into being (its turn fails at once with no key, but the session holds its
+ * lease, which the smoke sees), and a graceful stop (stdin's end) that exits
+ * 0 and releases that lease. It drives the app's own modules
  * (`desktop/src/runtime.ts`), so the smoke and the app cannot disagree on
  * the contract.
  */
@@ -42,6 +44,12 @@ try {
   const version = (JSON.parse(readFileSync(join(resources, 'runtime', 'node_modules', 'minidsh', 'package.json'), 'utf8')) as { version: string }).version
   if (ready.version !== version) fail(`the runtime reports ${ready.version}, its package ${version}`)
   const cookie = await signIn(ready.port, ready.token)
+  // One-shot: the same token a second time is refused.
+  const reused = await signIn(ready.port, ready.token).then(
+    () => true,
+    () => false,
+  )
+  if (reused) fail('the launch token was accepted twice')
   const origin = `http://127.0.0.1:${ready.port}`
 
   const index = await fetch(`${origin}/`, { headers: { cookie } })
@@ -55,27 +63,41 @@ try {
   }
   if (!html.includes('<title>MiniDSH</title>')) fail('the page is not the Web UI')
 
-  const initialized = await new Promise<string>((resolveInit, reject) => {
+  // initialize, then a prompt that creates a session (no key: its turn fails
+  // at once, which is fine — the session exists and holds its lease).
+  const { initialized, sessionId } = await new Promise<{ initialized: string; sessionId: string }>((resolveWire, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${ready.port}/ws`, { headers: { cookie } } as never)
-    const timer = setTimeout(() => reject(new Error('no initialize answer within 15 s')), 15_000)
+    const timer = setTimeout(() => reject(new Error('no initialize and prompt answers within 30 s')), 30_000)
+    let initializedVersion = ''
     socket.addEventListener('open', () => socket.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })))
     socket.addEventListener('message', (event) => {
-      const frame = JSON.parse(String(event.data)) as { id?: number; result?: { serverInfo?: { version?: string } } }
-      if (frame.id !== 1) return
-      clearTimeout(timer)
-      socket.close()
-      resolveInit(String(frame.result?.serverInfo?.version))
+      const frame = JSON.parse(String(event.data)) as { id?: number; result?: { serverInfo?: { version?: string }; sessionId?: string }; error?: { message?: string } }
+      if (frame.error !== undefined) {
+        clearTimeout(timer)
+        reject(new Error(`the wire refused request ${String(frame.id)}: ${frame.error.message ?? ''}`))
+      } else if (frame.id === 1) {
+        initializedVersion = String(frame.result?.serverInfo?.version)
+        socket.send(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'session/prompt', params: { text: 'smoke' } }))
+      } else if (frame.id === 2) {
+        clearTimeout(timer)
+        socket.close()
+        resolveWire({ initialized: initializedVersion, sessionId: String(frame.result?.sessionId) })
+      }
     })
     socket.addEventListener('error', () => reject(new Error('the WebSocket upgrade was refused')))
   })
   if (initialized !== version) fail(`initialize reports ${initialized}`)
+  const lease = join(home, 'sessions', `${encodeURIComponent(sessionId)}.jsonl.lock`)
+  const leaseDeadline = Date.now() + 10_000
+  while (!existsSync(lease) && Date.now() < leaseDeadline) await new Promise((wait) => setTimeout(wait, 100))
+  if (!existsSync(lease)) fail(`the prompted session ${sessionId} holds no lease at ${lease}: the stop below would prove nothing`)
 
   const stop = await runtime.stop({ deadlineMs: 30_000 })
   if (!stop.graceful) fail(`the stop was not graceful: ${JSON.stringify(stop)}`)
   const sessions = join(home, 'sessions')
   const locks = existsSync(sessions) ? readdirSync(sessions).filter((name) => name.endsWith('.lock')) : []
   if (locks.length > 0) fail(`leases left behind: ${locks.join(', ')}`)
-  process.stdout.write(`desktop smoke: runtime ${version} on the bundled node ${process.platform}-${process.arch}: ready, handoff, ${assets.length} assets, initialize, graceful stop\n`)
+  process.stdout.write(`desktop smoke: runtime ${version} on the bundled node ${process.platform}-${process.arch}: ready, one-shot handoff, ${assets.length} assets, initialize, a leased session, graceful stop releasing it\n`)
 } catch (error) {
   runtime.kill()
   fail(`${error instanceof Error ? error.message : String(error)}\n${Buffer.concat(stderr).toString().slice(-4000)}`)
