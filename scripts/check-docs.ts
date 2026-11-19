@@ -97,7 +97,10 @@ const ARCHITECTURE_HEADINGS = [
 ]
 
 const REPO_BLOB = 'https://github.com/earthwalker17/MiniDSH/blob/main/'
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage'])
+// Generated or foreign trees: `build` is desktop/build (the packed app, and
+// the Node release unpacked with ITS markdown); `worktrees` holds agents'
+// checkouts of this repository under .claude.
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage', 'build', 'worktrees'])
 
 function walk(dir: string): string[] {
   const out: string[] = []
