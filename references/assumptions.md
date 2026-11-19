@@ -10,7 +10,7 @@ Each claim a MiniDSH document leans on is a row with its verdict when last check
 |---|---|---|---|---|
 | The `minimal` preset is shell-only | partly | Persona and one PTY group, plus image-only `tool-fs` and compaction since 2026-10-12; presets are rows under `bundle/web-app/presets/` | `bundle/web-app/presets/minimal.patch.yml` | PROJ §5, README |
 | DSH ships five protocol profiles | partly | Five COMPOSITION profiles; `sdk`/`sdk-minimal` share one wire; Electron reserves `desktop` | `docs/architecture.md` | README |
-| DSH deleted its TUI | unverified (recheck in S22.1) | None ships per its README; `packages/terminal` is a PTY for model tools; yet 0.2.2-rc.5's `dsh --help` lists `dsh tui --resume <session>` among its examples | `apps/cli/README.md` | ARCH §12, README |
+| DSH ships no TUI | confirmed (`2e39e704`, S22.1) | No path in the tree names one; `--profile tui --resume <id>` is an example "assuming the tui profile is installed"; `packages/terminal` is a PTY for model tools | `apps/cli/README.md` | ARCH §12, README |
 | DSH's Web client keys a tool's view by its wire name (2026-11-18) | partly | Its owning package registers the view by name; core `presentCall` gives a kind only to non-web hosts. MiniDSH carries a tool-owned `display` on the wire instead | `client/ui-tool/README.md` | ARCH §11 |
 | The desktop app is an Electron client of the same runtime | partly | Same code, not a thin client: a RunAsNode child runs the `desktop` profile on an OS-assigned port; the window forwards to it | `apps/desktop/README.md` | PROJ §8, BP §2 |
 | No lower-bound attach cursor upstream | confirmed | `follow()` opens with a tail page; `page()` takes upper bounds only | `api/session-controller/src/history.ts` | ARCH §8 |

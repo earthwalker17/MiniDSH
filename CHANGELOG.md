@@ -6,6 +6,17 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ### Added
 
+- **A full-screen terminal.** `minidsh chat`, `resume` and `fork` now own the terminal on a real TTY:
+  - the conversation drawn like the web UI: your message, the reply as markdown with highlighted code and tables, each tool call as a card (a command with the tail of its output, an edit as a diff), a finished turn's work folded to one line (Ctrl+O opens it), approvals and permission changes always in view;
+  - parallel subagents shown live, each card following what its child is doing;
+  - a composer with a real line editor: multi-line drafts (Ctrl+J; Ctrl+Enter on Windows; `\` then Enter anywhere), word movement and deletion, history (↑ at the top of a draft, Ctrl+P/Ctrl+N), pastes kept intact;
+  - a command palette on `/`, with `/help`, `/resume` (a picker), `/new`, `/fork` and `/copy` beside the existing commands;
+  - an approval band that takes the composer's place, answered by `y`, `n` or `a` and only once the keyboard has been quiet for a moment, so a key typed for the composer never answers it;
+  - two status rows (permissions and what the session is doing; model, effort and context);
+  - keyboard scrolling and the wheel (on an empty draft); the terminal's own colours, with `NO_COLOR`, 256 and 16 colours and an ASCII glyph set (`MINIDSH_ASCII=1`) respected.
+
+  A pipe, a script, a screen reader or `--plain` keeps the line view.
+- **`session/resume` and `session/fork`** on the protocol: continue a stored session without a prompt, or branch one at an event; the terminal's own resume and fork now use them.
 - **A redesigned web UI.** `minidsh web` is now a full application:
   - a session list (a rail on a narrow window, a drawer on a phone), marking the sessions that wait on you;
   - replies rendered as markdown, with highlighted code and tables;
@@ -34,6 +45,8 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- A plain-text result line now names the call it answers (`✓ bash`, `✗ bash DENIED`): parallel calls finish in any order, so a bare mark no longer said which. This covers the line view, `minidsh run`'s progress and `sessions show`.
+- A shutdown racing a resume could answer while the resumed session was still being disposed; it now waits for it.
 - A session's view now follows its status: a client attached to it no longer shows a turn as running after it ended, or a subagent session as read-only after its delegation ended.
 - A `resume` (CLI, terminal or wire) whose authority flags the session refuses no longer loses the prompt the session had queued; the flags now land before that prompt can start a turn, and the model is told of them in its first request.
 - A prompt sent to a session that is shutting down is refused instead of being accepted and dropped.

@@ -2,20 +2,19 @@
 
 What comes next, the route there, what is undecided, and a compact record of how the system arrived. `ARCHITECTURE.md` (beside this file) is the current shape and its limitations; this file is direction and the measurements the architecture map does not carry. Its budget is in `scripts/check-docs.ts`; past 90%, compress §4 first (older entries collapse to what a later session reuses).
 
-## 1. Next session — S22.1 Terminal TUI redesign
+## 1. Next session — S22.2 Desktop application
 
-S22 made the browser a product surface over tool presentation on the wire (§4). S22.1 does the same for the terminal (`app/terminal`): a full-screen counterpart, with Codewhale (Rust/Ratatui, MIT) as the visual and interaction reference, adapted to Node with no native dependency. Research Codewhale's current repository first (layout, key handling, approval flow), not summaries. The terminal stays a protocol client that retains nothing of a session (ARCHITECTURE §8).
+S22 and S22.1 made the browser and the terminal product surfaces over one runtime. S22.2 makes an installable desktop app over the same runtime and the same Web UI, after studying DSH's `apps/desktop` first (`references/dsh/surfaces.md`): a window, not a second client.
 
-- **The surface.** A status line (mode, model, effort, context), a line editor, inline single-key approvals showing the trusted subject, and cards drawn from `display` under the browser's placement rules. `conversation.js` and `cards.js` are pure and parity-gated, so they are the candidates to share. A slash palette decides the skill gesture (§3).
-- **The wire.** `session/fork` and resume-without-prompt become protocol methods, so the app-assembly bypass (`resume`/`fork` beside the wire) is deleted; fork gets the `onResumed`-style opening hook.
-- **Inherited from S22:** pooled result lines matched by order on plain-text surfaces (ARCHITECTURE §13); `subjectParts` wherever a subject is styled.
+- **The launcher.** Single instance; a graceful `minidsh web` stop and `web --json` (ARCHITECTURE §13: today the next process repairs and reclaims the lease); a credential handoff without a token URL; a stable origin, so client preferences survive a relaunch.
+- **Packaging.** Signed installers per OS, and how an update reaches them.
+- **Decisions it owes:** the importable-surface question (§3) if the launcher hosts the runtime in-process rather than over the carrier; the social preview.
 
-*Not:* a second runtime, surface-held state, mouse-first interaction.
+*Not:* a second runtime, a native UI, a fork of the Web UI.
 
 **Gate.**
-- The full gates on both hosts.
-- Every arc 3× per host if the protocol host changes, otherwise the arcs the terminal touches.
-- A live terminal session doing real work, its log asserted.
+- The full gates on both hosts, the arcs the launcher touches.
+- The installed app doing real work on a real model, its log asserted.
 
 ## 2. Macro route (dependency-ordered; sessions are approximate)
 
@@ -35,7 +34,7 @@ S22 made the browser a product surface over tool presentation on the wire (§4).
 | ~~**S21** Multi-actor execution (2026-10-31)~~ | ✅ No scheduler: concurrency joined at the step; parallel foreground delegation, bounded by a durable per-agent width; replay keyed by delegation; an atomic editor CAS; jittered retry. §4. | S20.5 |
 | ~~**S21.1** Continuations and process hygiene (2026-11-08)~~ | ✅ A child's narrowing as an opening fact every lifecycle re-applies; agent-owned work; a continuer's switches before any wake; every Windows pwsh contains what it starts. §4. | S21 |
 | ~~**S22** Web UI redesign (2026-11-19)~~ | ✅ The browser as a product surface: tool presentation (`display`) on the wire, a conversation model joined by recorded ids, cards from durable facts, the view following status, a CSP with Trusted Types, the DOM under a real browser. §4. | S21.1 |
-| **S22.1** Terminal TUI redesign | A full-screen terminal (status line, line editor, inline single-key approvals, a slash palette that decides the skill gesture, §3), with Codewhale as the visual and interaction reference; cards from `display`; `session/fork` and resume-without-prompt on the wire, and the beside-the-wire bypass deleted | S22 |
+| ~~**S22.1** Terminal TUI redesign (2026-11-19)~~ | ✅ A full-screen terminal over the browser's presentation model (Codewhale as the reference): one controller for two views, consent at the keyboard, one neutralizing cell writer; `session/resume` and `session/fork` on the wire, the bypass deleted. §4. | S22 |
 | **S22.2** Desktop application | An installable app over the same runtime and Web UI, after studying DSH's `apps/desktop`: launcher, graceful `web` stop and `web --json`, a credential handoff without a token URL, single instance, packaging, a stable origin for client preferences, the importable-surface decision (§3), the social preview | S22 |
 | **S22.5** Hardening checkpoint C = V2 release candidate | — | S22–S22.2 |
 
@@ -57,7 +56,6 @@ S22 made the browser a product surface over tool presentation on the wire (§4).
 - **A second surface writer.** Only the compaction planner enforces "a replace never separates a call from its result", and the session invariant admits a `replace`-op `user/message` outside a step but not a `tool/result`. A pruner would be that second writer; the rule moves into the session when one exists.
 - **Workspace-lifetime grants.** S15 shipped the session-lifetime shape and the identity any durable grant needs (tool plus exact subject), so what is left open is only the STORE. One that outlives a session cannot live in one log, `settings` may not own authority, and no workspace layer exists: a home-side store keyed by canonical root, COPIED into opening facts, is the only shape that keeps a stored log's audit self-contained.
 - **A document input kind.** A PDF block is a vocabulary change (`AttachmentRef`, `ModelModality`, `ContentBlock`, both serializers, the meter); upstream's generic file kind, projected as one handle line and never bytes, gives every model PDF support for nothing.
-- **A person invoking a skill.** DSH injects a skill's body when a user types `/name`; MiniDSH has no gesture and hides a `disable-model-invocation` skill entirely. A surface could send a prompt naming the listed path (no runtime change) or a plugin message. S22.1's slash palette decides.
 - **Uploads.** An upload is a new image producer. Admission against the step's route happens at delivery, which needs a core path. The store is never swept. A client-sent ref could carry a forged `name`. The shape if evidence asks: host-minted upload ids that `session/prompt` cites, plus a retention row.
 - **Stopping one child among several.** A child mid-delegation is read-only on every driving method (`protocol/host.ts`). Stopping one is a runtime semantic: which result does the parent's call get?
 - **What projection would a rename need?** `session/title` is last-wins, but nothing reads the CURRENT title cheaply: a name chosen at seq 5,000 is nowhere near the bounded prefix `persistence.list()` reads. A sidecar, a writer-maintained stamp, or a real projection store (upstream mounts one by default).

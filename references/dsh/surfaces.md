@@ -1,6 +1,6 @@
 # DSH reference: Surfaces: host, clients, protocol, Desktop
 
-> Where to research DSH's host, clients, carriers and Desktop ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@22ddee37` (2026-10-23); the Web client rows re-read at `2e39e704` (2026-11-18, `@deepseek-ai/dsh` 0.2.2-rc.5) in S22, 2026-11-19.
+> Where to research DSH's host, clients, carriers and Desktop ([reading rules](../README.md)). Pinned to `deepseek-ai/deepseek-harness@22ddee37` (2026-10-23); the Web client rows re-read at `2e39e704` (2026-11-18, `@deepseek-ai/dsh` 0.2.2-rc.5) in S22, 2026-11-19, and the CLI's TUI question there in S22.1 (none ships in-tree; built here: resume and fork on the wire, children followed read-only, ARCH §8, §12).
 
 ## What exists (at the pin)
 
@@ -24,13 +24,8 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 
 ## Open for the route
 
-- **S22.1, a TUI.** `dsh --help` (0.2.2-rc.5) lists `dsh tui --resume <session>` among its examples; `apps/cli/README.md` says none ships. Check which is true. `apps/cli/`
-- **S22.1, following a child.** Only through its direct-parent address: header `origin: 'subagent'` and `parentSession` must match, and the `subagent` projection must lie in the child's own range. `packages/api/session-controller/src/history.ts`
-- **S22.1, fork on the wire.** An explicit `atSeq` copies the exact inclusive prefix, even inside an open turn; omitted, the latest completed turn and its tail. Since rc.3 an ordinary fork records no source (no `parentSession`); subagents keep their creator. `docs/upgrade-guide/v0.2.1-rc.3/independent-session-forks/guide.md`
-- **S22.1, resume without a prompt.** SDK `session/resume` restores a persisted session without input, refusing a missing, incompatible or occupied one. `packages/sdk/protocol/README.md`
 - **later, prompt retries.** Idempotent on a client-minted `requestId`, echoed as the user source's `rpcId`, which also binds the prompt's upload receipts. `packages/api/session-controller/src/commands.ts`
 - **later, uploads.** One streaming request per file, not resumable; an image is bounded by the per-image and per-message limits and stored via `ctx.attachments` before any prompt. `packages/client/file-upload/README.md`
-- **S22.1, tool presentation.** Core `ToolCallKind` from each tool's `presentCall` (`packages/core/tools/src/presentation.ts`) serves non-web hosts; the Web client derives its cards from raw events and keys views by wire name (`packages/client/ui-tool/README.md`). MiniDSH carries a tool-owned `display` instead.
 - **later, paging and the wire's bounds.** `turnWindow` asks 50 messages and two `turn/start` minima; the cap is the CLIENT's `maxMessages` (Web 500; Host default 50, no maximum); the uplink overflows at `streamInboxBytes` (`gateway/uplink-overflow`); the downlink awaits each socket write. `packages/api/gateway/src/stream-server.ts`
 - **later, display facts.** `command/run` and `command/done` bracket the handler; `command/done.sourceEventSeq` joins a projection without parsing text. `docs/subsystems/commands.md`
 - **later, an unseen approval.** It waits in the Gateway's Host-wide pending map, reaches each owner client that connects, and ends only on an answer, a cancel or the Agent's release: no timeout. `packages/api/gateway/src/index.ts`
@@ -47,6 +42,7 @@ Status `default` = mounted by the shipped `web` profile (`packages/bundle/base` 
 | `apps/desktop/README.md`, `apps/desktop/publishing/README.md` | Loading, ownership, updates, publication | 2026-10-25 |
 | `packages/sdk/protocol/README.md`, `packages/acp/acp/README.md`, `packages/client/file-upload/README.md` | The stdio carriers; uploads | 2026-10-25 |
 | `packages/client/ui-chat/src/client/chat/use-scroll-follow.ts` | Follow intent as state; its own target and last sample mark its writes | 2026-10-25 |
+| `apps/cli/README.md` | `--profile tui` is an example of an installable profile; no TUI package in the tree | 2026-11-19 |
 | `packages/client/ui-theme/src/styles/design-platform.css`, `ui-chat/README.md`, `ui-tool/README.md`, `ui-approval/README.md`, `docs/cookbook/reviewing-ui-design.md` | Tokens, process groups, per-tool views, the approval takeover, the review principles | 2026-11-19 |
 
 ## Likely to go stale
