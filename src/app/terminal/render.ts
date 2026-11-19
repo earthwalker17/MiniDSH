@@ -11,7 +11,7 @@ import { printableLines } from '../../core/text.ts'
 import { APPROVAL_ASKED } from '../../core/approval/index.ts'
 import type { StreamChunk } from '../../core/llm/index.ts'
 import type { SessionView } from '../../capabilities/protocol/index.ts'
-import { describeEvent, transcriptLines } from '../present.ts'
+import { CallNames, describeEvent, transcriptLines } from '../present.ts'
 
 /**
  * Folds live session events into raw terminal writes (may be partial lines).
@@ -26,6 +26,8 @@ export class TerminalRenderer {
   private thinking = false
   /** Whether text for the message now being assembled reached THIS client. */
   private streamedText = false
+  /** The tool each call was made with, so a result line names its call (a pooled step's results end in any order). */
+  private readonly names = new CallNames()
   /** The last numbers published, so an unchanged view prints nothing. */
   private context: ContextMetrics | undefined
 
@@ -79,7 +81,7 @@ export class TerminalRenderer {
       const streamed = this.streamedText
       this.streamedText = false
       if (streamed) return ''
-      const line = describeEvent(event)
+      const line = describeEvent(event, this.names)
       return line === undefined ? '' : `${line}
 `
     }
@@ -87,7 +89,7 @@ export class TerminalRenderer {
     // rendered by the controller's `[y/N]` prompt, so its line would be a twin.
     if (matches(event, TURN_END) && event.data.reason.kind === 'completed') return ''
     if (matches(event, APPROVAL_ASKED)) return ''
-    const line = describeEvent(event)
+    const line = describeEvent(event, this.names)
     return line === undefined ? '' : `${line}\n`
   }
 }

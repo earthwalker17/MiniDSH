@@ -55,19 +55,38 @@ function confinement(mode: string, enforcement: string): string {
  * interpolated raw, each a string a provider or a stored log controls, and an
  * ESC in any of them repaints the line above a person's [y/N].
  */
-export function describeEvent(event: EventEnvelope): string | undefined {
-  const line = lineFor(event)
+export function describeEvent(event: EventEnvelope, names?: CallNames): string | undefined {
+  names?.see(event)
+  const line = lineFor(event, names)
   return line === undefined ? undefined : printableText(line)
 }
 
-function lineFor(event: EventEnvelope): string | undefined {
+/**
+ * The tool each call id was made with, learned from the `tool/call`s a reader
+ * has seen. A pooled step (S21) commits its results in model order but its
+ * bodies end in any order, so on a plain-text surface a bare `✓` no longer
+ * says which call it answers: a reader that keeps one of these names it
+ * (`✓ bash`, `✗ bash DENIED`), joined by `callId`, never by position.
+ */
+export class CallNames {
+  private readonly names = new Map<string, string>()
+  see(event: EventEnvelope): void {
+    if (matches(event, TOOL_CALL)) this.names.set(event.data.callId, event.data.name)
+  }
+  get(callId: string): string | undefined {
+    return this.names.get(callId)
+  }
+}
+
+function lineFor(event: EventEnvelope, names?: CallNames): string | undefined {
   if (matches(event, USER_MESSAGE)) {
     const message = restoreMessage(event.data.message)
     return message.source.kind === 'user' ? undefined : `· context (${message.source.kind})`
   }
   if (matches(event, TOOL_CALL)) return `→ ${event.data.name} ${preview(event.data.arguments)}`
   if (matches(event, TOOL_RESULT)) {
-    if (event.data.error) return `✗ ${event.data.error.code}`
+    const name = names?.get(event.data.callId)
+    if (event.data.error) return `✗ ${name === undefined ? '' : `${name} `}${event.data.error.code}`
     // A tool result renders as a checkmark and nothing else — deliberately, a
     // one-line live projection. An IMAGE is the exception, because it is the
     // only tool output that is content rather than text, and every image
@@ -77,7 +96,8 @@ function lineFor(event: EventEnvelope): string | undefined {
     // so live rendering and history cannot disagree, which is the defect S7.5
     // spent a session closing.
     const images = imagesIn(restoreMessage(event.data.message).content)
-    return images.length === 0 ? '✓' : `✓ ${images.join(' ')}`
+    const said = [...(name === undefined ? [] : [name]), ...images]
+    return said.length === 0 ? '✓' : `✓ ${said.join(' ')}`
   }
   if (matches(event, EFFECT_RECORDED)) {
     // What a call actually DID, from the code that did it. The one spelling is
@@ -194,16 +214,16 @@ function lineFor(event: EventEnvelope): string | undefined {
  * a compaction showed none of them, while watching the same session live showed
  * them all. Which of two things you saw depended on when you looked.
  */
-export function transcriptLines(events: readonly EventEnvelope[]): string[] {
+export function transcriptLines(events: readonly EventEnvelope[], names: CallNames = new CallNames()): string[] {
   const lines: string[] = []
   for (const event of events) {
-    const line = transcriptLine(event)
+    const line = transcriptLine(event, names)
     if (line !== undefined) lines.push(line)
   }
   return lines
 }
 
-function transcriptLine(event: EventEnvelope): string | undefined {
+function transcriptLine(event: EventEnvelope, names: CallNames): string | undefined {
   if (matches(event, USER_MESSAGE)) {
     const message = restoreMessage(event.data.message)
     const text = messageText(message)
@@ -214,7 +234,7 @@ function transcriptLine(event: EventEnvelope): string | undefined {
   } else if (matches(event, TURN_END) && event.data.reason.kind === 'completed') {
     return undefined
   }
-  return describeEvent(event)
+  return describeEvent(event, names)
 }
 
 /** Result codes that are a decision of the authority plane, not a tool failure. */

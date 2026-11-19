@@ -133,8 +133,47 @@ export function renderLive(live: Live, ctx: BlockContext): Line[] {
     const tail = displayLines(live.reasoning.trim(), { tabSize: 4 }).filter((line) => line.trim().length > 0).slice(-2)
     for (const line of tail) out.push(...wrapLine([span(line, { faint: true, italic: true })], ctx.width, { first: [indent(2), span(`${g.thoughtRail} `, FAINT)] }))
   }
-  if (live.text.trim().length > 0) out.push(...replyLines(live.text, ctx, true))
+  if (live.text.trim().length > 0) out.push(...liveReply(live.text, ctx))
   return out
+}
+
+/** Below this a streaming reply is simply re-rendered whole each frame. */
+const STABLE_FROM = 2000
+let settledHead: { key: string; lines: Line[] } = { key: '', lines: [] }
+
+/**
+ * A long streaming reply re-parsed whole on every frame costs a parse of
+ * everything already on screen per chunk. Markdown blocks end at a blank
+ * line outside a fence, and nothing after such a line changes how the text
+ * before it renders, so the head up to the last one is rendered once and
+ * kept; only the tail still arriving is parsed per frame. The durable reply
+ * that replaces the preview is rendered whole.
+ */
+function liveReply(text: string, ctx: BlockContext): Line[] {
+  if (text.length < STABLE_FROM) return replyLines(text, ctx, true)
+  const cut = stableCut(text)
+  if (cut <= 0) return replyLines(text, ctx, true)
+  const head = text.slice(0, cut)
+  const key = `${ctx.width}|${ctx.theme.depth}|${ctx.theme.glyphs.reply}|${head}`
+  if (settledHead.key !== key) settledHead = { key, lines: replyLines(head, ctx, false) }
+  const tail = renderMarkdown(text.slice(cut), Math.max(10, ctx.width - 2), ctx.theme, { streaming: true }).map((line) => [indent(2), ...line])
+  return tail.length === 0 ? settledHead.lines : [...settledHead.lines, [], ...tail]
+}
+
+/** The offset just past the last blank line that lies outside a fenced block, or 0. */
+export function stableCut(text: string): number {
+  let fence: string | undefined
+  let offset = 0
+  let cut = 0
+  for (const line of text.split('\n')) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (marker !== undefined) {
+      if (fence === undefined) fence = marker[0]
+      else if (marker[0] === fence) fence = undefined
+    } else if (fence === undefined && line.trim() === '' && offset > 0) cut = offset + line.length + 1
+    offset += line.length + 1
+  }
+  return Math.min(cut, text.length)
 }
 
 function unbracket(text: string): string {

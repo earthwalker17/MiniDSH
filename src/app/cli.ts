@@ -44,7 +44,7 @@ import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
 import { printableText } from '../core/text.ts'
-import { auditLines, describeEvent } from './present.ts'
+import { auditLines, CallNames, describeEvent } from './present.ts'
 import { inspectLines, inspectStored, verdictExitCode, verifyAttachments, verifyLines, verifyStored } from './inspect.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
 import { startProtocolHost } from './serve.ts'
@@ -469,8 +469,9 @@ function eventPrinter(json: boolean): EventListener {
   // (S21), and a line no longer says whose it is by where it falls: every
   // session after the first this run printed is tagged with its id's tail.
   let root: string | undefined
+  const names = new CallNames()
   return (frame) => {
-    const line = describeEvent(frame.event)
+    const line = describeEvent(frame.event, names)
     if (!line) return
     root ??= frame.sessionId
     const tag = frame.sessionId === root ? '' : `[${printableText(String(frame.sessionId).slice(-6))}] `
@@ -1085,8 +1086,9 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
               `${formatTokens(metrics.sessionOutput)} out · context now ~${formatTokens(metrics.projectedTokens)}${ratio}\n`,
           )
         }
+        const names = new CallNames()
         for (const event of stored.events) {
-          const line = describeEvent(event)
+          const line = describeEvent(event, names)
           // The kind too: a stored line's `type` is any non-empty string the log holds (S20.5 review).
           process.stdout.write(`${String(event.seq).padStart(4)}  ${printableText(event.type)}${line ? ` ${line}` : ''}\n`)
         }

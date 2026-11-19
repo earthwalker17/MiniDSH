@@ -92,7 +92,7 @@ describe('present: one projection for every plain-text surface', () => {
       '→ bash {"command":"ls -la"}',
       '? approval-7 bash: run under "danger-full-access": need it',
       '! approval-7 rejected',
-      '✗ SANDBOX_ESCALATION_DENIED',
+      '✗ bash SANDBOX_ESCALATION_DENIED',
     ])
     expect(transcriptLines([end])).toEqual([])
     await root.dispose()
@@ -120,6 +120,20 @@ describe('what S8 added to the projection', () => {
   it('renders a plain tool result exactly as it always did', () => {
     const message = createToolResultMessage(asCallId('c1'), [{ type: 'text', text: 'output' }], false)
     expect(describeEvent({ type: 'tool/result', seq: 9, time: 0, data: { turn: 1, step: 1, callId: 'c1', message }, surfaceOp: { op: 'append' as const } })).toBe('✓')
+  })
+
+  it('names the call a result answers when the reader has seen it, so pooled results never read by position', () => {
+    const call = (seq: number, callId: string, name: string) => ({ type: 'tool/call', seq, time: 0, data: { turn: 1, step: 1, callId, name, arguments: '{}' } })
+    const result = (seq: number, callId: string, error?: string) => ({
+      type: 'tool/result',
+      seq,
+      time: 0,
+      data: { turn: 1, step: 1, callId, message: createToolResultMessage(asCallId(callId), [{ type: 'text', text: 'x' }], error !== undefined), ...(error === undefined ? {} : { error: { name: 'Error', code: error, message: error } }) },
+      surfaceOp: { op: 'append' as const },
+    })
+    // Two bodies of one step, the second ending first: each line says whose it is.
+    const lines = transcriptLines([call(1, 'c1', 'bash'), call(2, 'c2', 'view_image'), result(3, 'c2'), result(4, 'c1', 'DENIED')])
+    expect(lines.slice(2)).toEqual(['✓ view_image', '✗ bash DENIED'])
   })
 
   it('names a compaction decline, which had no line on any surface before', () => {
