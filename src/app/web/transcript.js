@@ -98,7 +98,22 @@ export function createTranscript(options) {
   const atBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= STICK_SLACK_PX
   const toBottom = () => {
     scroller.scrollTop = scroller.scrollHeight
+    lastTop = scroller.scrollTop
   }
+  /**
+   * Whether the reader follows the bottom: at it, or was and has not LEFT it.
+   * Only the reader's own input leaves it. A viewport that shrinks (the
+   * approval card replacing the composer, a long draft, a rotated phone),
+   * content that grows, or a clamp in a transient layout moves the bottom or
+   * `scrollTop` with a `scroll` event no different from a person's; read as
+   * "the reader left", it stopped every live turn's following at its first
+   * approval (S22's live run).
+   */
+  let stuck = true
+  let lastTop = 0
+  /** When the reader last touched, dragged or pressed a key: a scroll up soon after is theirs. */
+  let inputAt = Number.NEGATIVE_INFINITY
+  const following = () => stuck || atBottom()
 
   /** The card context the view supplies. */
   const context = () => ({
@@ -579,7 +594,7 @@ export function createTranscript(options) {
 
   /** Runs one DOM change with S10's rule: sample just before, write in the same task. @param {() => void} change */
   function mutate(change) {
-    const stick = atBottom()
+    const stick = following()
     change()
     if (stick) toBottom()
     syncToBottom()
@@ -718,24 +733,39 @@ export function createTranscript(options) {
     options.toBottom.hidden = atBottom() || model.blocks.length === 0
   }
 
-  /**
-   * Whether the reader was at the bottom at the last scroll. A resize (the
-   * approval card replacing the composer, a long draft, a rotated phone)
-   * moves the bottom without a scroll event; a reader who was there stays.
-   */
-  let stuck = true
+  // The reader moving the view up stops the following; reaching the bottom resumes it.
+  scroller.addEventListener(
+    'wheel',
+    (event) => {
+      if (event.deltaY < 0) stuck = false
+    },
+    { passive: true },
+  )
+  for (const type of ['pointerdown', 'touchmove']) scroller.addEventListener(type, () => (inputAt = performance.now()), { passive: true })
+  document.addEventListener('keydown', (event) => {
+    if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement) return
+    if (['PageUp', 'ArrowUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) stuck = false
+    inputAt = performance.now()
+  })
   scroller.addEventListener(
     'scroll',
     () => {
-      stuck = atBottom()
+      if (atBottom()) stuck = true
+      else if (scroller.scrollTop < lastTop && performance.now() - inputAt < 1000) stuck = false
+      lastTop = scroller.scrollTop
       syncToBottom()
     },
     { passive: true },
   )
-  new ResizeObserver(() => {
-    if (stuck) toBottom()
+  const follow = new ResizeObserver(() => {
+    if (following()) toBottom()
     syncToBottom()
-  }).observe(scroller)
+  })
+  follow.observe(scroller)
+  // The content too: what grows outside a `mutate` (the working line, a
+  // late layout) moves the bottom without a scroll event, and the next
+  // sample would read a reader at the bottom as one who scrolled away.
+  if (scroller.firstElementChild) follow.observe(scroller.firstElementChild)
 
   /** Everything a window held for its own blocks: nodes, expand state, pending thumbnails. */
   function forget() {
@@ -794,8 +824,8 @@ export function createTranscript(options) {
     },
     /** A person's own send: the bottom is where they will look. */
     toBottom() {
-      toBottom()
       stuck = true
+      toBottom()
       syncToBottom()
     },
     /** The trace tier: streamed, never stored. @param {EventEnvelope} event */

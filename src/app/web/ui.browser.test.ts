@@ -13,7 +13,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { AGENTS } from '../../core/agent/index.ts'
 import { ASSISTANT_MESSAGE, matches } from '../../core/session/index.ts'
 import { expectBrowserSuite, testBrowser } from '../../test-support/browser-fixture.ts'
-import { assistantMessage, assistantText, assistantTextPaused, gate } from '../../test-support/scripted-adapter.ts'
+import { assistantMessage, assistantText, type MessagePart, assistantTextPaused, gate } from '../../test-support/scripted-adapter.ts'
 import type { LlmRequest } from '../../core/llm/types.ts'
 import type { EventEnvelope } from '../../core/session/index.ts'
 import { TOOLS } from '../../core/tools/index.ts'
@@ -193,6 +193,45 @@ describe.runIf(testBrowser)('the web UI in a real browser', () => {
     while (!factsOf(sessionId).some((event) => event.type === 'job/end') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100))
     const end = factsOf(sessionId).find((event) => event.type === 'job/end')?.data as { cause: string; by?: string } | undefined
     expect(end).toMatchObject({ cause: 'cancelled', by: 'user' })
+    expect(await page.unexpectedProblems()).toEqual([])
+  })
+
+  it('follows the bottom across approvals answered mid-turn, and leaves a reader who scrolled up where they are', async () => {
+    const shell = toolNamed('terminal')!
+    const long = Array.from({ length: 40 }, (_, at) => `Line ${at}: what the agent is about to do next.`).join('\n\n')
+    const widen = (callId: string, command: string): MessagePart => ({ call: [callId, shell, { command, sandbox_permissions: 'danger-full-access', justification: 'checking the runtime' }] })
+    ui!.adapter.script(
+      assistantMessage([{ text: long }, widen('f1', 'node --version')]),
+      assistantMessage([{ text: 'A second check.' }, widen('f2', 'node -e "1"')]),
+      assistantText(`${long}\n\nFollowed to the end.`),
+    )
+    const page = await ui!.page()
+    await page.waitFor(READY)
+    const gap = "(() => { const s = document.querySelector('#log'); return s.scrollHeight - s.scrollTop - s.clientHeight })()"
+    await page.type('#prompt', 'run two checks')
+    await page.press('Enter')
+    // The card replaces the composer and goes again, twice: a transient
+    // layout clamps the scroll, which is not the reader leaving (S22's live run).
+    for (const round of [1, 2]) {
+      await page.waitFor(APPROVAL_ARMED, 20_000)
+      expect(await page.evaluate<number>(gap), `approval ${round} shown`).toBeLessThanOrEqual(40)
+      await page.click('#approval .btn.primary')
+      await page.waitFor("document.querySelector('#approval').hidden || document.querySelectorAll('#rows .system').length >= " + round, 20_000)
+    }
+    await page.waitFor(logHas('Followed to the end.'), 20_000)
+    await page.waitFor(`${gap} <= 40`, 5_000)
+
+    // A reader who scrolls up stays there while the next answer lands.
+    ui!.adapter.script(assistantText(`${long}\n\nA reply the reader was not following.`))
+    await page.evaluate("(() => { const s = document.querySelector('#log'); s.dispatchEvent(new WheelEvent('wheel', { deltaY: -400, bubbles: true })); s.scrollTop = 0 })()")
+    await page.type('#prompt', 'once more')
+    await page.press('Enter')
+    // A person's own send takes them to the bottom; scrolling up after it is theirs.
+    await page.waitFor(`${gap} <= 40`, 5_000)
+    await page.evaluate("(() => { const s = document.querySelector('#log'); s.dispatchEvent(new WheelEvent('wheel', { deltaY: -400, bubbles: true })); s.scrollTop = 0 })()")
+    await page.waitFor(logHas('A reply the reader was not following.'), 20_000)
+    expect(await page.evaluate<number>("document.querySelector('#log').scrollTop")).toBe(0)
+    expect(await page.evaluate<boolean>("!document.querySelector('#to-bottom').hidden")).toBe(true)
     expect(await page.unexpectedProblems()).toEqual([])
   })
 
