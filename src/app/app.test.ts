@@ -848,6 +848,10 @@ describe('the CLI front door', () => {
     }
     expect(await quiet(() => main(['resume', 'some-id', '--at', '12']))).toBe(2)
     expect(await quiet(() => main(['chat', '--json']))).toBe(2)
+    // `--plain` is the interactive terminal's: no flag of a headless command,
+    // and refused beside `--headless` (the smoke drives `chat --plain` itself).
+    expect(await quiet(() => main(['run', 'x', '--plain']))).toBe(2)
+    expect(await quiet(() => main(['resume', 'some-id', '--headless', 'task', '--plain']))).toBe(2)
   })
 
   it('prints a layer warning exactly once, and a malformed layer is a usage error', async () => {

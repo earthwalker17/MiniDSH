@@ -88,4 +88,12 @@ for (const name of ['office', 'pdf']) {
 console.log(`bundled skills listed: ${report.listed.map((entry) => `${entry.name} (${entry.origin})`).join(', ')}`)
 JS
 
-echo "smoke: minidsh $VERSION installed in $DIR starts, assembles, and finds its client and its bundled skills"
+# The terminal from the tarball: its line view on an empty pipe draws the
+# banner and exits 0 at once, no model called. This is what loads the
+# terminal's imports of the browser's modules from dist/, and drives `--plain`
+# itself (S22.1: the flag was promised and never parsed; only this caught it).
+mkdir -p .smoke-ws
+minidsh chat --plain --cwd .smoke-ws < /dev/null | grep -q "^minidsh $VERSION"
+echo "terminal line view starts from the installed package"
+
+echo "smoke: minidsh $VERSION installed in $DIR starts, assembles, finds its client and its bundled skills, and opens its terminal"

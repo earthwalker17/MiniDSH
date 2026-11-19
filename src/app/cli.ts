@@ -87,6 +87,7 @@ const FLAGS = {
   headless: '--headless',
   audit: '--audit',
   salvage: '--salvage',
+  plain: '--plain',
 } as const
 type FlagName = keyof typeof FLAGS
 const VALUE_FLAGS = new Set<string>((Object.keys(FLAGS) as FlagName[]).filter((name) => FLAGS[name].includes(' ')))
@@ -94,9 +95,9 @@ const VALUE_FLAGS = new Set<string>((Object.keys(FLAGS) as FlagName[]).filter((n
 /** What each command takes, from which both its usage line and the general help are printed — one table, never two strings. */
 const COMMANDS: Readonly<Record<string, { readonly positional: string; readonly flags: readonly FlagName[] }>> = {
   run: { positional: '"<task>"', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
-  chat: { positional: '["<task>"]', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
-  resume: { positional: '<id> ["<task>"]', flags: ['headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
-  fork: { positional: '<id> ["<task>"]', flags: ['at', 'salvage', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json'] },
+  chat: { positional: '["<task>"]', flags: ['cwd', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve', 'plain'] },
+  resume: { positional: '<id> ["<task>"]', flags: ['headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json', 'plain'] },
+  fork: { positional: '<id> ["<task>"]', flags: ['at', 'salvage', 'headless', 'provider', 'model', 'effort', 'max-steps', 'sandbox', 'ask', 'accept', 'preset', 'agent-preset', 'approve', 'json', 'plain'] },
   serve: { positional: '', flags: ['cwd', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   web: { positional: '', flags: ['cwd', 'port', 'host', 'sandbox', 'ask', 'accept', 'agent-preset', 'approve'] },
   config: { positional: '', flags: ['sandbox', 'ask', 'accept', 'json'] },
@@ -542,6 +543,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   // banner where a script expected frames — the exact class `chat --json`
   // was fixed for (refuseUnknownFlags): a flag a command cannot honour is
   // refused, never ignored.
+  if (headless && args.flags.get('plain') === true) return usage(`--plain chooses the interactive terminal's line view; a headless ${kind} has no terminal view`)
   if (!headless && args.flags.get('json') === true) return usage(`--json streams the wire's frames from a headless ${kind}: add --headless "<task>" (the interactive terminal has no JSON stream)`)
   const atRaw = args.flags.get('at')
   const boundary = typeof atRaw === 'string' ? Number(atRaw) : undefined
@@ -575,6 +577,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         ...at,
         ...salvage,
         ...(task.length > 0 ? { task } : {}),
+        ...(args.flags.get('plain') === true ? { plain: true } : {}),
         ...modelFlags(args),
       })
     } catch (error) {
@@ -616,6 +619,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
       ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
       approve: args.flags.get('approve') === true,
       ...(task.length > 0 ? { task } : {}),
+      ...(args.flags.get('plain') === true ? { plain: true } : {}),
       ...modelFlags(args),
     })
   } catch (error) {
