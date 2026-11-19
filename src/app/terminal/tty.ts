@@ -31,7 +31,10 @@ const MODES: readonly (readonly [set: string, reset: string])[] = [
   ['\x1b[?2004h', '\x1b[?2004l'], // bracketed paste
   ['\x1b[?7l', '\x1b[?7h'], // autowrap off: a full last column never scrolls
   ['\x1b[?25l', '\x1b[?25h'], // the cursor, until a frame places it
+  ['\x1b[?1007h', '\x1b[?1007l'], // alternate scroll: the wheel as arrows (Windows Terminal's default; xterm's is off)
 ]
+/** The signals that end the process with the terminal restored first. */
+const SIGNALS: readonly NodeJS.Signals[] = process.platform === 'win32' ? ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] : ['SIGINT', 'SIGTERM', 'SIGHUP']
 /** What a frame may leave behind, undone first whatever happened. */
 const AFTER_FRAME = '\x1b[?2026l\x1b[0m'
 
@@ -90,8 +93,9 @@ export class Tty {
     this.write(MODES.map(([set]) => set).join(''))
     if (this.ownProcess) {
       process.on('exit', this.onExit)
-      process.on('SIGTERM', this.onSignal)
-      process.on('SIGHUP', this.onSignal)
+      // SIGINT too: raw mode makes Ctrl+C a key, but an external `kill -INT`
+      // (or Ctrl+Break on Windows) would otherwise end the process raw.
+      for (const signal of SIGNALS) process.on(signal, this.onSignal)
       process.on('uncaughtException', this.onCrash)
       process.on('unhandledRejection', this.onCrash)
       this.captureStderr()
@@ -113,8 +117,7 @@ export class Tty {
     this.streams.input.pause()
     if (this.ownProcess) {
       process.removeListener('exit', this.onExit)
-      process.removeListener('SIGTERM', this.onSignal)
-      process.removeListener('SIGHUP', this.onSignal)
+      for (const signal of SIGNALS) process.removeListener(signal, this.onSignal)
       process.removeListener('uncaughtException', this.onCrash)
       process.removeListener('unhandledRejection', this.onCrash)
       this.releaseStderr()

@@ -66,6 +66,7 @@ import {
   REQUEST_CONTEXT,
   SESSIONS,
   SessionFormatError,
+  SessionForkError,
   foldSessionTitle,
   TRACE_TYPES,
   foldRequestContext,
@@ -235,11 +236,22 @@ function requireString(params: Record<string, unknown>, key: string, method: str
  * `-32603` a retry policy keyed on it would retry forever (the `settings/*`
  * rule, `asCallerError`).
  */
-function continuationFailure(method: string, error: unknown): RpcFailure {
+function continuationFailure(method: string, error: unknown): unknown {
   if (error instanceof RpcFailure) return error
   if (error instanceof SessionFormatError) return new RpcFailure(INVALID_PARAMS, error.message)
-  return new RpcFailure(INVALID_PARAMS, `${method}: ${error instanceof Error ? error.message : String(error)}`)
+  if (error instanceof SessionForkError || (error instanceof Error && CALLER_FAULTS.test(error.message))) return new RpcFailure(INVALID_PARAMS, `${method}: ${error.message}`)
+  // Anything else — an I/O error, a world that failed to mount, a bug — is the
+  // host's, and stays -32603 (the S22.1 review: mapping all of it hid real failures).
+  return error
 }
+
+/**
+ * What `core/agent` and the store say when the SESSION named is the problem:
+ * missing, damaged, held by another process, composed under another preset,
+ * or cut below a child's delegation opening. Plain `Error`s there, so matched
+ * by their words; a new caller fault added there must be added here.
+ */
+const CALLER_FAULTS = /no stored session|stored log is damaged|is locked by|the session was composed under|delegation opening|delegated under|delegated, but the log records/
 
 /** An optional non-negative integer, refused rather than coerced. */
 function optionalCount(params: Record<string, unknown>, key: string, method: string): number | undefined {
@@ -1381,6 +1393,9 @@ export class ProtocolHost {
     }
     const options = readAgentOptions(this.agentDefaults(), params.agentOptions, method)
     this.assertRoutable(options.partial, method)
+    // A fork keeps its source's root, as a resume does: `workspaceRoots`
+    // bounds where a session is first CREATED (`session/prompt`), and a fork
+    // continues one already created (ARCHITECTURE §13).
     const forking = agents
       .fork(this.ctx, asSessionId(sessionId), atSeq, {
         agentOptions: options.partial,

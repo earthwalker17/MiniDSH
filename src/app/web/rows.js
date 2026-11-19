@@ -317,3 +317,68 @@ export function describeRow(event) {
       return undefined
   }
 }
+
+/**
+ * A consent's outcome in words, for every surface that shows a decision (the
+ * browser's card and transcript, the terminal's decided line), so a person
+ * reads the same verdict wherever they look.
+ * @param {string | undefined} outcome
+ * @param {string | undefined} by
+ * @returns {string}
+ */
+export function decisionWords(outcome, by) {
+  if (outcome === undefined) return 'No decision recorded'
+  const what = outcome === 'allowed-once' ? 'Allowed once' : outcome === 'rejected' ? 'Rejected' : outcome === 'cancelled' ? 'Cancelled' : outcome === 'unavailable' ? 'Nobody could answer' : outcome
+  const who = by === 'user' ? ' by you' : by ? ` by ${by}` : ''
+  return `${what}${who}`
+}
+
+/**
+ * What a context message is, in a person's words: the plugin that wrote it
+ * names a kind of context, never shown as plugin jargon.
+ * @param {string} plugin
+ * @param {string | undefined} form
+ * @param {boolean} replace a compaction's replacing summary
+ * @returns {string}
+ */
+export function contextTitle(plugin, form, replace) {
+  if (replace) return 'Context summary · what the model keeps of the history above'
+  const known = /** @type {Record<string, string>} */ ({
+    'workspace-instructions': 'Workspace instructions',
+    skills: 'Skills available',
+    'context-runtime': 'Runtime context',
+    'compaction-basic': 'Context summary',
+    'tool-jobs': 'Background job update',
+    jobs: 'Background job update',
+  })
+  return known[plugin] ?? `Context from ${plugin}${form ? ` (${form})` : ''}`
+}
+
+/**
+ * An authority switch or a decision as a sentence, its model-chosen value
+ * (a command, a payload) as a code part: what both the browser and the
+ * terminal draw for a `system` block. Undefined for a kind with no sentence
+ * of its own (the row's text is the fallback). An if-chain, not a `switch`:
+ * the parity gate reads every `case` in this file as an event kind.
+ * @param {string} type
+ * @param {Record<string, any>} data
+ * @param {Record<string, any> | undefined} asked the question a decision answers, when the window holds it
+ * @returns {({ text: string } | { code: string })[] | undefined}
+ */
+export function systemParts(type, data, asked) {
+  if (type === 'sandbox/mode') return [{ text: `Sandbox set to ${data.mode} · enforcement ${data.enforcement}` }]
+  if (type === 'approval/policy') return [{ text: `Approvals set to ${data.policy}` }]
+  if (type === 'sandbox/acceptance') return [{ text: `Shell enforcement accepted: ${data.accepts} under ${data.forMode}` }]
+  if (type === 'authority/preset') return [{ text: `Preset ${data.name}` }]
+  if (type === 'agent/options') {
+    const route = data.options ?? {}
+    return [{ text: `Model set to ${route.provider}/${route.model}${route.reasoningEffort ? ` · effort ${route.reasoningEffort}` : ''}` }]
+  }
+  if (type === 'approval/grant') return data.op === 'revoke' ? [{ text: 'A session grant was revoked; the next such action asks again' }] : [{ text: `Standing grant for ${data.toolName}: ` }, ...subjectParts(data.subject)]
+  if (type === 'approval/decided') {
+    const subject = asked?.subject ? subjectParts(asked.subject) : [{ text: asked?.toolName ? `use ${asked.toolName}` : String(data.id) }]
+    const words = data.grantId && data.outcome === 'allowed-once' ? `Allowed for this session${data.decidedBy === 'user' ? ' by you' : ''}` : decisionWords(String(data.outcome), data.decidedBy === undefined ? undefined : String(data.decidedBy))
+    return [{ text: `${words}: ` }, ...subject]
+  }
+  return undefined
+}

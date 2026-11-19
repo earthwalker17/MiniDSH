@@ -104,7 +104,10 @@ export class NotNow extends Error {}
 export class SessionController {
   readonly client: ProtocolClient
   private readonly hooks: ControllerHooks
-  private readonly overrides: Partial<AgentOptions>
+  /** The route the first prompt creates its session on (launch flags, then `/model` before it). */
+  overrides: Partial<AgentOptions>
+  /** Authority switches asked for before the session exists: the creating prompt carries them as its opening. */
+  pendingAuthority: Record<string, string> = {}
   init: InitializeResult | undefined
   sessionId: string | undefined
   status: Status = 'idle'
@@ -285,6 +288,11 @@ export class SessionController {
     // A prompt asked and never decided still needs an answer; the host folds
     // that pair, because half of it can fall outside a page.
     for (const pending of result.view.pendingApprovals) this.ask(pending)
+    // The first prompt's session: an un-narrowed client streamed it from its
+    // first frame; one narrowed to nothing (after `/new`) streamed none of it.
+    // Its page fills what is missing, and the seq dedupe makes it a no-op
+    // where nothing is.
+    if (reason === 'created') for (const event of result.page.events) this.deliver({ sessionId: result.header.id, event })
     for (const frame of held) this.deliver(frame)
     this.hintHeld()
     return result
@@ -311,7 +319,12 @@ export class SessionController {
     this.creating = []
     let result: PromptResult
     try {
-      result = await this.client.request<PromptResult>('session/prompt', { text, agentOptions: this.overrides })
+      result = await this.client.request<PromptResult>('session/prompt', {
+        text,
+        agentOptions: this.overrides,
+        ...(Object.keys(this.pendingAuthority).length === 0 ? {} : { authority: this.pendingAuthority }),
+      })
+      this.pendingAuthority = {}
     } catch (error) {
       this.creating = undefined
       throw error

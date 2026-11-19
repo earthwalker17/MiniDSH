@@ -40,7 +40,7 @@ import { Palette, type PaletteOption } from './palette.ts'
 import { Frame, renderFrame } from './screen.ts'
 import { glyphsFor, span, wrapLine, type Depth, type Line, type Span, type Style, type Theme } from './style.ts'
 import { Tty } from './tty.ts'
-import { cleanText, displayLines, truncateText } from './width.ts'
+import { cleanKeepingLines, cleanText, displayLines, truncateStart, truncateText } from './width.ts'
 
 export interface FullScreenOptions {
   readonly client: ProtocolClient
@@ -63,9 +63,13 @@ export interface FullScreenOptions {
 export const ARM_MS = 600
 /** A lone ESC is a key once nothing has followed it for this long. */
 const ESCAPE_MS = 30
+/** How long an open bracketed paste may pause between chunks before it is closed as it stands. */
+const PASTE_HOLD_MS = 3000
 const FRAME_MS = 16
 const TICK_MS = 100
 const NOTICE_MS = 5000
+/** The largest paste the composer takes (the decoder's own bound is 4 MB). */
+const MAX_PASTE = 256 * 1024
 
 const FAINT: Style = { faint: true }
 
@@ -77,7 +81,12 @@ interface ChildState {
 
 interface BandAsk extends Ask {
   readonly shownAt: number
-  callScroll: number
+  /** The first body row the band shows (↑↓). */
+  scroll: number
+  /** Body rows the person has had on screen; it arms only once every one has been. */
+  readonly seen: Set<number>
+  /** The body's length when last drawn. */
+  bodyRows: number
   rang: boolean
 }
 
@@ -117,7 +126,7 @@ class FullScreenView {
 
   private ask: BandAsk | undefined
   private lastInputAt = Number.NEGATIVE_INFINITY
-  private panel: { kind: PanelKind; selected: number; sessions?: readonly SessionSummary[] } | undefined
+  private panel: { kind: PanelKind; selected: number; sessions?: readonly SessionSummary[]; confirm?: string } | undefined
   private notice: { text: string; style?: Style; until: number } | undefined
   private readonly pendingBubbles = new Map<string, string>()
   private runningSince: number | undefined
@@ -174,7 +183,7 @@ class FullScreenView {
           this.schedule()
         },
         onAsk: (ask) => {
-          this.ask = { ...ask, shownAt: this.now(), callScroll: 0, rang: false }
+          this.ask = { ...ask, shownAt: this.now(), scroll: 0, rang: false, seen: new Set(), bodyRows: 0 }
           this.syncTicker()
           this.schedule()
         },
@@ -234,44 +243,63 @@ class FullScreenView {
 
   private onData(chunk: Buffer | string): void {
     if (this.exiting) return
+    // How long the keyboard had been quiet BEFORE this chunk: the answer test
+    // reads it, never the stamp this chunk is about to leave.
+    const quietSince = this.lastInputAt
     this.lastInputAt = this.now()
     clearTimeout(this.escapeTimer)
     const keys = this.decoder.feed(chunk)
-    this.handleKeys(keys)
+    this.handleKeys(keys, quietSince)
     if (this.decoder.pending) {
-      this.escapeTimer = setTimeout(() => this.handleKeys(this.decoder.flush()), ESCAPE_MS)
+      // A held ESC is a key once nothing follows it for a moment; an open
+      // bracketed paste is still arriving and must not be cut by that timer
+      // (a gap between its chunks would close it, and its tail would submit).
+      const wait = this.decoder.pasting ? PASTE_HOLD_MS : ESCAPE_MS
+      this.escapeTimer = setTimeout(() => this.handleKeys(this.decoder.flush(), this.lastInputAt), wait)
     }
   }
 
-  private handleKeys(keys: readonly Key[]): void {
+  private handleKeys(keys: readonly Key[], quietSince: number): void {
     if (keys.length === 0) return
     // A lone key in its own chunk is the only thing that may answer a question.
     const lone = keys.length === 1 ? keys[0] : undefined
-    for (const key of keys) this.handleKey(key, key === lone)
+    for (const key of keys) this.handleKey(key, key === lone, quietSince)
     this.schedule()
   }
 
-  private handleKey(key: Key, lone: boolean): void {
-    if (this.ask !== undefined) return this.bandKey(key, lone)
+  private handleKey(key: Key, lone: boolean, quietSince: number): void {
+    if (this.ask !== undefined) return this.bandKey(key, lone, quietSince)
     if (this.panel !== undefined) return this.panelKey(key)
     this.composeKey(key)
   }
 
+  /** Whether the band can be answered now (for drawing it): long enough on screen, the keyboard quiet, and room to show it. */
   private armed(): boolean {
     const ask = this.ask
     if (ask === undefined) return false
     const now = this.now()
-    return now - ask.shownAt >= ARM_MS && now - this.lastInputAt >= ARM_MS && this.bandFits()
+    return now - ask.shownAt >= ARM_MS && now - this.lastInputAt >= ARM_MS && this.bandFits() && this.readAll(ask)
   }
 
-  private bandKey(key: Key, lone: boolean): void {
+  /**
+   * Keys while a question waits. A lone `y`, `n` or (where offered) `a`
+   * answers only if the band has been on screen for `ARM_MS` AND the keyboard
+   * was quiet for `ARM_MS` before it: a key in the middle of typing never
+   * does (the S22.1 review found one that did, once the band had armed).
+   * The same key pressed too EARLY on a quiet keyboard is an impatient answer,
+   * not text: it is swallowed and the person told to wait. Everything else
+   * typed goes to the draft underneath, which the editing keys still edit.
+   */
+  private bandKey(key: Key, lone: boolean, quietSince: number): void {
     const ask = this.ask!
+    const now = this.now()
     if (key.kind === 'text') {
       const answer = key.paste === undefined && lone ? key.text : undefined
-      // The arming test sees the keyboard as it was BEFORE this key: the
-      // chunk just stamped `lastInputAt`, so compare against the previous one.
-      if (answer !== undefined && this.armedBefore(ask) && (answer === 'y' || answer === 'n' || (answer === 'a' && ask.offered))) {
-        this.answer(ask, answer)
+      const isAnswer = answer === 'y' || answer === 'n' || (answer === 'a' && ask.offered)
+      const typing = now - quietSince < ARM_MS
+      if (isAnswer && !typing) {
+        if (now - ask.shownAt >= ARM_MS && this.bandFits() && this.readAll(ask)) this.answer(ask, answer!)
+        else this.say(!this.bandFits() ? 'enlarge the terminal to answer' : !this.readAll(ask) ? 'scroll the question to its end (↓) before answering' : 'the answer keys arm in a moment: read it first', { ink: 'warn' })
         return
       }
       this.editor.insert(key.text)
@@ -281,16 +309,32 @@ class FullScreenView {
       void this.controller.cancel(true).catch((error: unknown) => this.fail(error))
       return
     }
-    if (key.name === 'up') ask.callScroll = Math.max(0, ask.callScroll - 1)
-    else if (key.name === 'down') ask.callScroll++
-    else if (key.name === 'pageup') this.scrollBy(-Math.max(1, this.lastRows - 2))
-    else if (key.name === 'pagedown') this.scrollBy(Math.max(1, this.lastRows - 2))
-  }
-
-  /** Armed as of the input before the current chunk (the chunk being handled has just reset the clock). */
-  private armedAt = Number.NEGATIVE_INFINITY
-  private armedBefore(ask: BandAsk): boolean {
-    return this.armedAt >= ask.shownAt + ARM_MS
+    if (key.ctrl && key.name === 'u') {
+      this.editor.clear()
+      return
+    }
+    if (key.ctrl && key.name === 'w') {
+      this.editor.deleteWordBack()
+      return
+    }
+    switch (key.name) {
+      case 'backspace':
+        if (key.ctrl || key.alt) this.editor.deleteWordBack()
+        else this.editor.backspace()
+        return
+      case 'up':
+        ask.scroll = Math.max(0, ask.scroll - 1)
+        return
+      case 'down':
+        ask.scroll = Math.min(this.bandScrollMax, ask.scroll + 1)
+        return
+      case 'pageup':
+        return this.scrollBy(-Math.max(1, this.lastRows - 2))
+      case 'pagedown':
+        return this.scrollBy(Math.max(1, this.lastRows - 2))
+      default:
+        return
+    }
   }
 
   private answer(ask: BandAsk, key: string): void {
@@ -319,13 +363,19 @@ class FullScreenView {
     }
     if (key.kind !== 'key') return
     if (key.name === 'up') panel.selected = Math.max(0, panel.selected - 1)
-    else if (key.name === 'down') panel.selected = Math.min(Math.max(0, rows - 1), panel.selected + 1)
+    else if (key.name === 'down') panel.selected = Math.min(panel.kind === 'help' ? this.panelScrollMax : Math.max(0, rows - 1), panel.selected + 1)
     else if (key.name === 'enter') void this.panelAct(panel)
   }
 
   private composeKey(key: Key): void {
     const width = this.composerWidth()
     if (key.kind === 'text') {
+      // A paste this size is a file, not a message to type into: the composer
+      // lays every row out, and the model would get it whole anyway.
+      if (key.text.length > MAX_PASTE) {
+        this.say(`that paste is ${Math.round(key.text.length / 1024)} KB: save it to a file in the workspace and name the file instead`, { ink: 'error' })
+        return
+      }
       this.editor.insert(key.text)
       this.afterEdit()
       return
@@ -450,7 +500,7 @@ class FullScreenView {
 
   private afterEdit(): void {
     this.palette.update(this.editor.text)
-    if (this.editor.text.startsWith('/resume ') && this.sessionOptions.length === 0) void this.refreshSessions()
+    if (this.editor.text.startsWith('/resume ') && this.sessionOptions.length === 0) void this.refreshSessions().catch((error: unknown) => this.fail(error))
   }
 
   private enter(): void {
@@ -524,7 +574,11 @@ class FullScreenView {
     const name = head.slice(1)
     const arg = rest.join(' ')
     const spec = commandNamed(name)
-    if (spec === undefined) return this.say(`unknown command /${name}: /help lists them`, { ink: 'error' })
+    if (spec === undefined) {
+      // Kept, not lost: a path that starts with a slash, or a typo, is the person's to fix.
+      this.editor.set(line)
+      return this.say(`unknown command /${name}: /help lists them (a message that starts with / needs a space first)`, { ink: 'error' })
+    }
     try {
       switch (name) {
         case 'help':
@@ -544,6 +598,15 @@ class FullScreenView {
         }
         case 'model': {
           const [target, effort] = rest
+          // Before the first message there is no session to switch: the route is
+          // the one that message will create it on.
+          if (this.controller.sessionId === undefined) {
+            if (target === undefined) return this.say(`the session will start on ${this.route()?.provider}/${this.route()?.model}`)
+            const slash = target.indexOf('/')
+            const chosen = slash > 0 ? { provider: target.slice(0, slash), model: target.slice(slash + 1) } : { model: target }
+            this.controller.overrides = { ...this.controller.overrides, ...chosen, ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+            return this.say(`the session will start on ${this.route()?.provider}/${this.route()?.model}${effort ? ` ${this.theme.glyphs.dot} ${effort}` : ''} when you send the first message`)
+          }
           const route = await this.controller.model(target, effort)
           return this.say(`model: ${route.provider}/${route.model}${route.reasoningEffort ? ` ${this.theme.glyphs.dot} ${route.reasoningEffort}` : ''}`)
         }
@@ -553,6 +616,19 @@ class FullScreenView {
         case 'preset': {
           if (arg.length === 0) return this.say(`usage: /${name} ${spec.args ?? ''}`)
           const key = name === 'ask' ? 'approval' : name === 'accept' ? 'accepts' : name
+          // Before the first message, the switch rides on the prompt that creates
+          // the session, as its opening (the host refuses it there if it must).
+          if (this.controller.sessionId === undefined) {
+            // Checked now, against the same closed lists the palette offers, so a
+            // typo fails here and not on the prompt that carries it.
+            const allowed = (this.optionsFor(name) ?? []).map((option) => option.value)
+            if (!allowed.includes(arg)) return this.say(`/${name} takes ${allowed.length === 0 ? 'no value on this host' : allowed.join(' | ')}`, { ink: 'error' })
+            // A preset REPLACES the sandbox/approval pair (the wire refuses both at once).
+            const { preset: _preset, ...pair } = this.controller.pendingAuthority
+            const { sandbox: _sandbox, approval: _approval, ...unpaired } = this.controller.pendingAuthority
+            this.controller.pendingAuthority = key === 'preset' ? { ...unpaired, preset: arg } : key === 'accepts' ? { ...this.controller.pendingAuthority, accepts: arg } : { ...pair, [key]: arg }
+            return this.say(`${name} ${arg} applies when the session starts with your first message`)
+          }
           const view = await this.controller.authority({ [key]: arg })
           return this.say(`${humanSandbox(view.sandbox)} ${this.theme.glyphs.dot} approvals ${view.approval}${view.accepts === 'full' ? '' : ` ${this.theme.glyphs.dot} accepts ${view.accepts}`}${view.preset ? ` ${this.theme.glyphs.dot} ${view.preset}` : ''}`)
         }
@@ -597,6 +673,9 @@ class FullScreenView {
   }
 
   private async switchTo(target: Parameters<SessionController['switchTo']>[0]): Promise<void> {
+    // Refused before anything changes: a running delegation keeps its live cards.
+    const refusal = this.controller.switchRefusal()
+    if (refusal !== undefined) throw new NotNow(refusal)
     this.children.clear()
     const result = await this.controller.switchTo(target)
     if (result === undefined) {
@@ -610,8 +689,10 @@ class FullScreenView {
     if (reply === undefined) return this.say('no reply to copy yet')
     // OSC 52: the terminal puts it on the clipboard (Windows Terminal, iTerm2,
     // kitty, WezTerm; tmux with set-clipboard on). Our own sequence, never text.
-    this.tty.write(`\x1b]52;c;${Buffer.from(reply.text, 'utf8').toString('base64')}\x07`)
-    this.say(`copied the last reply (${reply.text.length} characters)`)
+    // What the screen showed, not the model's raw bytes: a CR or a bracketed-
+    // paste end on the clipboard could run something nobody saw.
+    this.tty.write(`\x1b]52;c;${Buffer.from(cleanKeepingLines(reply.text), 'utf8').toString('base64')}\x07`)
+    this.say(`sent the last reply to the clipboard (${reply.text.length} characters; the terminal must allow OSC 52)`)
   }
 
   private async refreshSessions(): Promise<readonly SessionSummary[]> {
@@ -645,6 +726,13 @@ class FullScreenView {
       } else if (panel.kind === 'jobs') {
         const job = (this.controller.view?.jobs ?? [])[panel.selected]
         if (job === undefined || job.state !== 'running') return
+        // Two steps: an Enter meant to close the list must not stop a job.
+        if (panel.confirm !== job.jobId) {
+          panel.confirm = job.jobId
+          this.say(`press Enter again to stop ${job.jobId}`, { ink: 'warn' })
+          return
+        }
+        delete panel.confirm
         const result = await this.controller.cancelJob(job.jobId)
         this.say(cleanText(`job ${result.jobId}: ${result.state === 'ended' ? 'stopped' : 'a stop was requested'}`))
       } else if (panel.kind === 'grants') {
@@ -680,7 +768,8 @@ class FullScreenView {
   }
 
   private say(text: string, style?: Style): void {
-    this.notice = { text, ...(style === undefined ? {} : { style }), until: this.now() + NOTICE_MS }
+    // An error stays long enough to read.
+    this.notice = { text, ...(style === undefined ? {} : { style }), until: this.now() + (style?.ink === 'error' ? NOTICE_MS * 3 : NOTICE_MS) }
     this.syncTicker()
     this.schedule()
   }
@@ -787,6 +876,17 @@ class FullScreenView {
   }
 
   // ---- drawing ------------------------------------------------------------------
+
+  private composerCache: { text: string; cursor: number; width: number; rows: ReturnType<Editor['rows']> } | undefined
+  /** The draft's rows, laid out again only when the draft, the cursor or the width changed (a 4 MB paste took 0.7 s a paint). */
+  private composerLayout(): ReturnType<Editor['rows']> {
+    const width = this.composerWidth()
+    const hit = this.composerCache
+    if (hit !== undefined && hit.text === this.editor.text && hit.cursor === this.editor.cursor && hit.width === width) return hit.rows
+    const rows = this.editor.rows(width)
+    this.composerCache = { text: this.editor.text, cursor: this.editor.cursor, width, rows }
+    return rows
+  }
 
   private composerWidth(): number {
     return Math.max(10, this.tty.size.columns - 4 - (this.theme.glyphs.prompt.length + 1))
@@ -895,7 +995,7 @@ class FullScreenView {
     const window = init?.providers.find((p) => p.id === options?.provider)?.models.find((m) => m.id === options?.model)?.contextWindow
     const rows: Line[] = [
       [span(`${g.reply} `, { ink: 'accent', bold: true }), span('minidsh', { bold: true }), span(init ? ` ${init.serverInfo.version}` : '', FAINT)],
-      [span('  '), span(truncateText(this.options.cwd, width - 4), FAINT)],
+      [span('  '), span(truncateStart(this.options.cwd, width - 4), FAINT)],
       [span('  '), span(route), span(window ? ` ${g.dot} ${Math.round(window / 1000)}k context` : '', FAINT)],
       [],
       [span('  '), span('Ask for anything, or type '), span('/', { ink: 'accent', bold: true }), span(' for commands.')],
@@ -922,40 +1022,44 @@ class FullScreenView {
     }
     if (ask.subject === undefined && ask.call !== undefined) {
       const callLines = displayLines(`${ask.call.name} ${ask.call.arguments}`)
-      const shown = callLines.slice(ask.callScroll, ask.callScroll + 6).flatMap((line) => wrapLine([span(line)], width - 4, { first: [span('  $ ', FAINT)], rest: [span('    ')] }))
-      body.push(...shown)
-      if (callLines.length > 6) body.push([span(`  ↑↓ scroll the call (${Math.min(callLines.length, ask.callScroll + 6)}/${callLines.length} lines)`, FAINT)])
+      body.push(...callLines.flatMap((line, index) => wrapLine([span(line)], width - 4, { first: [span(index === 0 ? '  $ ' : '    ', FAINT)], rest: [span('    ')] })))
       if (ask.call.omittedChars !== undefined) body.push([span(`  … ${ask.call.omittedChars} more characters: read the whole call with minidsh sessions show --json, or deny`, { ink: 'warn' })])
     }
     const armed = this.armed()
     const key = (letter: string): Span => span(letter, armed ? { ink: 'accent', bold: true } : FAINT)
     const word = (text: string): Span => span(text, armed ? undefined : FAINT)
+    const row = (parts: Span[]): Line[] => wrapLine(parts, width - 2, { first: [span('  ')], rest: [span('     ')] })
+    // The browser's words: Allow once, Allow for this session, Reject.
     const keys: Line[] = [
-      ...wrapLine([key('y'), word('  allow once')], width - 2, { first: [span('  ')], rest: [span('     ')] }),
-      ...(ask.offered ? wrapLine([key('a'), word('  allow this exact action again until the session ends or its authority changes')], width - 2, { first: [span('  ')], rest: [span('     ')] }) : []),
-      ...wrapLine([key('n'), word('  deny'), span(armed ? '' : this.bandFits() ? `   ${g.ellipsis}` : '   enlarge the terminal to answer', armed ? undefined : { ink: 'warn' })], width - 2, { first: [span('  ')], rest: [span('     ')] }),
+      ...row([key('y'), word('  allow once')]),
+      ...(ask.offered ? row([key('a'), word('  allow for this session'), span(' (this exact action, until the session ends or its authority changes)', FAINT)]) : []),
+      ...row([key('n'), word('  reject'), ...(armed ? [] : [span(this.bandFits() ? '   the answer keys arm in a moment' : '   enlarge the terminal to answer', { ink: 'warn' })])]),
     ]
     return { title, body, keys }
   }
 
-  private bandFits(): boolean {
-    const { columns, rows } = this.tty.size
-    if (columns < MIN_WIDTH || rows < MIN_HEIGHT) return false
-    const band = this.bandLinesUnarmed(columns)
-    return band === undefined || band <= Math.max(1, Math.floor(rows / 2) - 4)
+  /**
+   * Whether every row of the question has been on screen. A long subject or
+   * call scrolls rather than making the band unanswerable, and a model could
+   * size its tokens to push the end of a command below the fold, so consent
+   * needs the whole of it seen — as drawn, not as measured (the S22.1 review
+   * armed a band whose tail the wrap had pushed out of sight).
+   */
+  private readAll(ask: BandAsk): boolean {
+    for (let row = 0; row < ask.bodyRows; row++) if (!ask.seen.has(row)) return false
+    return true
   }
 
-  private bandLinesUnarmed(width: number): number | undefined {
-    const ask = this.ask
-    if (ask === undefined) return undefined
-    let count = 0
-    if (ask.subject !== undefined) count += wrapLine(subjectParts(ask.subject).map((part) => span('code' in part ? part.code : part.text)), width - 2, { first: [span('  ')] }).length
-    if (ask.reason !== undefined && ask.reason.trim().length > 0) count += Math.min(2, wrapLine([span(`model says: ${ask.reason}`)], width - 2).length)
-    if (ask.subject === undefined && ask.call !== undefined) count += 1
-    // The answer rows, the longest wrapped at this width.
-    count += 2 + (ask.offered ? wrapLine([span('a  allow this exact action again until the session ends or its authority changes')], width - 4).length : 0)
-    return count
+  /** Whether a question can be answered at this size (its body scrolls; only a terminal under the minimum cannot). */
+  private bandFits(): boolean {
+    const { columns, rows } = this.tty.size
+    return columns >= MIN_WIDTH && rows >= MIN_HEIGHT
   }
+
+  /** How far the band's body can scroll, as the last paint laid it out. */
+  private bandScrollMax = 0
+  /** How far the help panel can scroll, as the last paint laid it out. */
+  private panelScrollMax = 0
 
   private panelRows(kind: PanelKind): number {
     if (kind === 'sessions') return this.panel?.sessions?.length ?? 0
@@ -970,7 +1074,10 @@ class FullScreenView {
       const view = this.palette.view(8)
       return {
         title: [span('commands', FAINT)],
-        rows: view.items.map((item) => [span(item.label, { ink: 'accent' }), span(`  ${truncateText(item.description, Math.max(10, width - item.label.length - 10))}`, FAINT)]),
+        rows: (() => {
+          const pad = Math.min(30, Math.max(0, ...view.items.map((item) => item.label.length)))
+          return view.items.map((item) => [span(item.label.padEnd(pad), { ink: 'accent' }), span(`  ${truncateText(item.description, Math.max(10, width - pad - 10))}`, FAINT)])
+        })(),
         selected: view.selected,
         hint: `↑↓ choose ${g.dot} Tab complete ${g.dot} Enter run ${g.dot} Esc hide`,
       }
@@ -983,7 +1090,8 @@ class FullScreenView {
         [],
         ...COMMANDS.map((command) => [span(`/${command.name}${command.args ? ` ${command.args}` : ''}`.padEnd(30), { ink: 'accent' }), span(command.description, FAINT)]),
       ]
-      return { title: [span('keys and commands', { bold: true })], rows: panelLines(rows, width), hint: 'Esc closes' }
+      const lines = panelLines(rows, width)
+      return { title: [span('keys and commands', { bold: true })], rows: lines, scroll: panel.selected, hint: `↑↓ scroll ${g.dot} Esc closes` }
     }
     if (panel.kind === 'sessions') {
       const sessions = panel.sessions ?? []
@@ -1020,7 +1128,19 @@ class FullScreenView {
   private footer(): { posture: Segment[]; info: Segment[] } {
     const g = this.theme.glyphs
     const view = this.controller.view
-    const authority = view?.authority ?? this.init?.defaultAuthority
+    const pending = this.controller.sessionId === undefined ? this.controller.pendingAuthority : {}
+    const base = view?.authority ?? this.init?.defaultAuthority
+    // What the first message will open the session under, once asked for.
+    const authority =
+      base === undefined
+        ? undefined
+        : {
+            ...base,
+            ...(pending.sandbox === undefined ? {} : { sandbox: pending.sandbox as typeof base.sandbox }),
+            ...(pending.approval === undefined ? {} : { approval: pending.approval as typeof base.approval }),
+            ...(pending.accepts === undefined ? {} : { accepts: pending.accepts as typeof base.accepts }),
+            ...(pending.preset === undefined ? {} : { preset: pending.preset }),
+          }
     const posture: Segment[] = []
     if (authority !== undefined) {
       const ink = authority.sandbox === 'danger-full-access' ? 'error' : authority.sandbox === 'read-only' ? 'accent' : 'ok'
@@ -1047,7 +1167,7 @@ class FullScreenView {
             ? 'esc to interrupt'
             : this.details
               ? 'ctrl+o closes folds'
-              : '/ for commands'
+              : 'ctrl+o details'
     posture.push({ line: [span(hint, FAINT)], priority: 20, right: true })
 
     const info: Segment[] = []
@@ -1060,7 +1180,6 @@ class FullScreenView {
     }
     const jobs = (view?.jobs ?? []).filter((job) => job.state === 'running').length
     if (jobs > 0) info.push({ line: [span(`${jobs} job${jobs === 1 ? '' : 's'} running`, { ink: 'accent' })], priority: 50 })
-    if (this.controller.sessionId !== undefined) info.push({ line: [span(shortId(this.controller.sessionId), FAINT)], priority: 10 })
     info.push({ line: [span('/help', FAINT)], priority: 15, right: true })
     return { posture, info }
   }
@@ -1070,7 +1189,7 @@ class FullScreenView {
     const live = this.controller.view?.options
     if (live !== undefined) return live
     const defaults = this.init?.defaultAgentOptions
-    return defaults === undefined ? undefined : { ...defaults, ...this.options.overrides }
+    return defaults === undefined ? undefined : { ...defaults, ...this.controller.overrides }
   }
 
   private runningChildren(): number {
@@ -1092,12 +1211,12 @@ class FullScreenView {
   }
 
   private syncTicker(): void {
+    if (this.exiting) return
     const animate = this.controller.status === 'running' || this.ask !== undefined || this.notice !== undefined
     if (animate && this.ticker === undefined) {
       this.ticker = setInterval(() => {
         this.spinnerIndex++
         if (this.notice !== undefined && this.now() >= this.notice.until) this.notice = undefined
-        if (this.ask !== undefined && this.armed()) this.armedAt = Math.max(this.armedAt, this.now())
         this.syncTicker()
         this.schedule()
       }, TICK_MS)
@@ -1114,6 +1233,8 @@ class FullScreenView {
       if (columns === 0 || rows === 0) return
       this.previous = undefined
       this.cache.clear()
+      // The question re-wraps at the new width: what was seen must be seen again.
+      this.ask?.seen.clear()
       this.schedule()
     }, 30)
   }
@@ -1124,7 +1245,7 @@ class FullScreenView {
     const { columns, rows } = this.tty.size
     const width = Math.max(10, columns - 3)
     const band = this.bandLines(columns - 2)
-    const composerRows = this.editor.rows(this.composerWidth())
+    const composerRows = this.composerLayout()
     const pastLast = this.notice !== undefined && this.now() >= this.notice.until
     if (pastLast) this.notice = undefined
     const transcript = this.transcript(width)
@@ -1150,13 +1271,19 @@ class FullScreenView {
         empty: this.editor.isEmpty,
         ...(this.editor.isEmpty ? {} : { hint: running ? 'enter steers' : 'enter sends' }),
       },
-      ...(band === undefined ? {} : { band: { ...band, armed: this.armed(), ...(this.editor.isEmpty ? {} : { draft: this.editor.text.replace(/\n/g, ' ') }) } }),
+      ...(band === undefined ? {} : { band: { ...band, armed: this.armed(), scroll: this.ask?.scroll ?? 0, ...(this.editor.isEmpty ? {} : { draft: this.editor.text.replace(/\n/g, ' ') }) } }),
       ...(panel === undefined ? {} : { panel }),
       ...(this.notice === undefined ? {} : { notice: { text: this.notice.text, ...(this.notice.style === undefined ? {} : { style: this.notice.style }) } }),
       posture,
       info,
     })
     this.lastMaxTop = drawn.maxTop
+    this.bandScrollMax = drawn.bandScrollMax
+    this.panelScrollMax = drawn.panelScrollMax
+    if (this.ask !== undefined && band !== undefined) {
+      this.ask.bodyRows = band.body.length
+      for (let row = drawn.bandShown[0]; row < drawn.bandShown[1]; row++) this.ask.seen.add(row)
+    }
     this.lastTop = drawn.top
     this.lastRows = drawn.transcriptRows
     if (drawn.top >= drawn.maxTop) {

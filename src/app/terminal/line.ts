@@ -48,6 +48,9 @@ export function firstAskTip(offered: boolean, authority: AuthorityView | undefin
   return 'tip: approvals are one-shot; for shell commands, /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops those prompts; no preset or mode stops a network request\'s prompt\n'
 }
 
+/** How soon after a question replaced a settled one an answer line is taken as meant for the old one. */
+const REPLACED_MS = 600
+
 /** How many sessions `/sessions` prints. A terminal has one screen; the CLI's own listing has all of them. */
 const SESSIONS_SHOWN = 20
 
@@ -80,6 +83,13 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
   let pendingAsk: Ask | undefined
   let tipped = false
   let lastInterrupt = 0
+  /** When the standing question was printed, and when one was last settled elsewhere under the person's hands. */
+  let askedAt = Number.NEGATIVE_INFINITY
+  let settledElsewhereAt = Number.NEGATIVE_INFINITY
+  /** Resolved whenever the session goes idle (the end of input waits on it). */
+  const idleWaiters: (() => void)[] = []
+  const untilIdle = (): Promise<void> => new Promise<void>((resolve) => idleWaiters.push(resolve))
+  const stillWorking = (): boolean => !exiting && controller.status === 'running' && pendingAsk === undefined
 
   const prompt = (): void => {
     if (exiting || !attached || promptStanding) return
@@ -107,7 +117,9 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
       write(renderer.onEvent(event))
     },
     onStatus: (status) => {
-      if (status === 'idle' && attached && pendingAsk === undefined) prompt()
+      if (status !== 'idle') return
+      for (const wake of idleWaiters.splice(0)) wake()
+      if (attached && pendingAsk === undefined) prompt()
     },
     onView: (view) => {
       if (!attached) return
@@ -140,9 +152,16 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
       }
       write(`approve ${ask.toolName}${says}${ask.reason ? ` (${ask.reason})` : ''}? ${ask.offered ? '[y/N/a] ' : '[y/N] '}`)
       promptStanding = true
+      askedAt = Date.now()
     },
     onDecided: (id) => {
-      if (pendingAsk?.id === id) pendingAsk = undefined
+      if (pendingAsk?.id !== id) return
+      // Settled by someone or something else while it stood: say so, or the
+      // next `y` typed would go to the model as a message.
+      pendingAsk = undefined
+      settledElsewhereAt = Date.now()
+      write('(that question was settled elsewhere)\n')
+      if (controller.status === 'idle') prompt()
     },
     onHeld: (held) => {
       write(held.length === 1 ? 'a job notice is held; your next message delivers it\n' : `${held.length} job notices are held; your next message delivers them\n`)
@@ -164,6 +183,15 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
     const line = raw.trim()
     if (pendingAsk) {
       const ask = pendingAsk
+      // A line that lands just as a question REPLACED one settled elsewhere was
+      // typed for the old one: it is not consent to the new one.
+      const now = Date.now()
+      if (now - askedAt < REPLACED_MS && askedAt - settledElsewhereAt < REPLACED_MS) {
+        write('(that answer arrived as the question changed: answer this one)\n')
+        askedAt = Number.NEGATIVE_INFINITY
+        hooks.onAsk(ask)
+        return
+      }
       pendingAsk = undefined
       const answer = line.toLowerCase()
       // `a` is a yes that ALSO takes the scope the host offered on this
@@ -345,7 +373,15 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
     run: async (bound) => {
       controller = bound
       rl.on('line', enqueue)
-      rl.on('close', () => void exitWith(0))
+      // The end of input: the lines already read still run, and the turn they
+      // start finishes, before the terminal exits (a piped task was dropped
+      // before S22.1's review). A question nobody can answer ends it.
+      rl.on('close', () => {
+        void chain.then(async () => {
+          while (stillWorking()) await untilIdle()
+          await exitWith(0)
+        })
+      })
       if (options.handleSigint) process.on('SIGINT', onSigint)
       try {
         out.write(options.banner(await controller.start()))

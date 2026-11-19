@@ -4,14 +4,14 @@
    hyphens, .slice(0, 80)) keeps hello-big-world passing, but I left it unapplied — it alters the public behavior of
    slugify beyond the reported bug. Say the word and I'll implement it plus tests.
 
- ◆ model: deepseek/deepseek-flash · off
- ◆ shell enforcement: accepts none under workspace-write (change)
+ ◆ Model set to deepseek/deepseek-flash · effort off
+ ◆ Shell enforcement accepted: none under workspace-write
 
  ▎ Now start `node -e "setInterval(() => {}, 1000)"` as a background job with job_start, and tell me its id.
 
- · context added by context-runtime
+ · Runtime context
 
- ▸ Used tools · 2 steps · 2s ›
+ ▸ Used tools · 2 steps · 2s · ctrl+o
 
  ● The job is started and running.
 

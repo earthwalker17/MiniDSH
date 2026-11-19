@@ -38,6 +38,8 @@ export interface BandState {
   /** One row per answer, so none can be cut off at any width. */
   readonly keys: readonly Line[]
   readonly armed: boolean
+  /** The first body row shown: a long subject or call scrolls (↑↓) instead of making the band unanswerable. */
+  readonly scroll?: number
   /** The draft kept underneath, one line. */
   readonly draft?: string
 }
@@ -47,6 +49,8 @@ export interface PanelState {
   readonly rows: readonly Line[]
   /** The highlighted row, if the panel is a picker. */
   readonly selected?: number
+  /** The first row shown, for a panel that scrolls without a selection (help). */
+  readonly scroll?: number
   readonly hint?: string
 }
 
@@ -72,11 +76,19 @@ export interface Drawn {
   readonly transcriptRows: number
   readonly top: number
   readonly maxTop: number
+  /** How far the approval band's body can scroll at this size. */
+  readonly bandScrollMax: number
+  /** The band body rows this frame actually showed, [from, to): what the person has had in sight. */
+  readonly bandShown: readonly [number, number]
+  /** How far a non-picker panel (help) can scroll: its rows past one screenful. */
+  readonly panelScrollMax: number
 }
 
 /** The smallest screen worth drawing: Codewhale validates down to 40 x 12. */
 export const MIN_WIDTH = 40
 export const MIN_HEIGHT = 12
+/** The transcript rows a band always leaves above it. */
+const MIN_TRANSCRIPT = 3
 
 const FAINT: Style = { faint: true }
 
@@ -114,10 +126,13 @@ export function drawScreen(state: ScreenState): Drawn {
   if (width < MIN_WIDTH || height < MIN_HEIGHT) {
     const message = truncateText(`Enlarge the terminal to at least ${MIN_WIDTH}x${MIN_HEIGHT}`, width)
     frame.put(Math.floor(height / 2), Math.max(0, Math.floor((width - textWidth(message)) / 2)), [span(message, { bold: true })])
-    return { frame, transcriptRows: 0, top: 0, maxTop: 0 }
+    return { frame, transcriptRows: 0, top: 0, maxTop: 0, bandScrollMax: 0, bandShown: [0, 0], panelScrollMax: 0 }
   }
   const inner = width - 2
   let bottom = height
+  let bandScrollMax = 0
+  let bandShown: [number, number] = [0, 0]
+  let panelScrollMax = 0
 
   // Footer: two rows, always.
   frame.put(height - 1, 1, fitSegments(state.info, inner), width - 1)
@@ -127,8 +142,27 @@ export function drawScreen(state: ScreenState): Drawn {
   // The composer, or the band in its place.
   if (state.band !== undefined) {
     const band = state.band
-    const maxBody = Math.max(1, Math.floor(height / 2) - 4)
-    const body = band.body.slice(0, maxBody)
+    // Everything above a short strip of transcript: the answer rows are always
+    // in sight, and a body longer than the room scrolls, so no command is too
+    // long to read in full, or to answer.
+    const draftRows = band.draft !== undefined && band.draft.length > 0 ? 1 : 0
+    // At least two body rows (one of text, one of position), taken from the
+    // transcript strip on a small screen: a clipped body must always be readable
+    // to its end, or the question could never be answered (40x12 left one).
+    const room = bottom - 2 - band.keys.length - draftRows
+    const maxBody = Math.max(1, Math.min(2, room), room - MIN_TRANSCRIPT)
+    // A clipped body shows `maxBody - 1` rows of text above its position row,
+    // so a clipped body never reads as whole, and its last row is reachable.
+    const clipped = band.body.length > maxBody
+    const visible = clipped ? Math.max(1, maxBody - 1) : maxBody
+    bandScrollMax = clipped ? band.body.length - visible : 0
+    const first = Math.min(band.scroll ?? 0, bandScrollMax)
+    const body = band.body.slice(first, first + visible)
+    if (clipped) {
+      const more = first + body.length < band.body.length
+      body.push([span(`  ↑↓ ${first + 1}-${first + body.length} of ${band.body.length} lines${more && !band.armed ? ' · read to the end to answer' : ''}`, { ink: 'warn' })])
+      bandShown = [first, first + body.length - 1]
+    } else bandShown = [first, first + body.length]
     const rows: Line[] = [[span(g.box.h.repeat(width), { ink: 'warn' })], band.title, ...body, ...band.keys]
     if (band.draft !== undefined && band.draft.length > 0) rows.push([span(`draft: ${truncateText(band.draft, inner - 8)}`, FAINT)])
     const start = bottom - rows.length
@@ -176,7 +210,11 @@ export function drawScreen(state: ScreenState): Drawn {
     const room = Math.max(3, Math.min(panel.rows.length + 2, Math.floor((bottom - 3) * 0.6)))
     const shown = room - 2
     const selected = panel.selected ?? 0
-    const first = Math.max(0, Math.min(selected - Math.floor(shown / 2), panel.rows.length - shown))
+    panelScrollMax = Math.max(0, panel.rows.length - shown)
+    const first =
+      panel.selected === undefined
+        ? Math.max(0, Math.min(panel.scroll ?? 0, panel.rows.length - shown))
+        : Math.max(0, Math.min(selected - Math.floor(shown / 2), panel.rows.length - shown))
     const top = bottom - room
     frame.put(top, 1, panel.title, width - 1)
     panel.rows.slice(first, first + shown).forEach((line, index) => {
@@ -185,7 +223,8 @@ export function drawScreen(state: ScreenState): Drawn {
       const lead = span(chosen ? `${g.folded} ` : '  ', chosen ? { ink: 'accent', bold: true } : undefined)
       frame.put(top + 1 + index, 1, [lead, ...(chosen ? line.map((piece) => span(piece.text, { ...piece.style, bold: true })) : line)], width - 1)
     })
-    if (panel.hint !== undefined) frame.put(top + room - 1, 1, [span(truncateText(panel.hint, inner), FAINT)], width - 1)
+    const where = panel.rows.length > shown ? ` ${g.dot} ${first + 1}-${Math.min(panel.rows.length, first + shown)} of ${panel.rows.length}` : ''
+    if (panel.hint !== undefined || where !== '') frame.put(top + room - 1, 1, [span(truncateText(`${panel.hint ?? ''}${where}`, inner), FAINT)], width - 1)
     bottom = top
   }
 
@@ -210,7 +249,7 @@ export function drawScreen(state: ScreenState): Drawn {
       frame.put(rows - 1, x, [span(marker, { ink: 'accent', bold: true })], width - 1)
     }
   }
-  return { frame, transcriptRows: rows, top, maxTop }
+  return { frame, transcriptRows: rows, top, maxTop, bandScrollMax, bandShown, panelScrollMax }
 }
 
 /** Plain lines wrapped for a panel (help, lists) at the panel's width. */

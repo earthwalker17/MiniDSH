@@ -26,7 +26,7 @@ import { createConversation, fold, prepend, step } from './conversation.js'
 import { bytes, clock, duration } from './format.js'
 import { icon } from './icons.js'
 import { fillMarkdown, highlighted, markdown } from './md.js'
-import { subjectParts, tokens } from './rows.js'
+import { contextTitle as contextTitleOf, decisionWords, systemParts, tokens } from './rows.js'
 import { copyButton, h, lightbox } from './ui.js'
 
 /** @typedef {import('./conversation.js').Model} Model */
@@ -378,14 +378,6 @@ export function createTranscript(options) {
     return h('div', { class: 'card-section' }, h('div', { class: 'card-label' }, h('span', { text: label }), action), content)
   }
 
-  /** @param {string} [outcome] @param {string} [by] */
-  function decisionWords(outcome, by) {
-    if (outcome === undefined) return 'No decision recorded'
-    const what = outcome === 'allowed-once' ? 'Allowed once' : outcome === 'rejected' ? 'Rejected' : outcome === 'cancelled' ? 'Cancelled' : outcome === 'unavailable' ? 'Nobody could answer' : outcome
-    const who = by === 'user' ? ' by you' : by ? ` by ${by}` : ''
-    return `${what}${who}`
-  }
-
   /** @param {Extract<Block, { kind: 'context' }>} block */
   function contextBlock(block) {
     const node = h('div', { class: 'context-card' })
@@ -403,16 +395,7 @@ export function createTranscript(options) {
 
   /** @param {Extract<Block, { kind: 'context' }>} block */
   function contextTitle(block) {
-    if (block.replace) return 'Context summary · what the model keeps of the history above'
-    const known = /** @type {Record<string, string>} */ ({
-      'workspace-instructions': 'Workspace instructions',
-      skills: 'Skills available',
-      'context-runtime': 'Runtime context',
-      'compaction-basic': 'Context summary',
-      'tool-jobs': 'Background job update',
-      jobs: 'Background job update',
-    })
-    return known[block.plugin] ?? `Context from ${block.plugin}${block.form ? ` (${block.form})` : ''}`
+    return contextTitleOf(block.plugin, block.form, block.replace)
   }
 
   /** @param {Extract<Block, { kind: 'opening' }>} block */
@@ -499,31 +482,7 @@ export function createTranscript(options) {
 
   /** @param {Extract<Block, { kind: 'system' }>} block */
   function systemText(block) {
-    const data = block.data
-    switch (block.type) {
-      case 'sandbox/mode':
-        return `Sandbox set to ${data.mode} · enforcement ${data.enforcement}`
-      case 'approval/policy':
-        return `Approvals set to ${data.policy}`
-      case 'sandbox/acceptance':
-        return `Shell enforcement accepted: ${data.accepts} under ${data.forMode}`
-      case 'authority/preset':
-        return `Preset ${data.name}`
-      case 'agent/options': {
-        const route = data.options ?? {}
-        return `Model set to ${route.provider}/${route.model}${route.reasoningEffort ? ` · ${route.reasoningEffort}` : ''}`
-      }
-      case 'approval/grant':
-        return data.op === 'revoke' ? [{ text: 'A session grant was revoked; the next such action asks again' }] : [{ text: `Standing grant for ${data.toolName}: ` }, ...subjectParts(data.subject)]
-      case 'approval/decided': {
-        const asked = model.asked.get(String(data.id))?.data
-        const subject = asked?.subject ? subjectParts(asked.subject) : [{ text: asked?.toolName ? `use ${asked.toolName}` : String(data.id) }]
-        const words = data.grantId && data.outcome === 'allowed-once' ? `Allowed for this session${data.decidedBy === 'user' ? ' by you' : ''}` : decisionWords(String(data.outcome), data.decidedBy === undefined ? undefined : String(data.decidedBy))
-        return [{ text: `${words}: ` }, ...subject]
-      }
-      default:
-        return plain(block.row.text)
-    }
+    return systemParts(block.type, block.data, model.asked.get(String(block.data.id))?.data) ?? plain(block.row.text)
   }
 
   /** @param {Extract<Block, { kind: 'system' }>} block @returns {'bad' | 'warn' | undefined} */

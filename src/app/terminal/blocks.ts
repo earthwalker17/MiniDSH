@@ -24,11 +24,11 @@
 import { cardFor, processTitle, type Card, type CardContext } from '../web/cards.js'
 import type { Block, Item, Live, Model, ProcessBlock, ToolItem } from '../web/conversation.js'
 import { duration } from '../web/format.js'
-import { subjectParts, tokens } from '../web/rows.js'
+import { contextTitle, decisionWords, subjectParts, systemParts, tokens } from '../web/rows.js'
 import type { ToolDisplay } from '../../core/tools/types.ts'
 import { renderMarkdown } from './markdown.ts'
 import { span, wrapLine, type Line, type Span, type Style, type Theme } from './style.ts'
-import { cleanText, displayLines, textWidth, truncateText } from './width.ts'
+import { cleanText, displayLines, hidesText, textWidth, truncateText } from './width.ts'
 
 export interface BlockContext {
   readonly theme: Theme
@@ -117,7 +117,7 @@ export function renderBlock(block: Block, settled: boolean, model: Model, ctx: B
       return wrapped(`${block.resumed ? 'resumed' : 'opened'} ${g.dot} ${what}`, ctx.width, FAINT, [span(`${g.dot} `, FAINT)])
     }
     case 'context':
-      return wrapped(contextLabel(block.plugin, block.form, block.replace), ctx.width, FAINT, [span(`${g.dot} `, FAINT)])
+      return wrapped(contextTitle(block.plugin, block.form, block.replace), ctx.width, FAINT, [span(`${g.dot} `, FAINT)])
     case 'note':
       return wrapped(unbracket(block.row.text), ctx.width, FAINT, [span(`${g.dot} `, FAINT)])
     case 'compaction':
@@ -199,12 +199,6 @@ function unbracket(text: string): string {
   return trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed.slice(1, -1) : trimmed
 }
 
-function contextLabel(plugin: string, form: string | undefined, replace: boolean): string {
-  if (replace) return 'context compacted: earlier messages replaced by a summary'
-  if (plugin === 'skills') return 'skills listed for the model'
-  if (plugin === 'workspace-instructions') return 'workspace instructions (AGENTS.md) added'
-  return `context added by ${plugin}${form === undefined ? '' : ` (${form})`}`
-}
 
 function compactionLines(block: Extract<Block, { kind: 'compaction' }>, ctx: BlockContext): Line[] {
   const g = ctx.theme.glyphs
@@ -238,14 +232,17 @@ function systemLines(type: string, data: Record<string, any>, rowText: string, m
     const outcome = String(data.outcome)
     const asked = model.asked.get(String(data.id))?.data
     const what: Line = asked?.subject ? subjectLine(asked.subject) : [span(String(asked?.toolName ?? 'a call'))]
-    const by = data.decidedBy === undefined ? '' : ` ${g.dot} by ${String(data.decidedBy)}${data.grantId ? ` (${String(data.grantId)})` : ''}`
+    // The browser's words (rows.js), so both clients say the same thing.
+    const by = data.decidedBy === undefined ? undefined : String(data.decidedBy)
+    const words = data.grantId && outcome === 'allowed-once' ? `Allowed for this session${by === 'user' ? ' by you' : ''}` : decisionWords(outcome, by)
+    const grant = data.grantId ? [span(` ${g.dot} ${String(data.grantId)}`, FAINT)] : []
     const lead =
       outcome === 'allowed-once'
-        ? [span(`${g.ok} `, { ink: 'ok', bold: true }), span('Allowed: ', { bold: true })]
+        ? [span(`${g.ok} `, { ink: 'ok', bold: true }), span(`${words}: `, { bold: true })]
         : outcome === 'rejected'
-          ? [span(`${g.fail} `, { ink: 'error', bold: true }), span('Rejected: ', { bold: true })]
-          : [span(`${g.denied} `, FAINT), span(`${outcome === 'cancelled' ? 'Cancelled' : 'Unanswered'}: `, FAINT)]
-    return wrapLine([...what, span(by, FAINT)], ctx.width, { first: lead, rest: [indent(2)] })
+          ? [span(`${g.fail} `, { ink: 'error', bold: true }), span(`${words}: `, { bold: true })]
+          : [span(`${g.denied} `, FAINT), span(`${words}: `, FAINT)]
+    return wrapLine([...what, ...grant], ctx.width, { first: lead, rest: [indent(2)] })
   }
   if (type === 'approval/grant') {
     if (data.op === 'revoke') return [[span(`${g.attention} `, { ink: 'warn' }), span(`Grant ${String(data.id)} revoked`)]]
@@ -254,7 +251,11 @@ function systemLines(type: string, data: Record<string, any>, rowText: string, m
       rest: [indent(2)],
     })
   }
-  return wrapped(unbracket(rowText), ctx.width, undefined, [span(`${g.attention} `, { ink: 'warn' })], [indent(2)])
+  // The browser's sentence where it has one (`systemParts`), the row's text otherwise.
+  const parts = systemParts(type, data, undefined)
+  if (parts === undefined) return wrapped(unbracket(rowText), ctx.width, undefined, [span(`${g.attention} `, { ink: 'warn' })], [indent(2)])
+  const line = parts.map((part) => ('code' in part ? span(cleanText(part.code), { ink: 'accent' }) : span(cleanText(part.text))))
+  return wrapLine(line, ctx.width, { first: [span(`${g.attention} `, { ink: 'warn' })], rest: [indent(2)] })
 }
 
 /** A consent subject, its model-chosen value as code: from its parts, never split on backticks. */
@@ -268,7 +269,8 @@ function processLines(block: ProcessBlock, settled: boolean, ctx: BlockContext):
   const g = ctx.theme.glyphs
   const tools = block.items.filter((item): item is ToolItem => item.kind === 'tool')
   const cards = tools.map((item) => cardFor(item, ctx.display(item.name ?? ''), ctx.cards))
-  if (settled && !ctx.details && block.items.length >= 2) {
+  // Two or more CALLS fold; a single call (with its thought) keeps its title line.
+  if (settled && !ctx.details && tools.length >= 2) {
     const denied = tools.filter((item) => DENIALS.has(item.result?.error?.code ?? '')).length
     const failed = cards.filter((card) => card.status === 'failed' || card.status === 'unknown').length - denied
     const thoughts = block.items.filter((item) => item.kind === 'thought').length
@@ -278,7 +280,7 @@ function processLines(block: ProcessBlock, settled: boolean, ctx: BlockContext):
     head.push(span(` ${g.dot} ${meta.join(` ${g.dot} `)}`, FAINT))
     if (failed > 0) head.push(span(` ${g.dot} ${failed} failed`, { ink: 'error' }))
     if (denied > 0) head.push(span(` ${g.dot} ${denied} denied`, { ink: 'warn' }))
-    head.push(span(` ${g.more}`, FAINT))
+    head.push(span(` ${g.dot} ctrl+o`, FAINT))
     return wrapLine(head, ctx.width, { rest: [indent(2)] })
   }
   const out: Line[] = []
@@ -305,7 +307,8 @@ function itemLines(item: Exclude<Item, ToolItem>, ctx: BlockContext): Line[] {
   const head: Line = [span(`${g.thought} `, FAINT), span('Thought', { faint: true, italic: true })]
   if (lines.length === 0) return [head]
   if (!ctx.details) return [[...head, span(` ${g.dot} ${truncateText(lines[0]!, Math.max(8, ctx.width - 14))}`, { faint: true, italic: true })]]
-  return [head, ...lines.flatMap((line) => wrapLine([span(line, { faint: true, italic: true })], ctx.width, { first: [indent(2), span(`${g.thoughtRail} `, FAINT)] }))]
+  const rail = [indent(2), span(`${g.thoughtRail} `, FAINT)]
+  return [head, ...lines.flatMap((line) => wrapLine([span(line, { faint: true, italic: true })], ctx.width, { first: rail, rest: rail }))]
 }
 
 function groupDuration(block: ProcessBlock): string {
@@ -377,7 +380,9 @@ function cardLines(item: ToolItem, card: Card, quiet: boolean, ctx: BlockContext
       for (const [index, line] of shown.entries()) body.push(...wrapLine([span(line)], inner, { first: [span(index === 0 ? '$ ' : '  ', FAINT)] }))
       if (shown.length < lines.length) body.push([span(`${g.ellipsis} +${lines.length - shown.length} lines`, FAINT)])
     } else if (section.kind === 'output') {
-      body.push(...outputExcerpt(section.text, failed || section.error === true, inner, ctx))
+      // A command that exited non-zero is a successful CALL whose output is a
+      // failure: excerpt it as one, or the failing test lines stay hidden.
+      body.push(...outputExcerpt(section.text, failed || section.error === true || card.exit !== undefined, inner, ctx))
     } else if (section.kind === 'diff') {
       const rows = section.lines.map((line): Line => {
         const sign = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '
@@ -416,9 +421,21 @@ function cardLines(item: ToolItem, card: Card, quiet: boolean, ctx: BlockContext
  */
 function outputExcerpt(text: string, failed: boolean, width: number, ctx: BlockContext): Line[] {
   const g = ctx.theme.glyphs
-  const lines = displayLines(text)
-  while (lines.length > 0 && lines.at(-1)!.trim() === '') lines.pop()
-  if (lines.length === 0) return []
+  const all = displayLines(text, { faithful: ctx.details })
+  while (all.length > 0 && all.at(-1)!.trim() === '') all.pop()
+  if (all.length === 0) return []
+  // The runtime's own trailing notes ([exit code: 1], what an approval
+  // covered) are kept apart, so a tail of two lines is the command's output.
+  let end = all.length
+  while (end > 0 && /^\[.*\]$/.test(all[end - 1]!.trim())) end--
+  const lines = end === 0 ? all : all.slice(0, end)
+  const notes = end === 0 ? [] : all.slice(end)
+  const hidden = !ctx.details && hidesText(text) ? wrapLine([span(`some output was overwritten or hidden by terminal codes ${g.dot} ctrl+o shows it`, { ink: 'warn' })], width) : []
+  return [...excerptOf(lines, failed, width, ctx), ...notes.slice(-2).flatMap((note) => wrapLine([span(note, FAINT)], width)), ...hidden]
+}
+
+function excerptOf(lines: string[], failed: boolean, width: number, ctx: BlockContext): Line[] {
+  const g = ctx.theme.glyphs
   const style: Style | undefined = failed ? undefined : FAINT
   const row = (line: string): Line[] => wrapLine([span(line, style)], width).slice(0, ctx.details ? undefined : 2)
   if (ctx.details) {

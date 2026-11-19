@@ -208,6 +208,24 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
     expect(adapter.calls).toHaveLength(1)
   })
 
+  it('runs a piped task to its end before the end of input exits', async () => {
+    // `printf 'task\n' | minidsh chat`: the input ends at once, and used to end
+    // the terminal before the line it had read ever reached the host.
+    const driver = terminalDriver()
+    const adapter = new ScriptedAdapter().script(assistantText('piped and answered'))
+    const exitCode = runTerminal({
+      cwd: tempDir('minidsh-term-cwd-'),
+      sessionsRoot: tempDir('minidsh-term-sessions-'),
+      ...scriptedBoot(adapter),
+      ...SCRIPTED,
+      io: { input: driver.input, output: driver.output },
+    })
+    driver.input.end('do the piped thing\n')
+    expect(await exitCode).toBe(0)
+    expect(adapter.calls).toHaveLength(1)
+    expect(driver.text()).toContain('piped and answered')
+  })
+
   it('asks for approval on the durable frame and applies the typed answer', async () => {
     const touchy = defineTool({
       name: 'touchy',

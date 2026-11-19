@@ -126,6 +126,25 @@ export function cleanText(text: string): string {
 // oxlint-disable-next-line no-control-regex
 const ESCAPES = /\x1b(?:\[[\x30-\x3f]{0,64}[\x20-\x2f]{0,8}[\x40-\x7e]|\][^\x07\x1b]{0,4096}(?:\x07|\x1b\\)|[PX^_][^\x1b]{0,4096}\x1b\\|[\x40-\x5a\x5c\x5e\x5f])|\x9b[\x30-\x3f]{0,64}[\x20-\x2f]{0,8}[\x40-\x7e]/g
 
+/** Cursor and colour sequences alone (CSI and two-byte escapes): what a faithful display still drops. */
+// oxlint-disable-next-line no-control-regex
+const CSI_ONLY = /\x1b\[[\x30-\x3f]{0,64}[\x20-\x2f]{0,8}[\x40-\x7e]|\x9b[\x30-\x3f]{0,64}[\x20-\x2f]{0,8}[\x40-\x7e]|\x1b[\x40-\x4f\x51-\x57\x59\x5a\x5c]/g
+
+/**
+ * Whether the tidy display hides text the model was shown: a string
+ * sequence's payload (OSC, DCS…) or a segment a bare CR overwrote that held
+ * more than blanks.
+ */
+export function hidesText(text: string): boolean {
+  // oxlint-disable-next-line no-control-regex
+  if (/\x1b[\]PX^_]./.test(text)) return true
+  for (const line of text.replace(/\r\n/g, '\n').split('\n')) {
+    const segments = line.replace(/\r$/, '').split('\r')
+    if (segments.length > 1 && segments.slice(0, -1).some((segment) => segment.trim().length > 0 && !/^[\s\d%.#=>|\-[\]]*$/.test(segment))) return true
+  }
+  return false
+}
+
 /** Drops well-formed terminal escape sequences from tool output (the display only; the log keeps the bytes). */
 export function stripEscapes(text: string): string {
   return text.includes('\x1b') || text.includes('\x9b') ? text.replace(ESCAPES, '') : text
@@ -155,7 +174,16 @@ export function expandTabs(line: string, tabSize: number): string {
  * last one (a progress bar shows its final state), tabs expanded, each line
  * cleaned. The one entry point for multi-line text this surface did not write.
  */
-export function displayLines(text: string, { tabSize = 8, escapes = true }: { tabSize?: number; escapes?: boolean } = {}): string[] {
+export function displayLines(text: string, { tabSize = 8, escapes = true, faithful = false }: { tabSize?: number; escapes?: boolean; faithful?: boolean } = {}): string[] {
+  // Faithful (Ctrl+O): only cursor and colour sequences go; a string sequence's
+  // payload and every segment a bare CR overwrote stay readable, because the
+  // model read them all (the S22.1 review: an injection hid behind both).
+  if (faithful) {
+    return (escapes ? text.replace(CSI_ONLY, '') : text)
+      .replace(/\r\n/g, '\n')
+      .split('\n')
+      .map((line) => cleanText(expandTabs(line.replace(/\r$/, '').replace(/\r/g, ' ↵ '), tabSize)))
+  }
   const source = escapes ? stripEscapes(text) : text
   return source
     .replace(/\r\n/g, '\n')
@@ -183,6 +211,31 @@ export function fitText(text: string, width: number): { text: string; width: num
     used += w
   }
   return { text: out, width: used }
+}
+
+/** Text for the clipboard: lines, tabs and newlines kept; every control and invisible character blanked. */
+export function cleanKeepingLines(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.split('\t').map(cleanText).join('\t'))
+    .join('\n')
+}
+
+/** Clean text cut to `width` cells from the LEFT: the end of a path is the part that says which. */
+export function truncateStart(text: string, width: number, ellipsis = '…'): string {
+  if (textWidth(text) <= width) return text
+  const room = Math.max(0, width - textWidth(ellipsis))
+  const kept = graphemes(text).toReversed()
+  let used = 0
+  let out = ''
+  for (const g of kept) {
+    const w = graphemeWidth(g)
+    if (used + w > room) break
+    out = g + out
+    used += w
+  }
+  return `${ellipsis}${out}`
 }
 
 /** Clean text cut to `width` cells with a trailing ellipsis when it did not fit. */

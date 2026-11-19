@@ -7,7 +7,7 @@
  */
 import { formatTokens, type ContextMetrics } from '../../core/metering/index.ts'
 import { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, TURN_END, type EventEnvelope } from '../../core/session/index.ts'
-import { printableLines } from '../../core/text.ts'
+import { isInvisible } from '../../core/text.ts'
 import { APPROVAL_ASKED } from '../../core/approval/index.ts'
 import type { StreamChunk } from '../../core/llm/index.ts'
 import type { SessionView } from '../../capabilities/protocol/index.ts'
@@ -59,7 +59,7 @@ export class TerminalRenderer {
         // above the next `[y/N]`. Per LINE, so the answer's own paragraphs and
         // code blocks survive; length-preserving, and no fold reads a chunk, so
         // the log and the model are untouched (core/text.ts, §8).
-        return printableLines(chunk.text)
+        return printableStream(chunk.text)
       }
       if (chunk.type === 'reasoning-delta' && !this.thinking) {
         this.thinking = true
@@ -92,6 +92,23 @@ export class TerminalRenderer {
     const line = describeEvent(event, this.names)
     return line === undefined ? '' : `${line}\n`
   }
+}
+
+/**
+ * A streamed delta as the line view may print it: newlines and tabs kept (the
+ * answer's own paragraphs and code), every other control AND every invisible
+ * character blanked — the rule every other line this view prints follows
+ * (`printableText`), where `printableLines` keeps joiners and bidi
+ * controls (the S22.1 review: a streamed RLO reached the terminal).
+ * Length-preserving.
+ */
+export function printableStream(text: string): string {
+  let out = ''
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!
+    out += code === 0x0a || code === 0x09 ? ch : code < 0x20 || (code >= 0x7f && code <= 0x9f) || isInvisible(ch) ? ' ' : ch
+  }
+  return out
 }
 
 /** Folds a stored log into a conversation transcript for an attaching client. */

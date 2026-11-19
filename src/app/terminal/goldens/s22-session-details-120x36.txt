@@ -4,7 +4,7 @@
  ▎ slug.js fails its test. Fix slug.js so `npm test` passes, and run `npm test` to confirm. Then ask a subagent to
  ▎ review slug.js for edge cases. Finish with a short markdown summary that includes a table of what you changed.
 
- · skills listed for the model
+ · Skills available
 
  ● I'll start by inspecting the workspace and the failing test.
 
@@ -24,7 +24,7 @@
    ▏ "danger-full-access" that suffices) and justification; the user is asked to approve]
  … Thought
    ╎ Shell cannot run under workspace-write. I need to escalate. But maybe I can use the file editor tools first to
-     inspect files without shell. Let me use str_replace_editor view to list directory.
+   ╎ inspect files without shell. Let me use str_replace_editor view to list directory.
 
  ● Shell is blocked by the sandbox mode on this host. Let me first inspect files with the file tools (no shell
    needed).

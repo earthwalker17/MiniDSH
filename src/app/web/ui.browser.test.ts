@@ -144,7 +144,7 @@ describe.runIf(testBrowser)('the web UI in a real browser', () => {
     await page.click('#composer-bar [aria-label^="Model"]')
     await page.waitFor(OPEN_MENU)
     await page.evaluate(choose('low'))
-    await page.waitFor(logHas('Model set to scripted/scripted-model · low'))
+    await page.waitFor(logHas('Model set to scripted/scripted-model · effort low'))
     const change = factsOf(await openSessionId(page)).find((event) => event.type === 'agent/options' && (event.data as { reason: string }).reason === 'change')
     expect((change?.data as { options: { reasoningEffort?: string } } | undefined)?.options.reasoningEffort).toBe('low')
     expect(await page.unexpectedProblems()).toEqual([])

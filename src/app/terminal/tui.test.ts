@@ -36,6 +36,8 @@ function tempDir(prefix: string): string {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+/** Longer than the band's arming time with room for a loaded runner. */
+const QUIET = 1100
 
 async function waitFor(predicate: () => boolean, what: () => string, timeoutMs = 6000): Promise<void> {
   const start = Date.now()
@@ -148,24 +150,33 @@ describe('the full-screen terminal', () => {
     await term.press('y')
     await term.see('draft: y')
     // A chunk ending in `y` is a word being typed, never an answer.
-    await sleep(700)
+    await sleep(QUIET)
     await term.press('abcy')
     await term.see('draft: yabcy')
     // Enter and Esc never answer.
-    await sleep(700)
+    await sleep(QUIET)
     await term.press('\r')
     await term.press('\x1b')
     await sleep(100)
     expect(term.text()).toContain('Approval needed')
+    // Armed, then typing resumes: a `y` in the middle of typing is a letter of
+    // the draft, never consent (the S22.1 review's blocker: once armed, it was).
+    await sleep(QUIET)
+    await term.press('o')
+    await term.press('k')
+    await term.press('y')
+    await term.see('draft: yabcyoky')
+    expect(term.text()).toContain('Approval needed')
     // Quiet for the arming time, then a lone `y` answers.
-    await sleep(700)
+    await sleep(QUIET)
     await term.press('y')
     await term.see('tool went through')
-    expect(term.text()).toContain('Allowed:')
+    expect(term.text()).toContain('Allowed once by you:')
     expect(term.screen().bells).toBe(1)
     // The draft typed meanwhile was kept, not sent.
     expect(adapter.calls).toHaveLength(2)
     await term.press('\x15')
+    await term.see('ready', 30_000)
     await term.press('\x04')
     expect(await exitCode).toBe(0)
   })
@@ -186,6 +197,7 @@ describe('the full-screen terminal', () => {
     await term.see('steered')
     expect(term.text()).not.toContain('queued')
     expect(term.text()).toContain('▎ also check the tests')
+    await term.see('ready', 30_000)
     await term.press('\x04')
     expect(await exitCode).toBe(0)
   })
@@ -225,11 +237,12 @@ describe('the full-screen terminal', () => {
     await term.say(`/resume ${stored.sessionId}`)
     await term.see('plan remembered')
     expect(term.text()).toContain('▎ remember the plan')
+    await term.see('ready', 30_000)
     await term.press('\x04')
     expect(await exitCode).toBe(0)
   })
 
-  it("draws a running child's latest actions on its delegate card", async () => {
+  it("draws a running child's latest actions on its delegate card", { timeout: 90_000 }, async () => {
     const term = scriptedTerminal(110, 34)
     let release!: () => void
     const childGate = new Promise<void>((resolve) => (release = resolve))
@@ -260,9 +273,89 @@ describe('the full-screen terminal', () => {
     await term.see('Delegate a task')
     await term.see('1 subagent')
     // The child's own call, seen through the read-only attach.
-    await term.see('echo', 8000)
+    await term.see('echo', 30_000)
     release()
-    await term.see('parent summary', 8000)
+    await term.see('parent summary', 30_000)
+    await term.see('ready', 30_000)
+    await term.press('\x04')
+    expect(await exitCode).toBe(0)
+  })
+
+  it('opens the first session under the authority chosen before it, and keeps a mistyped command', async () => {
+    const term = scriptedTerminal()
+    const adapter = new ScriptedAdapter().script(assistantText('opened as asked'))
+    const exitCode = runTerminal({ cwd: tempDir('tui-cwd-'), sessionsRoot: tempDir('tui-sessions-'), ...scriptedBoot(adapter), ...SCRIPTED, io: term.io })
+    await term.see('Ask for anything')
+    // A value outside the closed list fails at the command, not at the first prompt.
+    await term.say('/sandbox nonsense')
+    await term.see('/sandbox takes read-only | workspace-write | danger-full-access')
+    await term.say('/sandbox read-only')
+    await term.see('applies when the session starts')
+    await term.see('Read only')
+    // An unknown command is the person's to fix: the line stays in the composer.
+    await term.say('/nosuch thing')
+    await term.see('unknown command /nosuch')
+    expect(term.text()).toContain('/nosuch thing')
+    await term.press('\x15')
+    await term.say('hello')
+    await term.see('opened as asked')
+    // The switch was the creating prompt's opening: a durable fact in the conversation, before the reply.
+    await term.see('Sandbox set to read-only · enforcement')
+    expect(term.text()).toContain('Read only')
+    await term.see('ready', 30_000)
+    await term.press('\x04')
+    expect(await exitCode).toBe(0)
+  })
+
+  it('scrolls the help list, and answers a long question only once it was read to its end', async () => {
+    const term = scriptedTerminal(80, 20)
+    const longy = defineTool({
+      name: 'longy',
+      description: 'needs approval, with a long argument',
+      input: z.object({ text: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => ({ ok: true }),
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
+    const body = Array.from({ length: 40 }, (_, index) => `line ${index} of the payload`).join('\n') + '\nTHE LAST LINE'
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'longy', { text: body }), assistantText('long one went through'))
+    const exitCode = runTerminal({
+      cwd: tempDir('tui-cwd-'),
+      sessionsRoot: tempDir('tui-sessions-'),
+      confinement: 'none',
+      ...scriptedBoot(adapter, (root) => {
+        root.get(TOOLS).register(root, longy)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'longy' ? { kind: 'ask', reason: 'long' } : next()))
+      }),
+      ...SCRIPTED,
+      io: term.io,
+    })
+    await term.see('Ask for anything')
+    // Help is longer than this screen: it scrolls, and says where it is.
+    await term.say('/help')
+    await term.see(/ 1-\d+ of \d+/)
+    await term.press('\x1b[B')
+    await term.see(/ 2-\d+ of \d+/)
+    await term.press('\x1b')
+    await term.say('use the long tool')
+    await term.see('Approval needed')
+    await term.see('read to the end to answer')
+    // Armed by time, but not read: a lone y is refused, and nothing is decided.
+    await sleep(QUIET)
+    await term.press('y')
+    await term.see('scroll the question to its end')
+    expect(adapter.calls).toHaveLength(1)
+    // Scrolled by the band's own indicator: the card above already shows the payload.
+    const atEnd = (): boolean => {
+      const where = / (\d+)-(\d+) of (\d+) lines/.exec(term.text())
+      return where !== null && where[2] === where[3]
+    }
+    for (let step = 0; step < 80 && !atEnd(); step++) await term.press('\x1b[B')
+    expect(atEnd(), term.text()).toBe(true)
+    await sleep(QUIET)
+    await term.press('y')
+    await term.see('long one went through')
+    await term.see('ready', 30_000)
     await term.press('\x04')
     expect(await exitCode).toBe(0)
   })
@@ -282,6 +375,7 @@ describe('the full-screen terminal', () => {
     await term.see('Enlarge the terminal')
     term.resize(80, 24)
     await term.see(/╭─{78}╮/)
+    await term.see('ready', 30_000)
     await term.press('\x04')
     expect(await exitCode).toBe(0)
   })
@@ -318,7 +412,7 @@ describe('owning the terminal', () => {
     return new Promise<void>((resolve) => {
       setImmediate(() => {
         expect(raws).toEqual([true, false])
-        expect(written.join('')).toBe('\x1b[?1049h\x1b[?2004h\x1b[?7l\x1b[?25l\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?7h\x1b[?2004l\x1b[?1049l')
+        expect(written.join('')).toBe('\x1b[?1049h\x1b[?2004h\x1b[?7l\x1b[?25l\x1b[?1007h\x1b[?2026l\x1b[0m\x1b[?1007l\x1b[?25h\x1b[?7h\x1b[?2004l\x1b[?1049l')
         resolve()
       })
     })
