@@ -137,7 +137,7 @@ class LoopFactory implements AgentFactory {
       if (options.world) await options.world(scope, agent)
       // The recorded narrowing, on EVERY lifecycle — the one place a create, a
       // resume and a fork all pass through, so no resumer has to know a child
-      // was narrowed, let alone reconstruct how (BLUEPRINT §1 refused a
+      // was narrowed, let alone reconstruct how (S21.1 refused a
       // resume-time `setup` for exactly that). After the world, because it
       // narrows the world; after the world has SETTLED, because a preset
       // world mounts plugins that activate asynchronously, and what they

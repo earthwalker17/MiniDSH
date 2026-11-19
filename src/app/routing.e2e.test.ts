@@ -427,6 +427,10 @@ describe.skipIf(!DEEPSEEK || !ANTHROPIC)('S6 live E2E: two models through one lo
  *   replay               the three-route log replays keylessly and the image
  *                        path really runs again
  *
+ * Stale since S20.5 (2026-10-26): gpt-5.4-mini passed this leg 17 of 21,
+ * misreading a quadrant (a 256 px image did no better, 5 of 6), so the next
+ * provider session re-chooses the model. What 2026-10-16 measured:
+ *
  * The model is the cheapest that exercises BOTH premises, measured 2026-10-16
  * with this leg's own fixture and prompts, four trials each: gpt-5.4-mini read
  * the drawn quadrants inside a tool output 4/4 and reasoned before its call
