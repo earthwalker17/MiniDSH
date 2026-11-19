@@ -39,7 +39,7 @@ Nineteen service keys: eighteen `core` (below) + app-only `app-composition`; `lo
 | `credentials` | `CredentialRef`: a validated env-var NAME, the only thing config, logs and errors carry; resolved per call; the `declare`d refs are the secrets (§9) | storing or logging values; which layers exist |
 | `presets` | key `authority-presets`: `presetTable`, pure `presetFor`, the log-only `authority/preset` intent (§7) | enforcement; knobs; a `defaultPreset` |
 | `llm` | the provider-neutral vocabulary and a deployment-global adapter registry (§5); `stream` = the `llm/stream` waterfall, whose terminal continuation picks the adapter | API keys, session state, default model |
-| `tools` | `defineTool`; `restrict` (subtractive, by name or `tags` KIND; own registrations exempt unless `includeOwn`) through the one resolver: a hidden tool is unknown to the model and refused if called; `ToolCall.onDispatch` and the pipeline (§6) | policy |
+| `tools` | `defineTool`; `restrict` (subtractive, by name or `tags` KIND; own registrations exempt unless `includeOwn`) through the one resolver: a hidden tool is unknown to the model and refused if called; `ToolCall.onDispatch` and the pipeline (§6); `display`, a surface's card, read by no runtime path | policy |
 | `prompt` | ordered named sections + strict `{{var}}` variables; `assemble(agent)` → `system-prompt/assemble`; sections stable within a session (cache-safe) | history, time-varying text |
 | `approval` | `request` → `allowed-once \| rejected \| cancelled \| unavailable` on the `approval/request` waterfall (default `unavailable`); the model-written `reason` neutralized and clamped before the log, `subject` its trusted half; `ApprovalPolicy` `ask \| never`; `grants`/`revoke` (§7) | answer logic; model-facing prose; a public `grant` |
 | `fs` | `fs/edit-intent` (read-before-edit) and `fs/observed`; **fences every mutation**, reads always pass (§7); `readBytes` emits no observation | tool schemas; policy itself |
@@ -147,17 +147,18 @@ A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval
 
 | method | rule |
 |---|---|
-| `initialize` | the catalog, defaults (live from settings) and workspaces |
-| `session/prompt` | no id creates, live delivers, stored resumes; `cwd`/`workspaceId` place a NEW session under `workspaceRoots` (not beside `sessionId`); a route no adapter serves is refused |
-| `session/attach` | subscribes BEFORE the cut; `view` is the folds a page cannot compute, nothing pending or running on a cold read |
+| `initialize` | the catalog (efforts included), defaults (live from settings), workspaces, presets, and each tool's `display` |
+| `session/prompt` | no id creates, live delivers, stored resumes; `cwd`/`workspaceId` place a NEW session under `workspaceRoots` (not beside `sessionId`); a route no adapter serves is refused; `authority` only when creating, as the creation's `opening` |
+| `session/attach` | subscribes BEFORE the cut; `view` is the folds a page cannot compute (with `drivable: false` exactly where `assertDrivable` refuses), nothing pending or running on a cold read; a live agent's `tools` |
 | `session/page` | beneath the attach cut |
 | `session/detach` | no id narrows to NOTHING |
 | `session/events` | every tier; the bounded gap repair |
-| `sessions/list` | live and stored, live wins; derived `title`; a workspace label by spelling, no I/O |
+| `sessions/list` | live and stored, live wins; derived `title`; `updatedAt` (the last event, else the store's write); a workspace label by spelling, no I/O |
 | `session/cancel` | `keepQueued` spares the durable inbox |
 | `session/compact` | HUMAN command, never a model tool |
 | `approval/answer` | first answer wins; only from a connection that may see the session; an `offer` the fold did not make is refused |
 | `approval/revoke` | ends one grant (§7) |
+| `attachment/read` | the bytes of an image the session's OWN log names, by the log's reference, re-verified; never an oracle over the store |
 | `job/cancel` | a PERSON stops one job of a live session: `by: user`, notice quiet |
 | `control/subscribe` | a live-session baseline, then `control.summary` whatever it watches |
 | `session/authority` | each switch IS its durable event |
@@ -165,13 +166,15 @@ A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval
 | `settings/describe`, `settings/get`, `settings/set` | `expectedRevision` REQUIRED |
 | `shutdown` | refused on a socket unless its carrier says `allowShutdown` |
 
-Notifications: `session.event`, `session.status`, `session.view`, `settings.changed`, `control.summary`; approval frames ARE the durable events; no DTO layer or protocol version until a client ships apart (`frames.ts`).
+Notifications: `session.event`, `session.status`, `session.view` (also on every status flip and a child's disposal), `settings.changed`, `control.summary`; approval frames ARE the durable events; no DTO layer or protocol version until a client ships apart (`frames.ts`).
 
 - **Attach contract.** A message-aligned tail page at a `cursor` (`core/session/page.ts`), never the trace tier (`Session.facts`, §4), so a bare seq dedups. A client pages back, repairs a hole with a bounded `session/events` and re-attaches on reconnect, replacing its window: no lower-bound cursor, by design. No client folds the surface; a cold read never resumes.
 - **Multi-client.** A connection owns only its sink, its watch set (narrowed by its first attach) and its control-plane subscription; a disconnect disposes nothing. A question stays parked while a watcher or control subscriber COULD answer it, else settles `unavailable`; only one that watches the session may answer (`protocol/host.ts`).
 - **Backpressure is tier-aware** (`transport-ws.ts`): `session/event` is a synchronous contained emit, so no listener may suspend the loop; past a soft limit only the trace tier drops (summaries kept); past a hard one the socket closes `slow-client`.
 - **The terminal** (`app/terminal`) is a protocol client that retains nothing of a session; a consent line shows the trusted subject, else the joined call, never a bare tool name. App assembly, not the wire, prepares its `resume`/`fork`: no wire method forks.
-- **The browser** (`app/web/`, plain ES modules) GROWS its transcript, never rebuilds it (`wire.js`, `rows.js`). An authority surface (`app/web.ts`): loopback unless `--host`, a one-shot token traded for a signed cookie, a Host/Origin fence, no framing.
+- **The browser** (`app/web/`, plain ES modules, no build) draws the log through `conversation.js`, a pure fold into blocks joined by the ids the log records (presentation, never a surface fold): authority, decisions and failures top-level, process collapsible. Its parity gate (`rows.test.ts`) holds every visible kind to one place. It GROWS its transcript (`transcript.js`); an older page folds alone and is joined at the boundary.
+- **A call's card is its tool's** `display` (`cards.js`), its result side durable facts only; running or waiting only where the view says. The DOM is under a real browser (`*.browser.test.ts`).
+- **An authority surface** (`app/web.ts`): loopback unless `--host`, a one-shot token traded for a signed cookie, a Host/Origin fence, no framing, a CSP with Trusted Types (no HTML sink can run).
 
 ## 9. Composition, configuration and packaging
 
@@ -263,6 +266,7 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 | an out-of-loop model call | `resolveCallConfig` + `runAuxCall`, never bare `llm.stream` |
 | recall of shadowed history | `tool-history` (§6) |
 | a tool KIND | a `ToolDefinition.tags` constant, not a name |
+| a tool's card on a surface | `ToolDefinition.display`: card, title, argument roles, a per-call selector |
 | a store's lifetime | a retention row (§9) first |
 | an effect worth recording | a `core/effects` kind (§4), written by the PROVIDER |
 | its consent subject | an `EffectIntent` naming its AUTHORITY (§7) |
@@ -316,7 +320,6 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 - `tool-browser` reaches EVERY loopback service, in any mode and from a child, unconsented, unrecorded and unwrapped by a shell backend; such a service may act or relay on its own authority.
 - On Windows a project marker above the cwd is never owner-checked; only a filesystem root's is refused (§9).
 - A module-loaded plugin is arbitrary code; `minidsh config`'s warnings are advisory.
-- The web UI takes an offered grant scope but cannot list or revoke one.
 
 **Context**
 
@@ -344,12 +347,12 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 **Surfaces**
 
 - `session/events` has no host ceiling (any range), no RPC deadline or client timeout; backpressure limits are unmeasured.
-- `session.view`'s `status` goes stale; a reconnect loses its paging position and a sole watcher's pending approval; only `control.summary` announces disposal.
+- A reconnect loses its paging position and a sole watcher's pending approval; only `control.summary` announces disposal.
 - Detaching one session narrows an un-narrowed client to nothing (`protocol/connection.ts`).
-- A pooled step's result lines match calls by order, not name, on plain-text surfaces and the browser (S22).
+- A pooled step's result lines match calls by order, not name, on plain-text surfaces (S22.1). A tool with no `display` in reach (a preset's on a cold read, the other shell dialect's) draws the generic card.
 - `minidsh web` has no graceful stop: the next process repairs and reclaims the lease.
 - `workspaceRoots` is always `[cwd]` and bounds only NEW sessions: a wire client may resume one outside it.
-- One principal, no accounts; the browser cannot switch a session's route.
+- One principal, no accounts. A stored session's route and authority change only once a message resumes it; the browser's theme is per origin.
 - Windows needs `pwsh` 7, never 5.1; a command reading stdin blocks until its deadline.
 
 **Delegation and providers**
@@ -383,7 +386,7 @@ src/capabilities/
   context-runtime/ · workspace-instructions/ · skills/ · compaction-basic/ · session-title/
   protocol/ (frames · host · connection · transport-*)
 src/app/     cli · home · compose · config · settings · version · headless · serve · web · present · inspect
-             web/ · terminal/ · *.e2e.test.ts
+             web/ (conversation · cards · transcript · rows · wire …) · terminal/ · *.e2e.test.ts
 src/test-support/ scripted-adapter · harness · llm-replay · serve-process · web-process · fixtures/ (logs, plugins)
 skills/      office/ · pdf/: bundled skills (README: helpers, authoring, provenance)
 scripts/     build · check-deps (+ deps-graph) · check-docs · doc-registers · count-lines · smoke-installed.sh
