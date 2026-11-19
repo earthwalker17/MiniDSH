@@ -23,7 +23,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'unit',
-          include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
+          include: ['src/**/*.test.ts', 'scripts/**/*.test.ts', 'desktop/src/**/*.test.ts'],
           exclude: ['src/**/*.e2e.test.ts', 'node_modules/**', ...BROWSER_SUITES],
           sequence: { groupOrder: 0 },
         },

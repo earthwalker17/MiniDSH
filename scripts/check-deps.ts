@@ -1,5 +1,5 @@
 /**
- * Source-shape gates. Four rules, one script:
+ * Source-shape gates. Five rules, one script:
  *
  * 1. Dependency direction, from docs/ARCHITECTURE.md §1, as a whitelist per
  *    layer: kernel imports only kernel; core imports kernel + core (but
@@ -29,31 +29,46 @@
  *    `WEB_ASSETS`, so anything else works under a checkout's Node and 404s in
  *    every browser. JSDoc type imports are comments and are not counted.
  *
+ * 5. The desktop package (`desktop/src`) imports only `electron`, `node:*`
+ *    builtins and itself, type imports included: it reaches the runtime by
+ *    spawning the bundled CLI and speaking the wire, never by importing it.
+ *
  * Test files are exempt (they mount real compositions across layers). The
  * rules themselves live in `deps-graph.ts`, pure, and are tested there.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
-import { checkTree } from './deps-graph.ts'
+import { checkDesktop, checkTree } from './deps-graph.ts'
 
-const SRC = resolve(import.meta.dirname, '..', 'src')
+const ROOT = resolve(import.meta.dirname, '..')
+const SRC = join(ROOT, 'src')
+const DESKTOP = join(ROOT, 'desktop', 'src')
 
-/** Source files, tests left out: every `.ts`, and the browser client's `.js` modules (rule 4). */
-function walk(dir: string): string[] {
+/** Source files under `dir` whose name `source` matches, tests left out. */
+function walk(dir: string, source: RegExp): string[] {
   const out: string[] = []
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry)
-    if (statSync(full).isDirectory()) out.push(...walk(full))
-    else if (/\.(ts|js)$/.test(full) && !/\.test\.(ts|js)$/.test(full)) out.push(full)
+    if (statSync(full).isDirectory()) out.push(...walk(full, source))
+    else if (source.test(full) && !/\.test\.[cm]?[jt]s$/.test(full)) out.push(full)
   }
   return out
 }
 
-const files = new Map<string, string>()
-for (const file of walk(SRC)) files.set(relative(SRC, file).replace(/\\/g, '/'), readFileSync(file, 'utf8'))
-const { violations, coreFiles } = checkTree(files)
+const read = (root: string, source: RegExp): Map<string, string> => {
+  const files = new Map<string, string>()
+  for (const file of walk(root, source)) files.set(relative(root, file).replace(/\\/g, '/'), readFileSync(file, 'utf8'))
+  return files
+}
+
+// Every `.ts`, and the browser client's `.js` modules (rule 4).
+const { violations, coreFiles } = checkTree(read(SRC, /\.(ts|js)$/))
+const desktopFiles = existsSync(DESKTOP) ? read(DESKTOP, /\.[cm]?[jt]s$/) : new Map<string, string>()
+violations.push(...checkDesktop(desktopFiles))
 if (violations.length > 0) {
   process.stderr.write(`source-shape violations:\n${violations.map((v) => `  ${v}`).join('\n')}\n`)
   process.exit(1)
 }
-process.stdout.write(`check-deps: dependency direction, payload discipline, core acyclicity and browser-module imports OK (${coreFiles} core files)\n`)
+process.stdout.write(
+  `check-deps: dependency direction, payload discipline, core acyclicity, browser-module imports and desktop isolation OK (${coreFiles} core files, ${desktopFiles.size} desktop files)\n`,
+)

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { checkTree, collectImports, directionViolation, findCycle, readsPayloadByCast, unresolvableImports, webImports, webImportViolation } from './deps-graph.ts'
+import {
+  checkDesktop,
+  checkTree,
+  collectImports,
+  desktopImports,
+  desktopImportViolation,
+  directionViolation,
+  findCycle,
+  readsPayloadByCast,
+  unresolvableImports,
+  webImports,
+  webImportViolation,
+} from './deps-graph.ts'
 
 describe('the source-shape gate', () => {
   it('reads every relative import form and tells a type-only statement from a value one', () => {
@@ -161,5 +173,51 @@ describe('the rules, over synthetic trees', () => {
       ),
     )
     expect(webImportViolation('./rows.js')).toBeUndefined()
+  })
+})
+
+describe('the desktop package rule', () => {
+  it('reads every specifier form a desktop file can name, type positions and require included', () => {
+    const source = [
+      `import { app } from 'electron'`,
+      `import type { Menu } from 'electron'`,
+      `import { readFileSync } from 'node:fs'`,
+      `export { x } from './x.ts'`,
+      `import './side.ts'`,
+      `const later = await import('./later.ts')`,
+      `type T = import('../../src/core/session/types.ts').EventEnvelope`,
+      `const legacy = require('minidsh')`,
+      `import {`,
+      `  startWebHost,`,
+      `} from '../../src/app/web.ts'`,
+    ].join('\n')
+    expect(desktopImports(source)).toEqual(['electron', 'electron', 'node:fs', './x.ts', '../../src/app/web.ts', './side.ts', './later.ts', '../../src/core/session/types.ts', 'minidsh'])
+  })
+
+  it('allows electron, node: builtins and desktop/src itself, and nothing else', () => {
+    for (const spec of ['electron', 'node:fs', 'node:fs/promises', 'node:child_process', './runtime.ts', '../folders.ts']) {
+      expect(desktopImportViolation('shell/view.ts', spec), spec).toBeUndefined()
+    }
+    for (const spec of ['../../src/app/web.ts', '../../../dist/app/cli.js', '../../bin/minidsh.js', '..', 'minidsh', 'minidsh/app', 'zod', 'electron/main', 'fs', '/abs/path.ts', 'file:///x.ts']) {
+      expect(desktopImportViolation('main.ts', spec), spec).toBeDefined()
+    }
+    expect(desktopImportViolation('main.ts', 'fs')).toMatch(/spelled node:fs/)
+    expect(desktopImportViolation('main.ts', 'zod')).not.toMatch(/spelled/)
+    expect(desktopImportViolation('shell/view.ts', '../../x.ts')).toMatch(/leaves desktop\/src/)
+  })
+
+  it('reports each offending import once per file, a type-only one too, and any non-literal import()', () => {
+    const violations = checkDesktop(
+      tree({
+        'main.ts': [`import { app } from 'electron'`, `import { b } from '../../src/app/web.ts'`, `import { c } from '../../src/app/web.ts'`, `const m = await import(name)`].join('\n'),
+        'preload.ts': `import type { InitializeResult } from '../../src/capabilities/protocol/frames.ts'`,
+        'ok.ts': [`import { spawn } from 'node:child_process'`, `import { x } from './runtime.ts'`].join('\n'),
+      }),
+    )
+    expect(violations).toEqual([
+      'desktop/src/main.ts: -> ../../src/app/web.ts: leaves desktop/src: the desktop reaches the runtime only by spawning its CLI and speaking the wire',
+      'desktop/src/main.ts: import(name: a dynamic import that is not a string literal hides its target from every rule',
+      'desktop/src/preload.ts: -> ../../src/capabilities/protocol/frames.ts: leaves desktop/src: the desktop reaches the runtime only by spawning its CLI and speaking the wire',
+    ])
   })
 })

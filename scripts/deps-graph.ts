@@ -1,11 +1,13 @@
 /**
- * The pure half of the source-shape gate: import extraction, the three rules
- * and cycle detection, over an in-memory tree. `check-deps.ts` walks the disk
- * and hands the tree to `checkTree`; this module has no filesystem access, so
+ * The pure half of the source-shape gate: import extraction, the rules and
+ * cycle detection, over an in-memory tree. `check-deps.ts` walks the disk and
+ * hands `src/` to `checkTree`, `desktop/src` to `checkDesktop`; this module
+ * has no filesystem access, so
  * every rule is tested against synthetic trees (`check-deps.test.ts`) — the
  * S20.5 review found all three could miss a violation while only extraction
  * and cycle-finding were ever tested.
  */
+import { builtinModules } from 'node:module'
 import { posix } from 'node:path'
 
 export interface ImportRef {
@@ -184,6 +186,53 @@ export function webImports(source: string): string[] {
  */
 export function webImportViolation(spec: string): string | undefined {
   return WEB_SIBLING.test(spec) ? undefined : 'a browser module may import at runtime only a sibling .js module, as "./<name>.js" (the host serves one flat directory)'
+}
+
+// ---- the desktop package --------------------------------------------------------
+
+/**
+ * Every module specifier a desktop file names — static, re-exported,
+ * side-effect, dynamic and `require`, bare or relative, and type positions
+ * too: a type import from `src/` would make this package typecheck only
+ * beside the runtime's source, which is a coupling even when it is erased.
+ */
+export function desktopImports(source: string): string[] {
+  const found: string[] = []
+  for (const match of source.matchAll(/(?:^|\n)[ \t]*(?:import|export)\s+(?:(?!\n[ \t]*(?:import|export)\s)[^'"])*?from\s*['"]([^'"]+)['"]/g)) found.push(match[1]!)
+  for (const match of source.matchAll(/(?:^|\n)[ \t]*import\s*['"]([^'"]+)['"]/g)) found.push(match[1]!)
+  for (const match of source.matchAll(/\b(?:import|require)\(\s*['"]([^'"]+)['"]\s*\)/g)) found.push(match[1]!)
+  return found
+}
+
+/**
+ * Rule 5: a desktop module (`desktop/src`, tests exempt) imports only
+ * `electron`, a `node:` builtin, or a relative path that stays inside
+ * `desktop/src`. The desktop reaches the runtime by spawning the bundled CLI
+ * and speaking its wire — never by importing `src/`, `dist/`, `bin/` or the
+ * `minidsh` package — so the runtime keeps one way in, the one every other
+ * surface uses (ARCHITECTURE §8). `importer` is relative to `desktop/src`,
+ * posix; `undefined` when allowed, otherwise the reason.
+ */
+export function desktopImportViolation(importer: string, spec: string): string | undefined {
+  if (spec === 'electron' || /^node:[\w/]+$/.test(spec)) return undefined
+  if (spec === '.' || spec === '..' || spec.startsWith('./') || spec.startsWith('../')) {
+    const target = posix.normalize(posix.join(posix.dirname(importer), spec))
+    return target === '..' || target.startsWith('../') ? 'leaves desktop/src: the desktop reaches the runtime only by spawning its CLI and speaking the wire' : undefined
+  }
+  return `a desktop module may import only electron, node:* builtins and desktop/src itself${builtinModules.includes(spec) ? ` (a builtin is spelled node:${spec})` : ''}`
+}
+
+/** Rule 5 over the desktop's files, keyed relative to `desktop/src` (posix), tests left out by the caller. */
+export function checkDesktop(files: ReadonlyMap<string, string>): string[] {
+  const violations: string[] = []
+  for (const [file, source] of files) {
+    for (const spec of new Set(desktopImports(source))) {
+      const why = desktopImportViolation(file, spec)
+      if (why !== undefined) violations.push(`desktop/src/${file}: -> ${spec}: ${why}`)
+    }
+    for (const expression of unresolvableImports(source)) violations.push(`desktop/src/${file}: ${expression}: a dynamic import that is not a string literal hides its target from every rule`)
+  }
+  return violations
 }
 
 export interface TreeReport {

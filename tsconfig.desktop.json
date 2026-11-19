@@ -1,0 +1,14 @@
+// The desktop package (desktop/src): Node-side TypeScript held to the main
+// project's strictness. A separate program because it is a separate package:
+// it imports only electron, node:* and itself (scripts/check-deps.ts), so it
+// must typecheck without src/ — a test may still import src/test-support,
+// which then rides along. `import … from 'electron'` resolves through the
+// root's types-only electron devDependency; no global types are needed.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["desktop/src/**/*.ts"],
+  "exclude": []
+}
