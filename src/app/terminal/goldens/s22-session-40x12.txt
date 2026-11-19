@@ -1,0 +1,12 @@
+   it with job_cancel — let me know.
+   If you do want the shell usable
+   again, the supported path is an
+   approval on a specific command (as
+   with npm test earlier), which keeps
+   each action explicit rather than
+   blanket-unconfined.                 │
+╭──────────────────────────────────────╮
+│ ❯ Reply, or / for commands           │
+╰──────────────────────────────────────╯
+ ● Workspace write · ask   ready
+ deepseek/deepseek-flash

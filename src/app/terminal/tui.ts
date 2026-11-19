@@ -29,7 +29,7 @@ import { createConversation, fold, prepend, step, type Block, type Model, type O
 import { compactAgo, humanSandbox, shortId } from '../web/format.js'
 import { subjectParts } from '../web/rows.js'
 import type { CardContext } from '../web/cards.js'
-import { renderBlock, renderLive, type BlockContext } from './blocks.ts'
+import { gapBetween, renderBlock, renderLive, settledProcesses, type BlockContext } from './blocks.ts'
 import type { ProtocolClient } from './client.ts'
 import { commandNamed, COMMANDS, KEYS, type OptionSource } from './commands.ts'
 import { NotNow, SessionController, type Ask, type ContinueRequest } from './controller.ts'
@@ -166,7 +166,8 @@ class FullScreenView {
           this.resetModel(fold(result.page.events, { seedLength: result.header.seedLength ?? 0 }))
           this.editor.seedHistory(this.model.blocks.flatMap((block) => (block.kind === 'bubble' && block.text.trim().length > 0 ? [block.text] : [])))
           if (result.damaged) this.say('the stored log is damaged: this is its readable prefix', { ink: 'warn' })
-          else if (reason === 'forked') this.say(`forked ${shortId(from ?? '')} into ${shortId(result.header.id)}`)
+          // A session is written at its first event: a fork nobody messages leaves no file.
+          else if (reason === 'forked') this.say(`forked ${shortId(from ?? '')} into ${shortId(result.header.id)}: it is saved once you send it a message`)
           else this.say(`${reason === 'switched' ? 'opened' : 'resumed'} ${shortId(result.header.id)}`)
           this.runningSince = result.view.status === 'running' ? this.now() : undefined
           this.syncTicker()
@@ -825,20 +826,12 @@ class FullScreenView {
     const keys: string[] = []
     const starts = new Map<string, number>()
     const blocks = this.model.blocks
-    // A process group may fold once a turn's end follows it.
-    const settled = new Set<string>()
-    let seenTail = false
-    for (let at = blocks.length - 1; at >= 0; at--) {
-      const block = blocks[at]!
-      if (block.kind === 'tail') seenTail = true
-      else if (block.kind === 'process' && seenTail) settled.add(block.key)
-    }
-    const quiet = new Set(['system', 'note', 'opening', 'context', 'compaction'])
+    const settled = settledProcesses(blocks)
     let previousKind: string | undefined
     for (const block of blocks) {
       const rows = this.linesFor(block, settled.has(block.key), ctx)
       if (rows.length === 0) continue
-      if (previousKind !== undefined && !(quiet.has(previousKind) && quiet.has(block.kind))) {
+      if (gapBetween(previousKind, block.kind)) {
         lines.push([])
         keys.push(block.key)
       }

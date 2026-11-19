@@ -70,6 +70,24 @@ function wrapped(text: string, width: number, style: Style | undefined, first: L
 
 // ---- top-level blocks ---------------------------------------------------------
 
+/** The process groups a turn's end follows: those may fold (a running turn's never do). */
+export function settledProcesses(blocks: readonly Block[]): Set<string> {
+  const settled = new Set<string>()
+  let seenTail = false
+  for (let at = blocks.length - 1; at >= 0; at--) {
+    const block = blocks[at]!
+    if (block.kind === 'tail') seenTail = true
+    else if (block.kind === 'process' && seenTail) settled.add(block.key)
+  }
+  return settled
+}
+
+/** Blocks that read as one quiet run of facts: no blank line between two of them. */
+const QUIET = new Set(['system', 'note', 'opening', 'context', 'compaction'])
+
+/** Whether a blank row separates a block from the one drawn before it. */
+export const gapBetween = (previous: string | undefined, kind: string): boolean => previous !== undefined && !(QUIET.has(previous) && QUIET.has(kind))
+
 /**
  * One block's lines. `settled` says the turn that holds a process group has
  * ended (a `tail` follows it), which is when it may fold.
@@ -271,7 +289,9 @@ function processLines(block: ProcessBlock, settled: boolean, ctx: BlockContext):
       // A finished call keeps only its title, except what a person still
       // needs to see: a shell command's output (Codewhale keeps those cells),
       // and anything that failed or was denied.
-      out.push(...cardLines(item, card, settled && !ctx.details && card.status === 'done' && card.card !== 'terminal', ctx))
+      // A successful read is one line while it runs too: the file is the model's, not the reader's (Codewhale).
+      const quietRead = card.card === 'read' && card.status === 'done'
+      out.push(...cardLines(item, card, !ctx.details && card.status === 'done' && (quietRead || (settled && card.card !== 'terminal')), ctx))
     }
     else out.push(...itemLines(item, ctx))
   }
@@ -374,7 +394,8 @@ function cardLines(item: ToolItem, card: Card, quiet: boolean, ctx: BlockContext
       for (const line of lines.slice(0, limit)) body.push(...wrapLine([span(line, FAINT)], inner))
       if (lines.length > limit) body.push([span(`${g.ellipsis} +${lines.length - limit} lines ${g.dot} ctrl+o`, FAINT)])
     } else if (section.kind === 'markdown') {
-      if (card.card === 'delegate' && section === card.sections[0] && !ctx.details && card.sections.length > 1) continue // the prompt: details only
+      // The delegation's prompt is behind Ctrl+O: the title already names the task, and the child's own activity says what it is doing.
+      if (card.card === 'delegate' && section === card.sections[0] && !ctx.details) continue
       const lines = renderMarkdown(section.text, inner, ctx.theme)
       const limit = ctx.details ? DETAIL_CAP : CALM.markdown
       body.push(...lines.slice(0, limit))
