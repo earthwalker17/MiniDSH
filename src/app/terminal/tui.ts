@@ -38,7 +38,7 @@ import { KeyDecoder, type Key } from './keys.ts'
 import { drawScreen, MIN_HEIGHT, MIN_WIDTH, panelLines, type PanelState, type Segment } from './layout.ts'
 import { Palette, type PaletteOption } from './palette.ts'
 import { Frame, renderFrame } from './screen.ts'
-import { glyphsFor, span, wrapLine, type Depth, type Line, type Span, type Style, type Theme } from './style.ts'
+import { glyphsFor, lineText, span, wrapLine, type Depth, type Line, type Span, type Style, type Theme } from './style.ts'
 import { Tty } from './tty.ts'
 import { cleanKeepingLines, cleanText, displayLines, truncateStart, truncateText } from './width.ts'
 
@@ -1035,7 +1035,11 @@ class FullScreenView {
       body.push(...wrapLine(parts, width - 2, { first: [span('  ')], rest: [span('  ')] }))
     }
     if (ask.reason !== undefined && ask.reason.trim().length > 0) {
-      body.push(...wrapLine([span(`model says: ${cleanText(ask.reason)}`, { faint: true, italic: true })], width - 2, { first: [span('  ')] }).slice(0, 2))
+      // The model's claim, clamped to two rows: a clamp says so, or a cut
+      // sentence reads as the whole one.
+      const said = wrapLine([span(`model says: ${cleanText(ask.reason)}`, { faint: true, italic: true })], width - 2, { first: [span('  ')] })
+      if (said.length > 2) said[1] = [span(truncateText(`${lineText(said[1]!).trimEnd()} …`, width - 2), { faint: true, italic: true })]
+      body.push(...said.slice(0, 2))
     }
     if (ask.subject === undefined && ask.call !== undefined) {
       const callLines = displayLines(`${ask.call.name} ${ask.call.arguments}`)

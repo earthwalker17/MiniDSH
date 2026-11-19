@@ -338,7 +338,7 @@ describe('the full-screen terminal', () => {
       confinement: 'none',
       ...scriptedBoot(adapter, (root) => {
         root.get(TOOLS).register(root, longy)
-        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'longy' ? { kind: 'ask', reason: 'long' } : next()))
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'longy' ? { kind: 'ask', reason: 'a long reason '.repeat(30) } : next()))
       }),
       ...SCRIPTED,
       io: term.io,
@@ -353,6 +353,9 @@ describe('the full-screen terminal', () => {
     await term.say('use the long tool')
     await term.see('Approval needed')
     await term.see('read to the end to answer')
+    // The model's claim is clamped to two rows, and the clamp says so.
+    expect(term.text()).toMatch(/model says: a long reason/)
+    expect(term.text()).toMatch(/a long reason a long[^\n]*… *\n/)
     // Armed by time, but not read: a lone y is refused, and nothing is decided.
     await sleep(QUIET)
     await term.press('y')
