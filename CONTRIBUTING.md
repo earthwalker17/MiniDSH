@@ -39,6 +39,10 @@ pnpm check          # tsc --noEmit + oxlint + the dependency gate + the docs gat
 pnpm test:e2e       # the twelve live arcs and the catalog drift probes: real provider calls, real cost, needs the keys
 pnpm build          # emits dist/ — what the package runs; `prepack` runs it for you
 pnpm minidsh …      # run the checkout
+
+pnpm --dir desktop install          # electron-builder, only to package the desktop app
+node desktop/scripts/package.ts     # this host's installer in desktop/build/dist (--dir: the unpacked app)
+MINIDSH_DESKTOP_EXE=<the unpacked MiniDSH.exe> pnpm test:e2e desktop/e2e   # drive it (keyless; live with a key)
 ```
 
 Set `MINIDSH_EXPECT_SHELL=1`, `MINIDSH_EXPECT_PYTHON=1` and `MINIDSH_EXPECT_BROWSER=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` on Linux and macOS, so a test that would self-skip for a missing shell, interpreter, browser or backend fails instead. That is what CI does, and it is the difference between "green" and "green having proved nothing".
@@ -76,7 +80,7 @@ A release is a tag. Bump `package.json`, cut the CHANGELOG section, merge to `ma
 
 ## Scope
 
-BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (continuable children, Windows job containment, a desktop launcher); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
+BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (continuable children, signing and an updater for the desktop app); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
 
 ## License and attribution
 

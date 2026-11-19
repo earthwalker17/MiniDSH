@@ -2,19 +2,19 @@
 
 What comes next, the route there, what is undecided, and a compact record of how the system arrived. `ARCHITECTURE.md` (beside this file) is the current shape and its limitations; this file is direction and the measurements the architecture map does not carry. Its budget is in `scripts/check-docs.ts`; past 90%, compress §4 first (older entries collapse to what a later session reuses).
 
-## 1. Next session — S22.2 Desktop application
+## 1. Next session — S22.5 Hardening checkpoint C = V2 release candidate
 
-S22 and S22.1 made the browser and the terminal product surfaces over one runtime. S22.2 makes an installable desktop app over the same runtime and the same Web UI, after studying DSH's `apps/desktop` first (`references/dsh/surfaces.md`): a window, not a second client.
+S22, S22.1 and S22.2 made the browser, the terminal and the desktop app product surfaces over one runtime. S22.5 reviews that cluster as one system and releases V2.0.0 (the npm package and the three installers) from CI.
 
-- **The launcher.** Single instance; a graceful `minidsh web` stop and `web --json` (ARCHITECTURE §13: today the next process repairs and reclaims the lease); a credential handoff without a token URL; a stable origin, so client preferences survive a relaunch.
-- **Packaging.** Signed installers per OS, and how an update reaches them.
-- **Decisions it owes:** the importable-surface question (§3) if the launcher hosts the runtime in-process rather than over the carrier; the social preview.
+- **The checkpoint.** A repo-wide read; invariants re-audited against code; current DSH re-researched and `references/` moved to one pin; the documents compacted where past 90%.
+- **Owed by earlier sessions:**
+  - Edge's cold start on the newer ubuntu image (S22.1: past 60 s once); diagnose it the S20 way before it fails every run.
+  - The context arc's one keyless replay that consumed 7 of 8 summaries (S22); rerun it with the recording dumped on failure.
+  - The desktop's CI legs and `release.yml`'s desktop job have never run on GitHub: their first run is this RC branch.
+  - Electron 45.3.4 (chosen under pnpm's release-age policy) and the bundled Node 24.22.3 move to the newest of their lines.
+- **Decisions it owes:** a signing identity (Windows: SignPath Foundation or Artifact Signing; macOS: Developer ID and notarization), and with it an updater (§3); an Intel macOS build.
 
-*Not:* a second runtime, a native UI, a fork of the Web UI.
-
-**Gate.**
-- The full gates on both hosts, the arcs the launcher touches.
-- The installed app doing real work on a real model, its log asserted.
+**Gate.** Every arc 3× per host and `live.yml` unfiltered; the desktop E2E keyless on Windows and WSLg and live on the installed Windows app, 3× each; CI green on all three runners including the desktop legs; V2.0.0 published from a tag.
 
 ## 2. Macro route (dependency-ordered; sessions are approximate)
 
@@ -35,8 +35,8 @@ S22 and S22.1 made the browser and the terminal product surfaces over one runtim
 | ~~**S21.1** Continuations and process hygiene (2026-11-08)~~ | ✅ A child's narrowing as an opening fact every lifecycle re-applies; agent-owned work; a continuer's switches before any wake; every Windows pwsh contains what it starts. §4. | S21 |
 | ~~**S22** Web UI redesign (2026-11-19)~~ | ✅ The browser as a product surface: tool presentation (`display`) on the wire, a conversation model joined by recorded ids, cards from durable facts, the view following status, a CSP with Trusted Types, the DOM under a real browser. §4. | S21.1 |
 | ~~**S22.1** Terminal TUI redesign (2026-11-19)~~ | ✅ A full-screen terminal over the browser's presentation model (Codewhale as the reference): one controller for two views, consent at the keyboard, one neutralizing cell writer; `session/resume` and `session/fork` on the wire, the bypass deleted. §4. | S22 |
-| **S22.2** Desktop application | An installable app over the same runtime and Web UI, after studying DSH's `apps/desktop`: launcher, graceful `web` stop and `web --json`, a credential handoff without a token URL, single instance, packaging, a stable origin for client preferences, the importable-surface decision (§3), the social preview | S22 |
-| **S22.5** Hardening checkpoint C = V2 release candidate | — | S22–S22.2 |
+| ~~**S22.2** Desktop application (2026-11-20)~~ | ✅ An installable app over the same runtime and Web UI: an Electron launcher running the bundled CLI's `web --json` on a bundled Node; the token spent in main and the cookie injected per request; one serialized lifecycle confirming over the wire; folders as authority; NSIS, AppImage and zip from CI. §4. | S22 |
+| **S22.5** Hardening checkpoint C = V2 release candidate | The product surfaces reviewed as one system; DSH refreshed; every arc and the desktop E2E 3× per host; V2.0.0 with its installers | S22–S22.2 |
 
 **The ordering principle: deepen the record before widening the runtime.** Every later capability adds a new kind of effect or a new concurrent actor, and each must be expressible as log facts, under recorded authority, with a recovery rule, so those three come first. One concept runs through the first cluster: a core **effect vocabulary** (what a call is about to do and what it did, written by trusted code from validated arguments, never model prose) with three consumers: the crash record (S14), the consent subject and grants (S15), the audit of effects (S16). Authority precedes jobs because on Windows a background job cannot exist while every shell call is a one-shot escalation. **Checkpoints follow clusters of architectural change** (CLAUDE.md §6): the record and authority planes; the widened runtime; multi-actor and product.
 
@@ -62,7 +62,9 @@ S22 and S22.1 made the browser and the terminal product surfaces over one runtim
 - **What does a session present of itself to a provider?** DeepSeek's `user_id` gives each id its own rate budget and OpenAI's `prompt_cache_key` routes its cache (upstream sends the session id, and by default uploads the whole log to DeepSeek); MiniDSH sends neither. One decision for both. Separately, Anthropic caps a request at 32 MB with a 413 that maps to `INVALID_REQUEST`, which nothing retries and nothing compacts.
 - **`web_fetch`, and on what boundary.** A dependency-free SSRF guard over `node:https` is feasible: resolve once, refuse the whole answer set if any address is non-public, pin the socket through a validating `lookup`, re-check every hop. Open: HTML extraction without a dependency, the proxy hop (DSH dropped its guard on 2026-10-20), and fetch as the widest exfiltration channel.
 - **One egress world, or a fetch per tool?** S18's search fetches in its own body and records nothing; S20's browser fences itself inside Chrome instead (a proxy it owns, resolver rules). A shared egress provider could record `effect/recorded{network}` and fence what leaves; per-tool boundaries keep each tool's consent and no common one.
-- **Does MiniDSH publish an importable surface?** A module-loaded plugin's own imports do not resolve from an installed package. An `exports` map is a compatibility promise; the first out-of-tree plugin decides, or S22.2 if its launcher hosts the runtime in-process rather than over the carrier. Skills do not need it.
+- **Does MiniDSH publish an importable surface?** A module-loaded plugin's own imports do not resolve from an installed package. An `exports` map is a compatibility promise; the first out-of-tree plugin decides (S22.2's launcher runs the CLI over its process contract and needed none). Skills do not need it.
+- **Signing, then updates.** The installers are unsigned, so updates are a release page and a person runs the new installer (S22.2). An identity (Windows: SignPath Foundation, free for OSI projects, or Artifact Signing; macOS: Developer ID plus notarization) is what an updater (electron-updater on GitHub Releases) needs before it can be more than SHA-512 over a channel whoever publishes a release controls.
+- **A GUI launch's environment on macOS and Linux.** It lacks the login shell's exports and PATH: keys go through `credentials.json`, and agents see the session's PATH. DSH probes the login shell (`$SHELL -ilc`, bounded, delimiter-framed); MiniDSH waits for a macOS build someone validates by hand.
 
 ## 4. Development record
 

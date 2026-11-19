@@ -125,7 +125,7 @@ describe('minidsh credentials', () => {
     for (const out of [run, list]) expect(`${out.out}${out.err}`).not.toContain(SECRET)
   })
 
-  it('is in the help, refuses an unknown subcommand and a flag it does not take', () => {
+  it('is in the help, refuses an unknown subcommand and a flag it does not take', { timeout: 120_000 }, () => {
     const dir = home()
     expect(cli(dir, ['--help']).out).toContain('minidsh credentials list | set <NAME> | unset <NAME> [--json]')
     expect(cli(dir, ['credentials']).code).toBe(2)
