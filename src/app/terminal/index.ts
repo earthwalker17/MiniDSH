@@ -1,87 +1,27 @@
 /**
- * The interactive terminal surface: a protocol CLIENT on a loopback byte-stream
- * pair to the same protocol plugin `minidsh serve` exposes on real stdio —
- * identical frames, no shared objects, zero harness semantics here. It renders
- * streaming output from durable `assistant/chunk` events, answers approval
- * frames by their durable ids, steers the running turn by typing, and cancels
- * on Ctrl+C. Attaching to a stored session (resume/fork) is prepared host-side
- * by the app assembly; the client then drives the live session over the wire —
- * a bounded tail PAGE first, live rendering only from the seq after the cursor
- * the host cut it against, so a self-waking resumed session never renders twice
- * and a long one is never dumped whole into a terminal (`/history` pages back).
+ * The interactive terminal: a protocol CLIENT on a loopback byte-stream pair
+ * to the same protocol plugin `minidsh serve` exposes on real stdio —
+ * identical frames, no shared objects, zero harness semantics here
+ * (ARCHITECTURE §8). A stored session is continued over the wire
+ * (`session/resume`, `session/fork`) like every other driving method.
  *
- * It holds no copy of the session: context pressure arrives as `session.view`,
- * because a client with one page cannot fold it.
+ * Two views over one controller (`controller.ts`): the full-screen view
+ * (`tui.ts`) for a real terminal, and the line view (`line.ts`) for a pipe, a
+ * script, a screen reader or `--plain`. Neither holds a copy of the session:
+ * the full-screen view folds its attached window into the browser's
+ * presentation model, which is presentation, never a surface fold.
  */
-import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
 import type { Context } from '../../kernel/index.ts'
 import type { AgentOptions } from '../../core/agent/index.ts'
-import { APPROVAL_ASKED, APPROVAL_DECIDED } from '../../core/approval/index.ts'
-import type { ApprovalOfferId, ApprovedCall, OpenApproval } from '../../core/approval/index.ts'
-import { describeIntent, type EffectIntent } from '../../core/effects/index.ts'
 import { formatTokens } from '../../core/metering/index.ts'
-import { matches, type SessionEventFrame } from '../../core/session/index.ts'
-import { printableText } from '../../core/text.ts'
-import type {
-  ApprovalAnswerResult,
-  AttachResult,
-  AuthorityView,
-  CompactResult,
-  ContinueResult,
-  InitializeResult,
-  JobCancelResult,
-  JobSummary,
-  ModelResult,
-  PageResult,
-  PromptResult,
-  SessionView,
-  SessionsListResult,
-} from '../../capabilities/protocol/index.ts'
-import { jobStatus } from '../../capabilities/tool-jobs/index.ts'
+import type { InitializeResult } from '../../capabilities/protocol/index.ts'
 import type { BootOptions } from '../headless.ts'
-import { preview } from '../present.ts'
 import { startProtocolHost } from '../serve.ts'
 import { ProtocolClient } from './client.ts'
-import { renderHistory, TerminalRenderer } from './render.ts'
-
-/**
- * The shell-confinement half of a status line: what this host CAN enforce, and
- * — when it is weaker than the default — what this session has agreed to accept
- * from it. Saying only the first would hide the decision that made an
- * unconfined command possible in the first place.
- */
-function confinementLine(view: AuthorityView): string {
-  const accepted = view.accepts === 'full' ? '' : `, accepting ${view.accepts}`
-  return `shell confinement: ${view.enforcement}${accepted}`
-}
-
-/**
- * The one line that tells a person how to stop being asked per call — and it
- * has to name the RIGHT answer for this host.
- *
- * It used to name `danger-full-access` unconditionally, which on a host with
- * no confinement backend is advice to drop the in-process file fence as well:
- * the only confinement such a host has. Where the shell cannot be sandboxed,
- * accepting that is narrower and keeps the fence; where a scope is offered on
- * this very ask, that is narrower still.
- *
- * And the mode advice is SHELL advice. A network request (S18's web search)
- * asks whatever the sandbox mode or preset — no knob widens egress, only an
- * exact grant answers a repeat — so the tip names the shell and says so,
- * rather than promising that a preset stops a prompt it never touches. It is
- * shown once, on the first ask of either family.
- */
-function firstAskTip(offered: boolean, authority: AuthorityView | undefined): string {
-  if (offered) return 'tip: y allows this once; a allows this exact call until this session is resumed or forked (/grants lists them, /revoke takes one back)\n'
-  if (authority !== undefined && authority.enforcement === 'none' && authority.accepts === 'full') {
-    return 'tip: this host cannot sandbox the shell. /accept none runs shell commands anyway and keeps file edits fenced; /preset danger-full-access drops the fence too; no preset or mode stops a network request\'s prompt\n'
-  }
-  return 'tip: approvals are one-shot; for shell commands, /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops those prompts; no preset or mode stops a network request\'s prompt\n'
-}
-
-/** How many sessions `/sessions` prints. A terminal has one screen; the CLI's own listing has all of them. */
-const SESSIONS_SHOWN = 20
+import { SessionController, type ContinueRequest } from './controller.ts'
+import { createLineView } from './line.ts'
+import { runFullScreen } from './tui.ts'
 
 export interface TerminalOptions extends BootOptions {
   readonly cwd: string
@@ -98,26 +38,64 @@ export interface TerminalOptions extends BootOptions {
   readonly model?: string
   readonly reasoningEffort?: string
   readonly maxSteps?: number
-  /** Per-agent world for every agent this surface creates or attaches (built from a named agent preset). */
+  /** Per-agent world for every agent this surface creates or continues (built from a named agent preset). */
   readonly agentWorld?: (agentCtx: Context) => void | Promise<void>
   /** The name of that preset, recorded in the header of a session this surface creates. */
   readonly agentPreset?: string
+  /** `--plain`: the line view even on a terminal. */
+  readonly plain?: boolean
   /** Injected for tests; defaults to process stdin/stdout. */
-  readonly io?: { readonly input: NodeJS.ReadableStream; readonly output: NodeJS.WritableStream }
+  readonly io?: {
+    readonly input: NodeJS.ReadableStream
+    readonly output: NodeJS.WritableStream
+    /** Run the full-screen view over these streams (a scripted terminal in tests). */
+    readonly fullScreen?: { readonly columns: number; readonly rows: number; readonly depth?: 1 | 4 | 8 | 24 }
+  }
+}
+
+/** The first line of the line view: version, route and the commands worth knowing. */
+function banner(init: InitializeResult, overrides: Partial<AgentOptions>): string {
+  const provider = overrides.provider ?? init.defaultAgentOptions.provider
+  const model = overrides.model ?? init.defaultAgentOptions.model
+  // From the advertised catalog: this client reads the wire, never the host's
+  // registry. A retired alias an adapter still resolves is unlisted, so it
+  // shows no window here until the view's context reports one.
+  const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
+  const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
+  return `minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /jobs lists background jobs, /exit quits, Ctrl+C cancels)\n`
+}
+
+/** Whether this process can own the terminal: a real TTY on both ends, and a terminal that can draw. */
+function canOwnTerminal(options: TerminalOptions): boolean {
+  if (options.plain === true) return false
+  if (options.io !== undefined) return options.io.fullScreen !== undefined
+  return process.stdin.isTTY === true && process.stdout.isTTY === true && process.env.TERM !== 'dumb'
 }
 
 export async function runTerminal(options: TerminalOptions): Promise<number> {
   const toHost = new PassThrough()
   const fromHost = new PassThrough()
   const host = await startProtocolHost({ ...options, input: toHost, output: fromHost })
-  const out = options.io?.output ?? process.stdout
-  const renderer = new TerminalRenderer()
-  const attaching = options.resumeId !== undefined || options.forkId !== undefined
+
+  let route: (method: string, params: unknown) => void = () => {}
+  let hostEnded: () => void = () => {}
+  const client = new ProtocolClient(fromHost, toHost, { onNotification: (method, params) => route(method, params), onEnd: () => hostEnded() })
 
   let done!: (code: number) => void
-  const finished = new Promise<number>((resolve) => {
-    done = resolve
-  })
+  const finished = new Promise<number>((resolve) => (done = resolve))
+  let exiting = false
+  const exit = async (code: number): Promise<void> => {
+    if (exiting) return
+    exiting = true
+    try {
+      await client.request('shutdown')
+    } catch {
+      // The host is already gone.
+    }
+    client.close()
+    await host.dispose()
+    done(code)
+  }
 
   const overrides: Partial<AgentOptions> = {
     ...(options.provider === undefined ? {} : { provider: options.provider }),
@@ -125,628 +103,50 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
     ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
   }
+  // A CLI continuation carries the launch's explicit model flags: that is this
+  // command's own request. An in-place one never does.
+  const continueRequest: ContinueRequest | undefined =
+    options.resumeId !== undefined
+      ? { kind: 'resume', sessionId: options.resumeId, agentOptions: overrides }
+      : options.forkId !== undefined
+        ? {
+            kind: 'fork',
+            sessionId: options.forkId,
+            agentOptions: overrides,
+            ...(options.boundary === undefined ? {} : { atSeq: options.boundary }),
+            ...(options.salvage === true ? { salvage: true } : {}),
+          }
+        : undefined
 
-  let sessionId: string | undefined
-  let status: 'idle' | 'running' = 'idle'
-  let pendingApproval: { id: string; toolName: string; offered: boolean } | undefined
-  /** The last authority the host published, so the first-ask tip can name what THIS host can do. */
-  let lastAuthority: AuthorityView | undefined
-  /**
-   * The open approvals from the last published view — the only place OFFERS
-   * live, because they are a fold and the durable frame is not.
-   *
-   * `publishView` runs in the same tick as the event broadcast, so by the time
-   * the prompt's microtask runs this names the ask that just arrived. Where a
-   * carrier splits the two writes it does not, and the prompt simply offers
-   * nothing extra — a missing affordance, never a missing question.
-   */
-  let lastPending: readonly OpenApproval[] = []
-  /**
-   * The background jobs from the last published view, kept as `lastPending`
-   * is: a fold the host owns (a page cannot pair a start with its end), read
-   * by `/jobs` and by the held-notice hint.
-   */
-  let lastJobs: readonly JobSummary[] = []
-  /** Held notices already pointed out, so a view push repeats no hint. */
-  const hintedHeld = new Set<string>()
-  let exiting = false
-  let lastInterrupt = 0
-  /** Until the attach page is rendered, live frames wait in the backlog. */
-  let attached = !attaching
-  let liveFromSeq = 0
-  const backlog: SessionEventFrame[] = []
-  /** Where `/history` reads from: the cut this client synchronized on, and the oldest event it holds. */
-  let history: { cursor: number; oldest: number; hasMore: boolean } | undefined
-
-  /**
-   * `you> ` is written and LEFT on the line, so anything rendered under it
-   * would glue itself to the prompt — which is what the first screen of a
-   * fresh `chat` did, reading `you> [approvals: ask]`. The flag says whether
-   * a prompt is standing, so a rendered event can break the line first.
-   */
-  let promptStanding = false
-  /** A real terminal echoes what is typed; an injected stream and a pipe do not. */
-  const isTty = options.io === undefined && process.stdin.isTTY === true
-  const prompt = (): void => {
-    if (exiting) return
-    out.write('you> ')
-    promptStanding = true
-  }
-  const printError = (error: unknown): void => {
-    out.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
-  }
-
-  /**
-   * One line when an IDLE session holds a job's notice: a stop a person or the
-   * runtime caused never wakes the agent, so without it the end would sit
-   * unread until the next prompt for no reason anyone can see. Said once per
-   * notice; true when it wrote, so a caller with no prompt coming re-prompts.
-   */
-  const hintHeld = (): boolean => {
-    if (status !== 'idle' || !attached || pendingApproval !== undefined) return false
-    const fresh = lastJobs.filter((job) => job.held === true && !hintedHeld.has(job.jobId))
-    if (fresh.length === 0) return false
-    for (const job of fresh) hintedHeld.add(job.jobId)
-    if (promptStanding) {
-      out.write('\n')
-      promptStanding = false
-    }
-    out.write(fresh.length === 1 ? 'a job notice is held; your next message delivers it\n' : `${fresh.length} job notices are held; your next message delivers them\n`)
-    return true
-  }
-
-  /** Said once: the session-scoped answer to being asked per call, at the moment it is first needed. */
-  let tipped = false
-  /** Every id this client has seen decided — so a queued question is never printed at all. */
-  const answeredIds = new Set<string>()
-
-  /**
-   * Asked on a MICROTASK, and skipped if the decision has already landed.
-   *
-   * A decision the seam makes without consulting anyone — the durable `never`,
-   * and from S15 a matching grant — appends `asked` and `decided` in the same
-   * tick, so both frames reach this client before it yields. Printed eagerly,
-   * the first would leave a standing `[y/N]` for a question that is already
-   * answered, and the next line a person typed would be swallowed as its answer.
-   */
-  const askApproval = (data: {
-    id: string
-    toolName: string
-    reason?: string
-    subject?: EffectIntent
-    call?: ApprovedCall
-    offers?: readonly ApprovalOfferId[]
-  }): void => {
-    if (answeredIds.has(data.id)) return
-    pendingApproval = { id: data.id, toolName: data.toolName, offered: false }
-    queueMicrotask(() => {
-      if (pendingApproval?.id !== data.id || answeredIds.has(data.id)) return
-      // Offers come from the fold, never from here: a surface renders the
-      // scopes the runtime says are available and invents none. The attach
-      // path passes them directly; the live path finds them in the view.
-      const offered =
-        data.offers?.includes('grant-session') === true || lastPending.find((entry) => entry.id === data.id)?.offers?.includes('grant-session') === true
-      pendingApproval = { id: data.id, toolName: data.toolName, offered }
-      if (!tipped) {
-        tipped = true
-        out.write(firstAskTip(offered, lastAuthority))
-      }
-      // The runtime's account of the call leads; the model's follows in
-      // parentheses, where it reads as the claim it is.
-      const says = data.subject ? ` — ${describeIntent(data.subject)}` : ''
-      const keys = offered ? '[y/N/a] ' : '[y/N] '
-      // With no subject — only a deployment's own `tools/pre-execute` policy
-      // asks that way — the joined call is all there is, and a bare tool name
-      // is not a question anyone can answer. The browser has always shown it;
-      // a terminal user was being asked to consent to strictly less.
-      const call = data.call ?? lastPending.find((entry) => entry.id === data.id)?.call
-      if (says === '' && call !== undefined) {
-        const omitted = call.omittedChars === undefined ? '' : `\n  […${call.omittedChars} more characters: approve from \`minidsh sessions show <id> --json\`, or deny]`
-        out.write(`  ${call.name} ${call.arguments}${omitted}\n`)
-      }
-      out.write(`approve ${data.toolName}${says}${data.reason ? ` (${data.reason})` : ''}? ${keys}`)
-      promptStanding = true
+  if (canOwnTerminal(options)) {
+    const tui = runFullScreen({
+      client,
+      overrides,
+      cwd: options.cwd,
+      ...(continueRequest === undefined ? {} : { continueRequest }),
+      ...(options.task === undefined ? {} : { task: options.task }),
+      exit,
+      ...(options.io === undefined ? {} : { io: options.io }),
     })
+    route = (method, params) => tui.controller.onNotification(method, params)
+    hostEnded = () => tui.controller.closed()
+    await tui.run()
+    return finished
   }
 
-  const handleFrame = (frame: SessionEventFrame): void => {
-    if (sessionId !== undefined && frame.sessionId !== sessionId) return
-    if (frame.event.seq < liveFromSeq) return // already in the rendered snapshot
-    const text = renderer.onEvent(frame.event)
-    if (text) {
-      if (promptStanding) {
-        out.write('\n')
-        promptStanding = false
-      }
-      out.write(text)
-    }
-    if (matches(frame.event, APPROVAL_ASKED)) {
-      askApproval(frame.event.data)
-    } else if (matches(frame.event, APPROVAL_DECIDED)) {
-      // Settled elsewhere (a cancelled turn, another answerer, a grant): stop
-      // asking, and remember, so a question still queued is never printed.
-      answeredIds.add(frame.event.data.id)
-      if (pendingApproval?.id === frame.event.data.id) pendingApproval = undefined
-    }
-  }
-
-  const client = new ProtocolClient(fromHost, toHost, {
-    onNotification: (method, params) => {
-      if (method === 'session.event') {
-        const frame = params as SessionEventFrame
-        if (!attached) backlog.push(frame)
-        else handleFrame(frame)
-      } else if (method === 'session.status') {
-        const projected = params as { sessionId: string; status: 'idle' | 'running' }
-        if (sessionId !== undefined && projected.sessionId !== sessionId) return
-        status = projected.status
-        if (status === 'idle' && attached) {
-          hintHeld()
-          prompt()
-        }
-      } else if (method === 'session.view') {
-        const projected = params as { sessionId: string; view: SessionView }
-        if (sessionId !== undefined && projected.sessionId !== sessionId) return
-        lastAuthority = projected.view.authority
-        lastPending = projected.view.pendingApprovals
-        lastJobs = projected.view.jobs
-        if (!attached) return
-        const line = renderer.onView(projected.view)
-        if (line) out.write(line)
-        // A notice held while the agent idles arrives as a view, with no
-        // status change behind it to bring the prompt back.
-        if (hintHeld()) prompt()
-      }
-    },
-    onEnd: () => void exit(1),
+  const view = createLineView({
+    input: options.io?.input ?? process.stdin,
+    output: options.io?.output ?? process.stdout,
+    echoes: options.io === undefined && process.stdin.isTTY === true,
+    handleSigint: options.io === undefined,
+    ...(continueRequest === undefined ? {} : { continueRequest }),
+    ...(options.task === undefined ? {} : { task: options.task }),
+    banner: (init) => banner(init, overrides),
+    exit,
   })
-
-  const rl = createInterface({ input: options.io?.input ?? process.stdin, terminal: false })
-
-  const onSigint = (): void => void onInterrupt()
-
-  async function exit(code: number): Promise<void> {
-    if (exiting) return
-    exiting = true
-    if (!options.io) process.removeListener('SIGINT', onSigint)
-    try {
-      await client.request('shutdown')
-    } catch {
-      // The host is already gone.
-    }
-    client.close()
-    rl.close()
-    await host.dispose()
-    done(code)
-  }
-
-  async function onLine(raw: string): Promise<void> {
-    if (exiting) return
-    const line = raw.trim()
-    if (pendingApproval) {
-      const approval = pendingApproval
-      pendingApproval = undefined
-      const answer = line.toLowerCase()
-      // `a` is a yes that ALSO takes the scope the host offered on this
-      // approval. It is never a third outcome: the decision is still
-      // `allowed-once`, and the scope is a second durable fact beside it.
-      const always = approval.offered && (answer === 'a' || answer === 'always')
-      const outcome = always || answer === 'y' || answer === 'yes' ? 'allowed-once' : 'rejected'
-      try {
-        const result = await client.request<ApprovalAnswerResult>('approval/answer', {
-          sessionId,
-          id: approval.id,
-          outcome,
-          ...(always ? { offer: 'grant-session' } : {}),
-        })
-        // Settled elsewhere before the answer landed: say so rather than let a
-        // y/N vanish into a prompt nothing was waiting on.
-        if (result.outcome === 'not-pending') out.write(`that approval (${approval.id}) is no longer pending\n`)
-      } catch (error) {
-        printError(error)
-      }
-      return
-    }
-    if (line.length === 0) {
-      if (status === 'idle') prompt()
-      return
-    }
-    if (line === '/exit' || line === '/quit') {
-      await exit(0)
-      return
-    }
-    // Exact token, never a prefix: `/presets …` once reached switchAuthority
-    // as an unrecognized command and fell through to the SANDBOX setter,
-    // durably widening the wrong knob with no error.
-    const command = line.split(/\s+/, 1)[0]
-    if (command === '/grants' || command === '/revoke') {
-      await manageGrants(line)
-      return
-    }
-    if (command === '/sandbox' || command === '/ask' || command === '/accept' || command === '/preset') {
-      await switchAuthority(line)
-      return
-    }
-    if (command === '/compact') {
-      await compactNow()
-      return
-    }
-    if (command === '/history') {
-      await showOlder()
-      return
-    }
-    if (command === '/model') {
-      await switchModel(line)
-      return
-    }
-    if (command === '/sessions') {
-      await listSessions()
-      return
-    }
-    if (command === '/jobs') {
-      await manageJobs(line)
-      return
-    }
-    // Before the catch-all, not after it: `/cancel` sat below the unknown-command
-    // branch and could never run.
-    if (command === '/cancel') {
-      if (sessionId !== undefined && status === 'running') await client.request('session/cancel', { sessionId }).catch(printError)
-      return
-    }
-    if (command?.startsWith('/')) {
-      out.write(`unknown command ${command}\n`)
-      prompt()
-      return
-    }
-    try {
-      // `auto`: the HOST decides steer-vs-followup against the live agent in
-      // the tick it delivers. Choosing here from the observed status raced
-      // turn-end — a line typed in the tick after `turn/end` became a fresh
-      // turn's prompt instead of steering the one that was still running.
-      const result = await client.request<PromptResult>('session/prompt', {
-        text: line,
-        ...(sessionId === undefined ? { agentOptions: overrides } : { sessionId, mode: 'auto' }),
-      })
-      sessionId = result.sessionId
-    } catch (error) {
-      printError(error)
-      if (status === 'idle') prompt()
-    }
-  }
-
-  /**
-   * One page further back, anchored to the cut this client attached on. A
-   * terminal cannot scroll, so it prints; the anchor is what keeps the pages
-   * consistent while the session keeps appending underneath them.
-   */
-  async function showOlder(): Promise<void> {
-    if (sessionId === undefined || history === undefined) {
-      out.write('nothing attached to page back through\n')
-      prompt()
-      return
-    }
-    if (!history.hasMore) {
-      out.write('that is the whole session\n')
-      prompt()
-      return
-    }
-    try {
-      const older = await client.request<PageResult>('session/page', { sessionId, throughSeq: history.cursor, beforeSeq: history.oldest })
-      const transcript = renderHistory(older.page.events)
-      if (older.page.hasMore) out.write('… earlier events remain (/history again)\n')
-      if (transcript) out.write(transcript)
-      history = { cursor: history.cursor, oldest: older.page.from, hasMore: older.page.hasMore }
-    } catch (error) {
-      printError(error)
-    }
-    if (status === 'idle') prompt()
-  }
-
-  /**
-   * What else is here, by name. A terminal cannot switch sessions in place —
-   * that is a capability, not a listing — so this ends with the command that
-   * opens one, and bounds itself: a store with hundreds of sessions must not
-   * scroll a conversation off the screen to show them.
-   */
-  async function listSessions(): Promise<void> {
-    try {
-      const { sessions } = await client.request<SessionsListResult>('sessions/list')
-      if (sessions.length === 0) out.write('no sessions yet\n')
-      const shown = sessions.slice(0, SESSIONS_SHOWN)
-      // A resumed session keeps its original `createdAt`, so the one you are
-      // actually in can sit below the cut — and it is the last row this command
-      // may drop. It joins the list rather than replacing a row.
-      const open = sessions.find((session) => session.id === sessionId)
-      if (open && !shown.includes(open)) shown.push(open)
-      for (const session of shown) {
-        const marks = [session.id === sessionId ? 'this one' : undefined, session.live ? 'live' : undefined, session.delegatedBy ? 'child' : undefined]
-          .filter(Boolean)
-          .join(', ')
-        out.write(`${session.id}  ${new Date(session.createdAt).toISOString()}  ${session.title ?? '(unnamed)'}${marks ? `  [${marks}]` : ''}\n`)
-      }
-      if (sessions.length > SESSIONS_SHOWN) out.write(`… and ${sessions.length - SESSIONS_SHOWN} older (minidsh sessions list shows them all)\n`)
-      if (sessions.length > 0) out.write('open one with: minidsh resume <id>\n')
-    } catch (error) {
-      printError(error)
-    }
-    if (status === 'idle') prompt()
-  }
-
-  /**
-   * Compaction is a human command over the wire, not a model-facing tool. The
-   * summary it produces arrives as a durable event like everything else, so the
-   * renderer reports the result twice over: once here, once from the log.
-   */
-  async function compactNow(): Promise<void> {
-    if (sessionId === undefined) {
-      out.write('no session yet - send a prompt first\n')
-      prompt()
-      return
-    }
-    try {
-      const result = await client.request<CompactResult>('session/compact', { sessionId })
-      if (result.kind === 'compacted') {
-        out.write(`compacted ${result.shadowedNodes} messages (~${formatTokens(result.surfaceTokensBefore)} → ~${formatTokens(result.surfaceTokensAfter)})\n`)
-      } else if (result.kind === 'scheduled') {
-        out.write('the turn is still running; compaction will run before its next step\n')
-      } else {
-        out.write('nothing worth compacting yet\n')
-      }
-    } catch (error) {
-      printError(error)
-    }
-    if (status === 'idle') prompt()
-  }
-
-  /**
-   * `/model` reads the base route; `/model <provider>/<model> [effort]` (or
-   * `/model <model> [effort]` on the same provider) switches it over the wire,
-   * where it becomes a durable `agent/options` event the renderer reports back.
-   */
-  async function switchModel(line: string): Promise<void> {
-    const [, target, effort] = line.split(/\s+/, 3)
-    if (sessionId === undefined) {
-      out.write('no session yet - send a prompt first\n')
-      prompt()
-      return
-    }
-    const params: Record<string, string> = { sessionId }
-    if (target) {
-      const slash = target.indexOf('/')
-      if (slash > 0) {
-        params.provider = target.slice(0, slash)
-        params.model = target.slice(slash + 1)
-      } else {
-        params.model = target
-      }
-    }
-    if (effort) params.reasoningEffort = effort
-    try {
-      const route = await client.request<ModelResult>('session/model', params)
-      out.write(`model: ${route.provider}/${route.model}${route.reasoningEffort ? ` · effort ${route.reasoningEffort}` : ''}\n`)
-    } catch (error) {
-      printError(error)
-    }
-    if (status === 'idle') prompt()
-  }
-
-  /**
-   * Lists or ends the standing consents this session holds.
-   *
-   * A grant is the only authority act here that is not a knob, so it needs a
-   * way to be seen and taken back — a consent nobody can enumerate is one
-   * nobody can withdraw. Both read the same fold every other surface reads.
-   */
-  async function manageGrants(line: string): Promise<void> {
-    const [command, value] = line.split(/\s+/, 2)
-    if (sessionId === undefined) {
-      out.write('no session yet - send a prompt first\n')
-      prompt()
-      return
-    }
-    try {
-      if (command === '/revoke') {
-        if (!value) out.write('usage: /revoke <grant-id>   (/grants lists them)\n')
-        else {
-          const { revoked } = await client.request<{ revoked: boolean }>('approval/revoke', { sessionId, grantId: value })
-          out.write(revoked ? `revoked ${value}\n` : `no live grant "${value}" in this session\n`)
-        }
-      } else {
-        const view = await client.request<AuthorityView>('session/authority', { sessionId })
-        if (view.grants.length === 0) out.write('no standing grants in this session\n')
-        for (const grant of view.grants) out.write(`${grant.id}  ${grant.toolName}  ${describeIntent(grant.subject)}\n`)
-      }
-    } catch (error) {
-      printError(error)
-    }
-    if (status === 'idle') prompt()
-  }
-
-  /**
-   * `/jobs` lists the background jobs the last view named; `/jobs cancel <id>`
-   * is a PERSON's stop, over the wire. The stop's end is recorded and its
-   * notice delivered quiet, so the agent is not woken by it: the hint says so
-   * once the session is idle.
-   */
-  async function manageJobs(line: string): Promise<void> {
-    const [, sub, value] = line.split(/\s+/, 3)
-    if (sessionId === undefined) {
-      out.write('no session yet - send a prompt first\n')
-      prompt()
-      return
-    }
-    if (sub === 'cancel') {
-      if (!value) out.write('usage: /jobs cancel <job-id>   (/jobs lists them)\n')
-      else {
-        try {
-          const result = await client.request<JobCancelResult>('job/cancel', { sessionId, jobId: value })
-          const said =
-            result.state === 'ended'
-              ? jobStatus({ state: 'ended', ...(result.end === undefined ? {} : { end: result.end }) })
-              : 'a stop was requested, but it has not ended yet'
-          out.write(`${printableText(`job ${result.jobId}: ${said}`)}\n`)
-        } catch (error) {
-          printError(error)
-        }
-      }
-    } else if (sub !== undefined) {
-      out.write('usage: /jobs  |  /jobs cancel <job-id>\n')
-    } else {
-      if (lastJobs.length === 0) out.write('no background jobs in this session\n')
-      // The label is the model's command and a failure's detail a producer's
-      // words: one line each, neutralized.
-      for (const job of lastJobs) {
-        out.write(`${printableText(`${jobStatus(job).padEnd(10)}  ${preview(job.label, 80)}  ${job.jobId}${job.held === true ? '  (notice held)' : ''}`)}\n`)
-      }
-    }
-    if (status === 'idle') prompt()
-  }
-
-  /**
-   * Authority changes go over the wire like everything else: the terminal is a
-   * protocol client, and the switch it asks for becomes a durable event the
-   * renderer then reports back to it.
-   */
-  async function switchAuthority(line: string): Promise<void> {
-    const [command, value] = line.split(/\s+/, 2)
-    if (sessionId === undefined) {
-      out.write('no session yet - send a prompt first\n')
-      prompt()
-      return
-    }
-    if (!value) {
-      const usage =
-        command === '/ask'
-          ? 'usage: /ask <ask|never>\n'
-          : command === '/accept'
-            ? 'usage: /accept <full|none>   (none: run shell commands this host cannot sandbox)\n'
-            : command === '/preset'
-              ? 'usage: /preset <name>\n'
-              : 'usage: /sandbox <read-only|workspace-write|danger-full-access>\n'
-      out.write(usage)
-      prompt()
-      return
-    }
-    const params =
-      command === '/ask'
-        ? { sessionId, approval: value }
-        : command === '/accept'
-          ? { sessionId, accepts: value }
-          : command === '/preset'
-            ? { sessionId, preset: value }
-            : { sessionId, sandbox: value }
-    try {
-      const view = await client.request<AuthorityView>('session/authority', params)
-      const preset = view.preset === undefined ? '' : ` · preset: ${view.preset}`
-      out.write(`sandbox: ${view.sandbox} (${confinementLine(view)}) · approvals: ${view.approval}${preset}\n`)
-    } catch (error) {
-      printError(error)
-    }
-    if (status === 'idle') prompt()
-  }
-
-  async function onInterrupt(): Promise<void> {
-    const now = Date.now()
-    const again = now - lastInterrupt < 2000
-    lastInterrupt = now
-    if (status === 'running' && sessionId !== undefined && !again) {
-      out.write('\n(cancelling — Ctrl+C again to exit)\n')
-      await client.request('session/cancel', { sessionId }).catch(() => {})
-      return
-    }
-    await exit(0)
-  }
-
-  // Lines are strictly serialized: a pasted second line waits for the first
-  // prompt's response, sees its sessionId, and becomes a followup/steer instead
-  // of creating a second session. And no line runs before the terminal knows
-  // WHICH session it is in: a line a piped script had waiting before a resume
-  // attached went out with no session id, and the host made a second, hidden
-  // session of it — a paid turn nobody saw (S20.5 review).
-  let ready!: () => void
-  let lineChain: Promise<void> = new Promise<void>((resolve) => (ready = resolve))
-  const enqueueLine = (raw: string): void => {
-    // A TTY echoed the user's keystrokes and their Enter, so the cursor has
-    // already left the prompt and the next event needs no break. A PIPE echoes
-    // nothing, so `you> ` is still sitting on the line and the first rendered
-    // event would glue itself to it — which is what a scripted `minidsh chat`
-    // and every piped transcript actually look like.
-    if (isTty) promptStanding = false
-    lineChain = lineChain.then(() => onLine(raw)).catch(printError)
-  }
-  rl.on('line', enqueueLine)
-  rl.on('close', () => void exit(0))
-  // readline never emits 'SIGINT' with terminal:false — on a real TTY Ctrl+C
-  // arrives as the process signal, so the interrupt handler must live there.
-  if (!options.io) process.on('SIGINT', onSigint)
-
-  try {
-    const init = await client.request<InitializeResult>('initialize')
-    const provider = overrides.provider ?? init.defaultAgentOptions.provider
-    const model = overrides.model ?? init.defaultAgentOptions.model
-    // From the advertised catalog: this client reads the wire, never the
-    // host's registry. A retired alias an adapter still resolves is unlisted,
-    // so it shows no window here until the view's context reports one.
-    const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
-    const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
-    out.write(`minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /jobs lists background jobs, /exit quits, Ctrl+C cancels)\n`)
-
-    if (attaching) {
-      // Over the wire, like every other client: the host composes the
-      // continuation under its own world and preset and opens it with this
-      // run's explicit authority flags (`onContinued`, inside the creation
-      // transaction, before a restored prompt can wake a turn), and OWNS it,
-      // so its shutdown sweeps it. The launch's model flags are this command's
-      // explicit request, so they go with it.
-      const continued =
-        options.resumeId !== undefined
-          ? await client.request<ContinueResult>('session/resume', { sessionId: options.resumeId, agentOptions: overrides })
-          : await client.request<ContinueResult>('session/fork', {
-              sessionId: options.forkId,
-              agentOptions: overrides,
-              ...(options.boundary === undefined ? {} : { atSeq: options.boundary }),
-              ...(options.salvage === true ? { salvage: true } : {}),
-            })
-      sessionId = continued.sessionId
-      // Attach first; live rendering starts at the seq after the cursor, and
-      // the backlog replays whatever streamed while we attached (a resumed
-      // session may have woken on its restored inbox already).
-      const attachment = await client.request<AttachResult>('session/attach', { sessionId })
-      // A readable prefix is not the session: saying nothing renders a
-      // truncated log as if it were whole.
-      if (attachment.damaged) out.write('warning: the stored log is damaged; what follows is its readable prefix\n')
-      const transcript = renderHistory(attachment.page.events)
-      // Not `page.from`: that is an inclusive lower SEQ bound, not a count, and
-      // seq space counts the trace tier a page never carries.
-      if (attachment.page.hasMore) out.write('… earlier events remain (/history shows the page before this one)\n')
-      if (transcript) out.write(transcript)
-      out.write(options.resumeId !== undefined ? `resumed ${sessionId}\n` : `forked ${options.forkId} → ${sessionId}\n`)
-      // The cursor is the host's own, not inferred from the last event on the
-      // page: a page that does not run to the head would otherwise open a gap.
-      liveFromSeq = attachment.cursor + 1
-      history = { cursor: attachment.cursor, oldest: attachment.page.from, hasMore: attachment.page.hasMore }
-      lastJobs = attachment.view.jobs
-      const line = renderer.onView(attachment.view)
-      if (line) out.write(line)
-      // A prompt asked and never decided still needs an answer; the host folds
-      // that pair, because half of it can fall outside a page.
-      for (const pending of attachment.view.pendingApprovals) askApproval(pending)
-      attached = true
-      for (const frame of backlog.splice(0)) handleFrame(frame)
-    }
-
-    // The session is known (or this is a fresh chat): lines held so far run now, in order.
-    ready()
-    if (options.task !== undefined && options.task.length > 0) enqueueLine(options.task)
-    else if (status === 'idle') {
-      // A resumed session whose job the closer ended `lost` holds its notice.
-      hintHeld()
-      prompt()
-    }
-  } catch (error) {
-    printError(error)
-    await exit(1)
-  }
-
+  const controller = new SessionController(client, view.hooks, overrides)
+  route = (method, params) => controller.onNotification(method, params)
+  hostEnded = () => controller.closed()
+  await view.run(controller)
   return finished
 }

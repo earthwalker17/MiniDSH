@@ -11,7 +11,7 @@
  * then the static ES import graph from every script it reaches (and from
  * `theme.js` where one exists), then each stylesheet's `@import`/`url()`.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { WEB_ASSETS } from '../../../scripts/build.ts'
@@ -73,6 +73,23 @@ describe('the browser client ships exactly what it loads', () => {
     const extra = [...listed].filter((name) => !reached.has(name))
     expect(missing, `the page loads these, and WEB_ASSETS in scripts/build.ts does not ship them: ${missing.join(', ')}`).toEqual([])
     expect(extra, `WEB_ASSETS ships these, and nothing the page loads reaches them: ${extra.join(', ')}`).toEqual([])
+  })
+
+  it('ships every browser module the terminal imports, so an installed terminal can load it', () => {
+    // Since S22.1 the full-screen terminal draws the browser's presentation
+    // model: `dist/app/terminal/*.js` imports `../web/<name>.js`, which exists
+    // in an install only because the build copies it as a browser asset.
+    const terminal = join(WEB, '..', 'terminal')
+    const listed = new Set<string>(WEB_ASSETS)
+    const imported = new Set<string>()
+    for (const file of readdirSync(terminal).filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))) {
+      for (const ref of collectImports(readFileSync(join(terminal, file), 'utf8'))) {
+        const match = /^\.\.\/web\/([\w.-]+\.js)$/.exec(ref.spec)
+        if (match && !ref.typeOnly) imported.add(match[1]!)
+      }
+    }
+    expect(imported.size, 'the terminal no longer imports a browser module: this guard is checking nothing').toBeGreaterThan(0)
+    expect([...imported].filter((name) => !listed.has(name))).toEqual([])
   })
 
   it('reads a reference the way the browser does, and refuses one this host could not serve', () => {
