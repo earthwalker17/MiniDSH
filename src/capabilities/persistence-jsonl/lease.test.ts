@@ -108,6 +108,37 @@ describe('persistence-jsonl: the session write lease', () => {
     expect(JSON.parse(readFileSync(`${fileFor('stale')}.lock`, 'utf8')).pid).toBe(process.pid)
   })
 
+  // A hard-killed runtime leaves its lock, and after a reboot its pid often
+  // names an unrelated LIVE process: the probe alone read that as a holder
+  // forever. The parent of this test process is alive for the whole test.
+  it('reclaims a holder that took its lease before this boot, even when its pid is alive now', async () => {
+    const rootA = await mountRoot()
+    rootA.get(SESSIONS).create({ cwd: '/w', id: asSessionId('reboot') })
+    appendTurn(rootA.get(SESSIONS), 'reboot', 1)
+    await rootA.get(SESSIONS).detach(rootA.get(SESSIONS).get(asSessionId('reboot'))!)
+    const lock = `${fileFor('reboot')}.lock`
+    const livePid = process.ppid
+    expect(() => process.kill(livePid, 0), `pid ${livePid} must be alive for this test to mean anything`).not.toThrow()
+
+    // The same live pid, acquired NOW: refused, so the rule never steals a live holder.
+    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: Date.now() }))
+    const refused = resumeStored(rootA, 'reboot')
+    await expect(refused.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
+    await rootA.get(SESSIONS).detach(refused)
+
+    // Acquired at the epoch, long before any boot: reclaimed.
+    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: 0 }))
+    const resumed = resumeStored(rootA, 'reboot')
+    await expect(resumed.flush()).resolves.toBeUndefined()
+    expect(JSON.parse(readFileSync(lock, 'utf8')).pid).toBe(process.pid)
+    await rootA.get(SESSIONS).detach(resumed)
+
+    // No numeric acquiredAt: the pid rule alone, and the pid is alive.
+    writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname() }))
+    const legacy = resumeStored(rootA, 'reboot')
+    await expect(legacy.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
+  })
+
   it('refuses a foreign-host holder even when its pid is locally dead', async () => {
     const rootA = await mountRoot()
     rootA.get(SESSIONS).create({ cwd: '/w', id: asSessionId('afar') })

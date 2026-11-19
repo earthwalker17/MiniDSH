@@ -43,7 +43,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs'
-import { hostname } from 'node:os'
+import { hostname, uptime } from 'node:os'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
@@ -197,9 +197,32 @@ function readLeaseHolder(lock: string): LeaseHolder | undefined {
   }
 }
 
-/** Dead means provably dead: same host AND the signal-0 probe reports ESRCH. */
+/**
+ * How far before this boot a holder's `acquiredAt` must lie to be read as a
+ * previous boot's. A wide margin, because both ends are estimates: `os.uptime()`
+ * has whole-second resolution on some hosts, and the boot it implies is a
+ * subtraction from a wall clock that may have been stepped since.
+ */
+const BOOT_MARGIN_MS = 60_000
+
+/**
+ * Dead means provably dead, and only ever on THIS host (another cannot be
+ * probed): the signal-0 probe reports ESRCH, OR the lease was taken before this
+ * machine last booted.
+ *
+ * The boot rule exists because the pid rule alone strands logs. A runtime the
+ * OS hard-kills — a Windows logoff, a crash, a supervisor's deadline kill —
+ * leaves its lock behind, and after a reboot its pid is often reused by an
+ * unrelated live process, which the probe reads as alive forever: every resume
+ * of that log was refused with "remove …lock". No process alive now can have
+ * acquired anything before this boot, so the rule never steals a live holder;
+ * a clock stepped BACK since the lease only makes it more conservative. A
+ * holder with no numeric `acquiredAt` (a hand-written lock, an old writer)
+ * keeps the pid rule alone.
+ */
 function holderIsDead(holder: LeaseHolder): boolean {
   if (holder.host !== hostname()) return false
+  if (typeof holder.acquiredAt === 'number' && holder.acquiredAt < Date.now() - uptime() * 1000 - BOOT_MARGIN_MS) return true
   try {
     process.kill(holder.pid, 0)
     return false
@@ -527,10 +550,11 @@ class JsonlArchive implements Persistence {
 
   /**
    * The per-session write lease: exclusive-create of `<file>.lock`. A holder
-   * is stale only when its pid is provably dead on THIS host (`ESRCH`; an
-   * `EPERM` probe means alive-but-inaccessible, and another host cannot be
-   * probed at all) — everything else refuses and names the holder, so pid
-   * reuse or a foreign host degrade to a manual `rm` of the lock file, never
+   * is stale only when it is provably dead on THIS host (`holderIsDead`: its
+   * pid answers `ESRCH`, or it took the lease before this boot; an `EPERM`
+   * probe means alive-but-inaccessible, and another host cannot be probed at
+   * all) — everything else refuses and names the holder, so pid reuse within
+   * a boot or a foreign host degrade to a manual `rm` of the lock file, never
    * to two writers.
    *
    * Reclaiming a stale lock is the one TWO-step in this protocol (remove, then
