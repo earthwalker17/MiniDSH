@@ -11,7 +11,9 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
   - parallel subagents shown live, each card following what its child is doing;
   - a composer with a real line editor: multi-line drafts (Ctrl+J; Ctrl+Enter on Windows; `\` then Enter anywhere), word movement and deletion, history (↑ at the top of a draft, Ctrl+P/Ctrl+N), pastes kept intact;
   - a command palette on `/`, with `/help`, `/resume` (a picker), `/new`, `/fork` and `/copy` beside the existing commands;
-  - an approval band that takes the composer's place, answered by `y`, `n` or `a` and only once the keyboard has been quiet for a moment, so a key typed for the composer never answers it;
+  - an approval band that takes the composer's place, answered by `y`, `n` or `a` and only once the whole question has been on screen (a long one scrolls) and the keyboard has been quiet for a moment, so a key typed for the composer never answers it;
+  - Ctrl+O shows a tool's output as the model read it, including text a terminal code or a carriage return would hide, and the folded view says when it hid something; `/copy` puts the cleaned text on the clipboard;
+  - `/model` and the permission commands before the first message choose what the session starts on;
   - two status rows (permissions and what the session is doing; model, effort and context);
   - keyboard scrolling and the wheel (on an empty draft); the terminal's own colours, with `NO_COLOR`, 256 and 16 colours and an ASCII glyph set (`MINIDSH_ASCII=1`) respected.
 
@@ -50,6 +52,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 - A session's view now follows its status: a client attached to it no longer shows a turn as running after it ended, or a subagent session as read-only after its delegation ended.
 - A `resume` (CLI, terminal or wire) whose authority flags the session refuses no longer loses the prompt the session had queued; the flags now land before that prompt can start a turn, and the model is told of them in its first request.
 - A prompt sent to a session that is shutting down is refused instead of being accepted and dropped.
+- The line view (`--plain` or a pipe) no longer exits before running what was piped into it; it runs each line and waits for the turn, and its streamed text drops invisible characters such as bidi overrides, as every other line it prints does.
 
 ## [1.2.0] — 2026-10-26
 

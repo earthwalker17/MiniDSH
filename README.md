@@ -35,14 +35,14 @@ Requirements:
 ```sh
 npm install -g minidsh            # or run it without installing: npx minidsh …
 
-minidsh chat --cwd path/to/repo   # full-screen terminal (--cwd defaults to the current directory; --plain for line mode)
+minidsh chat --cwd path/to/repo   # full-screen terminal (--cwd defaults to the current directory; a pipe or --plain: line mode)
 minidsh web  --cwd path/to/repo   # the same runtime in a browser; open the one URL it prints
 minidsh run "fix the failing test in src/slug.test.mjs" --approve
                                   # --approve answers every approval yes (chat, serve and web then never ask);
                                   # without it a headless run refuses anything that needs one (on Windows: add
                                   # --accept none, which runs shell commands unconfined but keeps file edits fenced)
 minidsh run "review this module for unchecked inputs" --provider anthropic --model claude-sonnet-5
-minidsh run "summarize this repository" --json     # one JSON line per session event on stdout
+minidsh run "summarize this repository" --json     # one JSON line per event; exit 0 iff it completed, 2 on a bad flag
 
 minidsh sessions list                     # what is stored, by name
 minidsh sessions show <id> --audit        # what this session was allowed to do, and what each call did
@@ -56,7 +56,7 @@ minidsh skills                            # the skills a session here is offered
 minidsh --help
 ```
 
-In the terminal: Enter sends (mid-turn, it steers); Ctrl+J, Ctrl+Enter on Windows or `\` then Enter is a new line; `/` opens the command palette and `/help` lists every key; Esc stops a turn; Ctrl+O opens what a finished turn folded. An approval takes the composer's place: `y`, `n`, or `a` when offered, which allows that exact call until the session ends or its authority changes (`/grants`, `/revoke <id>`); it arms once the keyboard is quiet, so typing never answers it. `/sandbox`, `/ask`, `/accept` and `/preset` switch authority, `/model` the model; `/resume`, `/new` and `/fork` switch sessions in place. A pipe or `--plain` gets the line view.
+In the terminal: Enter sends (mid-turn, it steers); Ctrl+J, Ctrl+Enter on Windows or `\` then Enter is a new line; `/` opens the command palette, `/help` lists every key; Esc stops a turn; Ctrl+O opens what a finished turn folded. An approval takes the composer's place: `y`, `n`, or `a` when offered, which allows that exact call until the session ends or its authority changes (`/grants`, `/revoke <id>`); it arms once read to its end with the keyboard quiet, so typing never answers it. `/sandbox`, `/ask`, `/accept` and `/preset` switch authority, `/model` the model; `/resume`, `/new` and `/fork` switch sessions in place.
 
 Everything MiniDSH keeps lives under `~/.minidsh` (override with `MINIDSH_HOME`): `sessions/` (one JSONL log per session), `spill/` (oversized tool output, swept after 30 days), `attachments/` (images, never swept), `composition.json`, `settings.json`, `credentials.json`, `skills/` (your own skills), and an optional `AGENTS.md` that every session reads. Nothing in the harness deletes a log.
 

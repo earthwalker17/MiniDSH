@@ -22,7 +22,8 @@
  * and `control.summary`, which is small, bound in rate by state changes and
  * superseding, so dropping one would buy nothing and could hide the one that
  * says a session wants a person: past a hard ceiling the socket is closed
- * instead, and the client reattaches and gets a fresh page.
+ * instead, and the client reattaches and gets a fresh page. Any new carrier
+ * keeps this tiering: trace may drop, nothing else may.
  */
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, Server } from 'node:http'

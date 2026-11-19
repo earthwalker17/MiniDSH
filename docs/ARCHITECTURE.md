@@ -139,45 +139,41 @@ The model proposes, policy decides, the effect boundary enforces.
 
 ## 8. Surfaces
 
-A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval` for catalog and authority), owns transport and process exit, renders from `session/event` and holds no authority state: a switch it asks for is a durable event it reads back. Plain-text surfaces share `app/present.ts`, which neutralizes control characters; the cold readers (`app/inspect.ts`) neither lease nor repair.
+A surface injects only `agents` and `sessions` (plus `llm`, `sandbox`, `approval` for catalog and authority), owns transport and process exit, renders from `session/event` and holds no authority state: a switch it asks for is a durable event it reads back. Plain-text surfaces share `app/present.ts`, which neutralizes control characters.
 
-- **Headless CLI** (`app/cli.ts`): exit 0 iff the turn completed, 2 on a usage failure; `--json` streams the wire's `{sessionId, event}` frame.
-
-**Protocol** (`capabilities/protocol`): JSON-RPC 2.0; one plugin, one host, N carriers (stdio, in-process, WebSocket). Control-plane methods act only on a LIVE session; a child mid-delegation is read-only on every driving method.
+**Protocol** (`capabilities/protocol`): JSON-RPC 2.0; one plugin, one host, N carriers. Control-plane methods act only on a LIVE session; a child mid-delegation is read-only on every driving method.
 
 | method | rule |
 |---|---|
-| `initialize` | the catalog (efforts included), defaults (live from settings), workspaces, presets, and each tool's `display` |
-| `session/resume` | a stored session continued with no prompt, a live one returned as it is; opened with the host's flags (`onContinued`); owned |
-| `session/fork` | a live or stored session branched at an inclusive `atSeq` into a new one that never wakes; `salvage` for a damaged stored log only; owned |
-| `session/prompt` | no id creates, live delivers, stored resumes; `cwd`/`workspaceId` place a NEW session under `workspaceRoots` (not beside `sessionId`); a route no adapter serves is refused; `authority` only when creating, as the creation's `opening` |
-| `session/attach` | subscribes BEFORE the cut; `view` is the folds a page cannot compute (with `drivable: false` exactly where `assertDrivable` refuses), nothing pending or running on a cold read; a live agent's `tools` |
+| `initialize` | catalog, settings-live defaults, workspaces, presets, each tool's `display` |
+| `session/resume` | stored: resumed, no prompt; live: returned; opened with the host's flags (`onContinued`); owned |
+| `session/fork` | live or stored, through an inclusive `atSeq`, into an owned session that never wakes; `salvage`: damaged stored only |
+| `session/prompt` | no id creates, live delivers, stored resumes; `cwd`/`workspaceId` only for a NEW session, under `workspaceRoots`; `authority` only at creation (its `opening`) |
+| `session/attach` | subscribes BEFORE the cut; `view`: the folds a page cannot compute, `drivable` included, nothing pending or running on a cold read; a live agent's `tools` |
 | `session/page` | beneath the attach cut |
 | `session/detach` | no id narrows to NOTHING |
 | `session/events` | every tier; the bounded gap repair |
-| `sessions/list` | live and stored, live wins; derived `title`; `updatedAt` (the last event, else the store's write); a workspace label by spelling, no I/O |
+| `sessions/list` | live and stored (live wins), derived `title` and `updatedAt`, a workspace label by spelling |
 | `session/cancel` | `keepQueued` spares the durable inbox |
 | `session/compact` | HUMAN command, never a model tool |
-| `approval/answer` | first answer wins; only from a connection that may see the session; an `offer` the fold did not make is refused |
+| `approval/answer` | first wins; only from a connection that may see the session; no `offer` the fold did not make |
 | `approval/revoke` | ends one grant (§7) |
-| `attachment/read` | the bytes of an image the session's OWN log names, by the log's reference, re-verified; never an oracle over the store |
-| `job/cancel` | a PERSON stops one job of a live session: `by: user`, notice quiet |
-| `control/subscribe` | a live-session baseline, then `control.summary` whatever it watches |
+| `attachment/read` | an image the session's OWN log names, re-verified; no store oracle |
+| `job/cancel` | a PERSON stops one job: `by: user`, notice quiet |
+| `control/subscribe` | a live-session baseline, then `control.summary` beside the watch set |
 | `session/authority` | each switch IS its durable event |
-| `session/model` | no fields reads; the given fields are ONE `agent/options{change}`, iff the base changes |
+| `session/model` | no fields reads; fields are ONE `agent/options{change}` iff the base changes |
 | `settings/describe`, `settings/get`, `settings/set` | `expectedRevision` REQUIRED |
 | `shutdown` | refused on a socket unless its carrier says `allowShutdown` |
 
-Notifications: `session.event`, `session.status`, `session.view` (also on every status flip and a child's disposal), `settings.changed`, `control.summary`; approval frames ARE the durable events; no DTO layer or protocol version until a client ships apart (`frames.ts`).
+Notifications: `session.event` (`{sessionId, event}`, verbatim; headless `--json` too), `session.status`, `session.view`, `settings.changed`, `control.summary`. An ask is its durable frame; no DTO layer or protocol version until a client ships apart (`frames.ts`).
 
-- **Attach contract.** A message-aligned tail page at a `cursor` (`core/session/page.ts`), never the trace tier (`Session.facts`, §4), so a bare seq dedups. A client pages back, repairs a hole with a bounded `session/events` and re-attaches on reconnect, replacing its window: no lower-bound cursor, by design. No client folds the surface; a cold read never resumes.
-- **Multi-client.** A connection owns only its sink, its watch set (narrowed by its first attach) and its control-plane subscription; a disconnect disposes nothing. A question stays parked while a watcher or control subscriber COULD answer it, else settles `unavailable`; only one that watches the session may answer (`protocol/host.ts`).
-- **Backpressure is tier-aware** (`transport-ws.ts`): `session/event` is a synchronous contained emit, so no listener may suspend the loop; past a soft limit only the trace tier drops (summaries kept); past a hard one the socket closes `slow-client`.
-- **The terminal** (`app/terminal`) is a protocol client: it continues a session over the wire, never beside it. One controller (`controller.ts`) serves the full-screen view (`tui.ts`) and, for a pipe or `--plain`, the line view (`line.ts`). **It attaches its own session as soon as the id is known and subscribes to the control plane**, so an ask raised before that attach parks; a running child is attached read-only for its card.
-- **The full-screen view** draws the browser's model (`conversation.js`, `cards.js`) through ONE neutralizing cell writer (`screen.ts`). **A consent shows the trusted subject, else the joined call; its band arms after 600 ms on screen and 600 ms of keyboard quiet, and only a lone `y`/`a`/`n` answers** (`tui.ts`). **Every mode it sets is undone on every exit path** (`tty.ts`).
-- **The browser** (`app/web/`, plain ES modules, no build) draws the log through `conversation.js`, a pure fold into blocks joined by the ids the log records (presentation, never a surface fold): authority, decisions and failures top-level, process collapsible. Its parity gate (`rows.test.ts`) holds every visible kind to one place. It GROWS its transcript (`transcript.js`); an older page folds alone and is joined at the boundary.
-- **A call's card is its tool's** `display` (`cards.js`), its result side durable facts only; running or waiting only where the view says. The DOM is under a real browser (`*.browser.test.ts`).
-- **An authority surface** (`app/web.ts`): loopback unless `--host`, a one-shot token traded for a signed cookie, a Host/Origin fence, no framing, a CSP with Trusted Types (no HTML sink can run).
+- **Attach contract.** A message-aligned tail page at a `cursor` (`core/session/page.ts`), never trace (§4); a reconnect re-attaches (no lower-bound cursor, by design). No client folds the surface; a cold read never resumes.
+- **Multi-client** (`protocol/host.ts`). A connection owns only its sink, its watch set (narrowed by its first attach) and its control subscription; a disconnect disposes nothing. An ask parks while a watcher or control subscriber COULD answer it, else settles `unavailable`.
+- **One presentation model, two renderers.** `app/web/conversation.js` folds the log into blocks joined by logged ids (presentation, never a surface fold; authority, decisions and failures top-level) for the browser and the full-screen terminal (`blocks.ts`); it grows, never rebuilds (`transcript.js`); `rows.test.ts` gates visibility parity with plain text.
+- **No composer key answers a consent** (subject first, else the joined call): a click does in the browser (`approval.js`), a lone `y`/`a`/`n` in the full-screen view, armed only once the band has been on screen, the keyboard quiet and every row of the question seen (`tui.ts`).
+- **The terminal** (`app/terminal`) continues sessions only over the wire (`session/resume`, `session/fork`). Its controller (`controller.ts`, under `tui.ts` and the line view `line.ts`) attaches its own session first and subscribes to the control plane, so an early ask parks. The full-screen view writes cells only via `screen.ts` (neutralizing) and undoes every mode it sets on any exit (`tty.ts`).
+- **`app/web.ts` is an authority surface**: loopback unless `--host`, a one-shot token for a signed cookie, a Host/Origin fence, no framing, a CSP with Trusted Types.
 
 ## 9. Composition, configuration and packaging
 
@@ -232,73 +228,73 @@ Tests mount real compositions; only the model is scripted or replayed (`test-sup
 
 | New thing | Home |
 |---|---|
-| a model provider | `capabilities/llm-<p>`: an `llm` adapter (§5) |
-| a model-facing capability | `capabilities/tool-<x>` |
-| a plugin's configuration | a strict `Plugin.config` schema (§2) |
-| an execution world | `fs`/`shell` providers; tools untouched |
-| a confinement backend | `shell-stdio/confine/` (§7) |
-| an authority knob | a log-only event, a fold, a default (§7), as `sandbox/acceptance` (its pin, `auditLines`) |
-| an authority preset | a presets-table entry (§7) |
-| a capability, no code edit | a `composition.json` row (§9) |
-| a user default | `core/settings` if the wire sets it, else row config |
-| a secret | a `CredentialRef` (§3) |
-| a per-agent bundle | an `agentPresets` list (§9) |
-| a policy/answerer | `tools/pre-execute`/`approval/request` listeners (§6) |
+| model provider | `capabilities/llm-<p>`: an `llm` adapter |
+| model-facing capability | `capabilities/tool-<x>` |
+| plugin configuration | strict `Plugin.config` schema |
+| execution world | `fs`/`shell` providers; tools untouched |
+| confinement backend | `shell-stdio/confine/` |
+| authority knob | log-only event, fold, default (§7), as `sandbox/acceptance` (pin, `auditLines`) |
+| authority preset | presets-table entry (§7) |
+| capability, no code edit | `composition.json` row (§9) |
+| user default | `core/settings` if the wire sets it, else row config |
+| secret | `CredentialRef` |
+| per-agent bundle | `agentPresets` list |
+| policy or answerer | `tools/pre-execute`/`approval/request` listeners (§6) |
 | durable state | an event kind (§4) |
-| an event's human line | `app/present.ts` AND `app/web/rows.js` |
-| context for the model | `agent.inject()` or `agent/pre-step`, never prompt text |
-| model know-how | a `SKILL.md` directory: data, never code or authority |
-| a surface | `app/` or a package under the §8 contract; no semantics |
-| a terminal key, view or panel | `app/terminal/tui.ts`; its wire call in `controller.ts`, a command in `commands.ts` |
-| a carrier | a protocol `Carrier`: framing, flow control only |
-| a named place to work | a `workspaces` entry: addressing, not a grant |
-| a remote client | the §8 attach contract |
-| a per-agent variant | `agent.ctx` (`world` if inherited, else `setup`), or a liftable `TOOLS.restrict` |
-| a narrowing continuations keep | `CreateAgentOptions.narrowing` (§4), never `setup` |
-| a resumer's switches | `ResumeAgentOptions.opening` (§3) |
-| a delegated child | `tool-subagent` (§7) |
-| context management | a `core/compaction` provider, keeping the pairing rule (§6) |
-| a context-pressure number | `core/metering`: the one pure fold |
-| oversized tool output | `spill`, via the producing tool (§3) |
-| an attachment kind | raster: an `attachments-local` probe; else `AttachmentRef`, `ModelModality`, `ContentBlock`, serializers, meter |
-| a network tool | a `tool-<x>` tagged `NETWORK_TOOL` (§7) |
-| an image producer | `core/llm/admission.ts`, then `attachments.saveImage` (§5) |
-| a spawned process | `core/process.ts`: the environment rule, the tree kill |
-| a second browser provider | a `core/browser` Definition first |
-| a verifier | a `tool-subagent` row + `model-roles` entry |
-| a model role | a `model-roles` entry; never the base route (§4) |
-| an out-of-loop model call | `resolveCallConfig` + `runAuxCall`, never bare `llm.stream` |
-| recall of shadowed history | `tool-history` (§6) |
-| a tool KIND | a `ToolDefinition.tags` constant, not a name |
-| a tool's card on a surface | `ToolDefinition.display`: card, title, argument roles, a per-call selector |
-| a store's lifetime | a retention row (§9) first |
-| an effect worth recording | a `core/effects` kind (§4), written by the PROVIDER |
-| its consent subject | an `EffectIntent` naming its AUTHORITY (§7) |
-| a durable pipeline step | `ToolCall.onDispatch`: cannot replace the body (§6) |
-| an overlapping tool body | `concurrencySafe` (`core/tools/types.ts`), never its own pool |
-| work that outlives its call | `jobs.start` with a `launch`, never a detached promise |
-| work an agent owns outside a turn | `Agent.own` (§6), never a detached promise |
-| a background producer | a world's `start` (§3); a second kind changes `JobKind` |
-| a session's name | `session/title` (§4), written by `session-title` |
-| a whole-log check | a pure `check*Log` beside its owner's invariant, composed by `app/inspect.ts` |
-| a format change | `core/session/format.ts` |
+| event's human line | `app/present.ts` AND `app/web/rows.js` |
+| context for the model | `agent.inject()`/`agent/pre-step`, never prompt text |
+| model know-how | `SKILL.md` directory: data, never code or authority |
+| surface | `app/` or a package under the §8 contract; no semantics |
+| terminal key, view, panel | `terminal/tui.ts`; wire calls `controller.ts`, commands `commands.ts` |
+| carrier | protocol `Carrier`: framing, tier-aware flow control (`transport-ws.ts`) |
+| named place to work | `workspaces` entry: addressing, not a grant |
+| remote client | the §8 attach contract |
+| per-agent variant | `agent.ctx` (`world` if inherited, else `setup`) or liftable `TOOLS.restrict` |
+| narrowing continuations keep | `CreateAgentOptions.narrowing` (§4), never `setup` |
+| resumer's switches | `ResumeAgentOptions.opening` |
+| delegated child | `tool-subagent` (§7) |
+| context management | `core/compaction` provider keeping the pairing rule (§6) |
+| context-pressure number | `core/metering`, the one pure fold |
+| oversized tool output | `spill`, via the producing tool |
+| attachment kind | raster: `attachments-local` probe; else `AttachmentRef`, `ModelModality`, `ContentBlock`, serializers, meter |
+| network tool | `tool-<x>` tagged `NETWORK_TOOL` (§7) |
+| image producer | `core/llm/admission.ts`, then `attachments.saveImage` |
+| spawned process | `core/process.ts`: environment rule, tree kill |
+| second browser provider | a `core/browser` Definition first |
+| verifier | `tool-subagent` row + `model-roles` entry |
+| model role | `model-roles` entry, never the base route (§4) |
+| out-of-loop model call | `resolveCallConfig` + `runAuxCall`, never bare `llm.stream` |
+| recall of shadowed history | `tool-history` |
+| tool KIND | `ToolDefinition.tags` constant, not a name |
+| tool's card on a surface | `ToolDefinition.display` (`core/tools/types.ts`) |
+| store's lifetime | a retention row (§9) first |
+| effect worth recording | `core/effects` kind (§4), written by the PROVIDER |
+| its consent subject | `EffectIntent` naming its AUTHORITY (§7) |
+| durable pipeline step | `ToolCall.onDispatch`: cannot replace the body |
+| overlapping tool body | `concurrencySafe`, never its own pool |
+| work outliving its call | `jobs.start` with a `launch`, never a detached promise |
+| out-of-turn work an agent owns | `Agent.own` (§6), never a detached promise |
+| background producer | a world's `start`; a second kind changes `JobKind` |
+| session's name | `session/title`, by `session-title` |
+| whole-log check | pure `check*Log` by its owner's invariant, run by `app/inspect.ts` |
+| format change | `core/session/format.ts` |
 
 No row here → an architecture question first.
 
 ## 12. Divergences from DeepSeek Harness (the ones that still shape decisions)
 
-Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
+Upstream facts and verdicts at the pin: `references/assumptions.md`.
 
 - **Substrate.** Own kernel, not Cordis: two composability properties in five mechanisms (§2); one package plus a dependency gate (§1).
-- **Concurrency.** Joined at the step, as DSH's batch (one ordered lane, pooled bodies, model-order results), but a child stays a foreground body: done is "idle", a cancel reaches it (DSH: an async activation settling through the inbox, beyond Stop); replay binds a child by its delegating call (DSH: first-call order). Owner-scoped jobs, waking bounded, a lost one closed and told (DSH: unbounded; left open).
+- **Concurrency.** Joined at the step (§6) like DSH's batch, but a child is a foreground body: done is "idle", a cancel reaches it (DSH: an async activation settled via the inbox, beyond Stop); replay binds a child by its delegating call (DSH: first-call order). Owner-scoped jobs, waking bounded, a lost one closed and told (DSH: unbounded; left open).
 - **The wire.** DSH's JSON-RPC SDK shape, bounded, unseen approvals settling `unavailable` (§8); `session/resume` returns a live session (DSH: refused as occupied).
 - **Consent.** A trusted `subject` and the joined call on every ask (DSH: model prose); exact-subject session grants; accepting `none`.
-- **Confinement.** bwrap and Seatbelt, each probed even alone; no Landlock (it needs a native launcher) or Windows backend (§13); a shell child's scrub by declared name (§9).
-- **The ceiling.** The workspace root alone (why: `core/sandbox/index.ts`; DSH adds temp and operator roots).
-- **Durability.** A durable `tool/dispatch` after the gate, recorded effects, a write lease and per-lifecycle writer claims over plain JSONL (DSH: no top-level dispatch; checksummed generations naming no writer).
-- **Delegation and routing.** An enforced ceiling (DSH: a seeded pin); a continuation re-applies the child's RECORDED narrowing (DSH: its descriptor under the saved preset, else the host's composition); `subagent/start|end` in the parent's log, closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
+- **Confinement.** bwrap and Seatbelt, each probed even alone; no Landlock (needs a native launcher) or Windows backend (§13); a shell child's scrub by declared name (§9).
+- **The ceiling.** The workspace root alone (why: `core/sandbox/index.ts`; DSH adds temp, operator roots).
+- **Durability.** A durable `tool/dispatch` after the gate, recorded effects, a write lease and per-lifecycle writer claims over plain JSONL (DSH: no top-level dispatch; checksummed generations name no writer).
+- **Delegation and routing.** An enforced ceiling (DSH: a seeded pin); a continuation re-applies the child's RECORDED narrowing (DSH: the saved preset's descriptor, else the host's); `subagent/start|end` in the parent's log, closed by repair (DSH: neither); `delegatedByCallId`; model roles over a durable base route.
 - **Context.** No tool-result pruner (tools bound their output); recall gated, not opt-in (§6).
-- **Surfaces.** A full-screen terminal ships (§8); DSH has none in-tree (`--profile tui` is an installable example, `2e39e704`).
+- **Surfaces.** A full-screen terminal ships (§8); DSH has none in-tree, only an installable `--profile tui` example.
 - **Providers.** Snapshot catalogs, conservative facts for an unknown id (§5; DSH: live `GET /models`).
 - **Web.** One opt-in search tool, consent per query, structured sources, no fetch (DSH: both default, unconsented).
 - **Browser.** Default where found, a pipe, fenced and proved per launch (§7; DSH: experimental, unfenced).
@@ -308,40 +304,38 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 
 **Authority**
 
-- No Windows confinement backend, by decision (DSH's is `partial`: a hard-link escape, standing ACL changes): until a session accepts `none` (§7) each command escalates to the unfenced `danger-full-access`; a child (pinned `never`) runs none.
+- No Windows confinement backend, by decision (DSH's is `partial`: a hard-link escape, standing ACL changes): each command escalates to unfenced `danger-full-access` until a session accepts `none` (§7); a child runs none.
 - A tree kill misses a timed-out or backgrounded POSIX command's descendants under an unwrapped persistent child.
-- On Windows a kill-on-close Job per pwsh ends an approved one-shot's descendants with the call, the persistent shell's with the shell (POSIX: the session); a process made by WMI or the Task Scheduler, one asking to break away, and all under Constrained Language Mode (one warning) escape it (`shell-stdio/process.ts`).
-- On Windows each pwsh start logs the containment body, never the command, as suspicious (`shell-stdio/process.ts`); security tooling may flag it.
-- A job's process tree outlives a killed host (SIGKILL, any `serve`/`web` stop) except under bwrap and on Windows: it reads `lost`, never re-adopted or killed.
+- On Windows a kill-on-close Job per pwsh ends an approved one-shot's descendants with the call, the persistent shell's with the shell; WMI, Task Scheduler and break-away processes escape it, and under Constrained Language Mode it is not applied (one warning); each start logs its body as suspicious, which security tooling may flag (`shell-stdio/process.ts`).
+- A job's tree outlives a killed host (SIGKILL, a `serve`/`web` stop) except under bwrap and on Windows: it reads `lost`, never re-adopted or killed.
 - **The fs fence races a concurrent process**: a link swapped in mid-write can leave an EMPTY file or directory outside (never content on Linux; best effort elsewhere).
 - **A hard link defeats both fences**: an outside inode linked into the workspace is written through by the fs fence and a confined shell; linking one in, or writing its outside path, stays refused (`confine.test.ts`).
-- **Parallel children share one checkout**: `fs-local`'s lock and version check order only this process's `fs-local` writes, never a shell's or a job's.
-- `full` is the probe's PROFILE claim, never measured per call; an unrun probe leaves its process unconfined-refusing until restart.
-- Under bwrap a path beneath the ephemeral `/tmp` is invisible, so its denial gets no hint; macOS has no writable temp: a tool needing one escalates.
-- After a live `reconfigure` of `shell` (outside the spine, §9), `enforcementFor` and a stamp describe a world no command runs in.
+- **Parallel children share one checkout**: `fs-local`'s version check orders only this process's `fs-local` writes, not a shell's or a job's.
+- `full` is the probe's PROFILE claim, never measured per call; a probe that could not run leaves its process backend-less until restart.
+- Under bwrap a path beneath the ephemeral `/tmp` is invisible, so its denial gets no hint; on macOS a tool needing a writable temp escalates.
+- Composition changes need a restart; after a live `reconfigure` of `shell` (outside the spine, §9), `enforcementFor` and stamps describe a world no command runs in.
 - A shell child's environment withholds variables, not credentials (§9; `core/process.ts`): undeclared secrets, `SSH_AUTH_SOCK` and proxies pass; `credentials.json` is readable, the network open.
 - A network tool is consented, never confined or recorded (§7); headless, only `--approve` allows one.
-- `tool-browser` reaches EVERY loopback service, in any mode and from a child, unconsented, unrecorded and unwrapped by a shell backend; such a service may act or relay on its own authority.
+- `tool-browser` reaches EVERY loopback service, in any mode and from a child, unconsented, unrecorded and unconfined (§7); each may act or relay on its own authority. It shows no cross-origin frame's content and uploads no file.
 - On Windows a project marker above the cwd is never owner-checked; only a filesystem root's is refused (§9).
 - A module-loaded plugin is arbitrary code; `minidsh config`'s warnings are advisory.
 
 **Context**
 
 - Under DeepSeek's default 1M window only overflow recovery fires unless `budgetTokens` is set.
-- A summary can be wrong, and nothing makes the model call `history_read`.
+- Nothing makes the model call `history_read`, even after a wrong summary.
 - The meter sees a prompt or tool-set change a step late and charges images on text-only routes; a smaller role may be asked to summarize past its cap.
 - Workspace instructions are read once per entry, not watched.
 - A notice the wake budget held waits for a human message; the terminal and browser flag it.
 - An unreadable user or bundled skill root freezes the skill list; no `/name` invokes a skill.
-- Document skills check content, not appearance; `office` refuses a package past 2M nodes a pass or 256 levels (`ooxml.mjs`).
+- Document skills check content, not appearance; `office` bounds a package's size and depth (`ooxml.mjs`).
 
 **Sessions and stores**
 
 - The in-memory log keeps trace: 400 turns are tens of MB of heap.
 - A long-running host's spill is swept only at restart (§9); a repeated `callId` overwrites.
 - A lost attachment is turn-fatal (`ATTACHMENT_UNREADABLE`); image validation is header-only; no client upload; the image bound counts the surface until compaction.
-- `tool-browser` shows no cross-origin frame's content and uploads no file.
-- No session deletion or search index (refused, BLUEPRINT §2), rename or model-written title (projections past `persistence.list()`).
+- No session deletion or search index (refused, BLUEPRINT §2), rename or model-written title.
 - **Crash repair is as sharp as the lifecycle (§4)**: without `synced`, "not started" holds only for a process crash; under salvage, closers are placeholders and damage between turns is invisible to the model (the CLI warns).
 - Effect records are no inventory (`core/effects/events.ts`): one may over-report a shell that died between commands or follow an abandoned body's result (§6).
 - `synced` is as honest as the disk; Windows cannot sync a new log's directory; after a power cut a zero-filled tail reads torn, earlier zeros damaged (`--salvage`).
@@ -354,12 +348,12 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 - A reconnect loses its paging position and a sole watcher's pending approval; only `control.summary` announces disposal.
 - Detaching one session narrows an un-narrowed client to nothing (`protocol/connection.ts`).
 - A tool with no `display` in reach (a preset's on a cold read, the other shell dialect's) draws the generic card.
-- The full-screen terminal captures no mouse (selection stays the terminal's; the wheel scrolls only as arrows on an empty draft) and leaves its screen on exit, its scrollback with it. On Windows Shift+Enter and Alt+Enter arrive as Enter: a new line is Ctrl+J, Ctrl+Enter or a backslash then Enter (`keys.ts`).
-- A session the terminal switches away from stays live, idle and leased until it exits; a fork never messaged is not saved (written at its first event).
-- An unconfined POSIX shell shares the terminal: a command opening /dev/tty (sudo, ssh, a git prompt) draws over the screen and competes for keys; Ctrl+L repaints.
+- The full-screen terminal captures no mouse (`tty.ts`) and its screen, scrollback included, goes at exit; on Windows Shift/Alt+Enter arrive as Enter (`keys.ts`).
+- A session the terminal switches away from stays live, idle and leased until it exits; a fork never messaged is not saved.
+- An unconfined POSIX shell shares the terminal: a command opening /dev/tty (sudo, ssh) draws over the screen and competes for keys; Ctrl+L repaints (`tty.ts`).
 - `minidsh web` has no graceful stop: the next process repairs and reclaims the lease.
-- `workspaceRoots` is always `[cwd]` and bounds only NEW sessions: a wire client may resume one outside it.
-- One principal, no accounts. A stored session's route and authority change only once a message resumes it; the browser's theme is per origin, so forgotten across launches without a fixed `--port` (S22.2).
+- `workspaceRoots` is always `[cwd]` and bounds only a session first CREATED: a wire client may resume or fork one outside it (a fork keeps its source's root).
+- One principal, no accounts. The browser changes a stored session's route and authority only once a message resumes it (`app.js`); its theme is per origin, so forgotten across launches without a fixed `--port`.
 - Windows needs `pwsh` 7, never 5.1; a command reading stdin blocks until its deadline.
 
 **Delegation and providers**
@@ -367,12 +361,11 @@ Upstream mechanisms and verdicts at the pin: `references/assumptions.md`.
 - A child's cost is summed in `subagent/end` (none if repaired), not the parent's meter.
 - A child delegated before S21.1 or continued by 1.2.0 runs un-narrowed, ceiling and pins intact (`core/session/format.ts`).
 - A step is never preempted: a steer waits for its slowest pooled child; a person stops all its children (a turn cancel) or none.
-- Disposal waits at most `ownedWorkBoundMs` (10 s) for owned work; work ignoring its signal is abandoned, its later records meeting a closed log.
+- Disposal joins owned work for at most `ownedWorkBoundMs`; work ignoring its signal is abandoned, its later records meeting a closed log.
 - A replay reproduces decisions, not the workspace: an absolute path misses a fresh root, yet `assertConsumed()` passes (arcs pin relative paths).
 - An installed-package plugin (§9) reaches seams only by deep path into `dist/`, proven only by an in-repo fixture.
-- OpenAI's drift probe holds only effort sets and defaults. An Anthropic id lacking its minor version's row gets 200K with images; an account enforcing an unedited prefix before signed thinking may refuse a compacted 5.x session's later steps.
+- An Anthropic id lacking its minor version's row gets 200K with images; an account enforcing an unedited prefix before signed thinking may refuse a compacted 5.x session's later steps.
 - `deepseek-v4-pro` accepts an image and ignores it: admission is the catalog's. Retired `deepseek-v4-flash` names resolve to `deepseek-flash` while DeepSeek routes them.
-- Composition changes need a restart.
 
 ## 14. File map
 
@@ -395,11 +388,12 @@ src/capabilities/
 src/app/     cli · home · compose · config · settings · version · headless · serve · web · present · inspect
              web/ (conversation · cards · transcript · rows · wire …) · terminal/ (controller · tui · line · tty · keys · blocks · layout · screen …) · *.e2e.test.ts
 src/test-support/ scripted-adapter · harness · llm-replay · serve-process · web-process · fixtures/ (logs, plugins)
-skills/      office/ · pdf/: bundled skills (README: helpers, authoring, provenance)
+skills/      office/ · pdf/: bundled skills (README)
 scripts/     build · check-deps (+ deps-graph) · check-docs · doc-registers · count-lines · smoke-installed.sh
 .github/     workflows/ (check, live, release) · ISSUE_TEMPLATE/ · PULL_REQUEST_TEMPLATE
-(root)       bin/minidsh.js (the entry point) · README · CLAUDE · CONTRIBUTING · SECURITY · CHANGELOG · CODE_OF_CONDUCT · LICENSE · NOTICE
+(root)       bin/minidsh.js (entry point) · README · CLAUDE · CONTRIBUTING · SECURITY · CHANGELOG · CODE_OF_CONDUCT · LICENSE · NOTICE
 docs/ · references/ · .claude/   named in CLAUDE.md §4, §5, §8
 ```
 
 `scripts/count-lines.ts` measures the tree; the 1.0.0 line counts are in BLUEPRINT §4.
+
