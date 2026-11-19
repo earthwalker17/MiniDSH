@@ -84,7 +84,9 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 **Composition from disk.** The default composition is a list of forty-one plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` flags any authority-sensitive row a file changed.
 
-**One runtime, three ways in.** The headless CLI, the terminal and the web UI are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record.
+**One runtime, three ways in.** The headless CLI, the terminal and the web UI are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record. The web UI draws each tool call as a card its tool describes, asks each approval in a card naming exactly what would run, and from the page switches model, effort and permissions, revokes a grant, stops a job or opens a subagent.
+
+![The web UI asking for an approval](https://raw.githubusercontent.com/earthwalker17/MiniDSH/main/docs/images/web-ui.png)
 
 ## Status and limitations
 
@@ -96,7 +98,7 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 - Only delegations run in parallel; every other tool call runs alone, in order. Parallel children share the workspace: give them separate files. A child is foreground: a message to the parent waits until its slowest child is done, and stopping the parent's turn stops all of them. A background job's process can outlive a MiniDSH process that is killed (on macOS, and unconfined on Linux): the resume reports it lost and does not stop it. On Windows a job runs only in a session that accepts an unconfined shell (`--accept none`); there, whatever a job or a shell command starts ends with it, a program started through WMI or the Task Scheduler excepted.
 - Nothing confines the network: web search is consent per query, and there is no `web_fetch`. The browser is fenced from the internet, not from localhost: it reaches every local service, from any sandbox mode and a delegated child. No session deletion, search or rename; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
 
-What comes next: the product surfaces — fork and resume on the wire, a better terminal and browser, and a Desktop launcher ([BLUEPRINT §2](docs/BLUEPRINT.md)).
+What comes next: a full-screen terminal with fork and resume on the wire, then an installable desktop app over the same runtime and web UI ([BLUEPRINT §2](docs/BLUEPRINT.md)).
 
 ## The question it investigates
 

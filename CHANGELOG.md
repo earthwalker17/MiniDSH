@@ -4,6 +4,27 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- **A redesigned web UI.** `minidsh web` is now a full application:
+  - a session list (a rail on a narrow window, a drawer on a phone), marking the sessions that wait on you;
+  - replies rendered as markdown, with highlighted code and tables;
+  - each tool call drawn as a card: a command with its output and exit status, an edit as a diff, a file read, a search, a subagent with a link to its session, a background job, an image you can enlarge;
+  - a finished turn's work folded to one line you can open, while what the session decided (approvals, permission and model changes) stays in view;
+  - an approval card that takes the composer's place and names exactly what would run;
+  - a permission chip and a model and reasoning-effort picker, for a new session before its first message too;
+  - a session panel listing the authority, its standing grants (each revocable), background jobs (each stoppable) and subagents;
+  - light, dark and system themes;
+  - a strict content-security policy.
+
+  It is tested in a real browser, light and dark, at four widths.
+- **For protocol clients:**
+  - `initialize` lists each tool's presentation (`display`), the authority presets and each model's reasoning efforts;
+  - `session/attach` returns the tools a live session can call, and says when a subagent session is read-only;
+  - `sessions/list` carries each session's last change (`updatedAt`);
+  - a `session/prompt` that creates a session may carry its `authority`;
+  - `attachment/read` returns an image the session's own log names.
+
 ### Changed
 
 - **A resumed or forked delegated child keeps what its delegation narrowed:** its tool filter, the tools hidden from every child (network tools, and delegation at the depth cap, a preset's own included) and its persona. A child's log records them once, and every continuation re-applies them; before, only its authority came back. A child delegated by an earlier version continues as it did.
@@ -12,6 +33,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ### Fixed
 
+- A session's view now follows its status: a client attached to it no longer shows a turn as running after it ended, or a subagent session as read-only after its delegation ended.
 - A `resume` (CLI, terminal or wire) whose authority flags the session refuses no longer loses the prompt the session had queued; the flags now land before that prompt can start a turn, and the model is told of them in its first request.
 - A prompt sent to a session that is shutting down is refused instead of being accepted and dropped.
 

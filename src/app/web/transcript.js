@@ -12,7 +12,9 @@
  * - **Scroll ownership is sampled just before each mutation and written in
  *   the same task** (S10): a reader at the tail follows, a reader who went
  *   looking stays. The live preview re-renders at most once a frame, and the
- *   sample and the write are both in that frame.
+ *   sample and the write are both in that frame. Only the reader's own input
+ *   leaves the tail (S22: a resize or a clamp fires the same `scroll`), and a
+ *   resize of the view or its content re-sticks one who follows (`following`).
  * - **The view decides pending and running** (`cards.js`): a call with no
  *   result is redrawn when the view changes, never assumed in flight.
  *
