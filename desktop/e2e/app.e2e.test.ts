@@ -27,14 +27,14 @@
  * Self-skips without the executable; `MINIDSH_EXPECT_DESKTOP=1` (CI's desktop
  * job) makes that skip a failure.
  */
-import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { alive, answerNativeDialog, DesktopApp, killDesktopApps } from '../../src/test-support/desktop-app.ts'
+import { alive, answerNativeDialog, killDesktopApps, type DesktopApp, type DesktopLaunch } from '../../src/test-support/desktop-app.ts'
+import { launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, turnEnds, waitUntil, type Cleanup } from './support.ts'
 
 const EXE = process.env.MINIDSH_DESKTOP_EXE
 const INSTALLER = process.env.MINIDSH_DESKTOP_INSTALLER
@@ -42,17 +42,14 @@ const EXPECTED = process.env.MINIDSH_EXPECT_DESKTOP === '1'
 const KEYS = ['DEEPSEEK_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'TAVILY_API_KEY', 'DEEPSEEK_BASE_URL']
 const win = process.platform === 'win32'
 
-const cleanup: (() => void | Promise<void>)[] = []
+const cleanup: Cleanup = []
 afterEach(async () => {
   for (const undo of cleanup.splice(0).toReversed()) await undo()
 })
 afterAll(() => killDesktopApps())
 
-const scratch = (prefix: string): string => {
-  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)))
-  cleanup.push(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
-  return dir
-}
+const scratch = (prefix: string): string => scratchOwned(cleanup, prefix)
+const launchApp = (launch: DesktopLaunch): DesktopApp => launchOwned(cleanup, launch)
 
 /** A model endpoint that takes every request and never answers it: a turn that stays running. */
 async function hangingModel(): Promise<{ url: string; requests: () => number }> {
@@ -73,54 +70,6 @@ async function hangingModel(): Promise<{ url: string; requests: () => number }> 
       }),
   )
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests: () => requests }
-}
-
-/** An app this test owns: killed (and its exit awaited) before the scratch directories it holds are removed. */
-function launchApp(launch: ConstructorParameters<typeof DesktopApp>[0]): DesktopApp {
-  const app = new DesktopApp(launch)
-  cleanup.push(async () => {
-    // Forceful and bounded: cleanup tests nothing, and a quit that asks (a
-    // native confirm nobody answers) must not hold the hook.
-    if (app.child.exitCode === null && app.child.signalCode === null) app.child.kill('SIGKILL')
-    await Promise.race([app.exited, new Promise((resolve) => setTimeout(resolve, 10_000))])
-    const runtime = app.runtimePid()
-    if (runtime !== undefined && alive(runtime)) process.kill(runtime, 'SIGKILL')
-    await new Promise((resolve) => setTimeout(resolve, 500))
-  })
-  return app
-}
-
-function seed(userData: string, folders: readonly string[]): void {
-  mkdirSync(userData, { recursive: true })
-  writeFileSync(join(userData, 'settings.json'), `${JSON.stringify({ version: 1, folders })}\n`)
-}
-
-const locksUnder = (home: string): string[] => {
-  const sessions = join(home, 'sessions')
-  return existsSync(sessions) ? readdirSync(sessions).filter((name) => name.endsWith('.lock')) : []
-}
-
-/** Every `turn/end` reason in every stored log under the home, in order. */
-function turnEnds(home: string): string[] {
-  const sessions = join(home, 'sessions')
-  if (!existsSync(sessions)) return []
-  const reasons: string[] = []
-  for (const name of readdirSync(sessions).filter((file) => file.endsWith('.jsonl'))) {
-    for (const line of readFileSync(join(sessions, name), 'utf8').split('\n')) {
-      if (!line.includes('"turn/end"')) continue
-      const event = JSON.parse(line) as { type: string; data: { reason?: { kind?: string } } }
-      if (event.type === 'turn/end') reasons.push(String(event.data.reason?.kind))
-    }
-  }
-  return reasons
-}
-
-async function waitUntil(what: string, check: () => boolean | Promise<boolean>, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`)
-    await new Promise((resolve) => setTimeout(resolve, 200))
-  }
 }
 
 describe.runIf(EXPECTED && !EXE)('the desktop E2E', () => {
@@ -261,18 +210,6 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     expect(locksUnder(home)).toEqual([])
   })
 })
-
-/**
- * An NSIS installer or uninstaller, waited for. `/D=` and `_?=` must come LAST
- * and UNQUOTED (they take the rest of the line, spaces included): Node would
- * quote a path with a space, NSIS would then ignore `_?=` and relaunch itself
- * from %TEMP%, and the exit status would arrive before the work did.
- */
-function nsis(file: string, args: readonly string[]): ReturnType<typeof spawnSync> {
-  // Through cmd's `/s /c "…"`, which hands the inner line over untouched; our
-  // paths hold a space and a letter outside ASCII, never cmd's & ^ % or quotes.
-  return spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `""${file}" ${args.join(' ')}"`], { timeout: 180_000, windowsVerbatimArguments: true })
-}
 
 describe.runIf(EXE && INSTALLER && win)('the installed desktop app (Windows)', () => {
   it('installs silently, refuses to reinstall while running, uninstalls leaving MINIDSH_HOME', { timeout: 300_000 }, async () => {
