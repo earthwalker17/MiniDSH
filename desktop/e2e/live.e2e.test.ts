@@ -116,7 +116,10 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
       'The test in this folder fails. Run `node --test` to see why, fix slug.mjs so the test passes (do not change the test), run `node --test` again, then run `node --version` and tell me the exact version it prints.',
     )
     await web.press('Enter')
+    const started = Date.now()
+    const evidence: string[] = []
     const clicks = await consentUntil(web, 'the first turn to end', () => turnEnds(home).length >= 1, 480_000)
+    evidence.push(`1. fix: ${Math.round((Date.now() - started) / 1000)} s, ${clicks} approval(s) clicked`)
     expect(turnEnds(home), `main.log:\n${app.mainLog()}`).toEqual(['completed'])
     expect(testsPass(repo), 'the fix holds when this process runs the tests').toBe(true)
     const events = storedEvents(home)
@@ -133,8 +136,8 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
 
     // ---- 2. the runtime killed mid-turn; Restart; resume ------------------
     await web.type('#prompt', 'Add a second test to slug.test.mjs: slugify(\'  Trim Me  \') must equal \'trim-me\'. Make it pass, then run `node --test`.')
-    await web.press('Enter')
     const before = storedEvents(home).length
+    await web.press('Enter')
     await waitUntil('the second turn to dispatch a tool or ask', () => storedEvents(home).slice(before).some((event) => event.type === 'tool/dispatch' || event.type === 'approval/asked'), 240_000)
     const runtime = app.runtimePid()!
     process.kill(runtime, 'SIGKILL')
@@ -152,14 +155,24 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     expect(ends.slice(0, 1)).toEqual(['completed'])
     expect(ends, 'the repair a resume wrote for the killed turn').toContain('interrupted')
     expect(ends.at(-1)).toBe('completed')
+    evidence.push(`2. killed runtime ${runtime}, restarted, resumed: turn ends ${ends.join(' → ')}`)
     expect(testsPass(repo)).toBe(true)
     expect(readFileSync(join(repo, 'slug.test.mjs'), 'utf8')).toMatch(/Trim Me/)
 
     // ---- 3. quit mid-turn: the confirm names the work ---------------------
+    // Counted BEFORE the prompt goes: a fast turn starts before the next line runs.
+    const turnsBefore = storedEvents(home).filter((event) => event.type === 'turn/start').length
     await back.type('#prompt', 'Run `node --test` one more time and summarize the result in one sentence.')
     await back.press('Enter')
-    const third = storedEvents(home).length
-    await waitUntil('the third turn to start', () => storedEvents(home).slice(third).some((event) => event.type === 'turn/start'), 60_000)
+    await waitUntil('the third turn to start', () => storedEvents(home).filter((event) => event.type === 'turn/start').length > turnsBefore, 60_000).catch(async (error: unknown) => {
+      const tail = storedEvents(home)
+        .slice(-12)
+        .map((event) => `${event.seq} ${event.type}`)
+        .join('\n')
+      const composer = await back.evaluate<string>(`JSON.stringify({ prompt: document.querySelector('#prompt')?.value, disabled: document.querySelector('#prompt')?.disabled, readonly: !document.querySelector('#readonly')?.hidden, approval: !document.querySelector('#approval')?.hidden, working: !document.querySelector('#working')?.hidden, url: location.href })`).catch(() => 'no page')
+      if (SHOTS) await back.screenshot(join(SHOTS, 'desktop-live-third.png')).catch(() => undefined)
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\nlog tail:\n${tail}\ncomposer: ${composer}\nfiles: ${readdirSync(join(home, 'sessions')).join(', ')}`)
+    })
     app.closeWindow()
     const asked = answerNativeDialog(app.pid, 'Quit', 30_000)
     expect(asked.clicked, `no confirm; main.log:\n${app.mainLog()}`).toBe(true)
@@ -167,6 +180,7 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     expect((await app.waitForExit(90_000)).code, app.mainLog()).toBe(0)
     expect(app.mainLog()).toMatch(/runtime stop: graceful=true/)
     expect(turnEnds(home).at(-1)).toBe('cancelled')
+    evidence.push(`3. quit mid-turn, the confirm said: ${asked.text.slice(0, 160)}`)
     expect(locksUnder(home)).toEqual([])
 
     // ---- 4. no key in the environment: the welcome view saves one --------
@@ -185,7 +199,7 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     seed(userData2, [repo])
     const keyed = launchApp({ exe, userData: userData2, home: home2, env, drop: [...drop, 'DEEPSEEK_API_KEY'] })
     const page = await keyed.page('http://127.0.0.1')
-    await page.waitFor(`document.querySelector('#hero') !== null`, 60_000)
+    await page.waitFor(`document.querySelector('#hero')?.textContent.includes('works in')`, 60_000)
     await page.type('#prompt', 'Reply with exactly the word READY and nothing else. Do not use any tool.')
     await page.press('Enter')
     await consentUntil(page, 'the keyed turn to end', () => turnEnds(home2).length >= 1, 180_000)
@@ -195,6 +209,7 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
       .map((event) => JSON.stringify(event.data))
       .join(' ')
     expect(said).toContain('READY')
+    evidence.push(`4. a key saved in the welcome view (${readFileSync(join(home2, 'credentials.json'), 'utf8').length} bytes on disk), used by the next launch: READY`)
     keyed.closeWindow()
     expect((await keyed.waitForExit(60_000)).code).toBe(0)
     for (const dir of [join(home, 'sessions'), join(home2, 'sessions')]) expect(readdirSync(dir).filter((name) => name.endsWith('.lock'))).toEqual([])
@@ -205,5 +220,8 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
       expect(existsSync(exe)).toBe(false)
       expect(existsSync(join(home, 'sessions'))).toBe(true)
     }
+    const decidedBy = storedEvents(home).filter((event) => event.type === 'approval/decided').map((event) => String(event.data.decidedBy))
+    const lines = [...evidence, `decisions: ${decidedBy.length} (${[...new Set(decidedBy)].join(', ')}); agent node ${BUNDLED_NODE}; ${installDir ? 'installed and uninstalled' : 'unpacked build'}; ${Math.round((Date.now() - started) / 1000)} s`]
+    process.stderr.write(`desktop live:\n  ${lines.join('\n  ')}\n`)
   })
 })

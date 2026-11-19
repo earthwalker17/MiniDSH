@@ -172,7 +172,7 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     const relaunch = (): DesktopApp => launchApp({ exe, userData, home, drop: KEYS, env: { DEEPSEEK_BASE_URL: model.url, DEEPSEEK_API_KEY: 'sk-e2e-dummy' } })
     const again = relaunch()
     const page = await again.page('http://127.0.0.1')
-    await page.waitFor(`document.querySelector('#hero') !== null`, 60_000)
+    await page.waitFor(`document.querySelector('#hero')?.textContent.includes('works in')`, 60_000)
     expect(await page.evaluate<string>('location.origin')).toBe(`http://127.0.0.1:${port}`)
     await page.evaluate(`localStorage.setItem('minidsh.theme', 'dark')`)
     again.closeWindow()
@@ -180,7 +180,7 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
 
     const third = relaunch()
     const themed = await third.page('http://127.0.0.1')
-    await themed.waitFor(`document.querySelector('#hero') !== null`, 60_000)
+    await themed.waitFor(`document.querySelector('#hero')?.textContent.includes('works in')`, 60_000)
     expect(await themed.evaluate<string>('location.origin')).toBe(`http://127.0.0.1:${port}`)
     expect(await themed.evaluate<string>(`document.documentElement.dataset.theme`)).toBe('dark')
 
@@ -192,7 +192,7 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     await shell.waitFor(`document.querySelector('h1')?.textContent.includes('stopped unexpectedly')`, 30_000)
     await shell.click('button.primary')
     const back = await third.page('http://127.0.0.1')
-    await back.waitFor(`document.querySelector('#hero') !== null && location.port === '${port}'`, 60_000)
+    await back.waitFor(`document.querySelector('#hero')?.textContent.includes('works in') && location.port === '${port}'`, 60_000)
     expect(third.runtimePid()).not.toBe(runtime)
 
     // The app is killed outright: its runtime goes with it (a kill-on-close
@@ -228,7 +228,7 @@ describe.runIf(EXE && INSTALLER && win)('the installed desktop app (Windows)', (
     seed(userData, [folder])
     const app = launchApp({ exe, userData, home, drop: KEYS })
     const web = await app.page('http://127.0.0.1')
-    await web.waitFor(`document.querySelector('#hero') !== null`, 60_000)
+    await web.waitFor(`document.querySelector('#hero')?.textContent.includes('works in')`, 60_000)
 
     // While it runs, the installer refuses (exit 2) and kills nothing.
     const runtime = app.runtimePid()!
