@@ -27,7 +27,7 @@ export class TerminalRenderer {
   /** Whether text for the message now being assembled reached THIS client. */
   private streamedText = false
   /** The tool each call was made with, so a result line names its call (a pooled step's results end in any order). */
-  private readonly names = new CallNames()
+  readonly names = new CallNames()
   /** The last numbers published, so an unchanged view prints nothing. */
   private context: ContextMetrics | undefined
 
@@ -112,7 +112,7 @@ export function printableStream(text: string): string {
 }
 
 /** Folds a stored log into a conversation transcript for an attaching client. */
-export function renderHistory(events: readonly EventEnvelope[]): string {
-  const lines = transcriptLines(events)
+export function renderHistory(events: readonly EventEnvelope[], names?: CallNames): string {
+  const lines = transcriptLines(events, names)
   return lines.length === 0 ? '' : `${lines.join('\n')}\n`
 }

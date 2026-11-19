@@ -80,7 +80,8 @@ interface ChildState {
 }
 
 interface BandAsk extends Ask {
-  readonly shownAt: number
+  /** When the band was first DRAWN at a size it fits (Infinity until then, and again after a resize). */
+  shownAt: number
   /** The first body row the band shows (↑↓). */
   scroll: number
   /** Body rows the person has had on screen; it arms only once every one has been. */
@@ -183,7 +184,9 @@ class FullScreenView {
           this.schedule()
         },
         onAsk: (ask) => {
-          this.ask = { ...ask, shownAt: this.now(), scroll: 0, rang: false, seen: new Set(), bodyRows: 0 }
+          // Arming counts from the first paint that draws it, not from its
+          // arrival: on a screen too small to show it, it has not been shown.
+          this.ask = { ...ask, shownAt: Number.POSITIVE_INFINITY, scroll: 0, rang: false, seen: new Set(), bodyRows: 0 }
           this.syncTicker()
           this.schedule()
         },
@@ -299,7 +302,12 @@ class FullScreenView {
       const typing = now - quietSince < ARM_MS
       if (isAnswer && !typing) {
         if (now - ask.shownAt >= ARM_MS && this.bandFits() && this.readAll(ask)) this.answer(ask, answer!)
-        else this.say(!this.bandFits() ? 'enlarge the terminal to answer' : !this.readAll(ask) ? 'scroll the question to its end (↓) before answering' : 'the answer keys arm in a moment: read it first', { ink: 'warn' })
+        else this.say(!this.bandFits() ? 'enlarge the terminal to answer' : !this.readAll(ask) ? 'scroll through the whole question (↑↓) before answering' : 'the answer keys arm in a moment: read it first', { ink: 'warn' })
+        return
+      }
+      // The same bound as the composer's: the draft under a band is a draft.
+      if (key.text.length > MAX_PASTE) {
+        this.say(`that paste is ${Math.round(key.text.length / 1024)} KB: save it to a file in the workspace and name the file instead`, { ink: 'error' })
         return
       }
       this.editor.insert(key.text)
@@ -346,7 +354,16 @@ class FullScreenView {
         if (result.outcome === 'not-pending') this.say('that question was already settled')
         this.schedule()
       },
-      (error: unknown) => this.fail(error),
+      (error: unknown) => {
+        this.fail(error)
+        // Refused (an offer the fold withdrew): the question still stands, so
+        // it comes back, armed afresh and without the offer, never lost.
+        if (this.controller.asked === ask.id && this.ask === undefined) {
+          this.ask = { ...ask, offered: offer === undefined ? ask.offered : false, shownAt: Number.POSITIVE_INFINITY, scroll: 0, seen: new Set() }
+          this.syncTicker()
+          this.schedule()
+        }
+      },
     )
   }
 
@@ -1129,6 +1146,8 @@ class FullScreenView {
     const g = this.theme.glyphs
     const view = this.controller.view
     const pending = this.controller.sessionId === undefined ? this.controller.pendingAuthority : {}
+    // A pending preset is drawn as the pair it selects, so its ink is right too.
+    const preset = pending.preset === undefined ? undefined : this.init?.presets.find((entry) => entry.name === pending.preset)
     const base = view?.authority ?? this.init?.defaultAuthority
     // What the first message will open the session under, once asked for.
     const authority =
@@ -1139,7 +1158,7 @@ class FullScreenView {
             ...(pending.sandbox === undefined ? {} : { sandbox: pending.sandbox as typeof base.sandbox }),
             ...(pending.approval === undefined ? {} : { approval: pending.approval as typeof base.approval }),
             ...(pending.accepts === undefined ? {} : { accepts: pending.accepts as typeof base.accepts }),
-            ...(pending.preset === undefined ? {} : { preset: pending.preset }),
+            ...(preset === undefined ? {} : { sandbox: preset.sandbox, approval: preset.approval, preset: preset.name }),
           }
     const posture: Segment[] = []
     if (authority !== undefined) {
@@ -1233,8 +1252,13 @@ class FullScreenView {
       if (columns === 0 || rows === 0) return
       this.previous = undefined
       this.cache.clear()
-      // The question re-wraps at the new width: what was seen must be seen again.
-      this.ask?.seen.clear()
+      // The question re-wraps at the new width: what was seen must be seen
+      // again, from its top, and the arming time starts over.
+      if (this.ask !== undefined) {
+        this.ask.seen.clear()
+        this.ask.scroll = 0
+        this.ask.shownAt = Number.POSITIVE_INFINITY
+      }
       this.schedule()
     }, 30)
   }
@@ -1281,6 +1305,7 @@ class FullScreenView {
     this.bandScrollMax = drawn.bandScrollMax
     this.panelScrollMax = drawn.panelScrollMax
     if (this.ask !== undefined && band !== undefined) {
+      if (this.ask.shownAt === Number.POSITIVE_INFINITY && this.bandFits()) this.ask.shownAt = this.now()
       this.ask.bodyRows = band.body.length
       for (let row = drawn.bandShown[0]; row < drawn.bandShown[1]; row++) this.ask.seen.add(row)
     }

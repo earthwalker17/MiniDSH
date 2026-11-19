@@ -38,6 +38,7 @@ import {
 import { ATTACHMENTS, type AttachmentRef } from '../../core/attachments/index.ts'
 import { COMPACTION } from '../../core/compaction/index.ts'
 import { asSessionId } from '../../core/ids.ts'
+import { InvariantError } from '../../core/invariants/index.ts'
 import { foldJobs, JOB_END, JOB_START, JobError, JOBS, type JobRecord, type JobView } from '../../core/jobs/index.ts'
 import { LLM } from '../../core/llm/index.ts'
 import { collectImageRefs } from '../../core/llm/content.ts'
@@ -238,6 +239,9 @@ function requireString(params: Record<string, unknown>, key: string, method: str
  */
 function continuationFailure(method: string, error: unknown): unknown {
   if (error instanceof RpcFailure) return error
+  // A broken invariant is the runtime's bug whatever its words say ("a
+  // delegation opening must be…" would match below).
+  if (error instanceof InvariantError) return error
   if (error instanceof SessionFormatError) return new RpcFailure(INVALID_PARAMS, error.message)
   if (error instanceof SessionForkError || (error instanceof Error && CALLER_FAULTS.test(error.message))) return new RpcFailure(INVALID_PARAMS, `${method}: ${error.message}`)
   // Anything else — an I/O error, a world that failed to mount, a bug — is the
@@ -251,7 +255,19 @@ function continuationFailure(method: string, error: unknown): unknown {
  * or cut below a child's delegation opening. Plain `Error`s there, so matched
  * by their words; a new caller fault added there must be added here.
  */
-const CALLER_FAULTS = /no stored session|stored log is damaged|is locked by|the session was composed under|delegation opening|delegated under|delegated, but the log records/
+const CALLER_FAULTS = /no stored session|stored log is damaged|is locked by|the session was composed under|delegation opening|delegated under|delegated, but the log records|pass agentOptions/
+
+/**
+ * `session/prompt`'s creation-only fields, refused by name on a continuation
+ * as there beside a `sessionId`: a success reply for a request the host did
+ * not honour would open the session under authority, or in a root, nobody chose.
+ */
+function refuseCreationFields(params: Record<string, unknown>, method: string): void {
+  if (params.authority !== undefined) throw new RpcFailure(INVALID_PARAMS, `${method}: "authority" chooses what a NEW session opens under; switch this one with session/authority`)
+  if (params.cwd !== undefined || params.workspaceId !== undefined || params.path !== undefined) {
+    throw new RpcFailure(INVALID_PARAMS, `${method}: "cwd", "workspaceId" and "path" choose where a NEW session works; a continued one keeps the root it was created with`)
+  }
+}
 
 /** An optional non-negative integer, refused rather than coerced. */
 function optionalCount(params: Record<string, unknown>, key: string, method: string): number | undefined {
@@ -1368,6 +1384,7 @@ export class ProtocolHost {
   private async resumeSession(params: Record<string, unknown>): Promise<ContinueResult> {
     if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
     const sessionId = requireString(params, 'sessionId', 'session/resume')
+    refuseCreationFields(params, 'session/resume')
     const options = readAgentOptions(this.agentDefaults(), params.agentOptions, 'session/resume')
     this.assertRoutable(options.partial, 'session/resume')
     const agent = await this.untilShutdown(this.continueById(sessionId, options.partial, 'session/resume'))
@@ -1383,6 +1400,7 @@ export class ProtocolHost {
     const method = 'session/fork'
     const sessionId = requireString(params, 'sessionId', method)
     const atSeq = optionalCount(params, 'atSeq', method)
+    refuseCreationFields(params, method)
     if (params.salvage !== undefined && typeof params.salvage !== 'boolean') throw new RpcFailure(INVALID_PARAMS, `${method}: "salvage" must be a boolean`)
     const salvage = params.salvage === true
     const agents = this.ctx.get(AGENTS)

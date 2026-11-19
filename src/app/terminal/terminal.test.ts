@@ -251,7 +251,7 @@ describe('terminal surface (scripted end-to-end over the loopback pair)', () => 
       io: { input: driver.input, output: driver.output },
     })
     driver.input.end('use the tool\n')
-    expect(await exitCode).toBe(0)
+    expect(await exitCode).toBe(1)
     expect(driver.text()).toContain('approve touchy (careful)? [y/N] ')
     expect(driver.text()).toContain('it stays unanswered')
     expect(adapter.calls).toHaveLength(1)

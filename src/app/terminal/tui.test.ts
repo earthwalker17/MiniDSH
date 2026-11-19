@@ -234,10 +234,23 @@ describe('the full-screen terminal', () => {
     await term.say('/new')
     await term.see('a fresh session starts with your next message')
     await term.see('Ask for anything')
+    // A preset chosen for the session the next message would create is drawn
+    // as the pair it selects, and is DROPPED by opening another session
+    // instead: it never comes back as the opening of an unrelated one (the
+    // S22.1 pre-push review).
+    await term.say('/preset danger-full-access')
+    await term.see('applies when the session starts')
+    await term.see('Full access')
     await term.say(`/resume ${stored.sessionId}`)
     await term.see('plan remembered')
     expect(term.text()).toContain('▎ remember the plan')
     await term.see('ready', 30_000)
+    expect(term.text()).not.toContain('Full access')
+    // `/new` again: the dropped preset would show here if it had survived.
+    await term.say('/new')
+    await term.see('a fresh session starts with your next message')
+    await term.see('Workspace write')
+    expect(term.text()).not.toContain('Full access')
     await term.press('\x04')
     expect(await exitCode).toBe(0)
   })
@@ -343,7 +356,7 @@ describe('the full-screen terminal', () => {
     // Armed by time, but not read: a lone y is refused, and nothing is decided.
     await sleep(QUIET)
     await term.press('y')
-    await term.see('scroll the question to its end')
+    await term.see('scroll through the whole question')
     expect(adapter.calls).toHaveLength(1)
     // Scrolled by the band's own indicator: the card above already shows the payload.
     const atEnd = (): boolean => {
@@ -412,7 +425,7 @@ describe('owning the terminal', () => {
     return new Promise<void>((resolve) => {
       setImmediate(() => {
         expect(raws).toEqual([true, false])
-        expect(written.join('')).toBe('\x1b[?1049h\x1b[?2004h\x1b[?7l\x1b[?25l\x1b[?1007h\x1b[?2026l\x1b[0m\x1b[?1007l\x1b[?25h\x1b[?7h\x1b[?2004l\x1b[?1049l')
+        expect(written.join('')).toBe('\x1b[?1049h\x1b[?2004h\x1b[?7l\x1b[?25l\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?7h\x1b[?2004l\x1b[?1049l')
         resolve()
       })
     })

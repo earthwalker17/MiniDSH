@@ -131,7 +131,7 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
       if (reason === 'created') return
       if (result.damaged) write('warning: the stored log is damaged; what follows is its readable prefix\n')
       if (result.page.hasMore) write('… earlier events remain (/history shows the page before this one)\n')
-      write(renderHistory(result.page.events))
+      write(renderHistory(result.page.events, renderer.names))
       write(reason === 'forked' ? `forked ${from ?? ''} → ${controller.sessionId}\n` : `resumed ${controller.sessionId}\n`)
       write(renderer.onView(result.view))
       attached = true
@@ -181,17 +181,22 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
     await options.exit(code)
   }
 
-  async function onLine(raw: string): Promise<void> {
+  async function onLine(raw: string, readAt: number): Promise<void> {
     if (exiting) return
     const line = raw.trim()
     if (pendingAsk) {
       const ask = pendingAsk
+      // A person's line read before this question was printed was typed for
+      // something else (the one before, answered here or elsewhere): it is not
+      // consent to this one. A pipe's lines are a script's, read at once by
+      // design, so only an echoing terminal is held to it.
+      const typedBefore = options.echoes === true && readAt < askedAt
       // A line that lands just as a question REPLACED one settled elsewhere was
-      // typed for the old one: it is not consent to the new one.
-      const now = Date.now()
-      if (now - askedAt < REPLACED_MS && askedAt - settledElsewhereAt < REPLACED_MS) {
-        write('(that answer arrived as the question changed: answer this one)\n')
-        askedAt = Number.NEGATIVE_INFINITY
+      // typed for the old one, too.
+      const replaced = Date.now() - askedAt < REPLACED_MS && askedAt - settledElsewhereAt < REPLACED_MS
+      if (typedBefore || replaced) {
+        write(`(that answer was typed ${typedBefore ? 'before this question appeared' : 'as the question changed'}: answer this one)\n`)
+        settledElsewhereAt = Number.NEGATIVE_INFINITY
         hooks.onAsk(ask)
         return
       }
@@ -255,7 +260,7 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
     const page = await controller.older()
     if (page === undefined) return
     if (page.hasMore) write('… earlier events remain (/history again)\n')
-    write(renderHistory(page.events))
+    write(renderHistory(page.events, renderer.names))
   }
 
   async function sessions(): Promise<void> {
@@ -367,7 +372,8 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
   const enqueue = (raw: string): void => {
     // A TTY echoed the keystrokes and the Enter, so the cursor already left the prompt.
     if (options.echoes) promptStanding = false
-    chain = chain.then(() => onLine(raw)).catch(printError)
+    const readAt = Date.now()
+    chain = chain.then(() => onLine(raw, readAt)).catch(printError)
   }
   const rl = createInterface({ input: options.input, terminal: false })
 
@@ -383,7 +389,8 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
         void chain.then(async () => {
           while (stillWorking()) await untilIdle()
           if (pendingAsk !== undefined && !exiting) write('\n(input ended with this question open; it stays unanswered)\n')
-          await exitWith(0)
+          // Stopped on a question nobody answered: not a finished task, so a script can tell.
+          await exitWith(pendingAsk === undefined ? 0 : 1)
         })
       })
       if (options.handleSigint) process.on('SIGINT', onSigint)

@@ -120,7 +120,7 @@ export class SessionController {
   /** While the first prompt creates the session, every frame waits: its id is not known yet. */
   private creating: SessionEventFrame[] | undefined
   /** Frames for the session being attached, held until its cut is known. */
-  private attaching: { sessionId: string; held: SessionEventFrame[] } | undefined
+  private attaching: { sessionId: string; held: SessionEventFrame[]; status?: Status; view?: SessionView } | undefined
   private readonly children = new Set<string>()
   private readonly answered = new Set<string>()
   /**
@@ -133,10 +133,14 @@ export class SessionController {
   private readonly queued = new Set<string>()
   private readonly hinted = new Set<string>()
 
+  /** The launch flags' route: what `overrides` returns to once a choice made for a new session goes stale. */
+  private readonly launchOverrides: Partial<AgentOptions>
+
   constructor(client: ProtocolClient, hooks: ControllerHooks, overrides: Partial<AgentOptions> = {}) {
     this.client = client
     this.hooks = hooks
     this.overrides = overrides
+    this.launchOverrides = { ...overrides }
   }
 
   /** The one entry for every notification the client receives. */
@@ -162,6 +166,12 @@ export class SessionController {
       this.deliver(frame)
     } else if (method === 'session.status') {
       const projected = params as { sessionId: string; status: Status }
+      // Held through an attach as its frames are: a flip that lands before the
+      // reply's continuation runs is NEWER than the reply, and must not be lost.
+      if (this.attaching?.sessionId === projected.sessionId) {
+        this.attaching.status = projected.status
+        return
+      }
       if (projected.sessionId !== this.sessionId) return
       this.status = projected.status
       // The held notice first, so a view can say it above the prompt that follows.
@@ -169,6 +179,10 @@ export class SessionController {
       this.hooks.onStatus(this.status)
     } else if (method === 'session.view') {
       const projected = params as { sessionId: string; view: SessionView }
+      if (this.attaching?.sessionId === projected.sessionId) {
+        this.attaching.view = projected.view
+        return
+      }
       if (projected.sessionId !== this.sessionId) return
       this.view = projected.view
       this.hooks.onView(projected.view)
@@ -191,7 +205,14 @@ export class SessionController {
     const at = this.queue.findIndex((ask) => ask.id === id)
     if (at !== -1) this.queue.splice(at, 1)
     this.hooks.onDecided(id)
-    if (at === 0 && this.queue.length > 0) this.hooks.onAsk(this.queue[0]!)
+    if (at === 0 && this.queue.length > 0) {
+      // Its offer as the fold says NOW: a grant on the one just answered can
+      // have withdrawn it, and an `a` the host no longer offers is refused.
+      const head = this.queue[0]!
+      const open = this.view?.pendingApprovals.find((entry) => entry.id === head.id)
+      if (open !== undefined) this.queue[0] = { ...head, offered: open.offers?.includes('grant-session') === true }
+      this.hooks.onAsk(this.queue[0]!)
+    }
   }
 
   /**
@@ -265,12 +286,12 @@ export class SessionController {
       this.attaching = undefined
       throw error
     }
-    const held = this.attaching.held
+    const { held, status: heldStatus, view: heldView } = this.attaching
     this.attaching = undefined
     this.sessionId = sessionId
     this.history = { cursor: result.cursor, oldest: result.page.from, hasMore: result.page.hasMore }
-    this.view = result.view
-    this.status = result.view.status
+    this.view = heldView ?? result.view
+    this.status = heldStatus ?? heldView?.status ?? result.view.status
     // A continuation's views draw its page, so live frames start past the cut.
     // The first prompt's session streamed from its first frame, so nothing is
     // cut: the held frames replay past what was already delivered.
@@ -280,8 +301,14 @@ export class SessionController {
       this.answered.clear()
       this.queued.clear()
       this.queue.length = 0
+      // A route or authority chosen for a NEW session belongs to the session
+      // the next first message creates, never to one opened instead: it would
+      // come back as the opening of an unrelated session after `/new`.
+      this.pendingAuthority = {}
+      this.overrides = { ...this.launchOverrides }
     }
     this.hooks.onAttached({ reason, result, ...(from === undefined ? {} : { from }) })
+    if (heldView !== undefined) this.hooks.onView(heldView)
     // The status the attach reports, as if it had arrived: a fresh session's
     // first `running` came before its id was known, and was not this client's yet.
     this.hooks.onStatus(this.status)

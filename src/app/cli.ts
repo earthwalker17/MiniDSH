@@ -469,9 +469,11 @@ function eventPrinter(json: boolean): EventListener {
   // (S21), and a line no longer says whose it is by where it falls: every
   // session after the first this run printed is tagged with its id's tail.
   let root: string | undefined
-  const names = new CallNames()
+  const names = new Map<string, CallNames>()
   return (frame) => {
-    const line = describeEvent(frame.event, names)
+    const own = names.get(frame.sessionId) ?? new CallNames()
+    names.set(frame.sessionId, own)
+    const line = describeEvent(frame.event, own)
     if (!line) return
     root ??= frame.sessionId
     const tag = frame.sessionId === root ? '' : `[${printableText(String(frame.sessionId).slice(-6))}] `

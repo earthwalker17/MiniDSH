@@ -528,6 +528,12 @@ describe('protocol: session/resume and session/fork', () => {
     await refused('session/resume', { sessionId: 'session-nope' }, /no stored session/)
     await refused('session/fork', { sessionId: 'session-nope' }, /no stored session/)
     await refused('session/fork', { sessionId: stored.sessionId, atSeq: -1 }, /atSeq/)
+    // Creation-only fields are refused by name, as beside session/prompt's
+    // sessionId: a success reply would honour a request the host ignored.
+    for (const method of ['session/resume', 'session/fork']) {
+      await refused(method, { sessionId: stored.sessionId, authority: { sandbox: 'read-only' } }, /"authority" chooses what a NEW session opens under/)
+      await refused(method, { sessionId: stored.sessionId, cwd: '/elsewhere' }, /choose where a NEW session works/)
+    }
     await refused('session/fork', { sessionId: stored.sessionId, atSeq: 'three' }, /atSeq/)
     await refused('session/fork', { sessionId: stored.sessionId, salvage: 'yes' }, /salvage/)
     await refused('session/resume', { sessionId: stored.sessionId, agentOptions: { provider: 'nowhere' } }, /no adapter/)

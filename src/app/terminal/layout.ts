@@ -145,11 +145,22 @@ export function drawScreen(state: ScreenState): Drawn {
     // Everything above a short strip of transcript: the answer rows are always
     // in sight, and a body longer than the room scrolls, so no command is too
     // long to read in full, or to answer.
-    const draftRows = band.draft !== undefined && band.draft.length > 0 ? 1 : 0
+    let draftRows = band.draft !== undefined && band.draft.length > 0 ? 1 : 0
+    let ruleRows = 1
     // At least two body rows (one of text, one of position), taken from the
     // transcript strip on a small screen: a clipped body must always be readable
     // to its end, or the question could never be answered (40x12 left one).
-    const room = bottom - 2 - band.keys.length - draftRows
+    // Short of that, the draft preview goes, then the rule (the S22.1 pre-push
+    // review: three wrapped key rows and a draft overflowed 40x12).
+    let room = bottom - 1 - ruleRows - band.keys.length - draftRows
+    if (room < 2 && draftRows > 0) {
+      draftRows = 0
+      room++
+    }
+    if (room < 2) {
+      ruleRows = 0
+      room++
+    }
     const maxBody = Math.max(1, Math.min(2, room), room - MIN_TRANSCRIPT)
     // A clipped body shows `maxBody - 1` rows of text above its position row,
     // so a clipped body never reads as whole, and its last row is reachable.
@@ -163,10 +174,11 @@ export function drawScreen(state: ScreenState): Drawn {
       body.push([span(`  ↑↓ ${first + 1}-${first + body.length} of ${band.body.length} lines${more && !band.armed ? ' · read to the end to answer' : ''}`, { ink: 'warn' })])
       bandShown = [first, first + body.length - 1]
     } else bandShown = [first, first + body.length]
-    const rows: Line[] = [[span(g.box.h.repeat(width), { ink: 'warn' })], band.title, ...body, ...band.keys]
-    if (band.draft !== undefined && band.draft.length > 0) rows.push([span(`draft: ${truncateText(band.draft, inner - 8)}`, FAINT)])
+    const rule: Line[] = ruleRows > 0 ? [[span(g.box.h.repeat(width), { ink: 'warn' })]] : []
+    const rows: Line[] = [...rule, band.title, ...body, ...band.keys]
+    if (draftRows > 0) rows.push([span(`draft: ${truncateText(band.draft ?? '', inner - 8)}`, FAINT)])
     const start = bottom - rows.length
-    rows.forEach((line, index) => frame.put(start + index, index === 0 ? 0 : 1, line, index === 0 ? width : width - 1))
+    rows.forEach((line, index) => frame.put(start + index, index === 0 && ruleRows > 0 ? 0 : 1, line, index === 0 && ruleRows > 0 ? width : width - 1))
     bottom = start
     frame.cursor = undefined
   } else {

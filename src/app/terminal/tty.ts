@@ -32,8 +32,11 @@ const MODES: readonly (readonly [set: string, reset: string])[] = [
   ['\x1b[?2004h', '\x1b[?2004l'], // bracketed paste
   ['\x1b[?7l', '\x1b[?7h'], // autowrap off: a full last column never scrolls
   ['\x1b[?25l', '\x1b[?25h'], // the cursor, until a frame places it
-  ['\x1b[?1007h', '\x1b[?1007l'], // alternate scroll: the wheel as arrows (Windows Terminal's default; xterm's is off)
 ]
+// Alternate scroll (?1007) is deliberately not in the table: its reset would
+// switch OFF what Windows Terminal has on by default, so `less` in that tab
+// would lose its wheel after exit (S22.1 pre-push review); a terminal with it
+// off keeps the wheel for its own scrollback.
 /** The signals that end the process with the terminal restored first. */
 const SIGNALS: readonly NodeJS.Signals[] = process.platform === 'win32' ? ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] : ['SIGINT', 'SIGTERM', 'SIGHUP']
 /** What a frame may leave behind, undone first whatever happened. */
