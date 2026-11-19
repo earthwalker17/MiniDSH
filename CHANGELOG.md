@@ -24,6 +24,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
   - `sessions/list` carries each session's last change (`updatedAt`);
   - a `session/prompt` that creates a session may carry its `authority`;
   - `attachment/read` returns an image the session's own log names.
+- **Claude Fable 5.2** in the Anthropic catalog (`--provider anthropic --model claude-fable-5-2`): 1M window, 128K output, adaptive thinking, efforts low to max. Before, it got the conservative fallback for an unknown model.
 
 ### Changed
 

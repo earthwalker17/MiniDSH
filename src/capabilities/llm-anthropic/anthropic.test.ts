@@ -335,6 +335,7 @@ describe('Anthropic catalog (GET /v1/models, 2026-10-25)', () => {
     expect(() => adapter.buildBody({ ...base, model: 'claude-opus-5-5', reasoningEffort: 'off' })).toThrowError(expect.objectContaining({ code: 'UNSUPPORTED_REASONING_EFFORT' }))
     expect(() => adapter.buildBody({ ...base, model: 'claude-haiku-5-5', maxTokens: 100_000 })).not.toThrow()
     expect(adapter.listModels().map((model) => model.id)).toEqual([
+      'claude-fable-5-2',
       'claude-fable-5-1',
       'claude-opus-5-5',
       'claude-sonnet-5-5',
@@ -354,7 +355,7 @@ describe('Anthropic catalog (GET /v1/models, 2026-10-25)', () => {
 
   it('offers `off` exactly where the listing says thinking can be disabled', () => {
     const offers = (id: string): boolean => adapter.resolveModel(id).reasoning.efforts.includes('off')
-    expect(['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5'].filter(offers)).toEqual([])
+    expect(['claude-fable-5-2', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5'].filter(offers)).toEqual([])
     expect(['claude-haiku-5-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-haiku-4-5-20251001'].every(offers)).toBe(true)
   })
 
@@ -367,7 +368,7 @@ describe('Anthropic catalog (GET /v1/models, 2026-10-25)', () => {
     expect(adapter.resolveModel('claude-opus-5-20261201').reasoning.efforts).toContain('off')
     // ...but 5.5 never inherits 5's row, and an unknown minor gets the fallback.
     expect(adapter.resolveModel('claude-opus-5-5-20261201').reasoning.efforts).not.toContain('off')
-    expect(adapter.resolveModel('claude-fable-5-2')).toMatchObject({ contextWindow: 200_000, defaultMaxTokens: 8192 })
+    expect(adapter.resolveModel('claude-fable-5-3')).toMatchObject({ contextWindow: 200_000, defaultMaxTokens: 8192 })
     // The provider judges a cap for an id this table does not know: a guessed
     // 8192 refused 16000 for models that serve 128K.
     expect(() => adapter.buildBody({ ...base, model: 'claude-mythos-5-1', maxTokens: 16_000 })).not.toThrow()

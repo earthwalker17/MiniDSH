@@ -82,8 +82,12 @@ const BUDGET_EFFORTS = ['low', 'high', 'max'] as const
  * values are MEASURED provider answers, not doc readings: `temperature` is
  * "deprecated for this model" on 4-7 and 4-8 and accepted by 4-6 and the 4.5
  * rows; `thinking.type.disabled` "is not supported" on Opus 5.5.
+ * Fable 5.2 (listed 2026-11-09) read and measured on 2026-11-19: its
+ * listing is 5.1's; with no `thinking` field it answered with a thinking
+ * block, and `temperature` "is deprecated for this model".
  */
 const CATALOG: readonly CatalogModel[] = [
+  { id: 'claude-fable-5-2', name: 'Claude Fable 5.2', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ADAPTIVE_ONLY, thinksUnasked: true, defaultEffort: 'medium', sampling: false, modalities: TEXT_AND_IMAGE },
   { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000, effortLevels: FIVE_LEVELS, thinkingTypes: ['adaptive', 'between_tools'], thinksUnasked: true, defaultEffort: 'high', sampling: false, modalities: TEXT_AND_IMAGE },
