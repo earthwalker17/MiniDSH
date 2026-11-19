@@ -94,6 +94,44 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     app.closeWindow()
     // Nothing is running, so nothing asks: the app exits on its own.
     expect((await app.waitForExit(30_000)).code).toBe(0)
+
+    // A packaged build refuses a port-based DevTools endpoint (any local
+    // process could drive it); tests use the pipe, which only a parent holds.
+    const refused = spawn(exe, ['--remote-debugging-port=0'], { env: { ...process.env, MINIDSH_DESKTOP_DATA: scratch('minidsh-e2e-ud-'), MINIDSH_HOME: scratch('minidsh-e2e-home-') }, stdio: 'ignore' })
+    const refusedExit = await new Promise<number | null>((resolve) => refused.once('exit', (code) => resolve(code)))
+    expect(refusedExit).toBe(2)
+  })
+
+  // Found by the S22.2 review: one deleted folder blocked every start, with
+  // advice to reinstall; and a stored folder was never held to the rules again.
+  it('a missing folder is skipped, a refused one forgotten, and neither blocks the start', { timeout: 120_000 }, async () => {
+    const userData = scratch('minidsh-e2e-ud-')
+    const home = scratch('minidsh-e2e-home-')
+    const gone = join(scratch('minidsh-e2e-gone-'), 'deleted project')
+    const kept = scratch('minidsh-e2e-ws-')
+    const driveRoot = join(kept, '..', '..', '..').split(/[\\/]/)[0] + (win ? '\\' : '/')
+    seed(userData, [gone, driveRoot, kept])
+    const app = launchApp({ exe, userData, home, drop: KEYS })
+    const web = await app.page('http://127.0.0.1')
+    await web.waitFor(`document.querySelector('#hero')?.textContent.includes('works in')`, 60_000)
+    const folders = await web.evaluate<string[]>(`JSON.stringify([...document.querySelectorAll('#workspace-row, #hero')].map((node) => node.textContent))`)
+    expect(String(folders)).not.toContain('deleted project')
+    // The missing one is still remembered (a drive may come back); the drive root is forgotten.
+    const saved = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')) as { folders: string[] }
+    expect(saved.folders).toContain(gone)
+    expect(saved.folders).not.toContain(driveRoot)
+    expect(app.mainLog()).toMatch(/folder missing, skipped this start/)
+    expect(app.mainLog()).toMatch(/folder refused and forgotten/)
+    app.closeWindow()
+    expect((await app.waitForExit(60_000)).code).toBe(0)
+
+    // Only the missing one left: the welcome view says what it could not find.
+    seed(userData, [gone])
+    const second = launchApp({ exe, userData, home, drop: KEYS })
+    const shell = await second.page('minidsh-shell:')
+    await shell.waitFor(`document.querySelector('h1')?.textContent === 'Welcome to MiniDSH' && document.body.innerText.includes('could not find')`, 30_000)
+    second.closeWindow()
+    expect((await second.waitForExit(30_000)).code).toBe(0)
   })
 
   // Found by this suite: a close landing while the start was still loading
@@ -123,6 +161,9 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     await web.waitFor(`document.querySelector('#hero')?.textContent.includes('ws ü')`, 60_000)
     expect(await web.evaluate<string>('typeof window.minidshShell')).toBe('undefined')
     expect(await web.evaluate<string>('document.cookie')).toBe('')
+    // The jar itself, HttpOnly cookies included: main injects the cookie per
+    // request and strips every set-cookie, so the browser stores none.
+    expect(await app.cookies('http://127.0.0.1', [`http://127.0.0.1:${(JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')) as { port: number }).port}/`])).toEqual([])
     const port = (JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8')) as { port: number }).port
     expect(port).toBeGreaterThanOrEqual(20_000)
     expect(port).toBeLessThan(45_000)

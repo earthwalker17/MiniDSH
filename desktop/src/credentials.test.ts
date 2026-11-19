@@ -92,6 +92,8 @@ describe('provider keys through the CLI', () => {
 
   it('reads only the documented list shape', () => {
     expect(parseCredentialList(JSON.stringify({ home: 'h', store: 's', refs: [] }))).toEqual({ home: 'h', store: 's', refs: [] })
+    // A composition with no store: the list still reads, so the view can say why there is no form.
+    expect(parseCredentialList(JSON.stringify({ home: 'h', store: null, refs: [] }))).toEqual({ home: 'h', store: null, refs: [] })
     for (const bad of [
       { home: 'h', store: 's', refs: [{ name: 'X', source: 'keychain' }] },
       { home: 'h', store: 's', refs: [{ name: 'bad name', source: 'env' }] },

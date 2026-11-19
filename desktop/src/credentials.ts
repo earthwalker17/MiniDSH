@@ -26,8 +26,8 @@ export interface CredentialRef {
 
 export interface CredentialList {
   readonly home: string
-  /** The store file the runtime reads. */
-  readonly store: string
+  /** The store file the runtime reads; `null` when the composition mounts no store (keys come from the environment alone). */
+  readonly store: string | null
   readonly refs: readonly CredentialRef[]
 }
 
@@ -136,7 +136,7 @@ export function parseCredentialList(text: string): CredentialList | undefined {
   } catch {
     return undefined
   }
-  if (!isRecord(value) || typeof value.home !== 'string' || typeof value.store !== 'string' || !Array.isArray(value.refs)) return undefined
+  if (!isRecord(value) || typeof value.home !== 'string' || (typeof value.store !== 'string' && value.store !== null) || !Array.isArray(value.refs)) return undefined
   const refs: CredentialRef[] = []
   for (const ref of value.refs) {
     if (!isRecord(ref) || typeof ref.name !== 'string' || !isCredentialName(ref.name)) return undefined

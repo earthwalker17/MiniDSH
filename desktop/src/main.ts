@@ -1,9 +1,10 @@
 /**
  * The MiniDSH desktop app's main process: a launcher, one window and the
- * lifecycle around ONE runtime child. Wiring only — every decision with a
- * rule lives in a pure module beside it (runtime, inspect, folders, settings,
- * menu, credentials, update, text), so this file has nothing to test that
- * the packaged app's end-to-end run does not exercise.
+ * lifecycle around ONE runtime child. The rules with no Electron in them live
+ * in pure, unit-tested modules beside it (runtime, inspect, folders, settings,
+ * guards, env, menu, credentials, update, text); what stays here is wiring
+ * and the lifecycle's ordering, which desktop/e2e drives in the packaged app
+ * (not every menu path: Check for Updates, About and Show Logs are untested).
  *
  * What the desktop is (ARCHITECTURE §8, the desktop row): a SURFACE. It never
  * imports the runtime. It spawns the bundled CLI (`minidsh web --json`) on the
@@ -25,7 +26,9 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSy
 import { homedir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { listCredentials, setCredential } from './credentials.ts'
-import { admitFolder, boundsVisible } from './folders.ts'
+import { runtimeEnv } from './env.ts'
+import { admitFolder, boundsVisible, type FolderContext } from './folders.ts'
+import { externalUrl, isHostUrl as isHostUrlOf } from './guards.ts'
 import { inspectRuntime } from './inspect.ts'
 import { folderOfRemoveId, MENU_IDS, menuTemplate, type MenuItemTemplate } from './menu.ts'
 import { choosePort, probePort, RuntimeProcess, RuntimeStartError, signIn, type RuntimeReady, type StartFailure } from './runtime.ts'
@@ -50,6 +53,11 @@ const LOG_CAP_BYTES = 1024 * 1024
 
 // ---------------------------------------------------------------- before ready
 
+// Main's sign-in and inspection talk to 127.0.0.1 alone, carrying the launch
+// token and the cookie: an environment proxy (Node honours NODE_USE_ENV_PROXY
+// with HTTP_PROXY) must never see them.
+process.env.NO_PROXY = [process.env.NO_PROXY, '127.0.0.1'].filter(Boolean).join(',')
+
 // Privileged before `ready`, as Electron requires: standard (a real origin for
 // relative URLs), secure (no mixed-content downgrade). No fetch, no CORS.
 protocol.registerSchemesAsPrivileged([{ scheme: SHELL_SCHEME, privileges: { standard: true, secure: true } }])
@@ -70,7 +78,7 @@ if (!app.requestSingleInstanceLock()) app.exit(0)
 
 type View =
   | { readonly kind: 'starting' }
-  | { readonly kind: 'welcome' }
+  | { readonly kind: 'welcome'; readonly notice?: string }
   | { readonly kind: 'keys' }
   | { readonly kind: 'stopping'; readonly restarting: boolean }
   | { readonly kind: 'stopped'; readonly title: string; readonly detail: string; readonly tail: string }
@@ -96,6 +104,12 @@ let exiting = false
 let busy: Promise<void> | undefined
 let reloads = 0
 let home: string | undefined
+/** The runtime being started (before `ready`), so a quit can stop it rather than wait out its boot. */
+let starting: RuntimeProcess | undefined
+/** A quit was asked for: a start it interrupts ends quietly, not in the stopped view. */
+let quitting = false
+/** What the keys view covers, so closing it returns there: the Web UI, or the view it replaced. */
+let keysReturn: View | 'web' = 'web'
 
 // ---------------------------------------------------------------- logs
 
@@ -143,18 +157,12 @@ function runtimeFiles(): { node: string; bin: string; nodeDir: string } {
   return { node, nodeDir: dirname(node), bin }
 }
 
-/**
- * The runtime's environment: the person's own, with the bundled Node's
- * directory APPENDED to PATH so an agent's `node` finds the person's own first
- * and a machine without one still runs the bundled office and pdf skills.
- */
-function runtimeEnv(nodeDir: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env }
-  delete env.ELECTRON_RUN_AS_NODE
-  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
-  const current = env[key]
-  env[key] = current ? `${current}${delimiter}${nodeDir}` : nodeDir
-  return env
+/** The folder rules' context: MiniDSH's own places, which a workspace may neither hold nor sit inside. */
+function folderContext(): FolderContext {
+  // The install as the person launches it: an AppImage's file (the mount is
+  // per launch and read-only), a macOS bundle, else the executable's folder.
+  const installDir = process.env.APPIMAGE !== undefined ? dirname(process.env.APPIMAGE) : process.platform === 'darwin' ? join(process.resourcesPath, '..', '..') : dirname(process.execPath)
+  return { ...(home === undefined ? {} : { home }), userData: app.getPath('userData'), installDir, profile: homedir(), platform: process.platform }
 }
 
 async function freePort(): Promise<number> {
@@ -169,9 +177,9 @@ async function freePort(): Promise<number> {
 function describeStartError(error: StartFailure): { title: string; detail: string; tail: string } {
   switch (error.kind) {
     case 'spawn':
-      return { title: "MiniDSH's runtime could not be started", detail: `${error.message}. Reinstalling MiniDSH restores its bundled files.`, tail: '' }
+      return { title: "MiniDSH's runtime could not be started", detail: `${error.message}. If MiniDSH's own files are missing, reinstalling it restores them.`, tail: '' }
     case 'error-record':
-      return { title: "MiniDSH's runtime refused to start", detail: `${error.code}: ${error.message}`, tail: '' }
+      return { title: "MiniDSH's runtime refused to start", detail: `${error.code}: ${error.message}${error.code === 'WORKSPACE' ? ' Remove that folder in File > Remove Folder, or open another.' : ''}`, tail: '' }
     case 'exited':
       return { title: "MiniDSH's runtime stopped while starting", detail: `exit code ${String(error.code)}${error.signal ? ` (${error.signal})` : ''}`, tail: error.stderrTail }
     case 'timeout':
@@ -181,30 +189,67 @@ function describeStartError(error: StartFailure): { title: string; detail: strin
   }
 }
 
-/** Start the runtime over the remembered folders and show the Web UI. Never called with a live runtime. */
+/**
+ * The folders this start may serve: every stored one re-admitted (a settings
+ * file written by another build, or moved under a rule since, is held to the
+ * same rules as a fresh pick) and present now. A refused one leaves the
+ * settings for good; a missing one (an unplugged drive, a deleted project)
+ * stays remembered but is skipped this time, so it never blocks the start.
+ */
+function usableFolders(): { readonly usable: string[]; readonly missing: string[] } {
+  const usable: string[] = []
+  const missing: string[] = []
+  const refused: string[] = []
+  for (const folder of settings.folders) {
+    if (!existsSync(folder)) {
+      missing.push(folder)
+      continue
+    }
+    const verdict = admitFolder(folder, folderContext())
+    if (verdict.ok) usable.push(verdict.path)
+    else {
+      refused.push(folder)
+      log(`folder refused and forgotten: ${folder} (${verdict.reason})`)
+    }
+  }
+  if (refused.length > 0) persist({ ...settings, folders: settings.folders.filter((folder) => !refused.includes(folder)) })
+  for (const folder of missing) log(`folder missing, skipped this start: ${folder}`)
+  return { usable, missing }
+}
+
+/** Start the runtime over the usable folders and show the Web UI. A live runtime is stopped first, so there is never a second one. */
 async function startRuntime(): Promise<void> {
-  const folder = settings.folders[0]
-  if (folder === undefined) return showView({ kind: 'welcome' })
+  if (live) await stopRuntime(true)
+  const { usable, missing } = usableFolders()
+  const folder = usable[0]
+  if (folder === undefined) {
+    return showView({ kind: 'welcome', ...(missing.length > 0 ? { notice: `MiniDSH could not find ${missing.length === 1 ? 'the folder it works in' : 'the folders it works in'}: ${missing.join(', ')}. Choose a folder, or reconnect the drive and restart MiniDSH.` } : {}) })
+  }
   showView({ kind: 'starting' })
   const files = runtimeFiles()
   let port = await freePort()
   for (let attempt = 0; ; attempt++) {
     const runtime = new RuntimeProcess()
     let ready: RuntimeReady
+    starting = runtime
     try {
       ready = await runtime.start({
         node: files.node,
         bin: files.bin,
         port,
         cwd: folder,
-        folders: settings.folders,
-        env: runtimeEnv(files.nodeDir),
+        folders: usable,
+        // The process runs from the app's own data folder: --cwd carries the
+        // workspace, and a folder deleted under it never fails the spawn.
+        spawnCwd: app.getPath('userData'),
+        env: runtimeEnv(process.env, files.nodeDir),
         onStderr: appendRuntimeLog,
         onFault: (detail) => log(`runtime broke its launch contract after ready: ${detail}`),
       })
     } catch (error) {
       if (!(error instanceof RuntimeStartError)) throw error
       const failure = error.failure
+      if (quitting) return
       // A persisted port another program took (or a range Hyper-V reserved
       // since): choose a fresh one ONCE, then report.
       if (attempt === 0 && failure.kind === 'error-record' && (failure.code === 'EADDRINUSE' || failure.code === 'EACCES')) {
@@ -212,6 +257,7 @@ async function startRuntime(): Promise<void> {
         port = await freePort()
         continue
       }
+      starting = undefined
       log(`start failed: ${failure.kind}`)
       return showView({ kind: 'stopped', ...describeStartError(failure) })
     }
@@ -221,11 +267,13 @@ async function startRuntime(): Promise<void> {
     } catch (error) {
       // The one-shot token was spent by someone else, or the answer was not
       // our host's: never retry with it, never show the page.
+      starting = undefined
       log(`handoff refused: ${error instanceof Error ? error.message : String(error)}`)
       await runtime.stop({ deadlineMs: 2_000 })
       return showView({ kind: 'stopped', title: 'MiniDSH could not sign in to its own runtime', detail: 'the launch credential was not accepted; restart MiniDSH', tail: '' })
     }
     const current: Live = { runtime, port: ready.port, ready, cookie }
+    starting = undefined
     live = current
     home = ready.home
     reloads = 0
@@ -258,7 +306,9 @@ async function loadWebUi(current: Live): Promise<void> {
     await win.webContents.loadURL(`http://127.0.0.1:${current.port}/`)
     hideOverlay()
   } catch (error) {
-    if (live !== current) return
+    // ERR_ABORTED: another navigation superseded this one (a reload): the page
+    // still loads, so this is no failure to cover it with.
+    if (live !== current || (error as { code?: string }).code === 'ERR_ABORTED') return
     log(`web ui did not load: ${error instanceof Error ? error.message : String(error)}`)
     showView({ kind: 'stopped', title: 'The MiniDSH window could not load', detail: error instanceof Error ? error.message : String(error), tail: '' })
   }
@@ -327,18 +377,32 @@ function serialize(action: () => Promise<void>, quit = false): void {
 }
 
 function requestQuit(): void {
+  quitting = true
+  // A start still booting is stopped now (stdin's end, a kill at the bound),
+  // so the quit queued behind it waits seconds, not the boot's two minutes.
+  if (starting && !live) void starting.stop({ deadlineMs: 5_000 })
   serialize(async () => {
-    if (!(await confirmInterrupt('quit'))) return
+    if (!(await confirmInterrupt('quit'))) {
+      quitting = false
+      return
+    }
     await stopRuntime(false)
     exiting = true
     app.quit()
   }, true)
 }
 
-function restartRuntime(confirm: boolean): void {
+/**
+ * The ONE way the runtime's folder set or life changes: decided when the
+ * action RUNS, not when it was asked for (a start still running when a folder
+ * was picked must not leave two runtimes). Confirm first if work would stop;
+ * only then save the change (a Cancel leaves settings, menu and runtime as
+ * they were); then stop whatever is live and start over the saved set.
+ */
+function reconcile(change?: (current: DesktopSettings) => DesktopSettings, confirm = true): void {
   serialize(async () => {
-    if (confirm && !(await confirmInterrupt('restart'))) return
-    await stopRuntime(true)
+    if (live && confirm && !(await confirmInterrupt('restart'))) return
+    if (change) persist(change(settings))
     await startRuntime()
   })
 }
@@ -360,14 +424,12 @@ async function openFolder(): Promise<void> {
   const picked = await dialog.showOpenDialog(win, { title: 'Open a folder for MiniDSH to work in', properties: ['openDirectory', 'createDirectory'] })
   const chosen = picked.filePaths[0]
   if (picked.canceled || chosen === undefined) return
-  const verdict = admitFolder(chosen, { ...(home === undefined ? {} : { home }), userData: app.getPath('userData'), installDir: dirname(process.execPath), profile: homedir(), platform: process.platform })
+  const verdict = admitFolder(chosen, folderContext())
   if (!verdict.ok) {
     await dialog.showMessageBox(win, { type: 'error', title: 'MiniDSH', message: 'MiniDSH cannot work in that folder', detail: verdict.reason, buttons: ['OK'], noLink: true })
     return
   }
-  persist(withCurrentFolder(settings, verdict.path))
-  if (live) restartRuntime(true)
-  else serialize(startRuntime)
+  reconcile((current) => withCurrentFolder(current, verdict.path))
 }
 
 async function removeFolder(folder: string): Promise<void> {
@@ -383,14 +445,8 @@ async function removeFolder(folder: string): Promise<void> {
     noLink: true,
   })
   if (answer.response !== 0) return
-  persist(withoutFolder(settings, folder))
-  if (settings.folders.length === 0) {
-    serialize(async () => {
-      if (!(await confirmInterrupt('restart'))) return
-      await stopRuntime(true)
-      showView({ kind: 'welcome' })
-    })
-  } else restartRuntime(true)
+  // With no folder left, the start shows the welcome view.
+  reconcile((current) => withoutFolder(current, folder))
 }
 
 // ---------------------------------------------------------------- the window
@@ -401,24 +457,13 @@ function backgroundColor(): string {
 
 /** http(s) and mailto open in the person's own browser or mail client; nothing else is ever handed to the OS. */
 function openExternalSafe(url: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    return
-  }
-  if (parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'mailto:') void shell.openExternal(parsed.href)
+  const safe = externalUrl(url)
+  if (safe !== undefined) void shell.openExternal(safe)
 }
 
+/** The live runtime's own origin (guards.ts). */
 function isHostUrl(url: string): boolean {
-  const current = live
-  if (!current) return false
-  try {
-    const parsed = new URL(url)
-    return (parsed.protocol === 'http:' || parsed.protocol === 'ws:') && parsed.host === `127.0.0.1:${current.port}`
-  } catch {
-    return false
-  }
+  return isHostUrlOf(url, live?.port)
 }
 
 function showWindow(): void {
@@ -440,11 +485,28 @@ function showView(next: View): void {
   if (!win.contentView.children.includes(overlay)) win.contentView.addChildView(overlay)
   layoutOverlay()
   overlay.webContents.send('shell:view', shellState())
+  // Keys go to what is on top: never to the Web UI's composer under a form
+  // (a key pasted there and an Enter would have been sent as a prompt).
+  overlay.webContents.focus()
 }
 
 function hideOverlay(): void {
   if (win && overlay && win.contentView.children.includes(overlay)) win.contentView.removeChildView(overlay)
   view = { kind: 'starting' }
+  win?.webContents.focus()
+}
+
+/** The keys view over whatever shows now; closing it returns there. */
+function openKeys(): void {
+  const covering = win && overlay && win.contentView.children.includes(overlay)
+  keysReturn = covering ? view : 'web'
+  showView({ kind: 'keys' })
+}
+
+function closeKeys(): void {
+  if (view.kind !== 'keys') return
+  if (keysReturn === 'web' && live && !busy) hideOverlay()
+  else showView(keysReturn === 'web' ? { kind: 'starting' } : keysReturn)
 }
 
 function shellState(): Record<string, unknown> {
@@ -462,7 +524,8 @@ function shellState(): Record<string, unknown> {
 function findPwsh(): boolean {
   const key = Object.keys(process.env).find((name) => name.toUpperCase() === 'PATH')
   const dirs = (key === undefined ? '' : (process.env[key] ?? '')).split(delimiter).filter(Boolean)
-  dirs.push(join(process.env.ProgramFiles ?? 'C:\\Program Files', 'PowerShell', '7'))
+  // PATH alone: the runtime starts `pwsh` by name, so a pwsh.exe that is
+  // installed but off PATH fails every shell call all the same.
   return dirs.some((dir) => existsSync(join(dir, 'pwsh.exe')))
 }
 
@@ -514,6 +577,7 @@ function createWindow(): void {
   })
   overlay.setBackgroundColor(backgroundColor())
   overlay.webContents.on('will-navigate', (event) => event.preventDefault())
+  overlay.webContents.on('context-menu', (_event, params) => editingMenu(params))
   win.contentView.addChildView(overlay)
   layoutOverlay()
   void overlay.webContents.loadURL(SHELL_URL)
@@ -561,24 +625,30 @@ function guardWebView(web: WebContents): void {
   web.on('render-process-gone', (_event, details) => {
     log(`web renderer gone: ${details.reason}`)
     const current = live
-    if (current && reloads++ < 2) void loadWebUi(current)
-    else if (!exiting) showView({ kind: 'stopped', title: 'The MiniDSH window stopped', detail: details.reason, tail: '' })
+    // Never under a stop, a restart or a start: reloading would bring a
+    // stopping runtime's page back and reopen the race about:blank closed.
+    if (busy || exiting || !current) return
+    if (reloads++ < 2) void loadWebUi(current)
+    else showView({ kind: 'stopped', title: 'The MiniDSH window stopped', detail: `${details.reason}. Restart asks first if work is running.`, tail: '' })
   })
   web.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     if (!isMainFrame || code === -3 || !isHostUrl(url)) return
     log(`web ui load failed: ${code} ${description}`)
   })
-  web.on('context-menu', (_event, params) => {
-    const items: MenuItemConstructorOptions[] = []
-    if (params.isEditable) {
-      items.push({ role: 'cut', enabled: params.editFlags.canCut }, { role: 'copy', enabled: params.editFlags.canCopy }, { role: 'paste', enabled: params.editFlags.canPaste }, { type: 'separator' }, { role: 'selectAll' })
-    } else if (params.selectionText.trim().length > 0) items.push({ role: 'copy' })
-    if (params.linkURL && /^(https?|mailto):/i.test(params.linkURL)) {
-      if (items.length > 0) items.push({ type: 'separator' })
-      items.push({ label: 'Open Link', click: () => openExternalSafe(params.linkURL) })
-    }
-    if (items.length > 0 && win) Menu.buildFromTemplate(items).popup({ window: win })
-  })
+  web.on('context-menu', (_event, params) => editingMenu(params))
+}
+
+/** Cut, copy, paste and select-all where editing; copy a selection; open an http(s)/mailto link outside. */
+function editingMenu(params: Electron.ContextMenuParams): void {
+  const items: MenuItemConstructorOptions[] = []
+  if (params.isEditable) {
+    items.push({ role: 'cut', enabled: params.editFlags.canCut }, { role: 'copy', enabled: params.editFlags.canCopy }, { role: 'paste', enabled: params.editFlags.canPaste }, { type: 'separator' }, { role: 'selectAll' })
+  } else if (params.selectionText.trim().length > 0) items.push({ role: 'copy' })
+  if (params.linkURL && externalUrl(params.linkURL) !== undefined) {
+    if (items.length > 0) items.push({ type: 'separator' })
+    items.push({ label: 'Open Link', click: () => openExternalSafe(params.linkURL) })
+  }
+  if (items.length > 0 && win) Menu.buildFromTemplate(items).popup({ window: win })
 }
 
 /**
@@ -657,27 +727,25 @@ function handle(channel: string, body: (...args: unknown[]) => unknown): void {
 function installShellApi(): void {
   handle('shell:state', () => shellState())
   handle('shell:chooseFolder', () => openFolder())
-  handle('shell:restart', () => {
-    if (live) restartRuntime(false)
-    else serialize(startRuntime)
-  })
+  // Restart from the stopped view: through reconcile, so a runtime still live
+  // under it (the window, not the runtime, stopped) is asked about first.
+  handle('shell:restart', () => reconcile())
   handle('shell:quit', () => requestQuit())
   handle('shell:showLogs', () => void shell.openPath(logsDir))
-  handle('shell:closeKeys', () => {
-    if (live) hideOverlay()
-    else showView({ kind: 'welcome' })
-  })
+  handle('shell:closeKeys', () => closeKeys())
   // The shell sees names and where each is set, never a value; a value it
   // sends goes to the runtime's own writer on stdin, never argv or env.
   handle('shell:listKeys', async () => {
     const files = runtimeFiles()
-    const result = await listCredentials({ node: files.node, bin: files.bin, env: runtimeEnv(files.nodeDir), cwd: app.getPath('userData') })
+    const result = await listCredentials({ node: files.node, bin: files.bin, env: runtimeEnv(process.env, files.nodeDir), cwd: app.getPath('userData') })
+    // The home as the runtime resolves it: the folder rules need it before any start.
+    if (result.ok) home = result.list.home
     return result.ok ? { ok: true, store: result.list.store, refs: result.list.refs } : { ok: false, message: result.reason }
   })
   handle('shell:saveKey', async (name, value) => {
     if (typeof name !== 'string' || typeof value !== 'string') return { ok: false, message: 'a name and a value' }
     const files = runtimeFiles()
-    const result = await setCredential({ node: files.node, bin: files.bin, env: runtimeEnv(files.nodeDir), cwd: app.getPath('userData'), name, value })
+    const result = await setCredential({ node: files.node, bin: files.bin, env: runtimeEnv(process.env, files.nodeDir), cwd: app.getPath('userData'), name, value })
     log(`provider key ${name}: ${result.ok ? 'saved' : 'refused'}`)
     return result.ok ? { ok: true } : { ok: false, message: result.reason }
   })
@@ -723,7 +791,7 @@ function dispatch(id: string): void {
       void openFolder()
       return
     case MENU_IDS.providerKeys:
-      showView({ kind: 'keys' })
+      openKeys()
       return
     case MENU_IDS.quit:
       requestQuit()
@@ -758,7 +826,7 @@ function toElectron(items: readonly MenuItemTemplate[]): MenuItemConstructorOpti
 }
 
 function rebuildMenu(): void {
-  Menu.setApplicationMenu(Menu.buildFromTemplate(toElectron(menuTemplate({ platform: process.platform, folders: settings.folders, appName: 'MiniDSH' }))))
+  Menu.setApplicationMenu(Menu.buildFromTemplate(toElectron(menuTemplate({ platform: process.platform, folders: settings.folders, ...(settings.folders[0] === undefined ? {} : { current: settings.folders[0] }), appName: 'MiniDSH' }))))
 }
 
 // ---------------------------------------------------------------- start
@@ -792,6 +860,10 @@ void app.whenReady().then(() => {
   settings = read.settings
   for (const problem of read.problems) log(`settings: ${problem}`)
   log(`MiniDSH ${app.getVersion()} starting (Electron ${process.versions.electron})`)
+  // An AppImage's launcher adds this where unprivileged user namespaces are
+  // unavailable (Ubuntu 24.04's default): the renderer then runs without
+  // Chromium's OS sandbox, and the log says so (ARCHITECTURE §13).
+  if (app.commandLine.hasSwitch('no-sandbox')) log('running WITHOUT the Chromium sandbox (--no-sandbox): the renderer is not OS-confined')
   for (const one of [session.fromPartition('persist:minidsh'), session.fromPartition(SHELL_SCHEME), session.defaultSession]) hardenSession(one)
   installHandoff()
   serveShell()
@@ -802,6 +874,6 @@ void app.whenReady().then(() => {
     overlay?.setBackgroundColor(backgroundColor())
   })
   createWindow()
-  serialize(startRuntime)
+  reconcile(undefined, false)
 })
 

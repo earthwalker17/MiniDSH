@@ -61,6 +61,9 @@ describe('folder admission, on this host', () => {
     mkdirSync(outer)
     const withHome = { ...ctx, home: join(outer, '.minidsh') }
     expect(admitFolder(outer, withHome)).toMatchObject({ ok: false, reason: expect.stringMatching(/home folder/) })
+    // Inside the home as well: an agent there rewrites the record or a skill.
+    mkdirSync(join(outer, '.minidsh', 'skills'), { recursive: true })
+    expect(admitFolder(join(outer, '.minidsh', 'skills'), withHome)).toMatchObject({ ok: false, reason: expect.stringMatching(/inside MiniDSH's home folder/) })
   })
 
   it('canonicalizes through a link, so a junction cannot walk around a refusal', (test) => {
@@ -117,8 +120,8 @@ describe('folder rules, pure, for both platforms', () => {
     expect(refusalFor('/opt', nix)).toMatch(/contains the MiniDSH installation/)
     expect(refusalFor('/opt/MiniDSH/resources', nix)).toMatch(/inside the MiniDSH installation/)
     expect(refusalFor('/opt/MiniDSHx', nix)).toBeUndefined()
-    // Inside the home is the CLI's rule, not the launcher's.
-    expect(refusalFor('/home/zoe/.minidsh/skills', nix)).toBeUndefined()
+    // Inside the home too, refused by the launcher before the CLI ever sees it.
+    expect(refusalFor('/home/zoe/.minidsh/skills', nix)).toMatch(/inside MiniDSH's home folder/)
     expect(refusalFor('/home/zoe/code', nix)).toBeUndefined()
     expect(refusalFor('/home/zoe/code', { ...nix, home: '/home/zoe/code/.minidsh' })).toMatch(/home folder/)
   })

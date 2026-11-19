@@ -49,6 +49,7 @@ export class DesktopApp {
   readonly launch: DesktopLaunch
   stderr = ''
   private readonly pages = new Map<string, UiPage>()
+  private readonly sessions = new Map<string, string>()
   private readonly problems = new Map<string, UiProblem[]>()
 
   constructor(launch: DesktopLaunch) {
@@ -99,6 +100,7 @@ export class DesktopApp {
     const known = this.pages.get(targetId)
     if (known !== undefined) return known
     const { sessionId } = await this.cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true })
+    this.sessions.set(targetId, sessionId)
     const problems: UiProblem[] = []
     this.problems.set(sessionId, problems)
     await this.cdp.send('Runtime.enable', {}, { sessionId })
@@ -110,6 +112,22 @@ export class DesktopApp {
     })
     this.pages.set(targetId, page)
     return page
+  }
+
+  /**
+   * Every cookie the browser holds for the page at `prefix`, read from the
+   * browser itself (CDP `Network.getCookies`), HttpOnly ones included: what a
+   * page's `document.cookie` cannot show.
+   */
+  async cookies(prefix: string, urls: readonly string[]): Promise<{ name: string; domain: string }[]> {
+    await this.page(prefix)
+    const { targetInfos } = await this.cdp.send<{ targetInfos: { targetId: string; type: string; url: string }[] }>('Target.getTargets')
+    const target = targetInfos.find((info) => info.type === 'page' && info.url.startsWith(prefix))
+    const sessionId = target === undefined ? undefined : this.sessions.get(target.targetId)
+    if (sessionId === undefined) throw new Error(`no attached page at ${prefix}`)
+    await this.cdp.send('Network.enable', {}, { sessionId })
+    const { cookies } = await this.cdp.send<{ cookies: { name: string; domain: string }[] }>('Network.getCookies', { urls }, { sessionId })
+    return cookies
   }
 
   /** The runtime child (the bundled node running `minidsh web --json`), by parentage. */

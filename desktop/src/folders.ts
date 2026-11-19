@@ -112,15 +112,17 @@ export function refusalFor(path: string, ctx: FolderContext): string | undefined
   const { platform } = ctx
   if (isRoot(path, platform)) return 'A whole drive or network share cannot be a workspace. Choose a folder inside it.'
   if (folderKey(path, platform) === folderKey(ctx.profile, platform)) return 'Your whole user folder cannot be a workspace. Choose a project folder inside it.'
-  const own: readonly { readonly at: string | undefined; readonly what: string; readonly inside: boolean }[] = [
-    { at: ctx.userData, what: "MiniDSH's app data", inside: true },
-    { at: ctx.installDir, what: 'the MiniDSH installation', inside: true },
-    // The agent may not reach composition.json, which is trusted as code. A
-    // folder INSIDE the home is not refused here: the CLI owns that rule.
-    { at: ctx.home, what: "MiniDSH's home folder (its settings are trusted as code)", inside: false },
+  const own: readonly { readonly at: string | undefined; readonly what: string }[] = [
+    { at: ctx.userData, what: "MiniDSH's app data" },
+    { at: ctx.installDir, what: 'the MiniDSH installation' },
+    // The agent may not reach composition.json, which is trusted as code, or
+    // the logs, which are the record: neither a folder holding the home nor
+    // one inside it. The CLI refuses both too; refusing here first means a
+    // folder is never saved only to fail every later start.
+    { at: ctx.home, what: "MiniDSH's home folder (its settings are trusted as code)" },
   ]
   for (const { at, what } of own) if (at !== undefined && isWithin(at, path, platform)) return `That folder contains ${what}. Choose a project folder.`
-  for (const { at, what, inside } of own) if (inside && at !== undefined && isWithin(path, at, platform)) return `That folder is inside ${what}. Choose a project folder.`
+  for (const { at, what } of own) if (at !== undefined && isWithin(path, at, platform)) return `That folder is inside ${what}. Choose a project folder.`
   return undefined
 }
 

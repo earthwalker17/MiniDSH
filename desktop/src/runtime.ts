@@ -293,6 +293,12 @@ export interface RuntimeStartOptions extends RuntimeArgvOptions {
   readonly onStderr?: (chunk: Buffer) => void
   /** A contract breach after `ready` (the child is killed): main shows the stopped view. */
   readonly onFault?: (detail: string) => void
+  /**
+   * The PROCESS's working directory, apart from `--cwd`: a folder the person
+   * deleted would fail the spawn itself (ENOENT, read as a broken install),
+   * so main runs the runtime from a directory of its own. Default: `cwd`.
+   */
+  readonly spawnCwd?: string
 }
 
 export const STDERR_TAIL_BYTES = 64 * 1024
@@ -354,7 +360,7 @@ export class RuntimeProcess {
     }
     let child: ChildProcess
     try {
-      child = (options.spawnImpl ?? spawn)(options.node, argv, { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      child = (options.spawnImpl ?? spawn)(options.node, argv, { cwd: options.spawnCwd ?? options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     } catch (error) {
       this.settleExit(null, null)
       return Promise.reject(new RuntimeStartError({ kind: 'spawn', message: (error as NodeJS.ErrnoException).code ?? String(error) }))

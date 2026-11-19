@@ -67,7 +67,7 @@ async function fillKeys(box) {
   for (const ref of result.refs) {
     const [label, tone] = SOURCES[ref.source] ?? ['unknown', 'warn']
     const row = h('div', { class: 'row' }, h('span', { class: 'name', text: ref.name }), h('span', { class: `badge ${tone}`, text: label }))
-    if (ref.source !== 'env') {
+    if (ref.source !== 'env' && result.store !== null) {
       const input = /** @type {HTMLInputElement} */ (h('input', { attrs: { type: 'password', autocomplete: 'off', spellcheck: 'false', 'aria-label': `${ref.name} value`, placeholder: ref.source === 'store' ? 'Replace the saved key' : 'Paste the key' } }))
       const status = h('span', { class: 'note' })
       const save = button('Save', async () => {
@@ -85,7 +85,15 @@ async function fillKeys(box) {
     }
     box.append(row)
   }
-  box.append(h('p', { class: 'note', text: `Saved keys live in ${result.store}; a key set in the environment wins. DeepSeek is the default provider (DEEPSEEK_API_KEY).` }))
+  box.append(
+    h('p', {
+      class: 'note',
+      text:
+        result.store === null
+          ? 'This MiniDSH reads keys from the environment only: its composition mounts no key store, so none can be saved here.'
+          : `Saved keys live in ${result.store}; a key set in the environment wins. DeepSeek is the default provider (DEEPSEEK_API_KEY).`,
+    }),
+  )
 }
 
 /** @param {any} state */
@@ -106,6 +114,7 @@ async function draw(state) {
     case 'welcome': {
       card.append(
         h('h1', { text: 'Welcome to MiniDSH' }),
+        view.notice ? h('p', { class: 'error', text: view.notice }) : null,
         h('p', { text: 'Choose a folder for MiniDSH to work in. It reads and edits files there and runs commands there with your approval; every session keeps a log you can resume, fork and audit.' }),
         h('div', { class: 'actions' }, button('Choose a folder…', () => api.chooseFolder(), true)),
       )
@@ -149,6 +158,10 @@ let last
 async function render() {
   await draw(last ?? (await api.state()))
 }
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && last?.view?.kind === 'keys') void api.closeKeys()
+})
 
 if (api) {
   api.onView((/** @type {any} */ state) => {
