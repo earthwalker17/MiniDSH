@@ -234,6 +234,8 @@ async function bundle(): Promise<void> {
       include: join(DESKTOP, 'installer.nsh'),
       shortcutName: 'MiniDSH',
       uninstallDisplayName: 'MiniDSH ${version}',
+      // No updater reads a blockmap (updates are a release page, S22.2).
+      differentialPackage: false,
     },
     linux: {
       target: [{ target: dirOnly ? 'dir' : 'AppImage', arch: ['x64'] }],

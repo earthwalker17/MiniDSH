@@ -12,6 +12,13 @@
 # and the publish answers 403). A tag pushed before that is configured fails
 # at the publish step with nothing published.
 #
+# The desktop installers (Windows NSIS, Linux AppImage, macOS zip; unsigned
+# until a signing identity exists) are built by a THIRD job, read-only like the
+# gate, one leg per platform, from the same commit; the publish job attaches
+# them to the draft beside the tarball. A desktop leg that fails stops the
+# release before anything is published: the app and the package are one
+# release identity.
+#
 # TWO jobs, because a credential exists for every step of a job that may mint
 # one: with `id-token: write` on the whole run, `pnpm check` and the install
 # smoke — repository and dependency code, lifecycle scripts included — could
@@ -154,9 +161,57 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  desktop:
+    name: desktop ${{ matrix.os }}
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24.19.0
+          cache: true
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir desktop install --frozen-lockfile
+
+      # Unsigned: no signing secret exists yet (S22.2). When one does, it goes
+      # into THIS job's environment (WIN_CSC_LINK / CSC_LINK and a password),
+      # which electron-builder reads; nothing else changes.
+      - name: Package for this platform
+        run: node desktop/scripts/package.ts
+
+      - name: The packaged runtime, started as the app starts it
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) RESOURCES="desktop/build/dist/win-unpacked/resources" ;;
+            Linux) RESOURCES="desktop/build/dist/linux-unpacked/resources" ;;
+            macOS) RESOURCES="$(ls -d desktop/build/dist/mac*/MiniDSH.app/Contents/Resources | head -1)" ;;
+          esac
+          node desktop/scripts/smoke-runtime.ts "$RESOURCES"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ runner.os }}
+          path: |
+            desktop/build/dist/*.exe
+            desktop/build/dist/*.AppImage
+            desktop/build/dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: publish ${{ github.ref_name }}
-    needs: gate
+    needs: [gate, desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -174,6 +229,12 @@ jobs:
         with:
           name: tarball
           path: ${{ runner.temp }}/release
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: ${{ runner.temp }}/desktop
+          merge-multiple: true
 
       - name: The bytes the gate packed
         run: |
@@ -222,6 +283,9 @@ jobs:
           else
             gh release create "v$VERSION" --draft --title "minidsh $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "$TARBALL"
           fi
+          # The desktop installers, beside the tarball; --clobber so a re-run replaces, never duplicates.
+          ls -la "$RUNNER_TEMP/desktop"
+          gh release upload "v$VERSION" --clobber "$RUNNER_TEMP"/desktop/*
 
       # What npm's trusted-publishing exchange is shown, printed before the
       # publish so a mismatch with the trusted publisher configured on

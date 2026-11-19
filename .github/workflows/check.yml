@@ -116,3 +116,66 @@ jobs:
           npm init -y > /dev/null
           npm install --no-audit --no-fund ../minidsh-*.tgz
           bash "$GITHUB_WORKSPACE/scripts/smoke-installed.sh" "$PWD" "$VERSION"
+
+  # The desktop app, packed and proved on each platform it ships for. Its
+  # packaging toolchain (desktop/package.json) is installed here alone, so the
+  # gate above stays lean. Each leg packs the installer it would ship and runs
+  # the packaged runtime the way the app does (the bundled Node, `web --json`,
+  # the handoff, every asset, a graceful stop). Windows also installs it
+  # silently into a path with a space and a non-ASCII letter and drives the
+  # installed app end to end (desktop/e2e/app.e2e.test.ts, keyless).
+  # MINIDSH_EXPECT_DESKTOP turns that suite's self-skip into a failure.
+  desktop:
+    name: desktop ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/setup@v3
+        with:
+          runtime: node@24.19.0
+          cache: true
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir desktop install --frozen-lockfile
+
+      - name: Package for this platform
+        run: node desktop/scripts/package.ts
+
+      - name: The packaged runtime, started as the app starts it
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) RESOURCES="desktop/build/dist/win-unpacked/resources" ;;
+            Linux) RESOURCES="desktop/build/dist/linux-unpacked/resources" ;;
+            macOS) RESOURCES="$(ls -d desktop/build/dist/mac*/MiniDSH.app/Contents/Resources | head -1)" ;;
+          esac
+          node desktop/scripts/smoke-runtime.ts "$RESOURCES"
+
+      - name: Locate the Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "MINIDSH_DESKTOP_INSTALLER=$(cygpath -w "$(ls "$GITHUB_WORKSPACE"/desktop/build/dist/MiniDSH-Setup-*.exe)")" >> "$GITHUB_ENV"
+
+      - name: The installed app, driven (keyless)
+        if: runner.os == 'Windows'
+        run: npx vitest run --config vitest.e2e.config.ts desktop/e2e/app.e2e.test.ts
+        env:
+          MINIDSH_EXPECT_DESKTOP: '1'
+          MINIDSH_DESKTOP_EXE: ${{ github.workspace }}\desktop\build\dist\win-unpacked\MiniDSH.exe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ runner.os }}
+          path: |
+            desktop/build/dist/*.exe
+            desktop/build/dist/*.AppImage
+            desktop/build/dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
