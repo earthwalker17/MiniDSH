@@ -286,7 +286,7 @@ describe('the conversation model', () => {
   })
 
   it('folds every real log MiniDSH has written, placing each visible event once', () => {
-    for (const name of ['minidsh-1.0.0.jsonl', 'minidsh-s16.jsonl']) {
+    for (const name of ['minidsh-1.0.0.jsonl', 'minidsh-s16.jsonl', 'minidsh-s22-web.jsonl']) {
       const lines = readFileSync(fileURLToPath(new URL(`../../test-support/fixtures/sessions/${name}`, import.meta.url)), 'utf8').trimEnd().split('\n')
       const events = lines.slice(1).map((line) => JSON.parse(line) as EventEnvelope)
       const live = createConversation()
@@ -297,5 +297,27 @@ describe('the conversation model', () => {
       for (const event of facts(events)) expect({ name, seq: event.seq, placed: where.has(event.seq) }).toEqual({ name, seq: event.seq, placed: describeRow(event) !== undefined })
       expect(cold.items.size, name).toBeGreaterThan(0)
     }
+  })
+
+  it('joins what S22\'s live browser session did, each to the call that did it', () => {
+    // Recorded through `minidsh web` in real Chrome against DeepSeek (2026-11-19): the paths
+    // rewritten to neutral ones and the trace tier (`assistant/chunk`) dropped, so seqs have gaps.
+    const lines = readFileSync(fileURLToPath(new URL('../../test-support/fixtures/sessions/minidsh-s22-web.jsonl', import.meta.url)), 'utf8').trimEnd().split('\n')
+    const model = fold(lines.slice(1).map((line) => JSON.parse(line) as EventEnvelope))
+    const items = [...model.items.values()]
+    // The approval a person answered in the page: asked on its call, decided by the user, top-level.
+    const decided = model.blocks.filter((block) => block.kind === 'system' && block.type === 'approval/decided')
+    expect(decided).toHaveLength(1)
+    expect(decided[0]?.kind === 'system' && decided[0].data.decidedBy).toBe('user')
+    // The delegation: started and ended on the one call, the child named.
+    const delegated = items.filter((item) => item.subagent?.start !== undefined)
+    expect(delegated).toHaveLength(1)
+    expect(delegated[0]?.subagent?.end).toBeDefined()
+    // The job a person stopped from the panel: its end joined to the call that started it.
+    const job = items.find((item) => item.job?.start !== undefined)
+    expect(job?.job?.end).toMatchObject({ cause: 'cancelled', by: 'user' })
+    // The effort and acceptance switches made from the chips: top-level, never inside a turn's work.
+    const switches = model.blocks.filter((block) => block.kind === 'system').map((block) => (block.kind === 'system' ? block.type : ''))
+    expect(switches).toEqual(expect.arrayContaining(['agent/options', 'sandbox/acceptance']))
   })
 })
