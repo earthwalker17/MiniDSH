@@ -200,6 +200,11 @@ describe('minidsh web --json: one error record for every exit before ready', () 
     const { code, record } = await refused(host)
     expect({ code, record: record.code }).toEqual({ code: 2, record: 'WORKSPACE' })
     expect(record.message).toMatch(/may not contain MiniDSH's home/)
+    // Inside it too: a root under the home lets an agent rewrite the record or a skill.
+    const inner = join(home, 'skills')
+    mkdirSync(inner)
+    const nested = new WebHostProcess(inner, home, { json: true, noCwd: true, args: ['--workspace', inner] })
+    expect(await refused(nested)).toMatchObject({ code: 2, record: { code: 'WORKSPACE' } })
   })
 
   it('EADDRINUSE for a port that is taken, exit 1', { timeout: 60_000 }, async () => {

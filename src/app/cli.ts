@@ -743,6 +743,10 @@ async function webCommand(args: ParsedArgs): Promise<number> {
     const url = new URL(web.url)
     const ready = { type: 'ready', host: url.hostname, port: web.port, token: url.searchParams.get('token'), version: VERSION, home: resolveHome(), workspaces: web.workspaces }
     process.stdout.write(`${JSON.stringify(ready)}\n`)
+    // A supervised host's pipes close when its supervisor dies, and the bin's
+    // EPIPE handler would then exit 0 on the next write: possibly one racing
+    // the stdin end that starts the stop. Under --json, stdin decides.
+    quietStreams()
   } else {
     process.stdout.write(`minidsh web — open this once:\n\n  ${web.url}\n\n`)
   }
@@ -762,9 +766,10 @@ async function webCommand(args: ParsedArgs): Promise<number> {
  * to the first and otherwise must be one of them, since a default session
  * outside every root is one no client could have opened.
  *
- * A root that holds MiniDSH's home is refused: the home's `composition.json`
- * is code-equivalent trust (§9), and a workspace is where an agent writes. A
- * bare `--cwd` is not held to this, because it never was.
+ * A root that holds MiniDSH's home, or lies inside it, is refused: the home's
+ * `composition.json` is code-equivalent trust (§9), its logs are the record,
+ * and a workspace is where an agent writes. A bare `--cwd` is not held to
+ * this, because it never was.
  */
 function webWorkspaces(args: ParsedArgs): { cwd: string; roots?: string[] } | string {
   if (args.workspaceDirs.length === 0) return { cwd: cwdFlag(args) }
@@ -779,8 +784,8 @@ function webWorkspaces(args: ParsedArgs): { cwd: string; roots?: string[] } | st
       const root = canonicalPath(absolute)
       // Without case on win32, where the filesystem has none: refusing a
       // spelling that only might be the home is the safe direction here.
-      const holdsHome = process.platform === 'win32' ? isInside(root.toLowerCase(), canonicalHome.toLowerCase()) : isInside(root, canonicalHome)
-      if (holdsHome) return `a workspace may not contain MiniDSH's home (${home}): its composition.json is code-equivalent trust`
+      const [a, b] = process.platform === 'win32' ? [root.toLowerCase(), canonicalHome.toLowerCase()] : [root, canonicalHome]
+      if (isInside(a, b) || isInside(b, a)) return `a workspace may not contain MiniDSH's home (${home}) or lie inside it: its composition.json is code-equivalent trust and its logs are the record`
       if (!roots.includes(root)) roots.push(root)
     }
     const cwd = args.flags.get('cwd')
@@ -820,10 +825,7 @@ function armStop(web: WebHostHandle, json: boolean): void {
     // the bin's EPIPE handler exits 0 on the first failed write, and a
     // supervisor that died is the commonest reason to be stopping at all —
     // exiting mid-disposal is what would strand its leases and its turns.
-    for (const stream of [process.stdout, process.stderr]) {
-      stream.removeAllListeners('error')
-      stream.on('error', () => undefined)
-    }
+    quietStreams()
     process.stderr.write(json ? `minidsh web: stopping (${why})\n` : 'minidsh web: stopping… (again to force)\n')
     void web.stop().then(
       (outcome) => process.exit(outcome === 'stopped' ? 0 : 1),
@@ -845,6 +847,14 @@ function armStop(web: WebHostHandle, json: boolean): void {
   // A parent that died can surface as a read error rather than an end.
   process.stdin.on('error', onEnd)
   process.stdin.resume()
+}
+
+/** A failed write to stdout or stderr is dropped, never a reason to exit. */
+function quietStreams(): void {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.removeAllListeners('error')
+    stream.on('error', () => undefined)
+  }
 }
 
 /** fd 0 is something whose writer can hang up: not a character device, not a file, not a directory, and there at all. */
