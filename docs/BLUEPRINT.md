@@ -68,47 +68,63 @@ S22 and S22.1 made the browser and the terminal product surfaces over one runtim
 
 One entry per session: what it decided and the measurements that still matter; the detail is in the commits.
 
-- **S22 Web UI redesign (2026-11-19).** Its decisions are ARCHITECTURE §3, §8, §11, §13 and `app/web/`:
-  - tool presentation is a fact the tool owns (`display`, read by no runtime path);
-  - the page folds the log into blocks joined by recorded ids (`conversation.js`), with cards from durable facts only;
-  - the view publishes on every flip and on a child's disposal;
-  - a stored session's view holds no grant;
-  - a strict CSP with Trusted Types.
+- **S22.1 Terminal TUI redesign (2026-11-19).** Its decisions are ARCHITECTURE §8, §11, §13 and `app/terminal/`:
+  - the terminal is a protocol client: `session/resume` and `session/fork` went on the wire, and the bypass is deleted (the agents it made were unowned, outside `shutdown`'s sweep);
+  - one presentation model, two renderers: the terminal imports the browser's pure modules, and both say decisions and authority in `rows.js`'s words;
+  - one controller under the full-screen view and the line view;
+  - a consent is a lone key, armed only once on screen, keyboard-quiet and read to its last row;
+  - one neutralizing cell writer; every mode undone on every exit path.
+
+  Codewhale (`e1364cab`) was the design reference; no code or assets were copied.
 
   **User decisions:**
-  - a sea-teal accent;
-  - image previews, a live DSH capture and DSH's MIT icon set;
-  - finished turns collapsed as DSH does, with decisions and errors always visible.
+  - keyboard scrolling, no mouse capture;
+  - the S22 accent on the terminal's own background;
+  - no skill gesture yet, which closed §3's question;
+  - the wire change with the full 3×-per-host gate.
+
+  **Measured with the user in Windows Terminal (`keys.ts`):**
+  - libuv drops Shift and Alt from Enter, and Ctrl+Enter arrives as LF;
+  - the terminal answers queries on stdin;
+  - an unbracketed paste arrives as 1024-byte chunks split at `\r`;
+  - the wheel arrives as arrows on the alternate screen.
 
   **Found:**
-  - A 3-lens review, 30 findings, among them:
-    - approval buttons live at once on the same pixels;
-    - a subject re-split on a model's backticks;
-    - a child read-only forever, which the page's own copy had rationalised.
-  - A 2-lens pre-push review, 13 more, among them:
-    - a key anywhere unsticking the transcript;
-    - a stored session's view offering grants `approval/revoke` refuses.
-  - Only the live run found that every real turn stopped following at its first approval. Chrome fires `scroll` for a shrinking viewport before any resize callback, and the answer clamps in a transient layout, so now only the reader's own input leaves the bottom.
-  - The Anthropic drift probe found `claude-fable-5-2` uncatalogued; it is added, measured.
+  - A 3-lens review (consent, state, UX). Two blockers:
+    - an armed band took a `y` typed mid-word;
+    - a long question was cut, so it could never be read whole.
+  - My own test of that fix found the band's last row unreachable, and that 40×12 left no readable row.
+  - A 2-lens pre-push review, 16 findings:
+    - a preset chosen before the first message came back as the opening of an unrelated session after `/new`;
+    - piped input whose turn asked a question hung (its scratch test failed my gate);
+    - resetting `?1007` switched off Windows Terminal's default.
+  - Only driving the packed tarball found `--plain` never parsed, though documented; only the live TUI run found a model's clamped reason cut with no ellipsis.
+  - The claim review restored 7 compaction cuts, among them an inverted DSH relation and OpenAI's probe scope.
 
   **Live:**
-  - `minidsh web` in real Chrome on DeepSeek, 4 runs. It fixed a failing test, answered approvals, delegated a review, switched effort and acceptance, and stopped a job from the panel.
-  - The test passes outside MiniDSH, and the log facts are asserted. The log is a fixture, with neutral paths and the trace tier dropped.
-  - Under WSL every arc 3/3, then the final tree's web, browser and probe once. On Windows every arc 3/3 but context: one keyless replay consumed 7 of its 8 recorded summaries; three reruns passed (5 of 6); the cause is not found, and S22.5 reruns it, dumping the recording on failure. 4.39 CNY.
+  - Through the real full-screen terminal in a Windows ConPTY on DeepSeek, twice (the second on the reviewed tree):
+    - the model fixed a failing test, approved by keystrokes, and the test passes outside MiniDSH;
+    - it delegated two parallel reviews, seen live on their cards;
+    - `/fork` was messaged, then `/resume` opened the original in place.
 
-  **Gates:**
-  - Final tree: Windows 1,698 passed with 29 skips; WSL 1,715 with 10.
-  - The first WSL gate was stopped for low memory (7.6 GB); its reruns held vitest to two workers.
+    The log's facts: decisions by the user, two `subagent/start`, and the fork's lineage.
+  - Keyless in ConPTY and tmux 3.4, screens read back as text.
+  - Every arc 3× per host on the final protocol host. Windows: 51 of 51, the context arc 3/3 (its recorded flake did not recur). WSL: 51 of 51.
+  - The harnesses live in the scratchpad, so they cannot be rerun from the repository.
 
-  DSH at `2e39e704`.
+  **Gates:** Windows 1,898 passed, 34 skipped; WSL 1,915 passed, 15 skipped, rerun after a low-memory stop (0.6 GB free) and `wsl --shutdown`, two workers. The installed smoke now opens the line view from the tarball.
 
-  **Agents:** 18 of 18:
-  - 9 planning;
-  - 2 lanes;
-  - 3 review lenses;
-  - 1 compaction author;
-  - 1 claim reviewer;
-  - 2 pre-push lenses.
+  **Docs:** ARCHITECTURE compacted by delegation, 52,781 → 50,699 bytes, with the parent restoring five risky cuts and seven review findings.
+
+  **Agents:** 14 of 16:
+  - 3 research, 2 critics, 2 implementation lanes;
+  - 3 review lenses, 1 compaction author, 1 claim reviewer, 2 pre-push lenses.
+
+- **S22 Web UI redesign (2026-11-19).** Its decisions are ARCHITECTURE §3, §8, §11, §13 and `app/web/` (`display`, the conversation fold, a strict CSP).
+  - **User decisions:** a sea-teal accent; image previews, a live DSH capture and DSH's MIT icon set; finished turns collapsed as DSH does.
+  - **Found:** a 3-lens review (30) and a 2-lens pre-push review (13). Only the live run found that every real turn stopped following at its first approval: Chrome fires `scroll` for a shrinking viewport before any resize callback, so only the reader's own input leaves the bottom.
+  - **Live:** `minidsh web` in real Chrome on DeepSeek, 4 runs, 4.39 CNY. Every arc 3/3 per host but Windows context, 5 of 6: one keyless replay consumed 7 of its 8 recorded summaries, cause not found (S22.5 reruns it, dumping the recording).
+  - **Gates:** Windows 1,698 / 29 skips; WSL 1,715 / 10, its vitest held to two workers after a low-memory stop (7.6 GB). 18 agents.
 
 - **S21.1 Continuations and process hygiene (2026-11-08).** Its decisions are ARCHITECTURE §4, §6, §7 and the code. **User decisions:** the resume-ordering defect pulled in from S22; containment for all three pwsh shapes. **Measured** (Windows 11, pwsh 7.6): containment costs ~+55 ms on a ~610 ms pwsh start; a 32-bit PowerShell is contained; the rest is at `shell-stdio/process.ts`. **Found:** a design critic, 16 findings; a 3-lens review, 12 with 4 major; what was applied is at the code. **Live:** delegation, parallel, verification, authority and context once on Windows; jobs 3/3 on Windows and under WSL with bwrap; delegation once under WSL; 0.19 CNY. **Gates:** Windows 1,454 passed with 28 named skips; WSL 1,470 with 10. DSH at `fcc0ad46` (a manual compaction there, `runMaintenance`, is joined unbounded). **Agents:** 9 of 9.
 
