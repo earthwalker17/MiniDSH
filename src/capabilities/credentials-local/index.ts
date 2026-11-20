@@ -12,8 +12,8 @@
  * (`updateCredentialStore`, for `minidsh credentials set|unset`), beside the
  * reader whose rules it must not contradict.
  */
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import { z } from 'zod'
 import type { Logger, Plugin } from '../../kernel/index.ts'
 import { CREDENTIALS, type CredentialRef, type Credentials } from '../../core/credentials/index.ts'
@@ -155,13 +155,30 @@ export function updateCredentialStore(path: string, name: CredentialRef, value: 
   return underStoreLock(target, () => writeStore(target, name, value))
 }
 
-/** The file a link at `path` names, followed; `path` itself when it is no link or does not exist yet. */
+/**
+ * The file a link at `path` names, followed link by link; `path` itself when
+ * it is no link or does not exist yet. A DANGLING link (its target not created
+ * yet, in a dotfiles checkout say) is followed too: the store is written where
+ * the link points, so a rename never replaces the person's link with a file.
+ */
 function storeTarget(path: string): string {
-  try {
-    return lstatSync(path).isSymbolicLink() ? realpathSync(path) : path
-  } catch {
-    return path
+  let at = path
+  for (let hop = 0; hop < 32; hop++) {
+    try {
+      if (!lstatSync(at).isSymbolicLink()) return at
+    } catch {
+      return at
+    }
+    try {
+      // A chain that ends at a file: exactly where the OS lands.
+      return realpathSync(at)
+    } catch {
+      // Dangling: one hop, relative to the link's REAL folder (a `..` in the
+      // target means what the OS means by it, never a lexical step).
+      at = resolve(realpathSync(dirname(at)), readlinkSync(at))
+    }
   }
+  throw new Error(`${path} is a chain of more than 32 links`)
 }
 
 /** How long a writer waits for another, and when a lock is too old to belong to a live one. */

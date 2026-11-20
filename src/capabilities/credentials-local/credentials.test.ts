@@ -264,18 +264,31 @@ describe('the store writer under concurrency, links and odd names (S22.2 review)
     const module = new URL('./index.ts', import.meta.url).href
     const { spawn } = await import('node:child_process')
     const names = ['RACE_A', 'RACE_B', 'RACE_C', 'RACE_D']
+    // A start barrier: every child has loaded the module and waits for `go`,
+    // so the writes overlap instead of falling into each process's start-up jitter.
+    const go = join(dir, 'go')
     const runs = names.map(
       (name) =>
         new Promise<number | null>((resolve) => {
-          const script = `const { updateCredentialStore } = await import(${JSON.stringify(module)}); for (let i = 0; i < 5; i++) updateCredentialStore(${JSON.stringify(store)}, ${JSON.stringify(name)}, 'value-' + i)`
+          const script = [
+            `const { updateCredentialStore } = await import(${JSON.stringify(module)})`,
+            `const fs = await import('node:fs')`,
+            `fs.writeFileSync(${JSON.stringify(join(dir as string, `ready-${name}`))}, '')`,
+            `const pause = new Int32Array(new SharedArrayBuffer(4))`,
+            `while (!fs.existsSync(${JSON.stringify(go)})) Atomics.wait(pause, 0, 0, 2)`,
+            `for (let i = 0; i < 20; i++) updateCredentialStore(${JSON.stringify(store)}, ${JSON.stringify(name)}, 'value-' + i)`,
+          ].join('\n')
           const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'ignore' })
           child.on('exit', (code) => resolve(code))
         }),
     )
+    const until = Date.now() + 30_000
+    while (names.some((name) => !existsSync(join(dir as string, `ready-${name}`))) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20))
+    writeFileSync(go, '')
     expect(await Promise.all(runs)).toEqual([0, 0, 0, 0])
     const saved = JSON.parse(readFileSync(store, 'utf8')) as Record<string, string>
     expect(Object.keys(saved).toSorted(), JSON.stringify(saved)).toEqual(names)
-    expect(Object.values(saved).every((value) => value === 'value-4')).toBe(true)
+    expect(Object.values(saved).every((value) => value === 'value-19')).toBe(true)
     expect(existsSync(`${store}.lock`)).toBe(false)
   })
 
@@ -305,6 +318,23 @@ describe('the store writer under concurrency, links and odd names (S22.2 review)
       expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ KEPT: 'k', MINIDSH_TEST_SECRET: 'v' })
     }
     expect(existsSync(lockOf)).toBe(false)
+  })
+
+  it('writes through a DANGLING store link to where it points, keeping the link (a dotfiles target not created yet)', (context) => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-dangling-'))
+    mkdirSync(join(dir, 'dotfiles'))
+    const store = join(dir, 'home', 'credentials.json')
+    mkdirSync(dirname(store))
+    try {
+      // Relative, through `..`: resolved from the link's own folder, as the OS does.
+      symlinkSync(join('..', 'dotfiles', 'credentials.json'), store, 'file')
+    } catch {
+      context.skip('this host cannot create a symlink (Windows without Developer Mode)')
+    }
+    expect(updateCredentialStore(store, REF, 'v')).toBe(true)
+    expect(lstatSync(store).isSymbolicLink()).toBe(true)
+    expect(JSON.parse(readFileSync(join(dir, 'dotfiles', 'credentials.json'), 'utf8'))).toEqual({ MINIDSH_TEST_SECRET: 'v' })
+    expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ MINIDSH_TEST_SECRET: 'v' })
   })
 
   it('reads a reference named after an Object.prototype member as absent, never a crash', () => {

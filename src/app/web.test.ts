@@ -400,6 +400,90 @@ describe('the graceful stop (WebHostHandle.stop)', () => {
     await host.dispose()
     await host.closed
   })
+
+  // Disposal is newest first (`kernel/context.ts`), so the newest agent's hung
+  // disposer holds every older one's ending: sessions created WHILE phase 1
+  // waits are only ended if phase 1 lists the agents again.
+  it('re-lists while it cancels: sessions a client creates during phase 1 end cancelled, even behind a hung disposal', async () => {
+    const sessionsRoot = tempDir('minidsh-web-sessions-')
+    let release!: () => void
+    const hung = new Promise<void>((resolve) => (release = resolve))
+    // Filled once connected; the first turn reads it later, from the abort.
+    const wire: { client?: WebClient } = {}
+    let firstStreaming!: () => void
+    const firstStarted = new Promise<void>((resolve) => (firstStreaming = resolve))
+    const streaming: (() => void)[] = []
+    const started = [0, 1].map(() => new Promise<void>((resolve) => streaming.push(resolve)))
+    const midStop: Promise<{ sessionId: string }>[] = []
+    const holdUntilAbort = (request: { signal?: AbortSignal }) => [gate(new Promise((resolve) => request.signal?.addEventListener('abort', resolve, { once: true }))), ...assistantText('never reached')]
+    const adapter = new ScriptedAdapter().script(
+      // The first turn, once the stop cancels it, goes idle only after two
+      // more sessions are streaming: both are born inside phase 1.
+      (request) => {
+        firstStreaming()
+        return [
+          gate(
+            new Promise<void>((resolve) =>
+              request.signal?.addEventListener(
+                'abort',
+                () => {
+                  void (async () => {
+                    for (const [index, text] of ['born mid-stop', 'born mid-stop, last'].entries()) {
+                      midStop.push(wire.client!.request<{ sessionId: string }>('session/prompt', { text, agentOptions: SCRIPTED }))
+                      await started[index]
+                    }
+                    resolve()
+                  })()
+                },
+                { once: true },
+              ),
+            ),
+          ),
+          ...assistantText('never reached'),
+        ]
+      },
+      (request) => {
+        streaming[0]!()
+        return holdUntilAbort(request)
+      },
+      (request) => {
+        streaming[1]!()
+        return holdUntilAbort(request)
+      },
+    )
+    let agents = 0
+    const host = await startWebHost({
+      cwd: tempDir('minidsh-web-cwd-'),
+      sessionsRoot,
+      logger: silent,
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+      prepare: (root) => {
+        root.get(LLM).registerAdapter(root, adapter)
+      },
+      // Only the newest agent's disposer never finishes: disposed first, it holds the rest.
+      agentWorld: (agentCtx) => {
+        if (++agents === 3) agentCtx.effect(() => () => hung, 'a disposer that never finishes')
+      },
+    })
+    hosts.push(host)
+    const cookie = await signIn(`http://127.0.0.1:${host.port}`, new URL(host.url).searchParams.get('token')!)
+    const client = await WebClient.open(`ws://127.0.0.1:${host.port}/ws`, cookie)
+    wire.client = client
+    sockets.push(client.socket)
+    const first = await client.request<{ sessionId: string }>('session/prompt', { text: 'hold on', agentOptions: SCRIPTED })
+    await firstStarted
+
+    expect(await host.stop({ cancelBoundMs: 10_000, disposeBoundMs: 500 })).toBe('deadline')
+    const sessions = [first, ...(await Promise.all(midStop))]
+    expect(sessions).toHaveLength(3)
+    for (const { sessionId } of sessions) {
+      const ends = storedEvents(sessionsRoot, sessionId).filter((event) => event.type === 'turn/end')
+      expect(ends.map((event) => (event.data as { reason: { kind: string } }).reason.kind), `the turn ends ${sessionId} recorded`).toEqual(['cancelled'])
+    }
+    release()
+    await host.dispose()
+    await host.closed
+  })
 })
 
 describe('the web surface, driven as a browser drives it', () => {

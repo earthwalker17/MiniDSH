@@ -104,6 +104,10 @@ describe('minidsh credentials', () => {
     expect(() => statSync(store)).toThrow()
     // A name that is not an environment-variable name is refused before stdin is read.
     expect(cli(dir, ['credentials', 'set', 'not a name'], { input: SECRET }).code).toBe(2)
+    // A key pasted where the NAME goes is refused without being echoed: the refusal states the rule, never the argument.
+    const pasted = cli(dir, ['credentials', 'set', SECRET], { input: 'x\n' })
+    expect(pasted.code).toBe(2)
+    expect(`${pasted.out}${pasted.err}`).not.toContain(SECRET)
   })
 
   it('refuses to rewrite a store it cannot parse, and leaves it byte for byte', { timeout: 120_000 }, () => {

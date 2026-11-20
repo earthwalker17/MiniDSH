@@ -224,6 +224,12 @@ const UPTIME_IS_MONOTONIC = process.platform === 'win32' || process.platform ===
  * alone applies, as it does after a Windows Fast Startup shutdown, which does
  * not reset uptime. A holder with no recorded uptime (an older writer, a
  * hand-written lock) keeps the pid rule.
+ *
+ * What it cannot see: a resume made LATER in the new boot than the lock was
+ * taken in the old one (uptime now 3600 s, holder's 600 s) reads as the same
+ * boot, and the pid rule decides, refusing if that pid is reused. A per-boot
+ * identity would close it (Linux's `random/boot_id`; Windows offers none
+ * without spawning a process), and it is not here yet (BLUEPRINT §3).
  */
 
 function holderIsDead(holder: LeaseHolder): boolean {

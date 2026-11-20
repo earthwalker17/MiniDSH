@@ -814,8 +814,8 @@ function webWorkspaces(args: ParsedArgs): { cwd: string; roots?: string[] } | st
 /**
  * The triggers of `web`'s graceful stop (`WebHostHandle.stop`). SIGINT,
  * SIGTERM, SIGHUP and (Windows) SIGBREAK in every mode; a second trigger exits
- * at once with 130. Under `--json` only, the end of stdin too — a supervisor's
- * pipe, so its death or its deliberate `end()` stops this process — and only
+ * at once with 128 + that signal's number (130 for SIGINT, 143 for SIGTERM).
+ * Under `--json` only, the end of stdin too — a supervisor's pipe, so its death or its deliberate `end()` stops this process — and only
  * when fd 0 IS such a stream. By exclusion, because Windows reports a Node
  * pipe as neither FIFO nor socket (measured: mode 0x1000, `isFIFO()` false):
  * a terminal, `/dev/null` or `NUL` (character devices), a file or a directory
