@@ -1058,7 +1058,9 @@ describe('pdf.mjs', () => {
     expect((JSON.parse(chain.stdout) as { text: PageText[] }).text[0]?.note).toContain('drawing stopped after')
   })
 
-  it('skips a stream that decodes past 64 MiB, and stops decoding at the document budget, with notes', () => {
+  // Its bound is its two helper runs' (60 s each, which is how a hang fails) plus
+  // ~130 MiB deflated in-process: 4-7 s alone, past vitest's 30 s under the full gate.
+  it('skips a stream that decodes past 64 MiB, and stops decoding at the document budget, with notes', { timeout: 150_000 }, () => {
     const font = '<< /Font << /F1 5 0 R >> >>'
     const bomb = deflateSync(Buffer.concat([Buffer.from('BT /F1 12 Tf 72 700 Td (BOMB) Tj ET\n'), Buffer.alloc(70 * 1024 * 1024, 0x20)]))
     writeFileSync(join(work, 'bomb.pdf'), simplePdf([CATALOG, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', pageObject(font), pdfStream('/Filter /FlateDecode', bomb.toString('latin1')), HELVETICA_FONT]))
