@@ -101,7 +101,7 @@ One entry per session: what it decided and the measurements that still matter; t
   - The `web` and `live` arcs once per host.
   - Keyless E2E: 5 of 5 on Windows (installer included), 4 of 4 twice under WSLg.
 
-  **Gates:** Windows 2,029 passed, 30 skipped; WSL 2,042 passed, 11 skipped before the pre-push fixes (their rerun was stopped for memory after typecheck). **Docs:** ARCHITECTURE 54.8 → 51.9 KB, README 30.1 → 28.4; the claim review restored 13 statements; §13 still over target.
+  **Gates:** Windows 2,029 passed, 30 skipped; WSL 2,046 passed, 11 skipped. **Docs:** ARCHITECTURE 54.8 → 51.9 KB, README 30.1 → 28.4; the claim review restored 13 statements; §13 still over target.
 
   **Agents:** 17 of 17: 5 research, 2 critics, 2 lanes, 3 review lenses, 2 compaction authors, 1 claim reviewer, 2 pre-push lenses.
 
