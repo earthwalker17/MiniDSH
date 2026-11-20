@@ -269,7 +269,7 @@ describe('the store writer under concurrency, links and odd names (S22.2 review)
     const go = join(dir, 'go')
     const runs = names.map(
       (name) =>
-        new Promise<number | null>((resolve) => {
+        new Promise<{ code: number | null; err: string }>((resolve) => {
           const script = [
             `const { updateCredentialStore } = await import(${JSON.stringify(module)})`,
             `const fs = await import('node:fs')`,
@@ -278,14 +278,21 @@ describe('the store writer under concurrency, links and odd names (S22.2 review)
             `while (!fs.existsSync(${JSON.stringify(go)})) Atomics.wait(pause, 0, 0, 2)`,
             `for (let i = 0; i < 20; i++) updateCredentialStore(${JSON.stringify(store)}, ${JSON.stringify(name)}, 'value-' + i)`,
           ].join('\n')
-          const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'ignore' })
-          child.on('exit', (code) => resolve(code))
+          // stderr kept, so a writer that dies says why (CI's first failure here said only "1").
+          const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['ignore', 'ignore', 'pipe'] })
+          let err = ''
+          child.stderr.on('data', (chunk: Buffer) => (err += chunk.toString()))
+          child.on('exit', (code) => resolve({ code, err }))
         }),
     )
     const until = Date.now() + 30_000
     while (names.some((name) => !existsSync(join(dir as string, `ready-${name}`))) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20))
     writeFileSync(go, '')
-    expect(await Promise.all(runs)).toEqual([0, 0, 0, 0])
+    const ended = await Promise.all(runs)
+    expect(
+      ended.map((run) => run.code),
+      ended.map((run) => run.err.split('\n').find((line) => /Error/.test(line)) ?? '').join(' | '),
+    ).toEqual([0, 0, 0, 0])
     const saved = JSON.parse(readFileSync(store, 'utf8')) as Record<string, string>
     expect(Object.keys(saved).toSorted(), JSON.stringify(saved)).toEqual(names)
     expect(Object.values(saved).every((value) => value === 'value-19')).toBe(true)

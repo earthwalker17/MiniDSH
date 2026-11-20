@@ -201,13 +201,25 @@ function underStoreLock<T>(path: string, body: () => T): T {
       closeSync(openSync(lock, 'wx', 0o600))
       break
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock)
-      } catch {
-        // Released between the two calls.
+      const code = (error as NodeJS.ErrnoException).code
+      // On Windows a lock its holder just removed stays DELETE-PENDING while
+      // any process still has a handle on it (a waiter's stat, an antivirus
+      // scan), and creating it again answers EPERM, not EEXIST. Measured: 6 of
+      // 100 writers died of it in a four-process race (CI found it first).
+      // Busy, not broken, until the deadline, which then reports the real error.
+      const pending = process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY')
+      if (code !== 'EEXIST' && !pending) throw error
+      if (code === 'EEXIST') {
+        try {
+          if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock)
+        } catch {
+          // Released between the two calls.
+        }
       }
-      if (Date.now() > deadline) throw new Error(`credentials store ${path} is being written by another process (${lock}); try again`, { cause: error })
+      if (Date.now() > deadline) {
+        if (pending) throw error
+        throw new Error(`credentials store ${path} is being written by another process (${lock}); try again`, { cause: error })
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
     }
   }
