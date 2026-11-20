@@ -6,7 +6,7 @@
  * and the lifecycle's ordering, which desktop/e2e drives in the packaged app
  * (not every menu path: Check for Updates, About and Show Logs are untested).
  *
- * What the desktop is (ARCHITECTURE §8, the desktop row): a SURFACE. It never
+ * What the desktop is (ARCHITECTURE §8, the desktop bullet): a SURFACE. It never
  * imports the runtime. It spawns the bundled CLI (`minidsh web --json`) on the
  * bundled Node, takes its `ready` record, spends the one-shot token itself,
  * and shows the unmodified Web UI in a window whose requests carry the cookie

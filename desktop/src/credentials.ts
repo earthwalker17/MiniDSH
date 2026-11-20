@@ -3,7 +3,8 @@
  * CLI: `minidsh credentials list --json` and `minidsh credentials set NAME`.
  * The credential store belongs to the runtime (`capabilities/credentials-local`
  * reads it, and its writer sits beside it); the desktop never opens the file,
- * so the store has one owner and one format (ARCHITECTURE §9).
+ * so the store has one owner and one format (ARCHITECTURE §11, the
+ * `credentials-local` row).
  *
  * A VALUE travels only on the child's stdin, then stdin is closed: never in
  * argv (any process can read another's command line) and never in the

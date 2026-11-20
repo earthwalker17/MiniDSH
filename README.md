@@ -9,7 +9,7 @@
 
 > **Minimal surface. Complete architecture.**
 
-MiniDSH is a small, local-first coding-agent harness: the runtime around a model that gives it tools, sessions and permissions. Install it, point it at a repository, and use it from a terminal, a browser or a script. It is also a reference architecture small enough to read in a sitting, and an experiment in growing an AI-assisted system *architecture-first* rather than feature by feature.
+MiniDSH is a small, local-first coding-agent harness: the runtime around a model that gives it tools, sessions and permissions. Install it, point it at a repository, and use it from a terminal, a browser, a desktop app or a script.
 
 It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) — DeepSeek's open-source, plugin-composed and unusually well documented coding agent — as a textbook, and asks how small a system can be while keeping the same architectural properties. It is an independent project: not a fork, not a product, and not affiliated with DeepSeek.
 
@@ -17,8 +17,8 @@ It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (
 
 Three things:
 
-1. **Useful software.** A coding agent that edits files and runs commands under an authority you set — which files it may write, and which actions need your approval — and can audit afterwards; that survives its process being killed and can be resumed or forked from its log; that manages its own context; that can hand a bounded task to a child or a visual check to a model that can see. Three providers ship (DeepSeek, Anthropic and OpenAI), and a session can switch models mid-conversation.
-2. **A reference architecture.** About thirty-three thousand lines of TypeScript in one package with one runtime dependency: four layers with a dependency rule enforced by a script in `pnpm check`, eighteen service contracts in core plus one in the application, thirty-four durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
+1. **Useful software.** A coding agent that edits files and runs commands under an authority you set and can audit afterwards; whose sessions survive a killed process and resume or fork from their log; that manages its own context and can hand a bounded task to a child, or a visual check to a model that can see. Three providers ship (DeepSeek, Anthropic and OpenAI), switchable mid-conversation.
+2. **A reference architecture.** About forty-one thousand lines of TypeScript in one package with one runtime dependency: four layers under a dependency rule a script enforces, eighteen service contracts in core plus one in the application, thirty-five durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
 3. **A systems-engineering experiment.** Whether a project built almost entirely by coding-agent sessions can keep a global architecture intact across months, by making it explicit, inspectable and continuously falsified rather than letting sessions gradually invent it.
 
 The thesis is **fewer concepts and stronger invariants**, not fewer lines or more features.
@@ -28,9 +28,9 @@ The thesis is **fewer concepts and stronger invariants**, not fewer lines or mor
 Requirements:
 
 - **Node 24** or newer.
-- **Windows:** PowerShell 7 (`pwsh`), never 5.1; a missing `pwsh` is refused by name. Windows has no shell confinement, so a shell command there is refused until the session accepts that (`--accept none`) — see [Status and limitations](#status-and-limitations).
+- **Windows:** PowerShell 7 (`pwsh`), never 5.1. Windows cannot confine a shell command, so each one costs an approval until the session accepts that with `--accept none` — see [Status and limitations](#status-and-limitations).
 - **Linux:** `bubblewrap` (`apt install bubblewrap`) if you want shell commands confined by the operating system instead of approved one by one. **macOS** needs nothing extra.
-- **A provider key:** `DEEPSEEK_API_KEY` for the default provider, `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI (and `TAVILY_API_KEY` for the opt-in web search) — in the environment, or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}`. A run without one stops and names the key it expected.
+- **A provider key:** `DEEPSEEK_API_KEY` for the default provider, `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI (and `TAVILY_API_KEY` for the opt-in web search), in the environment, or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}` (`minidsh credentials set <NAME>` writes it).
 
 ```sh
 npm install -g minidsh            # or run it without installing: npx minidsh …
@@ -39,15 +39,13 @@ minidsh chat --cwd path/to/repo   # full-screen terminal (--cwd defaults to the 
 minidsh web  --cwd path/to/repo   # the same runtime in a browser; open the one URL it prints
 minidsh run "fix the failing test in src/slug.test.mjs" --approve
                                   # --approve answers every approval yes (chat, serve and web then never ask);
-                                  # without it a headless run refuses anything that needs one (on Windows: add
-                                  # --accept none, which runs shell commands unconfined but keeps file edits fenced)
+                                  # without it a headless run refuses anything that needs one
 minidsh run "review this module for unchecked inputs" --provider anthropic --model claude-sonnet-5
-minidsh run "summarize this repository" --json     # one JSON line per event; exit 0 iff it completed, 2 on a bad flag
+minidsh run "summarize this repository" --json     # one JSON line per event; exit 0 iff it completed
 
 minidsh sessions list                     # what is stored, by name
 minidsh sessions show <id> --audit        # what this session was allowed to do, and what each call did
-minidsh sessions verify <id>              # can this log be resumed? (exit 0 for ok, interrupted and torn; 1 for
-                                          # damaged, invalid or a newer format; reads it without resuming it)
+minidsh sessions verify <id>              # can this log be resumed? (exit 1 if not; reads it without resuming it)
 minidsh sessions inspect <id>             # its lifecycles, authority, and what a resume would append
 minidsh resume <id> "continue"            # pick a stored session up; fork <id> --at <seq> branches it at a turn boundary
                                           # (fork <id> --salvage branches a damaged log from what is still readable)
@@ -56,13 +54,13 @@ minidsh skills                            # the skills a session here is offered
 minidsh --help
 ```
 
-In the terminal: Enter sends (mid-turn, it steers); Ctrl+J, Ctrl+Enter on Windows or `\` then Enter is a new line; `/` opens the command palette, `/help` lists every key; Esc stops a turn; Ctrl+O opens what a finished turn folded. An approval takes the composer's place: `y`, `n`, or `a` when offered, which allows that exact call until the session ends or its authority changes (`/grants`, `/revoke <id>`); it arms once read to its end with the keyboard quiet, so typing never answers it. `/sandbox`, `/ask`, `/accept` and `/preset` switch authority, `/model` the model; `/resume`, `/new` and `/fork` switch sessions in place.
+In the terminal: Enter sends (mid-turn, it steers); Ctrl+J, Ctrl+Enter on Windows or `\` then Enter is a new line; `/` opens the command palette and `/help` lists every key and command; Esc stops a turn. An approval takes the composer's place: `y`, `n`, or `a` when offered, which allows that exact call until the session ends or its authority changes (`/grants`, `/revoke <id>`); it arms once read to its end with the keyboard quiet, so typing never answers it. `/sandbox`, `/ask`, `/accept` and `/preset` switch authority, `/model` the model; `/resume`, `/new` and `/fork` switch sessions in place.
 
-**Or the desktop app** (Windows, Linux, macOS on Apple silicon): download `MiniDSH-Setup-x.y.z.exe`, the `.AppImage` or the `-mac-arm64.zip` from [Releases](https://github.com/earthwalker17/MiniDSH/releases). It brings its own Node and runs the same runtime and web UI in a window: File › Open Folder chooses where it works, and its welcome view saves a provider key. It is unsigned for now, so Windows SmartScreen asks (More info › Run anyway), Smart App Control must be off, and macOS needs System Settings › Privacy & Security › Open Anyway. Closing it asks first if work is running; everything it keeps is in the same `~/.minidsh`.
+**Or the desktop app** (Windows, Linux, macOS on Apple silicon): download `MiniDSH-Setup-x.y.z.exe`, the `.AppImage` or the `-mac-arm64.zip` from [Releases](https://github.com/earthwalker17/MiniDSH/releases). It brings its own Node and runs the same runtime and web UI in a window: File › Open Folder chooses where it works, and its welcome view saves a provider key. It is unsigned for now, so Windows SmartScreen asks (More info › Run anyway), Smart App Control must be off, and macOS needs System Settings › Privacy & Security › Open Anyway. Closing it asks first if work is running; it keeps everything in the same `~/.minidsh`.
 
 Everything MiniDSH keeps lives under `~/.minidsh` (override with `MINIDSH_HOME`): `sessions/` (one JSONL log per session), `spill/` (oversized tool output, swept after 30 days), `attachments/` (images, never swept), `composition.json`, `settings.json`, `credentials.json`, `skills/` (your own skills), and an optional `AGENTS.md` that every session reads. Nothing in the harness deletes a log.
 
-From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs natively on Node 24, so there is no build step to run it; `pnpm build` only emits the `dist/` the tarball ships) and `pnpm check` for the whole verification suite. See [`CONTRIBUTING.md`](CONTRIBUTING.md), and read [Status and limitations](#status-and-limitations) before relying on it.
+From a checkout: `pnpm install`, then `pnpm minidsh …` (no build step: TypeScript runs natively on Node 24) and `pnpm check` for the whole verification suite; see [`CONTRIBUTING.md`](CONTRIBUTING.md). Read [Status and limitations](#status-and-limitations) before relying on it.
 
 ## What you get
 
@@ -72,9 +70,9 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 **Context that manages itself.** Near the model's window, or when the provider refuses a request as too large, the oldest history is replaced by a summary (*compaction*); the summarized events stay in the log, and the model can read them back with `history_read`. An `AGENTS.md` (or `CLAUDE.md`) in the workspace enters as instructions to the model, never permissions for the harness.
 
-**Switch models mid-conversation.** The route — provider, model, reasoning effort — is a durable fact a session can change at any point. A `model-roles` entry in `composition.json` maps a *purpose* — the compaction summary, a delegated child — to a different route. An option a provider cannot honour is refused, never silently dropped. The DeepSeek adapter ships `deepseek-flash` (the default, which reads images; the retired `deepseek-v4-flash` names are served as it) and the text-only `deepseek-v4-pro`; the Anthropic adapter the Claude 5.5, 5 and 4 families; the OpenAI adapter the GPT-6 and GPT-5 families on the Responses API.
+**Switch models mid-conversation.** The route — provider, model, reasoning effort — is a durable fact a session can change at any point, and a `model-roles` entry in `composition.json` routes a *purpose* — the compaction summary, a delegated child — elsewhere. An option a provider cannot honour is refused, never silently dropped. The DeepSeek adapter ships `deepseek-flash` (the default, which reads images) and the text-only `deepseek-v4-pro`; the Anthropic adapter the Claude 5.5, 5 and 4 families; the OpenAI adapter the GPT-6 and GPT-5 families on the Responses API.
 
-**Delegation with a ceiling, in parallel.** The model can hand a bounded task to a `subagent`: a child with its own session and log whose authority is fixed at its parent's or narrower and cannot be widened from inside; approvals are off, so an action needing one is refused. Several `subagent` calls in one message run at the same time (up to four, `maxParallelToolCalls`), and the parent continues once all have answered. A verifier that can *see* is a second `subagent` entry pointed at a vision model, using the `view_image` tool, a built-in row that is off by default.
+**Delegation with a ceiling, in parallel.** The model can hand a bounded task to a `subagent`: a child with its own session and log whose authority is fixed at its parent's or narrower and cannot be widened from inside; approvals are off, so an action needing one is refused. Several `subagent` calls in one message run at the same time (up to four, `maxParallelToolCalls`), and the parent continues once all have answered. A verifier that can *see* is a second `subagent` entry on a vision model with the built-in, off-by-default `view_image` tool.
 
 **Background jobs that report back.** The model can start a long command — a dev server, a slow test run — with `job_start`, keep working, read its output with `job_output` and stop it with `job_cancel`. When a job ends on its own, its notice arrives in the session and wakes an idle agent, a bounded number of times. A job runs under the session's own authority and ends with its session.
 
@@ -86,13 +84,13 @@ From a checkout: `pnpm install`, then `pnpm minidsh …` (TypeScript runs native
 
 **Composition from disk.** The default composition is a list of forty-one plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` flags any authority-sensitive row a file changed.
 
-**One runtime, four ways in.** The headless CLI, the terminal, the web UI and the desktop app (the web UI in a window, over the same `minidsh web`) are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record. The web UI draws each tool call as a card its tool describes, asks each approval in a card naming exactly what would run, and from the page switches model, effort and permissions, revokes a grant, stops a job or opens a subagent.
+**One runtime, four ways in.** The headless CLI, the terminal, the web UI and the desktop app (the web UI in a window, over the same `minidsh web`) are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record. The web UI draws each tool call and approval as a card, and from the page switches model, effort and permissions, revokes a grant, stops a job or opens a subagent.
 
 ![The web UI asking for an approval](https://raw.githubusercontent.com/earthwalker17/MiniDSH/main/docs/images/web-ui.png)
 
 ## Status and limitations
 
-**Version 1.2.0** is the smallest release a developer can install, point at a repository and use daily without reading the architecture. 1.1 added durable execution with a cold `sessions verify` and `inspect`, a trusted consent subject on every approval, and a session that can accept the enforcement its host delivers; 1.2 adds background jobs, OpenAI as a third provider, opt-in web search, skills (Office and PDF documents on Node alone) and a fenced browser for checking a frontend, all reviewed together before release. It is a small project with one maintainer. The full register of limitations is [ARCHITECTURE §13](docs/ARCHITECTURE.md); the ones most likely to matter first:
+**Version 1.2.0** is the smallest release a developer can install, point at a repository and use daily without reading the architecture; what each release added is in [`CHANGELOG.md`](CHANGELOG.md). It is a small project with one maintainer. The full register of limitations is [ARCHITECTURE §13](docs/ARCHITECTURE.md); the ones most likely to matter first:
 
 - Windows has no shell-confinement backend and is not getting one. By default a shell command there costs an approval and runs in a fresh shell (`cd` and environment changes do not persist); `--accept none` records that the session accepts an unconfined shell and runs it normally, with file edits still fenced, instead of `danger-full-access`, which drops the fence too.
 - Confinement governs file effects only. A confined command still reaches the network. Its environment is scrubbed of this deployment's declared provider keys and of `MINIDSH_*`, and of nothing else: a credential-shaped variable you set is yours and reaches the shell. That scrub is defence in depth, not a boundary: reads are unfenced, so a credentials file stays readable to a command that looks.
@@ -110,7 +108,7 @@ DSH's answer to that pressure is explicit: an *everything-is-a-plugin* harness b
 
 > **What is the minimum modern agent harness that still preserves the architectural properties required for long-term composition, observability, verification, multi-surface evolution and maintainability?**
 
-"Minimum" is measured in concepts, not lines. The working rule is **everything evolvable has a seam** — a composition boundary — and not everything is evolvable: a capability earns one when it may realistically need to be replaced, scoped, disabled or owned by a different lifecycle; a pure helper or a type does not. The answer is concrete: a kernel with five mechanisms, nineteen seams, and everything else ordinary code.
+The working rule is **everything evolvable has a seam** — a composition boundary — and not everything is evolvable: a capability earns one when it may realistically need to be replaced, scoped, disabled or owned by a different lifecycle; a pure helper or a type does not. The answer is concrete: a kernel with five mechanisms, nineteen seams, and everything else ordinary code.
 
 ## Architecture
 
@@ -126,7 +124,7 @@ src/kernel/         composition substrate: Context, plugin lifecycle, services, 
 src/test-support/   scripted adapter, replay-from-log adapter, composition harness
 ```
 
-A script in `pnpm check` enforces the dependency direction (ARCHITECTURE §1) and that `core` is acyclic at file level. The four layers are the whole topology.
+A script in `pnpm check` enforces the dependency direction (ARCHITECTURE §1) and that `core` is acyclic at file level.
 
 ### The subsystems and what each owns
 
@@ -145,15 +143,12 @@ A script in `pnpm check` enforces the dependency direction (ARCHITECTURE §1) an
 
 ARCHITECTURE §3 also states what each key must *not* own — `sandbox` never owns an enforcement backend or a word of what the model is told, `tools` never owns policy — and those negative clauses are where most of the design lives.
 
-**Capabilities** (`src/capabilities`) are providers and consumers over those seams: three model adapters, JSONL persistence, the filesystem with its fence, the shell with its confinement backends, the model-facing tools, compaction, spill, and the client protocol.
-
 ### The invariants that hold
 
-- **The log is the only truth.** The model's history is a fold over three *model-visible* event kinds; everything else is a log-only fact or trace. New durable state is added as a new log-only event kind, never as a field a user interface holds.
+- **The log is the only truth.** The model's history is a fold over three *model-visible* event kinds; everything else is a log-only fact or trace. New durable state is a new log-only event kind, never a field a user interface holds: an interface renders the log by the page and owns only live state such as the current input and connection.
 - **Model-visible ⟺ logged.** Every model request is exactly what the log derives — the message history plus the request settings — and a runtime check verifies that before every call.
 - **Durable before every action.** A sync to disk precedes every paid model call and every tool effect.
 - **The model proposes, policy decides, the effect boundary enforces, the log records.** Enforcement lives at the effect, never at the tool gate.
-- **A delegated child opens under a ceiling it cannot widen**; **the route is a fact**; **user interfaces render the log by the page and own only live, non-durable state** such as the current input and connection.
 - **A repository may say how it likes its code and may not say what the harness is allowed to do.** There is deliberately no per-workspace configuration layer; composition and settings live only under `~/.minidsh`.
 
 ### Where a new thing goes
@@ -178,7 +173,7 @@ DSH is a large, fast-moving system (363 packages by its [module graph](https://g
 
 - **An own kernel instead of Cordis**: the two properties in five mechanisms and about nine hundred lines.
 - **One package with a dependency gate instead of hundreds.**
-- **Parallel only where it is joined:** a step's delegations run at once but the parent waits for them, with no background, continuable children or agent teams (DSH: every child an async activation); a background job belongs to its session, is closed `lost` if the process dies, and wakes it a bounded number of times (DSH: a lost job stays open, wakes unbounded).
+- **Parallel only where it is joined:** a step's delegations run at once and the parent waits for them; no background or continuable children, no agent teams (DSH: every child an async activation). A background job belongs to its session, is closed `lost` if the process dies, and wakes it a bounded number of times (DSH: a lost job stays open, wakes unbounded).
 - **One protocol over three transports** (stdio, in-process, WebSocket), not several composition profiles.
 - **Two confinement backends, not four:** no Landlock (a native launcher) and no Windows backend (DSH's reports only partial enforcement).
 - **A full-screen terminal ships** (DSH has none in its repository).
@@ -192,7 +187,7 @@ DSH is a large, fast-moving system (363 packages by its [module graph](https://g
 
 ### Not built
 
-PTC (DSH's programmatic tool calling), model-written dynamic packages, an MCP client, session deletion and per-user identity: BLUEPRINT §2 lists them, and puts a desktop launcher on the route.
+PTC (DSH's programmatic tool calling), model-written dynamic packages, an MCP client, session deletion and per-user identity: BLUEPRINT §2 lists them with the reason for each.
 
 ## The architecture-first experiment
 
@@ -200,15 +195,15 @@ Nearly all of the code was written by coding-agent *development sessions* under 
 
 **Every capability has a home before it has code.** A session states a capability's layer, seam, owned state and lifecycle before implementing it. When OS confinement arrived in the eleventh session the answer was "nowhere new": the shell contract had specified it since the third.
 
-**Falsify the architecture, and repair it.** A hardening checkpoint follows each cluster of architectural change and finds the documented invariants that are not true in code. They found several — stated invariants that were not implemented, a crash-repair path that resumed conversations in a shape the providers' APIs reject, a network client that could inject a prompt into a running delegated child, a documented security claim an experiment disproved — and [`BLUEPRINT.md`](docs/BLUEPRINT.md) §4 records each with what it measured.
+**Falsify the architecture, and repair it.** A hardening checkpoint follows each cluster of architectural change and finds the documented invariants that are not true in code. Among what they found: a crash-repair path that resumed conversations in a shape the providers' APIs reject, a network client that could inject a prompt into a running delegated child, a documented security claim an experiment disproved; [`BLUEPRINT.md`](docs/BLUEPRINT.md) §4 records each with what it measured.
 
-What it taught: documentation drift is a defect, so the documents carry size budgets a gate enforces; a convention that is not gated does not hold, so the dependency rules are scripts; verification means the world, not the agent's account of it. After seventeen sessions and two releases, a new contributor can still answer where a capability belongs, what each layer owns and where truth is stored, from one document.
+What it taught: documentation drift is a defect, so the documents carry size budgets a gate enforces; a convention that is not gated does not hold, so the dependency rules are scripts; verification means the world, not the agent's account of it. After three releases, a new contributor can still answer where a capability belongs, what each layer owns and where truth is stored, from one document.
 
 ## Verification
 
-`pnpm check` is typecheck, lint, the dependency gate, the documentation gate and about 1,400 tests, run in CI on Ubuntu, macOS and Windows, each leg followed by an install smoke of the packed tarball. Tests mount real compositions with the model scripted or replayed from a recorded log, and two real logs, one from `minidsh@1.0.0`, are repaired and replayed in every run.
+`pnpm check` is typecheck, lint, the dependency gate, the documentation gate and more than 1,900 tests, run in CI on Ubuntu, macOS and Windows, each leg followed by an install smoke of the packed tarball. Tests mount real compositions with the model scripted or replayed from a recorded log, and two real logs, one from `minidsh@1.0.0`, are repaired and replayed in every run.
 
-Thirteen live end-to-end tests — *arcs* — run against real providers before a release, in a workflow the release waits for (Linux, macOS) and by hand (Windows, Linux). Each asserts the world where one exists: a task killed inside a tool call is repaired by a second process and its log replays without a key; an edit outside the workspace is refused and the file absent; a context-budget crossing compacts and spills; a session switches provider mid-conversation; a delegated child's escalation is refused by its pin; three children delegated in one message run at once; the web client shares a session between two clients and takes a consent over the wire; a job's end wakes an idle agent; a skill turns a PDF and a CSV into a Word report; the browser sees a runtime bug before the edit that fixes it. The macOS leg, under Seatbelt, is the only evidence this project has for that platform.
+Fourteen live end-to-end tests — *arcs* — run against real providers before a release, in a workflow the release waits for (Linux, macOS) and by hand (Windows, Linux). Each asserts the world where one exists: a task killed inside a tool call is repaired by a second process and its log replays without a key; an edit outside the workspace is refused and the file absent; a context-budget crossing compacts and spills; a session switches provider mid-conversation; a delegated child's escalation is refused by its pin; three children delegated in one message run at once; two web clients share one session and an approval is answered over the wire; a job's end wakes an idle agent; a skill turns a PDF and a CSV into a Word report; the browser sees a runtime bug before the edit that fixes it. The macOS leg, under Seatbelt, is the only evidence this project has for that platform.
 
 ## Documents and help
 
