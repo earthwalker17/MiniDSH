@@ -220,7 +220,8 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
       expect(existsSync(exe)).toBe(false)
       expect(existsSync(join(home, 'sessions'))).toBe(true)
     }
-    // Each decision as outcome:decider. A decision with no decider is one nobody was asked to make: an ask the kill or the quit cancelled.
+    // Each decision as outcome:decider. One with no decider is one nobody made: an ask a stop cancelled, or `unavailable`,
+    // one the quit left with no page to answer it (the window leaves the Web UI before the runtime stops).
     const decidedBy = storedEvents(home).filter((event) => event.type === 'approval/decided').map((event) => `${String(event.data.outcome)}:${String(event.data.decidedBy ?? 'none')}`)
     const lines = [...evidence, `decisions: ${decidedBy.length} (${[...new Set(decidedBy)].join(', ')}); agent node ${BUNDLED_NODE}; ${installDir ? 'installed and uninstalled' : 'unpacked build'}; ${Math.round((Date.now() - started) / 1000)} s`]
     process.stderr.write(`desktop live:\n  ${lines.join('\n  ')}\n`)
