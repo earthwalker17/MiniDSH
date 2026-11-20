@@ -64,73 +64,61 @@ S22, S22.1 and S22.2 made the browser, the terminal and the desktop app product 
 - **One egress world, or a fetch per tool?** S18's search fetches in its own body and records nothing; S20's browser fences itself inside Chrome instead (a proxy it owns, resolver rules). A shared egress provider could record `effect/recorded{network}` and fence what leaves; per-tool boundaries keep each tool's consent and no common one.
 - **Does MiniDSH publish an importable surface?** A module-loaded plugin's own imports do not resolve from an installed package. An `exports` map is a compatibility promise; the first out-of-tree plugin decides (S22.2's launcher runs the CLI over its process contract and needed none). Skills do not need it.
 - **Signing, then updates.** The installers are unsigned, so updates are a release page and a person runs the new installer (S22.2). An identity (Windows: SignPath Foundation, free for OSI projects, or Artifact Signing; macOS: Developer ID plus notarization) is what an updater (electron-updater on GitHub Releases) needs before it can be more than SHA-512 over a channel whoever publishes a release controls.
+- **A per-boot identity for the lease.** Uptime sees a reboot only when the resume comes earlier in the new boot than the lock was taken in the old (`persistence-jsonl`); Linux has `random/boot_id`, Windows nothing without spawning a process.
 - **A GUI launch's environment on macOS and Linux.** It lacks the login shell's exports and PATH: keys go through `credentials.json`, and agents see the session's PATH. DSH probes the login shell (`$SHELL -ilc`, bounded, delimiter-framed); MiniDSH waits for a macOS build someone validates by hand.
 
 ## 4. Development record
 
 One entry per session: what it decided and the measurements that still matter; the detail is in the commits.
 
-- **S22.1 Terminal TUI redesign (2026-11-19).** Its decisions are ARCHITECTURE §8, §11, §13 and `app/terminal/`:
-  - the terminal is a protocol client: `session/resume` and `session/fork` went on the wire, and the bypass is deleted (the agents it made were unowned, outside `shutdown`'s sweep);
-  - one presentation model, two renderers: the terminal imports the browser's pure modules, and both say decisions and authority in `rows.js`'s words;
-  - one controller under the full-screen view and the line view;
-  - a consent is a lone key, armed only once on screen, keyboard-quiet and read to its last row;
-  - one neutralizing cell writer; every mode undone on every exit path.
+- **S22.2 Desktop application (2026-11-20).** Its decisions are ARCHITECTURE §8, §9, §12, §13 and `desktop/`:
+  - an Electron launcher runs the bundled CLI's `web --json` on a bundled official Node (RunAsNode fuse off) and never imports the runtime, so §3's importable surface was not needed;
+  - main spends the token and injects the cookie per request on loopback (no scheme, no proxy, nothing in the jar); the Web UI has no preload, and the shell overlay is its own webContents and scheme;
+  - one serialized lifecycle: busy asked over the wire on demand, confirm, then save, then stop by stdin's end;
+  - in the runtime: `web --json`, a graceful `web` stop, `--workspace`, `minidsh credentials`, and a lease reclaimed after a reboot by uptime.
 
-  Codewhale (`e1364cab`) was the design reference; no code or assets were copied.
+  DSH `2e39e704` was the reference, studied from source only.
 
-  **User decisions:**
-  - keyboard scrolling, no mouse capture;
-  - the S22 accent on the terminal's own background;
-  - no skill gesture yet, which closed §3's question;
-  - the wire change with the full 3×-per-host gate.
+  **User decisions:** unsigned installers; closing quits after a runtime-informed confirm (no tray); in-app key entry through a CLI command; a manual update check; Windows plus an AppImage plus a CI-built macOS zip.
 
-  **Measured with the user in Windows Terminal (`keys.ts`):**
-  - libuv drops Shift and Alt from Enter, and Ctrl+Enter arrives as LF;
-  - the terminal answers queries on stdin;
-  - an unbracketed paste arrives as 1024-byte chunks split at `\r`;
-  - the wheel arrives as arrows on the alternate screen.
+  **Measured (P0; Electron 45.3.4, electron-builder 26.18.1, this non-admin host):**
+  - no winCodeSign step;
+  - with the file-privilege fuse off, `file://` cannot read the asar, hence the overlay's own scheme;
+  - `onBeforeSendHeaders` reaches the navigation, every script, the stylesheet and the WebSocket upgrade;
+  - a Windows pipe on stdin reads `isFIFO() === false` (mode 0x1000), so the stop's stdin rule is by exclusion;
+  - pnpm's release age refused Electron 45.4.1 (a day old), so 45.3.4, with the same Node and Chromium;
+  - installers: Windows 127.9 MiB, AppImage 165 MiB (DSH's 286 MiB).
 
   **Found:**
-  - A 3-lens review (consent, state, UX). Two blockers:
-    - an armed band took a `y` typed mid-word;
-    - a long question was cut, so it could never be read whole.
-  - My own test of that fix found the band's last row unreachable, and that 40×12 left no readable row.
-  - A 2-lens pre-push review, 16 findings:
-    - a preset chosen before the first message came back as the opening of an unrelated session after `/new`;
-    - piped input whose turn asked a question hung (its scratch test failed my gate);
-    - resetting `?1007` switched off Windows Terminal's default.
-  - Only driving the packed tarball found `--plain` never parsed, though documented; only the live TUI run found a model's clamped reason cut with no ellipsis.
-  - The claim review restored 7 compaction cuts, among them an inverted DSH relation and OpenAI's probe scope.
+  - 2 design critics: 7 design changes (a preload per webContents, the libuv Job on parent death, a node shim re-parsed by cmd.exe, a standing subscriber parking asks, EPIPE mid-disposal, the installer killing a runtime, port exclusions);
+  - lane A: a wall-clock lease rule could steal a live lease;
+  - only the packaged E2E: a quit during startup dropped, the uninstaller refusing itself, task-dialog buttons exposed as Panes;
+  - a 3-lens review, about 40 findings, 6 major: two runtimes after a mid-start folder change; settings saved before the confirm; a missing folder blocking every start; a quit unable to stop a booting runtime; the AppImage forcing `--no-sandbox`; two key saves losing one;
+  - the 2-lens pre-push review, 17 findings, 4 major: a queued folder change dropped by a later one; a keys form that could not be closed; the lease rule blind to a resume later in the new boot (narrowed, §3); an AppImage refusing its neighbours. CI could not have caught a missing installer or an unsigned PR macOS build.
 
   **Live:**
-  - Through the real full-screen terminal in a Windows ConPTY on DeepSeek, twice (the second on the reviewed tree):
-    - the model fixed a failing test, approved by keystrokes, and the test passes outside MiniDSH;
-    - it delegated two parallel reviews, seen live on their cards;
-    - `/fork` was messaged, then `/resume` opened the original in place.
+  - The INSTALLED app on DeepSeek: a fix through the window (4 approvals clicked, 21 s); a killed runtime restarted and resumed (`completed → interrupted → completed`); a quit mid-turn confirmed (`cancelled`, no lease); a key saved by the form and used; the agent's `node` the bundled 24.22.3.
+  - The `web` and `live` arcs once per host.
+  - Keyless E2E: 5 of 5 on Windows (installer included), 4 of 4 twice under WSLg.
 
-    The log's facts: decisions by the user, two `subagent/start`, and the fork's lineage.
-  - Keyless in ConPTY and tmux 3.4, screens read back as text.
-  - Every arc 3× per host on the final protocol host. Windows: 51 of 51, the context arc 3/3 (its recorded flake did not recur). WSL: 51 of 51.
-  - The harnesses live in the scratchpad, so they cannot be rerun from the repository.
+  **Gates:** Windows 2,026 passed, 29 skipped; WSL 2,042 passed, 11 skipped. **Docs:** ARCHITECTURE 54.8 → 51.9 KB, README 30.1 → 28.4; the claim review restored 13 statements; §13 still over target.
 
-  **Gates:** Windows 1,898 passed, 34 skipped; WSL 1,915 passed, 15 skipped, rerun after a low-memory stop (0.6 GB free) and `wsl --shutdown`, two workers. The installed smoke now opens the line view from the tarball.
+  **Agents:** 17 of 17: 5 research, 2 critics, 2 lanes, 3 review lenses, 2 compaction authors, 1 claim reviewer, 2 pre-push lenses.
 
-  **Docs:** ARCHITECTURE compacted by delegation, 52,781 → 50,699 bytes, with the parent restoring five risky cuts and seven review findings.
-
-  **Agents:** 14 of 16:
-  - 3 research, 2 critics, 2 implementation lanes;
-  - 3 review lenses, 1 compaction author, 1 claim reviewer, 2 pre-push lenses.
+- **S22.1 Terminal TUI redesign (2026-11-19).** Its decisions are ARCHITECTURE §8, §11, §13 and `app/terminal/`: the terminal is a protocol client (`session/resume` and `session/fork` on the wire, the bypass deleted); one presentation model, two renderers; a consent is a lone key, armed once on screen. Codewhale (`e1364cab`) was the design reference.
+  - **User decisions:** keyboard scrolling, no mouse capture; the S22 accent; no skill gesture yet; the wire change with the full 3×-per-host gate.
+  - **Measured in Windows Terminal (`keys.ts`):** libuv drops Shift and Alt from Enter; Ctrl+Enter arrives as LF; an unbracketed paste comes in 1024-byte chunks split at `\r`; the wheel arrives as arrows on the alternate screen.
+  - **Found:** only driving the packed tarball found `--plain` never parsed; the reviews' worst were an armed band taking a `y` typed mid-word and a stale preset after `/new`.
+  - **Gates:** every arc 3× per host, Windows 51 of 51 and WSL 51 of 51; Windows 1,898 tests, WSL 1,915. 14 agents.
 
 - **S22 Web UI redesign (2026-11-19).** Its decisions are ARCHITECTURE §3, §8, §11, §13 and `app/web/` (`display`, the conversation fold, a strict CSP).
-  - **User decisions:** a sea-teal accent; image previews, a live DSH capture and DSH's MIT icon set; finished turns collapsed as DSH does.
-  - **Found:** a 3-lens review (30) and a 2-lens pre-push review (13). Only the live run found that every real turn stopped following at its first approval: Chrome fires `scroll` for a shrinking viewport before any resize callback, so only the reader's own input leaves the bottom.
-  - **Live:** `minidsh web` in real Chrome on DeepSeek, 4 runs, 4.39 CNY. Every arc 3/3 per host but Windows context, 5 of 6: one keyless replay consumed 7 of its 8 recorded summaries, cause not found (S22.5 reruns it, dumping the recording).
-  - **Gates:** Windows 1,698 / 29 skips; WSL 1,715 / 10, its vitest held to two workers after a low-memory stop (7.6 GB). 18 agents.
+  - **User decisions:** a sea-teal accent; image previews and DSH's MIT icon set; finished turns collapsed.
+  - **Found:** only the live run found that following stopped at the first approval: Chrome fires `scroll` for a shrinking viewport before any resize callback.
+  - **Open:** on Windows the context arc passed 5 of 6; one keyless replay consumed 7 of its 8 recorded summaries, cause not found (S22.5 reruns it). 18 agents.
 
-- **S21.1 Continuations and process hygiene (2026-11-08).** Its decisions are ARCHITECTURE §4, §6, §7 and the code. **User decisions:** the resume-ordering defect pulled in from S22; containment for all three pwsh shapes. **Measured** (Windows 11, pwsh 7.6): containment costs ~+55 ms on a ~610 ms pwsh start; a 32-bit PowerShell is contained; the rest is at `shell-stdio/process.ts`. **Found:** a design critic, 16 findings; a 3-lens review, 12 with 4 major; what was applied is at the code. **Live:** delegation, parallel, verification, authority and context once on Windows; jobs 3/3 on Windows and under WSL with bwrap; delegation once under WSL; 0.19 CNY. **Gates:** Windows 1,454 passed with 28 named skips; WSL 1,470 with 10. DSH at `fcc0ad46` (a manual compaction there, `runMaintenance`, is joined unbounded). **Agents:** 9 of 9.
+- **S21.1 Continuations and process hygiene (2026-11-08).** Its decisions are ARCHITECTURE §4, §6, §7 and the code. **User decisions:** the resume-ordering defect pulled in from S22; containment for all three pwsh shapes. **Measured:** containment costs ~+55 ms on a ~610 ms pwsh start (`shell-stdio/process.ts`). **Found:** a design critic, 16 findings; a 3-lens review, 12 with 4 major; what was applied is at the code. **Live:** delegation, parallel, verification, authority and context once on Windows; jobs 3/3 on Windows and under WSL with bwrap; delegation once under WSL; 0.19 CNY. **Gates:** Windows 1,454 passed with 28 named skips; WSL 1,470 with 10. DSH at `fcc0ad46` (a manual compaction there, `runMaintenance`, is joined unbounded). **Agents:** 9 of 9.
 
-- **S21 Multi-actor execution (2026-10-31).** Its decisions are ARCHITECTURE §6 and the code; the kernel needed nothing. **User decisions:** the parent waits rather than letting children run in the background. **Phase 0, the gate:** 25 of 25 first delegating messages carried three subagent calls (flash 14 of 14 with or without guidance, pro 11 of 11); on tiny tasks flash read the files itself before delegating in 9 of 18 runs. **Measured live:** joined, the step took 6.8–13.9 s against 17.3–27.7 s serial on Windows, 4.0–5.7 s against 11.1–13.7 s under WSL; children finished out of model order in 7 runs. **Found:** a panel agreed the design wins if and only if models batch; a 3-lens review, 9 findings, no blocker, what was applied is at the code. **Live:** every arc 3× per host, the OpenAI leg 3/3; under WSL `parallel` 2/3 until its replay ran in the run's own workspace, reruns 3/3. **Gates:** Windows 1,414 passed with 32 skips; WSL 1,438 with 4; office's 2M-node test and the WebSocket ping failed under load and passed alone. DeepSeek 6.08 → 3.43 CNY. **Agents:** 16 of 16, then a 2-lens pre-push review.
+- **S21 Multi-actor execution (2026-10-31).** Its decisions are ARCHITECTURE §6 and the code; the kernel needed nothing. **User decision:** the parent waits. **Phase 0, the gate:** 25 of 25 first delegating messages carried three subagent calls. **Measured live:** joined, a step took 6.8–13.9 s against 17.3–27.7 s serial (Windows). **Found:** a 3-lens review, 9 findings, no blocker. **Live:** every arc 3× per host, the OpenAI leg 3/3. **Agents:** 16 of 16, then a 2-lens pre-push review.
 
 - **S20.5 Hardening checkpoint B = 1.2.0 (2026-10-25 → 10-26).** Its decisions are the map and the code (§2); before a write was judged by its handle, 13 of 49 racing writes landed outside on Linux, none after. **User decisions:** a stated SemVer exception (a silent degradation or a leaked secret may become a refusal in a minor); zod pinned at 4.6.7; the format a note, not a bump (measured: 1.1.0 continues an S17 log's unfinished job without closing it). **Found:** 8 auditors, 107 findings; a 3-lens review, 29, no blocker; CI on `release/v1.2`, four defects no local host showed; what was applied is at the code. **Live:** every arc and the three drift probes 3× per host (routing `carried` with one compaction in every run after its recalibration); the OpenAI leg 17 of 21 (gpt-5.4-mini misreads a quadrant; a 256 px image did no better, 5 of 6), so S18's 4/4 no longer holds and the next provider session re-chooses that model; 2.53 CNY. **Published** 2026-10-26 from CI on the first try (tag at `1c4328e`), then fixed a fixture from the registry on both hosts. **Agents:** 21 of 21.
 

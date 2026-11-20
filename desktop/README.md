@@ -11,7 +11,7 @@ node desktop/scripts/package.ts    # this host's installer: Windows NSIS, Linux 
 node desktop/scripts/package.ts --dir   # the unpacked app only (faster)
 ```
 
-The output lands in `desktop/build/dist/`. Windows builds are unsigned unless `WIN_CSC_LINK` (or `CSC_LINK`) and its password are in the environment. macOS builds are ad-hoc signed unless a Developer ID is configured. Every other gate (`pnpm check`) covers `desktop/src` without this install.
+The output lands in `desktop/build/dist/`. Windows builds are unsigned unless `WIN_CSC_LINK` (or `CSC_LINK`) and its password are in the environment. macOS builds are ad-hoc signed unless `CSC_LINK` or `CSC_NAME` names a Developer ID certificate, and even then not notarized: nothing here configures notarization. Every other gate (`pnpm check`) covers `desktop/src` without this install.
 
 ## Layout
 

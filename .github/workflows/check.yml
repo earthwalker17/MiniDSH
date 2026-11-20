@@ -165,6 +165,9 @@ jobs:
               RESOURCES="$RUNNER_TEMP/appimage/squashfs-root/resources" ;;
             macOS)
               ditto -x -k desktop/build/dist/MiniDSH-*-mac-*.zip "$RUNNER_TEMP/mac"
+              # A fuse flip breaks the signature unless it is redone: an app
+              # macOS refuses to launch fails here (package.ts).
+              codesign --verify --deep --strict "$RUNNER_TEMP/mac/MiniDSH.app"
               RESOURCES="$RUNNER_TEMP/mac/MiniDSH.app/Contents/Resources" ;;
           esac
           node desktop/scripts/smoke-runtime.ts "$RESOURCES"
@@ -172,7 +175,12 @@ jobs:
       - name: Locate the Windows installer
         if: runner.os == 'Windows'
         shell: bash
-        run: echo "MINIDSH_DESKTOP_INSTALLER=$(cygpath -w "$(ls "$GITHUB_WORKSPACE"/desktop/build/dist/MiniDSH-Setup-*.exe)")" >> "$GITHUB_ENV"
+        # An assignment, so a glob that matches nothing fails the step (inside
+        # echo's argument it would not, and the installer suite would skip).
+        run: |
+          set -euo pipefail
+          INSTALLER="$(ls "$GITHUB_WORKSPACE"/desktop/build/dist/MiniDSH-Setup-*.exe)"
+          echo "MINIDSH_DESKTOP_INSTALLER=$(cygpath -w "$INSTALLER")" >> "$GITHUB_ENV"
 
       - name: The installed app, driven (keyless)
         if: runner.os == 'Windows'

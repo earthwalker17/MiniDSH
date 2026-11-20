@@ -363,7 +363,7 @@ Upstream facts and verdicts: `references/assumptions.md`.
 - An unconfined POSIX shell shares the terminal: a command opening /dev/tty draws over the screen and competes for keys; Ctrl+L repaints (`tty.ts`).
 - One principal, no accounts. The browser changes a stored session's route and authority only once a message resumes it (`app.js`); its theme is per origin, so `web` forgets it without a fixed `--port` (the desktop keeps its port).
 - `workspaceRoots` (`[cwd]`, or `web --workspace`) bounds only a session first CREATED: a wire client may resume or fork one outside them (a fork keeps its source's root).
-- A killed or logged-off Windows desktop ends its runtime at once (libuv's Job); the next resume repairs and reclaims, after a reboot too, except on macOS or after Fast Startup (`persistence-jsonl`).
+- A killed or logged-off Windows desktop ends its runtime at once (libuv's Job); the next resume repairs and reclaims; after a reboot, only if it comes earlier in that boot than the lock was taken, never on macOS or after Fast Startup (`persistence-jsonl`).
 - The desktop is unsigned (SmartScreen warns, Smart App Control blocks, Gatekeeper holds the Apple-silicon-only zip until opened by hand); no auto-update.
 - Its per-user install is user-writable (code-equivalent); Help's DevTools show the injected cookie; its runtime inherits `NODE_OPTIONS`; on Windows `credentials.json` keeps its folder's ACL.
 - A macOS or Linux GUI launch lacks the login shell's environment; without unprivileged user namespaces an AppImage renders outside Chromium's sandbox (logged), and SIGTERM stops its wrapper, not the app.

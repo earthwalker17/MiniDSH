@@ -72,9 +72,9 @@ async function hangingModel(): Promise<{ url: string; requests: () => number }> 
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests: () => requests }
 }
 
-describe.runIf(EXPECTED && !EXE)('the desktop E2E', () => {
-  it('needs MINIDSH_DESKTOP_EXE when MINIDSH_EXPECT_DESKTOP=1', () => {
-    expect.fail('MINIDSH_EXPECT_DESKTOP=1 but MINIDSH_DESKTOP_EXE names no app: build it (node desktop/scripts/package.ts --dir) and point at it')
+describe.runIf(EXPECTED && (!EXE || (win && !INSTALLER)))('the desktop E2E', () => {
+  it('needs MINIDSH_DESKTOP_EXE, and on Windows MINIDSH_DESKTOP_INSTALLER, when MINIDSH_EXPECT_DESKTOP=1', () => {
+    expect.fail('MINIDSH_EXPECT_DESKTOP=1 but MINIDSH_DESKTOP_EXE names no app, or on Windows MINIDSH_DESKTOP_INSTALLER no installer: build them (node desktop/scripts/package.ts) and point at them')
   })
 })
 

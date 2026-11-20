@@ -242,6 +242,11 @@ async function bundle(): Promise<void> {
       enableNodeOptionsEnvironmentVariable: false,
       enableNodeCliInspectArguments: false,
       grantFileProtocolExtraPrivileges: false,
+      // Flipping a fuse breaks an Apple-silicon signature, and electron-builder
+      // skips signing on a pull request (`isPullRequest`): re-sign ad hoc here,
+      // so no build it makes is an app macOS refuses to launch. CI checks it
+      // with `codesign --verify` on the unpacked zip.
+      resetAdHocDarwinSignature: process.platform === 'darwin',
     },
     win: {
       target: [{ target: dirOnly ? 'dir' : 'nsis', arch: ['x64'] }],

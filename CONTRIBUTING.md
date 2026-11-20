@@ -36,14 +36,15 @@ A pure helper, an algorithm or a type does not need any of this. Architecture-fi
 ```sh
 pnpm install
 pnpm check          # tsc --noEmit + oxlint + the dependency gate + the docs gate + vitest
-pnpm test:e2e       # the twelve live arcs and the catalog drift probes: real provider calls, real cost, needs the keys
+pnpm test:e2e       # the fourteen live arcs and the catalog drift probes: real provider calls, real cost, needs the keys
 pnpm build          # emits dist/ — what the package runs; `prepack` runs it for you
 pnpm minidsh …      # run the checkout
 
 pnpm --dir desktop install          # electron-builder, only to package the desktop app
-node desktop/scripts/package.ts     # this host's installer in desktop/build/dist (--dir: the unpacked app)
-MINIDSH_DESKTOP_EXE=<the unpacked MiniDSH.exe> pnpm test:e2e desktop/e2e   # drive it (keyless; live with a key)
+node desktop/scripts/package.ts     # this host's installer in desktop/build/dist (--dir: the unpacked app only)
 ```
+
+To drive the app, set `MINIDSH_DESKTOP_EXE` to the unpacked build (`desktop\build\dist\win-unpacked\MiniDSH.exe`, on Linux `linux-unpacked/minidsh-desktop`) and, on Windows, `MINIDSH_DESKTOP_INSTALLER` to the installer, then run `pnpm test:e2e desktop/e2e`: keyless everywhere, plus the live leg on Windows with a DeepSeek key.
 
 Set `MINIDSH_EXPECT_SHELL=1`, `MINIDSH_EXPECT_PYTHON=1` and `MINIDSH_EXPECT_BROWSER=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` on Linux and macOS, so a test that would self-skip for a missing shell, interpreter, browser or backend fails instead. That is what CI does, and it is the difference between "green" and "green having proved nothing".
 
@@ -76,7 +77,7 @@ If a change needs state that must survive a restart, a resume or a fork, it is a
 
 ## Releases
 
-A release is a tag. Bump `package.json`, cut the CHANGELOG section, merge to `main`, and push `v<version>`: `release.yml` runs the whole gate, packs, drafts the GitHub release from that section, publishes the packed bytes through npm trusted publishing (no token exists anywhere in the repository or its secrets), installs the public package and verifies its provenance attestation, then publishes the draft. A tag that is not on `main`, that disagrees with `package.json`, or whose commit has no green `check.yml` run and no green unfiltered `live.yml` run, publishes nothing. The trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com.
+A release is a tag. Bump `package.json` and `desktop/package.json` together (the packer refuses two versions), cut the CHANGELOG section, merge to `main`, and push `v<version>`: `release.yml` runs the whole gate, packs, drafts the GitHub release from that section, publishes the packed bytes through npm trusted publishing (no token exists anywhere in the repository or its secrets), installs the public package and verifies its provenance attestation, then publishes the draft with the three desktop installers built from those bytes and a `SHA256SUMS`. A tag that is not on `main`, that disagrees with `package.json`, or whose commit has no green `check.yml` run and no green unfiltered `live.yml` run, publishes nothing. The trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com.
 
 ## Scope
 

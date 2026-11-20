@@ -19,8 +19,8 @@
 # release before anything is published: the app and the package are one
 # release identity.
 #
-# TWO jobs, because a credential exists for every step of a job that may mint
-# one: with `id-token: write` on the whole run, `pnpm check` and the install
+# The gate and the publish are separate jobs, because a credential exists
+# for every step of a job that may mint one: with `id-token: write` on the whole run, `pnpm check` and the install
 # smoke — repository and dependency code, lifecycle scripts included — could
 # each have minted a publish credential (S20.5 review). The `gate` job runs
 # all of that with read access alone and hands over the packed bytes; the
@@ -30,8 +30,9 @@
 # The ORDER is what makes a failed run leave a state a person can read:
 # guards (the tag is on main, agrees with package.json, and its commit already
 # passed check.yml on all three platforms AND an unfiltered live.yml on both
-# legs) → the whole gate → pack → smoke-install the packed bytes → [publish
-# job] a DRAFT release holding those bytes → publish those same bytes →
+# legs) → the whole gate → pack → smoke-install the packed bytes → [desktop
+# job] the installers built from those bytes, each runtime smoked → [publish
+# job] a DRAFT release holding those bytes and the installers → publish those same bytes →
 # install from the public registry, verify the attestation, then smoke it →
 # the draft goes public. A failure before the draft leaves nothing; one
 # between the draft and the publish leaves a draft and no package; one after
@@ -199,7 +200,8 @@ jobs:
       # The runtime as the app starts it, out of the artifact that ships: the
       # AppImage and the zip are unpacked first, so a file the packer dropped
       # fails here, not on a person's machine. (Windows: the unpacked build
-      # here; the installer itself is installed and driven below.)
+      # only. These installer bytes are not installed by this run; check.yml
+      # installs and drives an installer built from the same commit.)
       - name: The packaged runtime, started as the app starts it
         shell: bash
         run: |
@@ -212,6 +214,9 @@ jobs:
               RESOURCES="$RUNNER_TEMP/appimage/squashfs-root/resources" ;;
             macOS)
               ditto -x -k desktop/build/dist/MiniDSH-*-mac-*.zip "$RUNNER_TEMP/mac"
+              # A fuse flip breaks the signature unless it is redone: an app
+              # macOS refuses to launch fails here (package.ts).
+              codesign --verify --deep --strict "$RUNNER_TEMP/mac/MiniDSH.app"
               RESOURCES="$RUNNER_TEMP/mac/MiniDSH.app/Contents/Resources" ;;
           esac
           node desktop/scripts/smoke-runtime.ts "$RESOURCES"

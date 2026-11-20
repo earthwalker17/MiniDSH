@@ -13,7 +13,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
   - **Failures:** a runtime that dies is shown with its last output and a Restart button; a second launch brings the open window forward.
   - **Updates and signing:** Help › Check for Updates opens the release page; the installers are unsigned for now.
 - **`minidsh web --json`**, a process contract for a supervisor:
-  - one JSON `ready` record (port, one-shot token, version, home, folders), or one `error` record with a code for any exit before it;
+  - one JSON `ready` record (host, port, one-shot token, version, home, workspaces), or one `error` record with a code for any exit before it;
   - a graceful stop on Ctrl+C, SIGTERM or (with `--json`) the end of a piped stdin: every running turn is cancelled and saved, then the host shuts down, each step bounded.
 - **`minidsh web --workspace <dir>`** (repeatable): several folders a session may start in, refused if one holds or lies inside MiniDSH's home.
 - **`minidsh credentials list | set NAME | unset NAME`**:
@@ -55,7 +55,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 ### Changed
 
 - **`minidsh web` stops gracefully** on Ctrl+C or SIGTERM: running turns end as cancelled in their logs and every lease is released, where before the next process had to repair and reclaim them.
-- **A session lock taken before a reboot is reclaimed** on Windows and Linux even when its process id now belongs to another program, instead of refusing the resume with "remove …lock".
+- **A session lock taken before a reboot is reclaimed** on Windows and Linux even when its process id now belongs to another program, when the resume comes earlier in the new boot than the lock was taken in the old one; later, the process id decides as before.
 - **A resumed or forked delegated child keeps what its delegation narrowed:** its tool filter, the tools hidden from every child (network tools, and delegation at the depth cap, a preset's own included) and its persona. A child's log records them once, and every continuation re-applies them; before, only its authority came back. A child delegated by an earlier version continues as it did.
 - **On Windows, what a shell starts ends with it.** Every PowerShell the harness starts — a background job, an approved command, the session's shell — holds its descendants in a Job of its own, so a program it `Start-Process`'d no longer outlives the job's end, its stop, an approved command's end, or a MiniDSH process that is killed. Where Constrained Language Mode forbids that, one warning says so and the command runs as before.
 - **A `/compact` run while the agent is idle is stopped by quitting**, recorded as cancelled, instead of running on and paying for a summary nobody would see.
