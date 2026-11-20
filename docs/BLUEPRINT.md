@@ -82,11 +82,10 @@ One entry per session: what it decided and the measurements that still matter; t
   **User decisions:** unsigned installers; closing quits after a runtime-informed confirm (no tray); in-app key entry through a CLI command; a manual update check; Windows plus an AppImage plus a CI-built macOS zip.
 
   **Measured (P0; Electron 45.3.4, electron-builder 26.18.1, this non-admin host):**
-  - no winCodeSign step;
   - with the file-privilege fuse off, `file://` cannot read the asar, hence the overlay's own scheme;
   - `onBeforeSendHeaders` reaches the navigation, every script, the stylesheet and the WebSocket upgrade;
   - a Windows pipe on stdin reads `isFIFO() === false` (mode 0x1000), so the stop's stdin rule is by exclusion;
-  - pnpm's release age refused Electron 45.4.1 (a day old), so 45.3.4, with the same Node and Chromium;
+  - pnpm's release age refused Electron 45.4.1, so 45.3.4;
   - installers: Windows 127.9 MiB, AppImage 165 MiB (DSH's 286 MiB).
 
   **Found:**
@@ -94,14 +93,15 @@ One entry per session: what it decided and the measurements that still matter; t
   - lane A: a wall-clock lease rule could steal a live lease;
   - only the packaged E2E: a quit during startup dropped, the uninstaller refusing itself, task-dialog buttons exposed as Panes;
   - a 3-lens review, about 40 findings, 6 major: two runtimes after a mid-start folder change; settings saved before the confirm; a missing folder blocking every start; a quit unable to stop a booting runtime; the AppImage forcing `--no-sandbox`; two key saves losing one;
-  - the 2-lens pre-push review, 17 findings, 4 major: a queued folder change dropped by a later one; a keys form that could not be closed; the lease rule blind to a resume later in the new boot (narrowed, §3); an AppImage refusing its neighbours. CI could not have caught a missing installer or an unsigned PR macOS build.
+  - the 2-lens pre-push review, 17 findings, 4 major: a queued folder change dropped by a later one; a keys form that could not be closed; the lease rule blind to a resume later in the new boot (narrowed, §3); an AppImage refusing its neighbours. CI could not have caught a missing installer or an unsigned PR macOS build;
+  - CI's first run: on Windows a just-released lock stays delete-pending and its re-create answers EPERM, killing a concurrent `credentials set` (6 of 100 writers here); fixed.
 
   **Live:**
   - The INSTALLED app on DeepSeek: a fix through the window (3 approvals clicked, 23 s); a killed runtime restarted and resumed (`completed → interrupted → completed`); a quit mid-turn confirmed (`cancelled`, no lease); a key saved by the form and used; the agent's `node` the bundled 24.22.3.
   - The `web` and `live` arcs once per host.
   - Keyless E2E: 5 of 5 on Windows (installer included), 4 of 4 twice under WSLg.
 
-  **Gates:** Windows 2,029 passed, 30 skipped; WSL 2,046 passed, 11 skipped. **Docs:** ARCHITECTURE 54.8 → 51.9 KB, README 30.1 → 28.4; the claim review restored 13 statements; §13 still over target.
+  **Gates:** Windows 2,029 passed, 30 skipped; WSL 2,046 passed, 11 skipped. **Docs:** ARCHITECTURE 54.8 → 51.9 KB, README 30.1 → 28.4; 13 statements restored in claim review.
 
   **Agents:** 17 of 17: 5 research, 2 critics, 2 lanes, 3 review lenses, 2 compaction authors, 1 claim reviewer, 2 pre-push lenses.
 
