@@ -108,8 +108,16 @@ let home: string | undefined
 let starting: RuntimeProcess | undefined
 /** A quit was asked for: a start it interrupts ends quietly, not in the stopped view. */
 let quitting = false
-/** What the keys view covers, so closing it returns there: the Web UI, or the view it replaced. */
+/** What the keys view covers, so closing it returns there: the Web UI, or the view it replaced (or the lifecycle showed since). */
 let keysReturn: View | 'web' = 'web'
+/** The web renderer died while a lifecycle action ran (the reason): recovered once nothing runs. */
+let webGone: string | undefined
+/**
+ * Folder changes asked for and not applied yet, in order. They live apart
+ * from the queued action, so a later request replacing that action (or a quit
+ * outranking it) never drops a change the person already confirmed.
+ */
+let pendingChanges: ((current: DesktopSettings) => DesktopSettings)[] = []
 
 // ---------------------------------------------------------------- logs
 
@@ -159,9 +167,10 @@ function runtimeFiles(): { node: string; bin: string; nodeDir: string } {
 
 /** The folder rules' context: MiniDSH's own places, which a workspace may neither hold nor sit inside. */
 function folderContext(): FolderContext {
-  // The install as the person launches it: an AppImage's file (the mount is
-  // per launch and read-only), a macOS bundle, else the executable's folder.
-  const installDir = process.env.APPIMAGE !== undefined ? dirname(process.env.APPIMAGE) : process.platform === 'darwin' ? join(process.resourcesPath, '..', '..') : dirname(process.execPath)
+  // The install as the person launches it: an AppImage's FILE (its mount is
+  // per launch and read-only; a folder holding the file is refused, a project
+  // beside it in ~/Downloads is not), a macOS bundle, else the executable's folder.
+  const installDir = process.env.APPIMAGE !== undefined ? process.env.APPIMAGE : process.platform === 'darwin' ? join(process.resourcesPath, '..', '..') : dirname(process.execPath)
   return { ...(home === undefined ? {} : { home }), userData: app.getPath('userData'), installDir, profile: homedir(), platform: process.platform }
 }
 
@@ -220,6 +229,8 @@ function usableFolders(): { readonly usable: string[]; readonly missing: string[
 /** Start the runtime over the usable folders and show the Web UI. A live runtime is stopped first, so there is never a second one. */
 async function startRuntime(): Promise<void> {
   if (live) await stopRuntime(true)
+  // A quit asked for during that stop (or before this start ran) waits for no boot.
+  if (quitting) return
   const { usable, missing } = usableFolders()
   const folder = usable[0]
   if (folder === undefined) {
@@ -229,6 +240,7 @@ async function startRuntime(): Promise<void> {
   const files = runtimeFiles()
   let port = await freePort()
   for (let attempt = 0; ; attempt++) {
+    if (quitting) return
     const runtime = new RuntimeProcess()
     let ready: RuntimeReady
     starting = runtime
@@ -249,7 +261,10 @@ async function startRuntime(): Promise<void> {
     } catch (error) {
       if (!(error instanceof RuntimeStartError)) throw error
       const failure = error.failure
-      if (quitting) return
+      if (quitting) {
+        starting = undefined
+        return
+      }
       // A persisted port another program took (or a range Hyper-V reserved
       // since): choose a fresh one ONCE, then report.
       if (attempt === 0 && failure.kind === 'error-record' && (failure.code === 'EADDRINUSE' || failure.code === 'EACCES')) {
@@ -304,6 +319,7 @@ async function loadWebUi(current: Live): Promise<void> {
   if (!win) return
   try {
     await win.webContents.loadURL(`http://127.0.0.1:${current.port}/`)
+    webGone = undefined
     hideOverlay()
   } catch (error) {
     // ERR_ABORTED: another navigation superseded this one (a reload): the page
@@ -354,9 +370,9 @@ async function stopRuntime(restarting: boolean): Promise<void> {
  * a request arriving while one runs waits in a single slot, the latest
  * replacing an earlier one, except that a quit is never replaced. Dropping
  * was a defect the packaged E2E found: a close or a SIGTERM landing while
- * the start was still loading the page was ignored, and the app never quit
- * (a folder change in that window was lost the same way, its settings
- * already saved).
+ * the start was still loading the page was ignored, and the app never quit.
+ * What a replaced action was FOR is not lost with it: folder changes wait in
+ * `pendingChanges`, and the action that runs applies them all.
  */
 let queued: { readonly action: () => Promise<void>; readonly quit: boolean } | undefined
 
@@ -373,7 +389,33 @@ function serialize(action: () => Promise<void>, quit = false): void {
       const next = queued
       queued = undefined
       if (next) serialize(next.action, next.quit)
+      else settle()
     })
+}
+
+/**
+ * Nothing runs or waits: put right what an action left only because it ended
+ * early (a Cancel, a load another navigation superseded). A web renderer that
+ * died meanwhile is recovered now; a leftover "starting" over a live runtime
+ * is lifted.
+ */
+function settle(): void {
+  const current = live
+  if (!current || exiting) return
+  if (webGone !== undefined) {
+    const reason = webGone
+    webGone = undefined
+    return recoverWeb(current, reason)
+  }
+  if (view.kind === 'starting' && overlayShown()) removeOverlay()
+}
+
+/** Every pending folder change, in the order asked, saved as one. */
+function applyPendingChanges(): void {
+  if (pendingChanges.length === 0) return
+  const changes = pendingChanges
+  pendingChanges = []
+  persist(changes.reduce((next, change) => change(next), settings))
 }
 
 function requestQuit(): void {
@@ -384,8 +426,12 @@ function requestQuit(): void {
   serialize(async () => {
     if (!(await confirmInterrupt('quit'))) {
       quitting = false
+      // A folder change that arrived behind this quit runs now.
+      if (pendingChanges.length > 0) reconcile()
       return
     }
+    // Folder changes the person asked for before quitting are kept for the next launch.
+    applyPendingChanges()
     await stopRuntime(false)
     exiting = true
     app.quit()
@@ -396,13 +442,18 @@ function requestQuit(): void {
  * The ONE way the runtime's folder set or life changes: decided when the
  * action RUNS, not when it was asked for (a start still running when a folder
  * was picked must not leave two runtimes). Confirm first if work would stop;
- * only then save the change (a Cancel leaves settings, menu and runtime as
- * they were); then stop whatever is live and start over the saved set.
+ * only then save the changes (a Cancel leaves settings, menu and runtime as
+ * they were, every pending change dropped); then stop whatever is live and
+ * start over the saved set.
  */
 function reconcile(change?: (current: DesktopSettings) => DesktopSettings, confirm = true): void {
+  if (change) pendingChanges.push(change)
   serialize(async () => {
-    if (live && confirm && !(await confirmInterrupt('restart'))) return
-    if (change) persist(change(settings))
+    if (live && confirm && !(await confirmInterrupt('restart'))) {
+      pendingChanges = []
+      return
+    }
+    applyPendingChanges()
     await startRuntime()
   })
 }
@@ -479,10 +530,45 @@ function layoutOverlay(): void {
   overlay.setBounds({ x: 0, y: 0, width: width ?? 0, height: height ?? 0 })
 }
 
+/** A dead Web UI renderer: reloaded twice per runtime, then the stopped view. */
+function recoverWeb(current: Live, reason: string): void {
+  if (reloads++ < 2) void loadWebUi(current)
+  else showView({ kind: 'stopped', title: 'The MiniDSH window stopped', detail: `${reason}. Restart asks first if work is running.`, tail: '' })
+}
+
+function overlayShown(): boolean {
+  return win !== undefined && overlay !== undefined && win.contentView.children.includes(overlay)
+}
+
+/**
+ * The lifecycle's view. An open keys form is never taken away by it (a key
+ * half typed would vanish, and focus would fall to the composer, where a
+ * paste and an Enter send the key as a prompt): what the lifecycle shows
+ * meanwhile is where closing the form returns. Only a quit's stop replaces
+ * the form, since the window is going.
+ */
 function showView(next: View): void {
-  view = next.kind === 'stopped' ? { ...next, tail: displayTail(next.tail, 6_000) } : next
+  const shaped: View = next.kind === 'stopped' ? { ...next, tail: displayTail(next.tail, 6_000) } : next
+  if (view.kind === 'keys' && !(shaped.kind === 'stopping' && !shaped.restarting)) {
+    keysReturn = shaped
+    return
+  }
+  present(shaped)
+}
+
+/** The lifecycle uncovering the Web UI; under an open keys form, the Web UI becomes where closing it returns. */
+function hideOverlay(): void {
+  if (view.kind === 'keys') {
+    keysReturn = 'web'
+    return
+  }
+  removeOverlay()
+}
+
+function present(next: View): void {
+  view = next
   if (!win || !overlay) return
-  if (!win.contentView.children.includes(overlay)) win.contentView.addChildView(overlay)
+  if (!overlayShown()) win.contentView.addChildView(overlay)
   layoutOverlay()
   overlay.webContents.send('shell:view', shellState())
   // Keys go to what is on top: never to the Web UI's composer under a form
@@ -490,23 +576,30 @@ function showView(next: View): void {
   overlay.webContents.focus()
 }
 
-function hideOverlay(): void {
-  if (win && overlay && win.contentView.children.includes(overlay)) win.contentView.removeChildView(overlay)
+function removeOverlay(): void {
+  if (win && overlay && overlayShown()) win.contentView.removeChildView(overlay)
   view = { kind: 'starting' }
   win?.webContents.focus()
 }
 
-/** The keys view over whatever shows now; closing it returns there. */
+/** The keys view over whatever shows now; closing it returns there. Asked again while open, it stays as it is. */
 function openKeys(): void {
-  const covering = win && overlay && win.contentView.children.includes(overlay)
-  keysReturn = covering ? view : 'web'
-  showView({ kind: 'keys' })
+  if (view.kind === 'keys') {
+    overlay?.webContents.focus()
+    return
+  }
+  keysReturn = overlayShown() ? view : 'web'
+  present({ kind: 'keys' })
 }
 
 function closeKeys(): void {
   if (view.kind !== 'keys') return
-  if (keysReturn === 'web' && live && !busy) hideOverlay()
-  else showView(keysReturn === 'web' ? { kind: 'starting' } : keysReturn)
+  const back = keysReturn
+  keysReturn = 'web'
+  if (back !== 'web') return present(back)
+  if (live) return removeOverlay()
+  // Nothing live and nothing shown since: the action under way shows what comes next.
+  present({ kind: 'starting' })
 }
 
 function shellState(): Record<string, unknown> {
@@ -624,12 +717,16 @@ function guardWebView(web: WebContents): void {
   })
   web.on('render-process-gone', (_event, details) => {
     log(`web renderer gone: ${details.reason}`)
-    const current = live
+    if (exiting) return
     // Never under a stop, a restart or a start: reloading would bring a
     // stopping runtime's page back and reopen the race about:blank closed.
-    if (busy || exiting || !current) return
-    if (reloads++ < 2) void loadWebUi(current)
-    else showView({ kind: 'stopped', title: 'The MiniDSH window stopped', detail: `${details.reason}. Restart asks first if work is running.`, tail: '' })
+    // Remembered instead, and recovered when the action settles (a confirm
+    // the person cancelled loads nothing that would replace the dead page).
+    if (busy) {
+      webGone = details.reason
+      return
+    }
+    if (live) recoverWeb(live, details.reason)
   })
   web.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     if (!isMainFrame || code === -3 || !isHostUrl(url)) return

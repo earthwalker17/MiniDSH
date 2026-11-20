@@ -126,6 +126,12 @@ describe('folder rules, pure, for both platforms', () => {
     expect(refusalFor('/home/zoe/code', { ...nix, home: '/home/zoe/code/.minidsh' })).toMatch(/home folder/)
   })
 
+  it('takes an AppImage as its FILE: a folder holding it is refused, a project beside it is not', () => {
+    const appImage: FolderContext = { ...nix, installDir: '/home/zoe/Downloads/MiniDSH-1.2.0-x86_64.AppImage' }
+    expect(refusalFor('/home/zoe/Downloads', appImage)).toMatch(/contains the MiniDSH installation/)
+    expect(refusalFor('/home/zoe/Downloads/myrepo', appImage)).toBeUndefined()
+  })
+
   it('treats a child named `..x` as inside, and different drives as unrelated', () => {
     expect(isWithin('/opt/MiniDSH/..x', '/opt/MiniDSH', 'linux')).toBe(true)
     expect(isWithin('/opt', '/opt/MiniDSH', 'linux')).toBe(false)
