@@ -97,11 +97,11 @@ One entry per session: what it decided and the measurements that still matter; t
   - the 2-lens pre-push review, 17 findings, 4 major: a queued folder change dropped by a later one; a keys form that could not be closed; the lease rule blind to a resume later in the new boot (narrowed, §3); an AppImage refusing its neighbours. CI could not have caught a missing installer or an unsigned PR macOS build.
 
   **Live:**
-  - The INSTALLED app on DeepSeek: a fix through the window (4 approvals clicked, 21 s); a killed runtime restarted and resumed (`completed → interrupted → completed`); a quit mid-turn confirmed (`cancelled`, no lease); a key saved by the form and used; the agent's `node` the bundled 24.22.3.
+  - The INSTALLED app on DeepSeek: a fix through the window (3 approvals clicked, 23 s); a killed runtime restarted and resumed (`completed → interrupted → completed`); a quit mid-turn confirmed (`cancelled`, no lease); a key saved by the form and used; the agent's `node` the bundled 24.22.3.
   - The `web` and `live` arcs once per host.
   - Keyless E2E: 5 of 5 on Windows (installer included), 4 of 4 twice under WSLg.
 
-  **Gates:** Windows 2,026 passed, 29 skipped; WSL 2,042 passed, 11 skipped. **Docs:** ARCHITECTURE 54.8 → 51.9 KB, README 30.1 → 28.4; the claim review restored 13 statements; §13 still over target.
+  **Gates:** Windows 2,029 passed, 30 skipped; WSL 2,042 passed, 11 skipped before the pre-push fixes (their rerun was stopped for memory after typecheck). **Docs:** ARCHITECTURE 54.8 → 51.9 KB, README 30.1 → 28.4; the claim review restored 13 statements; §13 still over target.
 
   **Agents:** 17 of 17: 5 research, 2 critics, 2 lanes, 3 review lenses, 2 compaction authors, 1 claim reviewer, 2 pre-push lenses.
 
