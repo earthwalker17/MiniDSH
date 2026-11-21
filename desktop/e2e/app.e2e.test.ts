@@ -34,7 +34,7 @@ import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { alive, answerNativeDialog, killDesktopApps, type DesktopApp, type DesktopLaunch } from '../../src/test-support/desktop-app.ts'
-import { launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, turnEnds, waitUntil, type Cleanup } from './support.ts'
+import { launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, storedEvents, turnEnds, waitUntil, type Cleanup } from './support.ts'
 
 const EXE = process.env.MINIDSH_DESKTOP_EXE
 const INSTALLER = process.env.MINIDSH_DESKTOP_INSTALLER
@@ -178,7 +178,16 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     // A running turn: the request reaches the model and is never answered.
     await web.type('#prompt', 'say hello')
     await web.press('Enter')
-    await waitUntil('the turn to reach the model', () => model.requests() > 0, 60_000)
+    await waitUntil('the turn to reach the model', () => model.requests() > 0, 60_000).catch(async (error: Error) => {
+      // Timed out twice on the Linux runner and passed on the third attempt of
+      // the same commit (S22.5), with nothing to say where the prompt stopped:
+      // in the page (focus, a draft never sent), on the wire, or in the runtime.
+      const page = await web
+        .evaluate<string>(`JSON.stringify({ focus: document.activeElement?.id || document.activeElement?.tagName, draft: document.querySelector('#prompt')?.value, hasFocus: document.hasFocus(), tail: document.body.innerText.slice(-400) })`)
+        .catch((unreadable: unknown) => `unreadable: ${String(unreadable)}`)
+      const logged = storedEvents(home).map((event) => event.type)
+      throw new Error(`${error.message}\nlogged: ${logged.join(' ') || 'nothing'}\npage: ${page}\nmain.log (tail):\n${app.mainLog().slice(-2000)}`)
+    })
 
     if (win) {
       app.closeWindow()
