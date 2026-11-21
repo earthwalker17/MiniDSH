@@ -35,6 +35,7 @@ import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { launchBrowser } from '../capabilities/tool-browser/launch.ts'
 import { fixtureServer, testBrowser, type FixtureServer } from '../test-support/browser-fixture.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { QUADRANT_COLOURS, quadPng } from '../test-support/images.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
@@ -43,6 +44,7 @@ import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the browser arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 const VISION_MODEL = 'deepseek-flash'
 const TEXT_ONLY_MODEL = 'deepseek-v4-pro'

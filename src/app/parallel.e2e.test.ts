@@ -32,12 +32,14 @@ import { join, sep } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the parallel arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 
 const TEAMS = { alpha: 'AMBER-FALCON', beta: 'COBALT-HERON', gamma: 'OPAL-LYNX' } as const

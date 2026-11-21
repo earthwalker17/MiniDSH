@@ -34,6 +34,7 @@ import type { ResolvedImage } from '../core/llm/content.ts'
 import { serializeMessages as serializeAnthropic } from '../capabilities/llm-anthropic/index.ts'
 import { serializeMessages as serializeDeepSeek } from '../capabilities/llm-deepseek/index.ts'
 import { serializeInput as serializeOpenAI } from '../capabilities/llm-openai/index.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { QUADRANT_COLOURS, quadPng } from '../test-support/images.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
@@ -44,6 +45,8 @@ import { skillRootsFor } from './home.ts'
 const DEEPSEEK = process.env.DEEPSEEK_API_KEY
 const ANTHROPIC = process.env.ANTHROPIC_API_KEY
 const OPENAI = process.env.OPENAI_API_KEY
+// Both legs of this file: the Anthropic one, and the OpenAI one, which is held only by a run that promised OPENAI_API_KEY.
+expectKeys('the routing arc', ['DEEPSEEK_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 /**
  * Crossed by the reads together, first after the switch, and never by the

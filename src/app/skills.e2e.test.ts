@@ -47,12 +47,15 @@ import { deflateSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { resultFailed } from '../test-support/arc-evidence.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the skills arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 const win32 = process.platform === 'win32'
 let dirs: string[] = []
@@ -248,7 +251,11 @@ interface Shape {
 }
 
 function shapeOf(events: readonly EventEnvelope[]): Shape {
-  const results = new Map(events.filter((event) => event.type === 'tool/result').map((event) => [data<{ callId: string }>(event).callId, data<{ isError?: boolean }>(event).isError === true]))
+  // `resultFailed`, not a field of the record: a tool/result has no `isError`
+  // of its own (the flag is on its message's block, the code in `error`), so
+  // reading one here made every answered call "ok" — and "a non-error read of
+  // SKILL.md" below accepted a read that was refused or found nothing.
+  const results = new Map(events.filter((event) => event.type === 'tool/result').map((event) => [data<{ callId: string }>(event).callId, resultFailed(event)]))
   const calls = events
     .filter((event) => event.type === 'tool/call')
     .map((event) => ({
@@ -301,6 +308,7 @@ async function record(prompt: string, options: { readonly skillsDisabled?: boole
   process.env.PIP_REQUIRE_VIRTUALENV = '1'
   const serve = new ServeProcess(workspace, home, { args: ['--accept', 'none'] })
   const stopAnswering = serve.answerApprovals('rejected')
+  let failed = false
   try {
     await serve.request('initialize')
     const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: prompt })
@@ -313,9 +321,16 @@ async function record(prompt: string, options: { readonly skillsDisabled?: boole
     const log = await serve.request<{ events: EventEnvelope[] }>('session/events', { sessionId })
     const model = data<{ header: { model: string } }>(log.events.find((event) => event.type === 'request/header')).header.model
     return { workspace, home, prompt, sessionId, events: log.events, model }
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
     stopAnswering()
-    await serve.shutdown().catch(() => serve.kill())
+    // A run that already failed is reported as that failure, and its host is
+    // only stopped. A run that got its log is still owed a host that leaves
+    // properly: this used to swallow a failing shutdown either way.
+    if (failed) await serve.kill()
+    else await serve.shutdown()
   }
 }
 
@@ -327,11 +342,23 @@ function officeSkillPath(home: string): string {
 /** Office processes started during the arc: a model driving Word through COM leaves one behind. */
 function strayOffice(since: Date): string[] {
   if (!win32) return []
-  const list = spawnSync('pwsh', ['-NoProfile', '-Command', `Get-Process WINWORD,EXCEL,POWERPNT -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt [datetime]'${since.toISOString()}' } | ForEach-Object { $_.ProcessName + ':' + $_.Id }`], {
-    encoding: 'utf8',
-    timeout: 30_000,
-  })
-  return list.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0)
+  // An empty answer is what the arc reads as "none left", so it is given only
+  // by a query that RAN. pwsh ends now and then on this kind of host with an
+  // internal CLR error and nothing on stdout, which read as a clean machine:
+  // it is asked up to three times, and a query that never answers is an error.
+  // The script ends `exit 0` itself, because "no such process" leaves pwsh's
+  // own status at 1: without it a clean machine and a crashed query look alike.
+  const query = `Get-Process WINWORD,EXCEL,POWERPNT -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -gt [datetime]'${since.toISOString()}' } | ForEach-Object { $_.ProcessName + ':' + $_.Id }; exit 0`
+  const failures: string[] = []
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const list = spawnSync('pwsh', ['-NoProfile', '-Command', query], {
+      encoding: 'utf8',
+      timeout: 30_000,
+    })
+    if (list.error === undefined && list.status === 0) return list.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0)
+    failures.push(`attempt ${attempt}: ${list.error?.message ?? `status ${String(list.status)}: ${String(list.stderr).trim().slice(0, 200)}`}`)
+  }
+  throw new Error(`the Office process query could not answer, so nothing is known about what was left running\n${failures.join('\n')}`)
 }
 
 describe.skipIf(!KEY)('S19 live E2E: skills as data', () => {

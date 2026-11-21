@@ -14,9 +14,16 @@
  *   spill         a command's output too large to show inline is saved, and the
  *                 model retrieves a value only present in the omitted middle
  *
- * Then the fresh log replays keylessly under the SAME disk composition, with
- * both replay cursors drained — so the recorded compaction happened again, at
- * the same point, with the same summary.
+ * Then the fresh log replays keylessly under the SAME disk composition, in the
+ * SAME workspace (re-seeded) and under the same authority, and is held to the
+ * recording's walk over its surface: the same history, compacted at the same
+ * points. Both cursors drained is the weaker half of that — a count of summary
+ * calls can agree while the points do not, and it was a count this replay
+ * once missed (7 of 8) with nothing kept to read it against. Where a
+ * compaction fires is decided from estimates over the text the model is shown,
+ * which holds the workspace's path, the spill file's path and the mode the
+ * session opened under: a replay that differs in any of them is deciding from
+ * a different surface.
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
@@ -31,6 +38,8 @@ import { meterSession } from '../core/metering/index.ts'
 import { foldSurfaceSeqs, REQUEST_HEADER, type EventEnvelope } from '../core/session/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
+import { assertReplayed, resultFailed, resultText, surfaceWalk } from '../test-support/arc-evidence.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
@@ -38,6 +47,7 @@ import { applyAuthority, bootComposition, type BootOptions } from './headless.ts
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the context arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 const pwsh = process.platform === 'win32'
 
@@ -178,16 +188,25 @@ describe.skipIf(!KEY)('S5 live E2E: a long session stays in budget without the l
       'utf8',
     )
 
-    const serve = new ServeProcess(workspace, home, { approve: true })
-    const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: FIRST_PROMPT })
     // This run needs a shell that works on EVERY platform, and only one mode
     // does: a Linux or macOS host confines and would run the command under
     // `workspace-write`, while a Windows host has no backend and would refuse
     // it, spending a round trip on consent per command. The arc is about
     // context pressure, not about authority — the authority arc is where the
     // difference between those hosts is the subject.
-    await serve.request('session/authority', { sessionId, sandbox: 'danger-full-access' })
+    //
+    // The mode is the host's FLAG, so the session opens in it. It used to be
+    // switched over the wire after the first prompt: the log then held a
+    // `sandbox/mode{change}`, the surface a durable note about it, and the
+    // system prompt the lines of the mode it had opened under — none of which
+    // a replay that opens in the mode reproduces.
+    const serve = new ServeProcess(workspace, home, { approve: true, sandbox: 'danger-full-access' })
+    const { sessionId } = await serve.request<{ sessionId: string }>('session/prompt', { text: FIRST_PROMPT })
     await serve.waitForCompletedTurn(sessionId, 1)
+    expect(
+      serve.events('sandbox/mode', sessionId).map((event) => event.data),
+      'the session opened in the mode it ran in, with no switch',
+    ).toEqual([expect.objectContaining({ mode: 'danger-full-access', reason: 'initial' })])
 
     const prompts = [
       readWholeFile('notes-b.txt'),
@@ -360,19 +379,34 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
     // That alone is not evidence it READ the file: the prompt hands over the
     // generating expression ($((i*7))), so `row-450:3150` is one multiplication
     // away from what the model already has. The read itself is the claim, so
-    // the read is what is asserted — a call naming the saved file by name.
+    // the read is what is asserted — a call naming the saved file by name,
+    // whose RESULT came back without an error and holds the needle. The call
+    // alone was the assertion until S22.5, and a call counts whether or not it
+    // worked: a notice naming a directory that is not there would have made
+    // the read fail and the arc pass, on the multiplication.
     const spillNames = new Set(spillFiles.map((file) => basename(file)))
-    const reads = events
-      .filter((event) => event.type === 'tool/call')
-      .map((event) => (event.data as { arguments?: string }).arguments ?? '')
-      .filter((args) => [...spillNames].some((name) => args.includes(name)))
+    const reads = events.filter((event) => event.type === 'tool/call').filter((event) => [...spillNames].some((name) => ((event.data as { arguments?: string }).arguments ?? '').includes(name)))
     expect(reads.length, `no tool call named any of ${[...spillNames].join(', ')}: the needle could have come from the prompt's own formula`).toBeGreaterThan(0)
+    const readIds = new Set(reads.map((event) => (event.data as { callId: string }).callId))
+    const readBack = events.filter((event) => event.type === 'tool/result' && readIds.has((event.data as { callId: string }).callId))
+    const outcomes = readBack.map((event) => `${(event.data as { callId: string }).callId}: ${resultFailed(event) ? 'failed' : resultText(event).includes(NEEDLE) ? 'returned the needle' : 'returned without the needle'}`)
+    expect(
+      readBack.some((event) => !resultFailed(event) && resultText(event).includes(NEEDLE)),
+      `${reads.length} call(s) named the saved file and none returned ${NEEDLE} from it (${outcomes.join('; ') || 'no results'}): the needle in the answer did not come from a read`,
+    ).toBe(true)
 
     // ---- the log is still its own oracle ------------------------------------
-    // A pristine copy of the workspace, so the replayed run meets the world the
-    // recording met rather than the one the recording left behind.
-    const replayWorkspace = tempDir('minidsh-e2e5-replay-ws-')
-    seedWorkspace(replayWorkspace)
+    // The SAME workspace, emptied and seeded again, so the replayed run meets
+    // the world the recording met rather than the one it left behind — and
+    // meets it at the same path. A copy under another name would do for the
+    // files and not for the surface: the workspace's path is in the system
+    // prompt, the spill root's in every spill notice, and each compaction is
+    // decided from an estimate over that text at a budget where the arc itself
+    // measures small heads being refused. So the roots, the authority the
+    // session opens under and the composition are the recording's own.
+    const leftBehind = readdirSync(workspace)
+    for (const name of leftBehind) rmSync(join(workspace, name), { recursive: true, force: true })
+    seedWorkspace(workspace)
     const file = loadCompositionFile(join(home, 'composition.json'))!
     const boot: BootOptions = {
       sandbox: 'danger-full-access',
@@ -381,7 +415,8 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
       // What `serve` mounted: the recorded requests carry its skill list.
       skillRoots: skillRootsFor(home),
       browserProfileRoot: join(home, 'browser-replay'),
-      spillRoot: tempDir('minidsh-e2e5-replay-spill-'),
+      // The recording's own spill root: the replayed session spills beside it, under its own id.
+      spillRoot: join(home, 'spill'),
       logger: silent,
       patches: [{ id: 'llm-deepseek', disabled: true }],
       configLayers: [{ name: 'home', patches: await toPatches(file, home) }],
@@ -390,24 +425,42 @@ ${assistantTexts(events).at(-1)}`).toBe(true)
       },
     }
     const root = await bootComposition(boot)
+    let replayed: EventEnvelope[] = []
     try {
       const handle = await root.get(AGENTS).create(root, {
-        cwd: replayWorkspace,
+        cwd: workspace,
         // The route the recording ran on, never a literal (A8-11).
         agentOptions: recordedRoute(events),
       })
       applyAuthority(root, handle.agent, boot)
-      // Every recorded prompt in order, so the replayed session walks the same path.
+      // Every recorded prompt in order, each sent once the turn before it has ended, as the recording sent them.
       for (const text of [FIRST_PROMPT, ...prompts]) {
         handle.agent.followup(createUserMessage(text))
         await handle.agent.whenIdle()
       }
+      replayed = handle.agent.session.events.map((event) => ({ ...event }))
       await handle.dispose()
     } finally {
       await root.dispose()
     }
     expect(replayHandle!.auxCalls).toBeGreaterThanOrEqual(1)
-    replayHandle!.assertConsumed()
+    // Both cursors, and the walk: every surface event in the recording's
+    // order and every compaction at the recording's point with the recording's
+    // outcome. On a mismatch both logs, both walks and the cursors are written
+    // to a file the failure names, outside the directories this file deletes.
+    assertReplayed({ arc: 'context', handle: replayHandle!, recorded: events, replayed, sameWalk: true })
+    // What this run compared, on a passing run too: the replay once missed a
+    // summary call, so the numbers of each run are what a rerun is read by.
+    const walked = surfaceWalk(events)
+    const attempts = walked.filter((entry) => entry.startsWith('compaction'))
+    console.log(
+      `[context arc] replay walked the recording: ${walked.length} entries, ${summaryCalls} summary call(s) replayed of ${summaryCalls} recorded, ` +
+        `${attempts.filter((entry) => entry.endsWith(': applied')).length} applied and ${attempts.filter((entry) => entry.includes(': declined')).length} declined, at the recorded points`,
+    )
+    // And the replayed run did the work again: the file the recording wrote,
+    // which the re-seed above removed, is back with the same bytes.
+    expect(leftBehind, 'the recorded run left its summary in the workspace').toContain('summary.txt')
+    expect(readFileSync(join(workspace, 'summary.txt'), 'utf8'), 'the replay drained its script and did not write the file the recording wrote').toBe(summary)
   })
 })
 

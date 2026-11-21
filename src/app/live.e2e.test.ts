@@ -19,12 +19,15 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { resultFailed, resultText, storedLog } from '../test-support/arc-evidence.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the live arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 const HOLD_PLUGIN = fileURLToPath(new URL('../test-support/fixtures/hold-plugin.ts', import.meta.url))
 let dirs: string[] = []
@@ -217,9 +220,15 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     expect([...openCompactions], 'a bracket the crash left open').toEqual([])
     expect(orphanEnds, 'a closer that ended a bracket nothing opened').toEqual([])
 
-    // The WIRE: history reads back over the protocol, seqs contiguous.
+    // The WIRE: history reads back over the protocol — the stored log, event
+    // for event, seqs contiguous. Held against what the file held a moment ago
+    // (the log only grows, so that is a prefix of anything read later): a bare
+    // `every` over the reply passed on a reply that held no events at all.
     const history = await second.request<{ events: EventEnvelope[] }>('session/events', { sessionId })
-    expect(history.events.every((event, index) => event.seq === index)).toBe(true)
+    expect(storedEvents.length, 'the stored log this is compared with').toBeGreaterThan(0)
+    expect(history.events.length, `session/events answered ${history.events.length} event(s) for a log that stores ${storedEvents.length}`).toBeGreaterThanOrEqual(storedEvents.length)
+    expect(history.events.slice(0, storedEvents.length)).toEqual(storedEvents)
+    expect(history.events.map((event) => event.seq)).toEqual(history.events.map((_event, index) => index))
 
     // ---- lifecycle 2 continued: a fresh session for the replay oracle -----
     const fresh = await second.request<{ sessionId: string }>('session/prompt', {
@@ -232,14 +241,23 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     // ---- keyless replay: the fresh log is its own oracle ------------------
     const recordedText = lastAssistantText(freshLog.events)
     expect(recordedText).toContain('resumed and finished')
+    // The recording READ the file to say so: a tool result of its own holds the line.
+    const readTheLine = (events: readonly EventEnvelope[]): string[] =>
+      events.filter((event) => event.type === 'tool/result').map((event) => `${(event.data as { callId: string }).callId}: ${resultFailed(event) ? 'failed' : resultText(event).includes('resumed and finished') ? 'returned the line' : 'returned without the line'}`)
+    expect(readTheLine(freshLog.events).filter((outcome) => outcome.endsWith('returned the line')), `the fresh session answered without a read that returned the line: ${readTheLine(freshLog.events).join('; ')}`).not.toHaveLength(0)
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
+    const replaySessionsRoot = tempDir('minidsh-e2e-replay-')
     const replayed = await runTask(
       {
         task: 'Read greeting.txt and reply with its second line, exactly, and nothing else.',
         cwd: workspace,
         // The route the recording ran on, never a literal (A8-11).
         ...recordedRoute(freshLog.events),
-        sessionsRoot: tempDir('minidsh-e2e-replay-'),
+        sessionsRoot: replaySessionsRoot,
+        // As the recording's host was started (`serve --approve`): a model that
+        // read the file through the shell was granted its escalation there, and
+        // a replay that refused it would fail the read for a reason of its own.
+        approve: true,
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),
         browserProfileRoot: join(home, 'browser-replay'),
@@ -254,6 +272,13 @@ describe.skipIf(!KEY)('S2 live E2E: kill, resume, and replay over the real wire'
     expect(replayed.exitCode).toBe(0)
     expect(replayed.text).toBe(recordedText)
     replayHandle!.assertConsumed()
+    // Neither line above can fail on a replay whose tools did nothing: the
+    // text is the recorded chunks re-emitted, equal to its own recording by
+    // construction, and the cursors only count. What the replay DID is in its
+    // own log: the replayed read of greeting.txt returned the line too (delete
+    // the file before this replay and everything above still passes).
+    const replayedReads = readTheLine(storedLog(replaySessionsRoot, replayed.sessionId))
+    expect(replayedReads.filter((outcome) => outcome.endsWith('returned the line')), `no replayed tool result returned the line: ${replayedReads.join('; ') || 'no tool results'}`).not.toHaveLength(0)
   })
 })
 

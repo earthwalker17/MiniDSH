@@ -16,9 +16,11 @@
  * so it runs on every live dispatch. Costs nothing: the listing is free.
  */
 import { describe, expect, it } from 'vitest'
+import { expectKeys } from '../../test-support/expect-keys.ts'
 import { AnthropicAdapter, anthropicCatalog, catalogRowFor, type ThinkingType } from './adapter.ts'
 
 const KEY = process.env.ANTHROPIC_API_KEY
+expectKeys('the Anthropic drift probe', ['ANTHROPIC_API_KEY'])
 const BASE = (process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/+$/u, '')
 
 type Supported = { readonly supported?: boolean } | undefined

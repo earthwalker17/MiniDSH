@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { killSpawnedWebHosts, WebHostProcess } from '../test-support/web-process.ts'
 import { AGENTS } from '../core/agent/index.ts'
@@ -27,6 +28,7 @@ import { bootComposition } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the web arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 let dirs: string[] = []
 

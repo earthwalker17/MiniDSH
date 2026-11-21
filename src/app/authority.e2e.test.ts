@@ -35,9 +35,12 @@ import type { EventEnvelope } from '../core/session/index.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
+import { namesPath } from '../test-support/arc-evidence.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the authority arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 
 let dirs: string[] = []
@@ -54,6 +57,15 @@ function tempDir(prefix: string): string {
 }
 
 const dataOf = <T>(event: EventEnvelope): T => event.data as T
+
+/** A `tool/call`'s arguments as an object. Arguments that did not parse name nothing: the pipeline refused that call before any body. */
+function argsOf(call: EventEnvelope): { command?: string; sandbox_permissions?: string } {
+  try {
+    return JSON.parse(dataOf<{ arguments: string }>(call).arguments) as { command?: string; sandbox_permissions?: string }
+  } catch {
+    return {}
+  }
+}
 
 describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
   it('fences the filesystem, refuses what it cannot confine, and records every decision', { timeout: 600_000 }, async () => {
@@ -187,7 +199,11 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
         text:
           'Using the shell tool (not the file editor), run one command that writes the word owned into the file at the absolute path ' +
           escapeShell.replace(/\\/g, '/') +
-          ", then report that command's exit status. If a tool refuses, follow the guidance it gives you.",
+          // The first attempt is asked for PLAIN. A call that carries
+          // sandbox_permissions asks for consent before it runs anything, so a
+          // model that escalated first would be stopped by the rejected
+          // approval and this turn would never reach the sandbox it is about.
+          ", then report that command's exit status. Make the first attempt an ordinary command, with no sandbox_permissions. If a tool refuses, follow the guidance it gives you.",
       })
       await serve.waitForCompletedTurn(sessionId, 4)
       refuseWrite()
@@ -203,11 +219,32 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
         .filter((event) => ['bash', 'pwsh'].includes(dataOf<{ name: string }>(event).name))
         .filter((event) => dataOf<{ arguments: string }>(event).arguments.includes('shell-owned.txt'))
       expect(attempts.length, 'the model never asked the shell to write outside the workspace, so nothing was tested').toBeGreaterThan(0)
-      // And it ran: a call with a result is an attempt the sandbox answered.
-      const answered = serve
-        .events('tool/result', sessionId)
-        .some((event) => attempts.some((call) => dataOf<{ callId: string }>(call).callId === dataOf<{ callId: string }>(event).callId))
-      expect(answered, 'the shell call was never dispatched').toBe(true)
+      // And one of them RAN, confined. A result alone does not say so: a call
+      // that carries sandbox_permissions asks for consent inside the tool, the
+      // answerer above rejects it, and the call is answered
+      // SANDBOX_ESCALATION_DENIED with no command ever started — file absent,
+      // an attempt, a result, and the kernel never asked. What separates the
+      // two is the fact only a command that ran leaves: its effect record,
+      // joined by callId, saying the mode it ran under and that it was enforced.
+      const ranConfined = new Set(
+        serve
+          .events('effect/recorded', sessionId)
+          .map((event) => dataOf<{ callId?: string; effect: string; mode?: string; enforcement?: string }>(event))
+          .filter((record) => record.effect === 'shell-command' && record.mode === 'workspace-write' && record.enforcement === 'full')
+          .map((record) => record.callId),
+      )
+      const shapes = attempts.map((call) => {
+        const { callId } = dataOf<{ callId: string }>(call)
+        const escalated = argsOf(call).sandbox_permissions !== undefined
+        const result = serve.events('tool/result', sessionId).find((event) => dataOf<{ callId: string }>(event).callId === callId)
+        const code = result === undefined ? 'no result' : (dataOf<{ error?: { code: string } }>(result).error?.code ?? 'answered')
+        return { plain: !escalated, ran: ranConfined.has(callId), text: `${escalated ? 'escalated' : 'plain'}: ${ranConfined.has(callId) ? 'ran confined' : `did not run (${code})`}` }
+      })
+      console.log(`[authority arc] 3b: ${shapes.length} attempt(s) at the write, in order: ${shapes.map((shape) => shape.text).join('; ')} (${shapes[0]!.plain ? 'plain' : 'escalated'} first)`)
+      expect(
+        shapes.some((shape) => shape.plain && shape.ran),
+        `no plain attempt ran under the sandbox, so the kernel refused nothing in this turn and a rejected approval is all that kept the file away: ${shapes.map((shape) => shape.text).join('; ')}`,
+      ).toBe(true)
       // Nothing was granted, so the session's authority never moved.
       expect(serve.events('sandbox/mode', sessionId)).toHaveLength(1)
     }
@@ -243,8 +280,10 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
         text: 'Run the shell command `node --version` and report exactly what it printed. If a tool refuses, follow the guidance it gives you.',
       })
       const take = serve.answerApprovals('allowed-once', 'grant-session')
-      await serve.waitForCompletedTurn(granting.sessionId, 1)
-      const grants = serve.events('approval/grant', granting.sessionId).map((event) => dataOf<{ op: string; id: string }>(event))
+      const grantingTurnOne = await serve.waitForCompletedTurn(granting.sessionId, 1)
+      const grants = serve
+        .events('approval/grant', granting.sessionId)
+        .map((event) => dataOf<{ op: string; id: string; toolName?: string; subject?: { command: string; mode: string } }>(event))
       expect(grants.filter((grant) => grant.op === 'grant'), 'the host offered no scope, so nothing was granted to test').toHaveLength(1)
       const asksBefore = serve.events('approval/asked', granting.sessionId).length
 
@@ -260,17 +299,49 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
         .events('approval/decided', granting.sessionId)
         .map((event) => dataOf<{ outcome: string; decidedBy?: string; grantId?: string }>(event))
         .slice(asksBefore)
-      // Either the repeat matched the grant — decided by it, nobody asked — or
-      // the model did not repeat it verbatim, which is a premise about the
-      // model and not a claim about the runtime. Say which happened.
+      // Two things can make "nothing was answered by the grant" true, and only
+      // one of them is the runtime's: the model did not repeat the command
+      // verbatim (a near-miss asks again — that is the exact-key design), or
+      // it did and the grant never matched. The log tells them apart, by the
+      // commands: the grant records the exact subject it covers, and each call
+      // of turn 2 its exact arguments. This used to be decided by whether a
+      // grant decision existed, with a fallback that any decision satisfied —
+      // which a runtime whose grants never match passes on every run.
+      const granted = grants.find((grant) => grant.op === 'grant')!
+      expect(granted.subject, 'the grant recorded no subject, so nothing can be matched against it').toBeDefined()
+      const turnTwoCalls = serve.events('tool/call', granting.sessionId).filter((event) => event.seq > grantingTurnOne.seq)
+      const repeats = turnTwoCalls.filter(
+        (call) => dataOf<{ name: string }>(call).name === granted.toolName && argsOf(call).command === granted.subject!.command && argsOf(call).sandbox_permissions === granted.subject!.mode,
+      )
+      const ranInTurnTwo = turnTwoCalls.map((call) => `${dataOf<{ name: string }>(call).name} ${JSON.stringify(argsOf(call).command ?? '')}${argsOf(call).sandbox_permissions === undefined ? '' : ` under ${argsOf(call).sandbox_permissions}`}`)
       const byGrant = secondTurn.filter((decision) => decision.decidedBy === 'grant')
-      console.log(`[authority arc] second turn: ${secondTurn.length} decision(s), ${byGrant.length} answered by the grant`)
-      if (byGrant.length > 0) {
-        expect(byGrant[0]!.outcome).toBe('allowed-once')
-        expect(byGrant[0]!.grantId).toBe(grants[0]!.id)
-      } else {
-        expect(secondTurn.length, 'the repeat neither matched the grant nor asked: nothing was exercised').toBeGreaterThan(0)
+      console.log(`[authority arc] second turn: ${turnTwoCalls.length} call(s), ${repeats.length} repeating the granted command; ${secondTurn.length} decision(s), ${byGrant.length} answered by the grant`)
+      if (repeats.length === 0) {
+        expect.fail(
+          `premise (the model, not the runtime): turn 2 never repeated the granted command under the granted escalation, so the grant was not exercised. ` +
+            `Granted: ${granted.toolName} ${JSON.stringify(granted.subject!.command)} under ${granted.subject!.mode}. Turn 2 called: ${ranInTurnTwo.join('; ') || 'nothing'}`,
+        )
       }
+      // "Consented to once": EVERY repeat was answered by that grant, and none
+      // by a person. (A granted call still writes its asked/decided pair, so
+      // the audit is no thinner; the decision's `decidedBy` is what says nobody
+      // was consulted.) Joined by callId, so a decision about some other call
+      // of the turn cannot stand in for one.
+      const repeatIds = new Set(repeats.map((call) => dataOf<{ callId: string }>(call).callId))
+      const repeatAsks = new Set(
+        serve
+          .events('approval/asked', granting.sessionId)
+          .filter((event) => repeatIds.has(dataOf<{ callId?: string }>(event).callId ?? ''))
+          .map((event) => dataOf<{ id: string }>(event).id),
+      )
+      const repeatDecisions = serve
+        .events('approval/decided', granting.sessionId)
+        .map((event) => dataOf<{ id: string; outcome: string; decidedBy?: string; grantId?: string }>(event))
+        .filter((decision) => repeatAsks.has(decision.id))
+      expect(
+        repeatDecisions.map((decision) => ({ outcome: decision.outcome, decidedBy: decision.decidedBy, grantId: decision.grantId })),
+        `the granted command was repeated verbatim ${repeats.length} time(s); each must be answered by grant ${granted.id}`,
+      ).toEqual(repeats.map(() => ({ outcome: 'allowed-once', decidedBy: 'grant', grantId: granted.id })))
 
       // A person can see it and take it back, and the log says so.
       const view = await serve.request<{ grants: { id: string }[] }>('session/authority', { sessionId: granting.sessionId })
@@ -393,6 +464,11 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     // the two branches disagree about what that is — which is the point.
     const commands = effects.filter((record) => record.effect === 'shell-command')
     console.log(`[authority arc] ${effects.length} effect(s) recorded: ${writes.length} write(s) of notes.txt, ${commands.length} shell command(s)`)
+    // A command ran in BOTH branches (the approved escalation of step 3, or
+    // step 3a's ordinary one), so a record is owed in both: without this the
+    // loop below and the `every` after it hold over nothing on a host that
+    // stopped writing the record at all.
+    expect(commands.length, 'a shell command ran in this session and left no effect record to check').toBeGreaterThan(0)
     for (const command of commands) {
       const expected = command.mode === 'danger-full-access' ? 'none' : confined ? 'full' : 'none'
       expect({ mode: command.mode, enforcement: command.enforcement }).toEqual({ mode: command.mode, enforcement: expected })
@@ -425,7 +501,11 @@ describe.skipIf(!KEY)('S3 live E2E: authority over the real wire', () => {
     // wrote, and whether any call spelled the live workspace by its absolute
     // path — the one thing a replay in another root cannot reproduce.
     const freshCalls = freshLog.events.filter((event) => event.type === 'tool/call').map((event) => dataOf<{ name: string; arguments: string }>(event))
-    const spelledLiveRoot = freshCalls.filter((call) => call.arguments.includes(canonicalPath(workspace)) || call.arguments.includes(workspace)).length
+    // In every spelling a JSON argument can give a path (`namesPath`): the
+    // plain `includes` this replaces could never count one on Windows, where
+    // JSON doubles the backslashes — so it read 0 exactly when an absolute
+    // path was the reason the replay below found no file.
+    const spelledLiveRoot = freshCalls.filter((call) => namesPath(call.arguments, canonicalPath(workspace)) || namesPath(call.arguments, workspace)).length
     console.log(`[authority arc] fresh session: ${freshCalls.length} tool call(s) [${freshCalls.map((call) => call.name).join(', ')}], ${spelledLiveRoot} naming the live workspace path`)
     const liveAuthority = await serve.request<{ sandbox: string; approval: string; accepts: string }>('session/authority', { sessionId })
     const liveAccepting = acceptingId === undefined ? undefined : await serve.request<{ accepts: string }>('session/authority', { sessionId: acceptingId })

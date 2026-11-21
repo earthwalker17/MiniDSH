@@ -24,13 +24,15 @@
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise.
  */
-import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import { effectiveSandboxMode } from '../core/sandbox/index.ts'
 import { foldRequestHeader, type EventEnvelope } from '../core/session/index.ts'
+import { storedLog } from '../test-support/arc-evidence.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { auditLines } from './present.ts'
@@ -38,6 +40,7 @@ import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the delegation arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 
 let dirs: string[] = []
@@ -76,6 +79,13 @@ const NARROWED_ROW = {
 }
 const DENIED = NARROWED_ROW.config.toolFilter.deny
 
+/** The three files the delegated task reads, as seeded: nobody is asked to change one. */
+const SEEDED: Readonly<Record<string, string>> = {
+  'one.txt': 'nothing here\nmove along\n',
+  'two.txt': 'still nothing\nTHE ANSWER IS PLUM-42\nnor here\n',
+  'three.txt': 'empty of answers\n',
+}
+
 /** The child's effective request header after `events`: a step that ran wider would have written a new one. */
 function narrowHeader(events: readonly EventEnvelope[], what: string): void {
   const header = foldRequestHeader(events)
@@ -96,9 +106,7 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     const workspace = tempDir('minidsh-e2e6d-ws-')
     const home = tempDir('minidsh-e2e6d-home-')
     // The needle lives in one of three files; finding it is the delegated task.
-    writeFileSync(join(workspace, 'one.txt'), 'nothing here\nmove along\n', 'utf8')
-    writeFileSync(join(workspace, 'two.txt'), 'still nothing\nTHE ANSWER IS PLUM-42\nnor here\n', 'utf8')
-    writeFileSync(join(workspace, 'three.txt'), 'empty of answers\n', 'utf8')
+    for (const [name, text] of Object.entries(SEEDED)) writeFileSync(join(workspace, name), text, 'utf8')
     const decoy = join(workspace, 'decoy.txt')
     writeFileSync(decoy, 'must never change\n', 'utf8')
     const decoyBytes = readFileSync(decoy)
@@ -224,10 +232,18 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     expect(parentCold.children).toEqual([{ childId, callId: (start!.data as { callId: string }).callId, seq: start!.seq, ended: 'completed' }])
 
     // The WORLD: the parent wrote the file, the decoy is untouched, and the
-    // child — asked to read, and unable to ask anyone for anything — wrote nothing.
+    // child — asked to read, and unable to ask anyone for anything — wrote
+    // nothing. Said twice, because each half alone leaves a way round: the
+    // child's own log records no write through the editor (in either of its
+    // lifecycles), and the workspace holds what was seeded plus the one file
+    // the PARENT wrote — a write through a shell would show there. (This used
+    // to be "one.txt exists", a file this test wrote itself.)
     expect(readFileSync(join(workspace, 'found.txt'), 'utf8')).toContain('PLUM-42')
     expect(readFileSync(decoy).equals(decoyBytes)).toBe(true)
-    expect(existsSync(join(workspace, 'one.txt'))).toBe(true)
+    const childWrites = storedEvents(home, childId).filter((event) => event.type === 'effect/recorded' && (event.data as { effect: string }).effect === 'fs-write')
+    expect(childWrites.map((event) => (event.data as { path?: string }).path), 'the child recorded a write').toEqual([])
+    expect(readdirSync(workspace).toSorted(), 'a file nobody was asked to write is in the workspace').toEqual(['decoy.txt', 'found.txt', 'one.txt', 'three.txt', 'two.txt'])
+    for (const [name, seeded] of Object.entries(SEEDED)) expect(readFileSync(join(workspace, name), 'utf8'), `${name} was changed`).toBe(seeded)
 
     // ---- both logs replay, each as its own session's oracle -----------------
     // The child is a DIFFERENT session making its own model calls, so it
@@ -242,7 +258,8 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     const parentTurnOne = final.events.slice(0, final.events.findIndex((event) => event.type === 'turn/end') + 1)
     let replayHandle: ReturnType<typeof installLlmReplay> | undefined
     const replayWorkspace = tempDir('minidsh-e2e6d-replay-ws-')
-    writeFileSync(join(replayWorkspace, 'two.txt'), 'still nothing\nTHE ANSWER IS PLUM-42\nnor here\n', 'utf8')
+    writeFileSync(join(replayWorkspace, 'two.txt'), SEEDED['two.txt']!, 'utf8')
+    const replaySessionsRoot = tempDir('minidsh-e2e6d-replay-')
     const replayed = await runTask(
       {
         task: 'Use the subagent tool exactly once.',
@@ -250,7 +267,7 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
         // The route the recording ran on, never a literal (A8-11).
         ...recordedRoute(parentTurnOne),
         approve: true,
-        sessionsRoot: tempDir('minidsh-e2e6d-replay-'),
+        sessionsRoot: replaySessionsRoot,
         // What `serve` mounted: the recorded requests carry its skill list.
         skillRoots: skillRootsFor(home),
         browserProfileRoot: join(home, 'browser-replay'),
@@ -269,5 +286,18 @@ describe.skipIf(!KEY)('S6 live E2E: a delegated child does real work under an au
     // were drained.
     expect(replayed.exitCode).toBe(0)
     replayHandle!.assertConsumed()
+    // And the replayed child was the SAME child. The cursors say only that
+    // each session asked for its recorded answers; this replay is also the one
+    // place in the arc where a child meets a deployment that approves
+    // everything (`approve: true`), so it is where a child composed un-narrowed,
+    // or one whose escalation the deployment granted, would show — in the
+    // replayed child's own log, which nothing read.
+    const replayedStart = storedLog(replaySessionsRoot, replayed.sessionId).find((event) => event.type === 'subagent/start')
+    expect(replayedStart, 'the replayed parent delegated to nobody').toBeDefined()
+    const replayedChild = storedLog(replaySessionsRoot, (replayedStart!.data as { childId: string }).childId)
+    narrowHeader(replayedChild, 'the replayed child')
+    const replayedDecisions = replayedChild.filter((event) => event.type === 'approval/decided').map((event) => event.data as { outcome: string; decidedBy?: string })
+    expect(replayedDecisions.length, 'the replayed child reached no approval, though the recording did').toBe(decided.length)
+    expect(replayedDecisions.map((decision) => `${decision.outcome} by ${decision.decidedBy}`), 'an approving deployment answered for a delegated child').toEqual(decided.map(() => 'rejected by policy'))
   })
 })

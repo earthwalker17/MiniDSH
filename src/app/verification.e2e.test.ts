@@ -35,6 +35,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { QUADRANT_COLOURS, quadPng } from '../test-support/images.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
@@ -44,6 +45,7 @@ import { skillRootsFor } from './home.ts'
 import { transcriptLines } from './present.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the verification arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 
 /**

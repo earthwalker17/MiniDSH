@@ -12,9 +12,11 @@
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
 import { describe, expect, it } from 'vitest'
+import { expectKeys } from '../../test-support/expect-keys.ts'
 import { DeepSeekAdapter, deepseekCatalog } from './adapter.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the DeepSeek drift probe', ['DEEPSEEK_API_KEY'])
 const BASE = process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com'
 
 interface ListedModel {

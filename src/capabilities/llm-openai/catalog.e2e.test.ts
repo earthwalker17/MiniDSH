@@ -14,9 +14,11 @@
  * OpenAI secret (ARCHITECTURE §10). Costs well under one US cent.
  */
 import { describe, expect, it } from 'vitest'
+import { expectKeys } from '../../test-support/expect-keys.ts'
 import { OPENAI_CATALOG } from './catalog.ts'
 
 const KEY = process.env.OPENAI_API_KEY
+expectKeys('the OpenAI drift probe', ['OPENAI_API_KEY'])
 const BASE = (process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/$/u, '')
 /** The levels a probe may try, in the order that finds an unsupported one fastest across today's rows. */
 const PROBES = ['none', 'minimal', 'max', 'xhigh'] as const

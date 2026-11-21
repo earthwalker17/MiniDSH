@@ -10,13 +10,15 @@
  *
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { resultFailed, resultText, storedLog } from '../test-support/arc-evidence.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
@@ -24,6 +26,7 @@ import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the composition arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 const GREET_PLUGIN = fileURLToPath(new URL('../test-support/fixtures/greet-plugin.ts', import.meta.url))
 const TASK = 'Call the greet tool with name "minidsh" and reply with the tool output exactly, and nothing else.'
@@ -128,9 +131,18 @@ describe.skipIf(!KEY)('S4 live E2E: a from-disk composition drives the real runt
     // assertions above can fail if they did not: an unmounted `tool-greet`
     // answers UNKNOWN_TOOL, which is an isError result the turn survives, so
     // the recorded chunks replay, the text matches and the cursors drain on
-    // arithmetic (the S7.5 class). The replayed log is where the tool ran.
-    const replayLog = readFileSync(join(replaySessionsRoot, `${encodeURIComponent(replayed.sessionId)}.jsonl`), 'utf8')
-    expect(replayLog, 'the replay drained its script without ever running the module-loaded tool').toContain('greeting:MINIDSH-7')
+    // arithmetic (the S7.5 class). The replayed log is where the tool ran —
+    // in its tool/result, and only there: TASK asks the model to repeat the
+    // output, so the recorded ANSWER carries the same string, the replay
+    // re-emits that answer whatever the tools did, and a search of the whole
+    // log (which this was) is satisfied by the echo with `tool-greet` gone.
+    const replayLog = storedLog(replaySessionsRoot, replayed.sessionId)
+    const replayedCall = replayLog.find((event) => event.type === 'tool/call' && (event.data as { name: string }).name === 'greet')
+    expect(replayedCall, 'the replay never called the module-loaded tool').toBeDefined()
+    const replayedResult = replayLog.find((event) => event.type === 'tool/result' && (event.data as { callId?: string }).callId === (replayedCall!.data as { callId: string }).callId)
+    expect(replayedResult, 'the replayed greet call was never answered').toBeDefined()
+    expect(resultFailed(replayedResult!), `the replayed greet call failed: ${resultText(replayedResult!)}`).toBe(false)
+    expect(resultText(replayedResult!), 'the replay drained its script without the module-loaded tool producing its output').toContain('greeting:MINIDSH-7')
   })
 })
 

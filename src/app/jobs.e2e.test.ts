@@ -17,18 +17,20 @@
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Logger } from '../kernel/index.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay, recordedRoute } from '../test-support/llm-replay.ts'
 import { coldRead, killSpawnedServes, ServeProcess, validPrefix } from '../test-support/serve-process.ts'
 import { runTask } from './headless.ts'
 import { skillRootsFor } from './home.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
+expectKeys('the jobs arc', ['DEEPSEEK_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 let dirs: string[] = []
 afterAll(() => {
@@ -191,19 +193,29 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
     // IDLE, a job running: the shape whose log a recorded replay may still read.
     await first.kill()
     const pid = data<{ pid?: number }>(start).pid
-    const sizeAtKill = statSync(join(workspace, 'heartbeat.txt')).size
-    await new Promise((resolve) => setTimeout(resolve, 2_000))
-    const survived = statSync(join(workspace, 'heartbeat.txt')).size > sizeAtKill
     const worker = Number(readFileSync(join(workspace, 'long.pid'), 'utf8'))
+    expect(Number.isInteger(worker) && worker > 0, `long.pid holds ${JSON.stringify(readFileSync(join(workspace, 'long.pid'), 'utf8'))}, not the worker's pid`).toBe(true)
+    // Decided by the worker's OWN pid, waited on to a bound: a worker that goes
+    // with its host is gone within moments, and one that survives is still
+    // there when the bound runs out. (The verdict used to be "did the
+    // heartbeat file grow in the 2 s after the kill", with the baseline read
+    // after the kill returned: the worker dies through two Job closes behind
+    // its host and beats every 500 ms, so one last beat in that gap read as
+    // SURVIVED.)
+    const goneBy = Date.now() + 10_000
+    while (alive(worker) && Date.now() < goneBy) await new Promise((resolve) => setTimeout(resolve, 100))
+    const survived = alive(worker)
     const root = pid !== undefined && alive(pid) ? 'alive' : 'gone'
-    console.log(`[jobs arc B] ${process.platform}: the job's worker ${survived ? 'SURVIVED' : 'died with'} its host; its root (pid ${pid ?? '?'}) is ${root}`)
+    console.log(`[jobs arc B] ${process.platform}: the job's worker (pid ${worker}) ${survived ? 'SURVIVED' : 'died with'} its host; its root (pid ${pid ?? '?'}) is ${root}`)
     if (pid !== undefined) killTree(pid)
     killTree(worker)
     // On Windows the job's own pwsh holds what it starts in a kill-on-close
     // Job (S21.1, `PWSH_CONTAINMENT`): libuv's Job killed that pwsh with the
     // host, and closing its handle took the worker down too. It SURVIVED in
-    // 7 of 7 S17 runs.
+    // 7 of 7 S17 runs. Under bubblewrap the profile's `--die-with-parent` does
+    // the same, which ARCHITECTURE §13 states and this used only to print.
     if (process.platform === 'win32') expect(survived, "a Windows job's worker outlived its killed host").toBe(false)
+    if (process.platform === 'linux' && process.env.MINIDSH_EXPECT_CONFINEMENT === '1') expect(survived, "a confined Linux job's worker outlived its killed host").toBe(false)
 
     // ---- a cold read predicts the closers -----------------------------------
     const sessionFile = join(home, 'sessions', `${encodeURIComponent(sessionId)}.jsonl`)

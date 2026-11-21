@@ -27,6 +27,7 @@ import { AGENTS } from '../core/agent/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import type { EventEnvelope } from '../core/session/index.ts'
 import { WEB_SEARCH_NOTICE } from '../capabilities/tool-web-search/index.ts'
+import { expectKeys } from '../test-support/expect-keys.ts'
 import { installLlmReplay } from '../test-support/llm-replay.ts'
 import { killSpawnedServes, ServeProcess } from '../test-support/serve-process.ts'
 import { loadCompositionFile, toPatches } from './config.ts'
@@ -35,6 +36,7 @@ import { skillRootsFor } from './home.ts'
 
 const DEEPSEEK = process.env.DEEPSEEK_API_KEY
 const TAVILY = process.env.TAVILY_API_KEY
+expectKeys('the search arc', ['DEEPSEEK_API_KEY', 'TAVILY_API_KEY'])
 const silent: Logger = { warn: () => {}, error: () => {} }
 
 let dirs: string[] = []
