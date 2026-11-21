@@ -115,7 +115,7 @@ async function draw(state) {
       card.append(
         h('h1', { text: 'Welcome to MiniDSH' }),
         view.notice ? h('p', { class: 'error', text: view.notice }) : null,
-        h('p', { text: 'Choose a folder for MiniDSH to work in. It reads and edits files there and runs commands there with your approval; every session keeps a log you can resume, fork and audit.' }),
+        h('p', { text: 'Choose a folder for MiniDSH to work in. It reads and edits files there and runs commands there with your approval; every session keeps a log you can reopen here later.' }),
         h('div', { class: 'actions' }, button('Choose a folder…', () => api.chooseFolder(), true)),
       )
       const before = h('div', { class: 'section' }, h('h2', { text: 'Before you start' }))
