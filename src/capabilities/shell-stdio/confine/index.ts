@@ -131,7 +131,11 @@ function isDirectory(path: string): boolean {
   }
 }
 
-/** One candidate per platform. Windows has none, and §13 says why. */
+/**
+ * One candidate per platform. Windows has none, by decision: DSH's own
+ * backend there reports `partial`, needs native bindings and leaves standing
+ * ACL changes (BLUEPRINT §2, ARCHITECTURE §13).
+ */
 const PLATFORM_CANDIDATE: Readonly<Record<string, Exclude<ConfinementId, 'none'> | undefined>> = {
   linux: 'bwrap',
   darwin: 'seatbelt',

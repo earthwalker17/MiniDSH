@@ -8,7 +8,8 @@
  * set is the union of what applied compactions shadowed IN THIS SESSION, so it
  * is not a log reader, not a session search, and cannot reach another session's
  * events. Reads are never fenced, and there is nothing here to fence: an agent
- * can only see what it was already shown once.
+ * can only see what it was already shown once. Nothing makes the model call
+ * it, even after a wrong summary: recall is offered, never forced.
  *
  * **It costs nothing until it can do something.** The tool is registered in the
  * deployment globals — so a summary can name it by tag without knowing which

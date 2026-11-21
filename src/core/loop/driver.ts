@@ -559,6 +559,10 @@ export class ReactLoopAgent implements Agent {
         // A cancellation that lands during recovery (e.g. retry backoff) is a
         // cancellation, not a provider failure.
         if (signal.aborted) throw new Error('request aborted during recovery')
+        // No `agent/pre-step` precedes a retry: after an overflow compaction
+        // this request lacks what the compaction shadowed and a pre-step would
+        // have re-entered (AGENTS.md, the skill list) until the next step
+        // (ARCHITECTURE §13).
         if (action?.kind === 'retry') continue
         return { kind: 'error', reason: { kind: 'error', code: finish.failure.code, message: finish.failure.message } }
       }

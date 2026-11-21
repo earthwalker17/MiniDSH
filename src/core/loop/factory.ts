@@ -124,7 +124,9 @@ class LoopFactory implements AgentFactory {
       // Work the agent owns outside a turn (`Agent.own`): the cancel above
       // aborted its signal, and it gets to record how it ended while the scope
       // is whole and the session still takes appends — the end recorded
-      // before the detach. Bounded: the cancel is cooperative.
+      // before the detach. Bounded: the cancel is cooperative. Work that
+      // ignores its abort past the bound is abandoned, and a record it writes
+      // later meets a closed log (`SESSION_CLOSED`).
       if (!(await agent.settleOwned(this.ownedWorkBoundMs))) {
         this.ctx.logger.warn(`agent ${session.id}: work it owned outside a turn did not stop within ${this.ownedWorkBoundMs} ms of its disposal; disposing anyway`)
       }

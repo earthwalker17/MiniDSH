@@ -73,9 +73,12 @@ function shellCommand(dialect: ShellDialect, shellPath: string | undefined): { c
  *     suspicious-script log (`PWSH_CONTAINMENT`).
  *   - It fails SOFT. Under Constrained Language Mode (WDAC, AppLocker) it runs
  *     nothing and only warns; where any call fails, the same: one
- *     `Write-Warning` line naming `minidsh:`, and the command runs as before,
- *     under the old taskkill tree kill (measured: the warning, then the
- *     command, exit kept).
+ *     `Write-Warning` line naming `minidsh:`. A one-shot and a job then run as
+ *     before, under the old taskkill tree kill (measured: the warning, then
+ *     the command, exit kept). The PERSISTENT shell does not: under that mode
+ *     its `wrapper` below decodes each command with a method call the mode
+ *     refuses, so it runs no command at all (measured with the mode set
+ *     in-session; ARCHITECTURE §13).
  *   - On a machine whose security tooling reads that log, each pwsh start
  *     still logs the BODY once (reflection over kernel32's Job calls), which
  *     such tooling may flag (§13).

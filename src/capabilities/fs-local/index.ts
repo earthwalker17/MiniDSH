@@ -243,6 +243,9 @@ class LocalFs implements Fs {
       if (intent.kind === 'replaceIfVersion' && versionOf(await handle.stat()) !== intent.version) {
         throw new FsError('FS_STALE_VERSION', `"${target.displayPath}" changed since it was read`)
       }
+      // Not atomic: truncate, then write. A failure between the two leaves the
+      // file empty or partial with no `effect/recorded`, and the old content
+      // is gone (ARCHITECTURE §13).
       await handle.truncate(0)
       await handle.writeFile(text, 'utf8')
       // Before the version read, which can fail on a write that already landed
