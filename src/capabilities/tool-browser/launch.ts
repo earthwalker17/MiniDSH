@@ -129,11 +129,16 @@ const SWITCHES = [
 
 /**
  * Bounds a browser that never answers (a session bus that accepts and never
- * replies wedges any Chromium's start, measured), not a slow one: Edge's cold
- * first start on a fresh ubuntu-latest VM took 19–32 s, working throughout
- * (its verbose log has no silence over 2.5 s; 2026-10-19). 30 s cut it off.
+ * replies wedges any Chromium's start, measured), not a slow one. A browser's
+ * first start after a boot is slow: Edge on a fresh ubuntu CI VM took 19 to
+ * 41 s on most runs and 64 s once, working throughout (2026-10-19 to
+ * 2026-11-20), and with `startup` measured it is the cold binary that costs:
+ * 8.3 s before Edge wrote its first byte and 20.9 s to its first answer, 7.1 s
+ * and 14.5 s for Chromium, while a browser already started in that run
+ * answered in 0.2 s (ubuntu-26.04, 2026-11-21). 30 s cut real starts off and
+ * 60 s did once; 120 s has not been reached by a browser that was working.
  */
-const START_TIMEOUT_MS = 60_000
+const START_TIMEOUT_MS = 120_000
 const CANARY_TIMEOUT_MS = 20_000
 
 export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBrowser> {
@@ -279,7 +284,10 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     await close()
     if (error instanceof BrowserError && error.code === 'BROWSER_FENCE_UNAVAILABLE') throw error
     const known = remedy(tail)
-    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${messageOf(error)} (${phases})${known.text}`, { hostFault: known.hostFault })
+    // A start that only ran out of time is a moment: the same call a little
+    // later meets a warm binary, and the reader should know to make it.
+    const again = known.hostFault ? '' : '; the next call starts it again, and a first start after a boot is the slow one'
+    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${messageOf(error)} (${phases})${again}${known.text}`, { hostFault: known.hostFault })
   }
 }
 

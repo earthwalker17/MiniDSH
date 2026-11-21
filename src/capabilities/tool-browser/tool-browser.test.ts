@@ -27,7 +27,8 @@ import { changesSince, header, toolBrowserPlugin } from './index.ts'
 
 expectBrowserSuite('tool-browser tools')
 
-const LONG = { timeout: 120_000 }
+/** Above the launch's own 120 s bound, so a start that fails says why instead of timing the test out. */
+const LONG = { timeout: 240_000 }
 let harnesses: CoreHarness[] = []
 let dirs: string[] = []
 let served: FixtureServer | undefined
@@ -37,7 +38,7 @@ afterEach(async () => {
   harnesses = []
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   dirs = []
-}, 120_000)
+}, 240_000)
 afterAll(async () => {
   await served?.close()
 })

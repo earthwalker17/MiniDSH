@@ -21,7 +21,8 @@ import type { BrowserPage, CallBudget } from './types.ts'
 
 expectBrowserSuite('tool-browser page')
 
-const LONG = { timeout: 120_000 }
+/** Above the launch's own 120 s bound, so a start that fails says why instead of timing the test out. */
+const LONG = { timeout: 240_000 }
 const VIEWPORT = { width: 1000, height: 700 }
 const DOWNLOAD_NAME = `minidsh-download-${process.pid}-${Date.now()}.bin`
 
@@ -200,14 +201,14 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
     fixture = await fixtureServer(ROUTES)
     browser = await launchBrowser({ executablePath: testBrowser!.path, profileRoot: tempDir('minidsh-profiles-'), headless: true, allowHosts: [], declared: [], window: { width: 1280, height: 800 } })
     page = await openPage({ cdp: browser.cdp, generation: 1, workspaceRoot: workspace, viewport: VIEWPORT, refs: { next: 1 } })
-  }, 120_000)
+  }, 240_000)
 
   afterAll(async () => {
     await page?.close()
     await browser?.close()
     await fixture?.close()
     for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
-  }, 120_000)
+  }, 240_000)
 
   /** Load a fixture and drain the report, so each test reads only what it caused. */
   async function go(path: string): Promise<string> {

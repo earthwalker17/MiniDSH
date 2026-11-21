@@ -23,13 +23,14 @@ import { candidates, locateBrowser } from './locate.ts'
 
 expectBrowserSuite('tool-browser launch')
 
-const LONG = { timeout: 120_000 }
+/** Above the launch's own 120 s bound, so a start that fails says why instead of timing the test out. */
+const LONG = { timeout: 240_000 }
 const dirs: string[] = []
 const browsers: LaunchedBrowser[] = []
 afterAll(async () => {
   for (const browser of browsers) await browser.close()
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
-}, 120_000)
+}, 240_000)
 
 function tempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix))
