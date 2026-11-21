@@ -21,26 +21,49 @@
  * A worktree that genuinely needs dependencies runs its own `pnpm install`;
  * this project has no build step, so most inspection needs no worktree at all.
  *
+ * What it reads is the command's TEXT, so it sees a path only where the text
+ * names one. Every word of a deleting statement is tried as a path, a bare
+ * `wt` as much as `./wt`, against each directory the statement could be
+ * running in: the session's, one an earlier `cd` on the same line moved to,
+ * and `git -C <dir>`. Git Bash's spellings of a Windows path are read as that
+ * shell reads them. A path held in a variable, or made by a glob, is not
+ * seen: that is the limit of reading text, and the reason rule 1 comes first.
+ *
  * Exit 2 blocks the call and returns the reason to the agent.
+ * `scripts/guard-repo.test.ts` feeds it tool inputs and reads the exit code;
+ * the hook only ever inspects a command, so nothing in that test deletes.
  */
 import { lstatSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
-/** Verbs that CREATE a link. Matched per statement, so a grep that merely mentions one is not a link. */
+/**
+ * Verbs that CREATE a link. Matched per statement, so a grep that merely
+ * mentions one is not a link. A verb counts at the start of a statement, after
+ * a space, or right after a quote: `cmd //c "mklink …"` is still a mklink.
+ */
 const LINK_VERBS = [
-  /(^|[\s;&|(])mklink\b/i,
-  /(^|[\s;&|(])new-item\b[^\n]*?-itemtype\s*['"]?\s*(symboliclink|junction|hardlink)/i,
-  /(^|[\s;&|(])ln\s+-[a-z]*s/i,
-  /(^|[\s;&|(])junction(\.exe)?\s/i,
+  /(^|[\s;&|({"'])mklink\b/i,
+  // New-Item, or its alias `ni`, asked for a link type under any spelling of
+  // the parameter: `-ItemType`, its alias `-Type`, or a prefix PowerShell accepts.
+  /(^|[\s;&|({"'])(new-item|ni)\b[^\n]*\b(symboliclink|junction|hardlink)\b/i,
+  /(^|[\s;&|({"'])ln\s+(-[a-z]*s|--symbolic)/i,
+  /(^|[\s;&|({"'])junction(\.exe)?\s/i,
 ]
 
 /** Verbs that delete a directory TREE, and would therefore follow a link inside it. */
 const RECURSIVE_DELETES = [
-  /(^|[\s;&|(])git\s+worktree\s+remove\b/i,
-  /(^|[\s;&|(])rm\s+(-[a-z]*\s+)*-[a-z]*r/i,
-  /(^|[\s;&|(])remove-item\b[^\n]*-recurse/i,
-  /(^|[\s;&|(])(rd|rmdir)\s+\/s\b/i,
+  // `git worktree remove`, with or without `-C <dir>` before the subcommand.
+  /(^|[\s;&|({"'])git\b[^\n]*\bworktree\s+remove\b/i,
+  // rm with a recursive flag anywhere among its arguments: -r, -R, -rf, -fr, --recursive.
+  /(^|[\s;&|({"'])rm\b[^\n]*?\s(-[a-z]*r[a-z]*|--recursive)(?=[\s"']|$)/i,
+  // PowerShell's Remove-Item and its aliases, `-Recurse` abbreviated as PowerShell allows (`-r`, `-rec`).
+  /(^|[\s;&|({"'])(remove-item|ri|del|erase|rd|rmdir)\b[^\n]*?\s-r(?:e(?:c(?:u(?:r(?:s(?:e)?)?)?)?)?)?(?=[\s:"']|$)/i,
+  /(^|[\s;&|({"'])(rd|rmdir)\b[^\n]*?\s\/s\b/i,
 ]
+
+/** `cd <dir>` in any of its spellings: where the rest of the line runs. */
+const CHANGE_DIRECTORY = /^[\s({]*(?:cd|chdir|pushd|set-location|sl|push-location)\s+(?:\/d\s+|--\s+|-(?:literal)?path\s+)?(?:"([^"]*)"|'([^']*)'|(\S+))/i
 
 /** One command line as separate statements, so a verb in one is not attributed to a path in another. */
 function statements(command) {
@@ -50,15 +73,45 @@ function statements(command) {
     .filter((part) => part.length > 0)
 }
 
-/** Every path-shaped token in a statement: quoted runs, and bare non-flag words containing a separator. */
+/**
+ * Every word of a statement that could name a path: quoted runs and bare
+ * words alike, a comma list taken apart. A quoted run is taken whole (a path
+ * with a space in it) AND word by word (a command handed to another shell,
+ * `bash -c "rm -rf wt"`). Flags are left out, and so is anything with a
+ * variable in it, whose value this cannot know.
+ */
 function pathTokens(statement) {
   const tokens = []
+  const take = (text) => {
+    for (const piece of text.split(',')) {
+      const word = piece.trim().replace(/^[({]+|[)}]+$/g, '').replace(/[\\/]+$/, '')
+      if (word.length === 0 || word.startsWith('-') || word.includes('$')) continue
+      tokens.push(word)
+    }
+  }
   for (const match of statement.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
-    const value = match[1] ?? match[2] ?? match[3] ?? ''
-    if (value.length === 0 || value.startsWith('-') || value.startsWith('$')) continue
-    if (/[\\/]/.test(value)) tokens.push(value.replace(/[\\/]+$/, ''))
+    const quoted = match[1] ?? match[2]
+    take(quoted ?? match[3] ?? '')
+    if (quoted !== undefined && /\s/.test(quoted)) for (const inner of quoted.split(/\s+/)) take(inner)
   }
   return tokens
+}
+
+/**
+ * A path as the shell that will run the command reads it, from `base`. Git
+ * Bash on Windows spells `C:\x` as `/c/x`, the temp folder as `/tmp` and the
+ * home folder as `~`; Node would read the first as `\c\x` on the current drive
+ * and find nothing there.
+ */
+function located(base, word) {
+  let path = word
+  if (path === '~' || /^~[\\/]/.test(path)) path = join(homedir(), path.slice(1))
+  else if (process.platform === 'win32') {
+    const drive = /^\/([a-z])(?:\/(.*))?$/i.exec(path)
+    if (drive) path = `${drive[1]}:/${drive[2] ?? ''}`
+    else if (path === '/tmp' || path.startsWith('/tmp/')) path = join(tmpdir(), path.slice(4))
+  }
+  return resolve(base, path)
 }
 
 /** True when the path itself is a link (junction, symlink) rather than a real directory. */
@@ -98,7 +151,8 @@ try {
 }
 const command = input?.tool_input?.command
 if (typeof command !== 'string' || command.length === 0) process.exit(0)
-const cwd = typeof input?.cwd === 'string' ? input.cwd : process.cwd()
+/** Where the statement being read runs: the session's directory, until a `cd` on this line moves it. */
+let cwd = typeof input?.cwd === 'string' ? input.cwd : process.cwd()
 
 for (const statement of statements(command)) {
   if (/node_modules/i.test(statement) && LINK_VERBS.some((verb) => verb.test(statement))) {
@@ -113,9 +167,19 @@ for (const statement of statements(command)) {
     ])
   }
 
+  const moved = CHANGE_DIRECTORY.exec(statement)
+  if (moved) {
+    const to = moved[1] ?? moved[2] ?? moved[3] ?? ''
+    // A directory this cannot know (a variable, `cd -`) leaves the last known one standing.
+    if (to.length > 0 && !to.includes('$') && !to.startsWith('-')) cwd = located(cwd, to.replace(/[)}]+$/, ''))
+    continue
+  }
+
   if (!RECURSIVE_DELETES.some((pattern) => pattern.test(statement))) continue
-  for (const token of pathTokens(statement)) {
-    const candidate = isAbsolute(token) ? token : resolve(cwd, token)
+  // `git -C <dir> …` runs in that directory, whatever the shell's own is.
+  const bases = [cwd, ...[...statement.matchAll(/\s-C\s+(?:"([^"]*)"|'([^']*)'|(\S+))/g)].map((match) => located(cwd, match[1] ?? match[2] ?? match[3] ?? ''))]
+  const candidates = new Set(pathTokens(statement).flatMap((word) => bases.map((base) => located(base, word))))
+  for (const candidate of candidates) {
     // The target itself being a link is the same hazard by a shorter path:
     // git-bash `rm -rf` walks INTO a Windows junction rather than unlinking it.
     if (isLink(candidate)) {
