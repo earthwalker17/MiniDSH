@@ -1,8 +1,11 @@
 /**
- * The runtime's environment, built from main's. Pure, so tested on any host.
+ * The runtime's environment, built from main's, and the one thing main's own
+ * environment must say (`exemptLoopbackFromProxy`). No Electron, so both are
+ * tested on any host.
  *
  * Owns: what main passes on to the runtime (and, through the runtime's own
- * rule in core/process.ts, to an agent's shell). Must not own: secrets (the
+ * rule in core/process.ts, to an agent's shell), and that main's loopback
+ * requests go around an environment proxy. Must not own: secrets (the
  * runtime's credentials plane) or anything the runtime scrubs itself.
  *
  *   - The bundled Node's directory is APPENDED to PATH: a person's own `node`
@@ -18,6 +21,28 @@ import { delimiter as hostDelimiter } from 'node:path'
 
 const APPIMAGE_NAMES = ['APPDIR', 'APPIMAGE', 'ARGV0', 'OWD']
 const SEARCH_PATHS = ['PATH', 'LD_LIBRARY_PATH', 'XDG_DATA_DIRS', 'GSETTINGS_SCHEMA_DIR', 'QT_PLUGIN_PATH', 'PERLLIB', 'PYTHONPATH', 'GST_PLUGIN_SYSTEM_PATH', 'GST_PLUGIN_SYSTEM_PATH_1_0']
+
+/**
+ * Main's own requests (the sign-in, the inspection) go to 127.0.0.1 carrying
+ * the launch token and the cookie, and an environment proxy must never see
+ * them: Node honours `NODE_USE_ENV_PROXY` with `HTTP_PROXY`. Its proxy agent
+ * reads the LOWERCASE `no_proxy` first and the uppercase only when that one
+ * is unset, so on a host whose environment is case-sensitive a `no_proxy`
+ * that lacks loopback, even an empty one, would win over anything written to
+ * `NO_PROXY` alone. Both spellings are therefore made to exempt it. Changes
+ * `env` in place (it is `process.env`, where Windows keeps one variable under
+ * both spellings: the second pass then finds the entry already there).
+ */
+export function exemptLoopbackFromProxy(env: NodeJS.ProcessEnv): void {
+  for (const name of ['NO_PROXY', 'no_proxy']) {
+    const entries = (env[name] ?? '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+    if (!entries.includes('127.0.0.1')) entries.push('127.0.0.1')
+    env[name] = entries.join(',')
+  }
+}
 
 export function runtimeEnv(base: NodeJS.ProcessEnv, nodeDir: string, delimiter: string = hostDelimiter): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base }

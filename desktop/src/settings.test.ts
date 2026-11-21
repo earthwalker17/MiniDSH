@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,6 +28,40 @@ describe('desktop settings', () => {
       expect(settings).toEqual(defaultSettings())
       expect(problems).toHaveLength(1)
     }
+  })
+
+  // The defaults returned for a file that is there are NOT that file's
+  // content: `unreadable` is how main knows not to write them over it.
+  it('marks a file it could not understand as unreadable, each way it can happen, and no other read', () => {
+    const dir = scratch()
+    writeFileSync(join(dir, 'comma.json'), '{"version":1,"folders":["/work/a"],}')
+    writeFileSync(join(dir, 'list.json'), '["/work/a"]')
+    writeFileSync(join(dir, 'empty.json'), '')
+    mkdirSync(join(dir, 'directory.json'))
+    const read = (name: string): { unreadable: string | undefined; problems: string[] } => {
+      const { unreadable, problems } = readSettings(join(dir, name), 'linux')
+      return { unreadable, problems }
+    }
+    expect(read('comma.json')).toEqual({ unreadable: 'is not valid JSON', problems: [expect.stringMatching(/^the settings file is not valid JSON; it is left as it is/)] })
+    expect(read('list.json')).toEqual({ unreadable: 'is not a JSON object', problems: [expect.stringMatching(/is not a JSON object; it is left as it is/)] })
+    expect(read('empty.json').unreadable).toBe('is not valid JSON')
+    // A read that fails for any reason but absence: here the path is a directory.
+    expect(read('directory.json')).toEqual({ unreadable: expect.stringMatching(/^could not be read \(E[A-Z]+\)$/), problems: [expect.stringMatching(/could not be read/)] })
+    // Absent is the first run, and a file with one bad field is still that file: both may be written.
+    expect(read('absent.json')).toEqual({ unreadable: undefined, problems: [] })
+    writeFileSync(join(dir, 'field.json'), '{"version":1,"folders":["/work/a"],"port":80}')
+    expect(read('field.json')).toEqual({ unreadable: undefined, problems: [expect.stringMatching(/"port"/)] })
+  })
+
+  // Windows PowerShell 5.1 and older editors save UTF-8 with a byte-order
+  // mark, which JSON.parse refuses: the file looked valid and read as broken.
+  it('reads a file saved with one leading byte-order mark, and refuses a mark anywhere else', () => {
+    const dir = scratch()
+    const stored = '{"version":1,"folders":["/work/a"],"port":31234}'
+    writeFileSync(join(dir, 'bom.json'), `﻿${stored}`)
+    expect(readSettings(join(dir, 'bom.json'), 'linux')).toEqual({ settings: { version: 1, folders: ['/work/a'], port: 31_234 }, problems: [] })
+    writeFileSync(join(dir, 'two.json'), `﻿﻿${stored}`)
+    expect(readSettings(join(dir, 'two.json'), 'linux').unreadable).toBe('is not valid JSON')
   })
 
   it('drops an invalid field ALONE and keeps the rest', () => {

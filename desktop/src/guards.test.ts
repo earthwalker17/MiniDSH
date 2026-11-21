@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runtimeEnv } from './env.ts'
+import { exemptLoopbackFromProxy, runtimeEnv } from './env.ts'
 import { externalUrl, isHostUrl } from './guards.ts'
 
 describe('the host URL rule', () => {
@@ -79,5 +79,29 @@ describe("the runtime's environment", () => {
     const env = runtimeEnv({ APPDIR: '/x', PATH: '/x/bin:/usr/bin' }, '/n', ':')
     expect(env.PATH).toBe('/x/bin:/usr/bin:/n')
     expect(env.APPDIR).toBe('/x')
+  })
+})
+
+// Node's proxy agent reads `no_proxy` before `NO_PROXY`, and an empty value
+// counts as set: a lowercase one that lacks loopback wins over an uppercase
+// one that has it, and the launch token would go to the proxy.
+describe("main's own environment", () => {
+  const exempted = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+    exemptLoopbackFromProxy(env)
+    return env
+  }
+
+  it('exempts loopback from an environment proxy under BOTH spellings, whichever were set', () => {
+    expect(exempted({})).toEqual({ NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' })
+    expect(exempted({ no_proxy: 'example.com' })).toEqual({ NO_PROXY: '127.0.0.1', no_proxy: 'example.com,127.0.0.1' })
+    expect(exempted({ no_proxy: '' })).toEqual({ NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' })
+    expect(exempted({ NO_PROXY: 'corp.example, .internal' })).toEqual({ NO_PROXY: 'corp.example,.internal,127.0.0.1', no_proxy: '127.0.0.1' })
+    expect(exempted({ NO_PROXY: 'a.example', no_proxy: 'b.example' })).toEqual({ NO_PROXY: 'a.example,127.0.0.1', no_proxy: 'b.example,127.0.0.1' })
+  })
+
+  it('adds it once: an entry already there is not repeated, nor is a second pass', () => {
+    const env = exempted({ NO_PROXY: 'localhost,127.0.0.1', no_proxy: '127.0.0.1 , x.example' })
+    expect(env).toEqual({ NO_PROXY: 'localhost,127.0.0.1', no_proxy: '127.0.0.1,x.example' })
+    expect(exempted({ ...env })).toEqual(env)
   })
 })

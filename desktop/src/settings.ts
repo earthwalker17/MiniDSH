@@ -14,8 +14,14 @@
  * Reading never throws. A missing file is the first run; a field that fails
  * validation is dropped ALONE and named in `problems` for the log, so one bad
  * value (a hand edit, a truncated write from an older build) costs that field,
- * not every folder. Writing is atomic: a temp file in the same directory,
- * flushed, then renamed over — a crash leaves the old file or the new one.
+ * not every folder. A file that is THERE and cannot be understood at all (a
+ * read error, text that is not a JSON object) is another matter: the defaults
+ * returned for it come with `unreadable`, and main writes nothing over that
+ * file until the person changes something, because one failed read (a lock
+ * held by another program, a stray comma from a hand edit) must not cost
+ * every remembered folder. Writing is atomic: a temp file in the same
+ * directory, flushed, then renamed over — a crash leaves the old file or the
+ * new one.
  */
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, posix, win32 } from 'node:path'
@@ -121,21 +127,41 @@ export function sanitizeSettings(value: unknown, platform: NodeJS.Platform = pro
   return { settings, problems }
 }
 
-/** Never throws: a missing file is the defaults, anything unreadable is the defaults plus a problem. */
-export function readSettings(path: string, platform: NodeJS.Platform = process.platform): { settings: DesktopSettings; problems: string[] } {
+export interface SettingsRead {
+  readonly settings: DesktopSettings
+  readonly problems: string[]
+  /**
+   * The file exists and could not be understood: how, in a few words that
+   * finish "the settings file …". `settings` are then the defaults, and they
+   * must not be written over the file (see the header).
+   */
+  readonly unreadable?: string
+}
+
+const unreadable = (how: string): SettingsRead => ({
+  settings: defaultSettings(),
+  problems: [`the settings file ${how}; it is left as it is, and this launch starts without what it holds`],
+  unreadable: how,
+})
+
+/** Never throws: a missing file is the defaults; a file that cannot be understood is the defaults, a problem and `unreadable`. */
+export function readSettings(path: string, platform: NodeJS.Platform = process.platform): SettingsRead {
   let text: string
   try {
     text = readFileSync(path, 'utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { settings: defaultSettings(), problems: [] }
-    return { settings: defaultSettings(), problems: [`the settings file could not be read (${(error as NodeJS.ErrnoException).code ?? 'error'}); using defaults`] }
+    return unreadable(`could not be read (${(error as NodeJS.ErrnoException).code ?? 'error'})`)
   }
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    // One leading byte-order mark is not part of the JSON: Windows PowerShell
+    // 5.1 and older editors write one, and JSON.parse refuses it.
+    parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
   } catch {
-    return { settings: defaultSettings(), problems: ['the settings file is not valid JSON; using defaults'] }
+    return unreadable('is not valid JSON')
   }
+  if (!isRecord(parsed)) return unreadable('is not a JSON object')
   return sanitizeSettings(parsed, platform)
 }
 

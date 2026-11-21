@@ -5,6 +5,10 @@
  * guards, env, menu, credentials, update, text); what stays here is wiring
  * and the lifecycle's ordering, which desktop/e2e drives in the packaged app
  * (not every menu path: Check for Updates, About and Show Logs are untested).
+ * `main.test.ts` runs the ordering itself under Node, against a stand-in for
+ * Electron: a quit landing at a chosen step of the start, a save over a
+ * settings file that could not be read. A change to the order of a start, a
+ * stop or a quit belongs in a case there, where the moment can be chosen.
  *
  * What the desktop is (ARCHITECTURE §8, the desktop bullet): a SURFACE. It never
  * imports the runtime. It spawns the bundled CLI (`minidsh web --json`) on the
@@ -26,7 +30,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSy
 import { homedir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { listCredentials, setCredential } from './credentials.ts'
-import { runtimeEnv } from './env.ts'
+import { exemptLoopbackFromProxy, runtimeEnv } from './env.ts'
 import { admitFolder, boundsVisible, type FolderContext } from './folders.ts'
 import { externalUrl, isHostUrl as isHostUrlOf } from './guards.ts'
 import { inspectRuntime } from './inspect.ts'
@@ -54,9 +58,9 @@ const LOG_CAP_BYTES = 1024 * 1024
 // ---------------------------------------------------------------- before ready
 
 // Main's sign-in and inspection talk to 127.0.0.1 alone, carrying the launch
-// token and the cookie: an environment proxy (Node honours NODE_USE_ENV_PROXY
-// with HTTP_PROXY) must never see them.
-process.env.NO_PROXY = [process.env.NO_PROXY, '127.0.0.1'].filter(Boolean).join(',')
+// token and the cookie: an environment proxy must never see them, under
+// either spelling of the variable that exempts a host (env.ts).
+exemptLoopbackFromProxy(process.env)
 
 // Privileged before `ready`, as Electron requires: standard (a real origin for
 // relative URLs), secure (no mixed-content downgrade). No fetch, no CORS.
@@ -96,10 +100,20 @@ interface Live {
 
 let win: BrowserWindow | undefined
 let overlay: WebContentsView | undefined
+/** The Web UI's webContents id while its window exists: what the credential handoff matches a request against. */
+let webViewId: number | undefined
 let view: View = { kind: 'starting' }
 let live: Live | undefined
 let settings: DesktopSettings
 let settingsFile = ''
+/**
+ * The settings file is there and this launch could not read it (how, in a few
+ * words): nothing is written over it until the person changes the folders.
+ * The folders in it are authority the person granted, and one failed read (a
+ * lock, a hand edit's stray comma) must not replace them with none on the
+ * next window move. Cleared by the first deliberate change (`applyPendingChanges`).
+ */
+let settingsHeld: string | undefined
 let logsDir = ''
 /** Set once the stop has finished and nothing may veto the exit any more. */
 let exiting = false
@@ -125,6 +139,10 @@ let pendingChanges: ((current: DesktopSettings) => DesktopSettings)[] = []
 // ---------------------------------------------------------------- logs
 
 function log(line: string): void {
+  // Before `ready` there is no logs folder yet, and a quit can arrive that
+  // early: an empty folder would be a path relative to wherever the app was
+  // launched from, and a stray main.log there.
+  if (logsDir === '') return
   try {
     appendFileSync(join(logsDir, 'main.log'), `${new Date().toISOString()} ${line}\n`)
   } catch {
@@ -237,7 +255,15 @@ async function startRuntime(): Promise<void> {
   const { usable, missing } = usableFolders()
   const folder = usable[0]
   if (folder === undefined) {
-    return showView({ kind: 'welcome', ...(missing.length > 0 ? { notice: `MiniDSH could not find ${missing.length === 1 ? 'the folder it works in' : 'the folders it works in'}: ${missing.join(', ')}. Choose a folder, or reconnect the drive and restart MiniDSH.` } : {}) })
+    // A settings file this launch could not read looks like a first run
+    // otherwise, and the person's next pick would replace it unannounced.
+    const notice =
+      settingsHeld !== undefined
+        ? `MiniDSH's settings file ${settingsHeld}, so the folders it worked in are not listed here. The file is left as it is (${settingsFile}): put it right and restart MiniDSH, or choose a folder, which replaces it.`
+        : missing.length > 0
+          ? `MiniDSH could not find ${missing.length === 1 ? 'the folder it works in' : 'the folders it works in'}: ${missing.join(', ')}. Choose a folder, or reconnect the drive and restart MiniDSH.`
+          : undefined
+    return showView({ kind: 'welcome', ...(notice === undefined ? {} : { notice }) })
   }
   showView({ kind: 'starting' })
   const files = runtimeFiles()
@@ -245,6 +271,21 @@ async function startRuntime(): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     if (quitting) return
     const runtime = new RuntimeProcess()
+    /**
+     * A quit arrived while this runtime was starting. `requestQuit` has ended
+     * its stdin already (a runtime reads that only once it is ready, so the
+     * start usually still resolves), and a host that is closing must not be
+     * signed in to or shown: the sign-in would be refused, which reads in the
+     * log as a spent credential and on screen as the stopped view, and one
+     * that got through would leave a dying runtime as the live one, for the
+     * quit behind this start to ask about. Wait for the stop (the quit waits
+     * for this action) and show nothing: the window is going.
+     */
+    const abandonForQuit = async (): Promise<void> => {
+      starting = undefined
+      const result = await runtime.stop({ deadlineMs: 5_000 })
+      log(`quit: the runtime that was starting was stopped before it was used (graceful=${String(result.graceful)} killed=${String(result.killed)})`)
+    }
     let ready: RuntimeReady
     starting = runtime
     try {
@@ -279,10 +320,15 @@ async function startRuntime(): Promise<void> {
       log(`start failed: ${failure.kind}`)
       return showView({ kind: 'stopped', ...describeStartError(failure) })
     }
+    // Checked again at each step a quit can land in: after the start, and on
+    // both outcomes of the sign-in (`requestQuit` stops a runtime that is
+    // `starting`, and it stays that until it is `live`).
+    if (quitting) return abandonForQuit()
     let cookie: string
     try {
       cookie = await signIn(ready.port, ready.token)
     } catch (error) {
+      if (quitting) return abandonForQuit()
       // The one-shot token was spent by someone else, or the answer was not
       // our host's: never retry with it, never show the page.
       starting = undefined
@@ -290,6 +336,7 @@ async function startRuntime(): Promise<void> {
       await runtime.stop({ deadlineMs: 2_000 })
       return showView({ kind: 'stopped', title: 'MiniDSH could not sign in to its own runtime', detail: 'the launch credential was not accepted; restart MiniDSH', tail: '' })
     }
+    if (quitting) return abandonForQuit()
     const current: Live = { runtime, port: ready.port, ready, cookie }
     starting = undefined
     live = current
@@ -333,6 +380,18 @@ async function loadWebUi(current: Live): Promise<void> {
   }
 }
 
+/**
+ * A message box on the window, or nothing (`undefined`) when the window is
+ * gone. Every caller awaits something first (the runtime, the network, a
+ * picker), and a window that closed meanwhile must not be asked: with no
+ * parent Electron shows the box application-modal, which on macOS parks the
+ * main thread until someone answers, and after a quit nobody will (S22.5).
+ */
+async function ask(options: Electron.MessageBoxOptions): Promise<number | undefined> {
+  if (!win || win.isDestroyed()) return undefined
+  return (await dialog.showMessageBox(win, options)).response
+}
+
 /** Ask the runtime, through the wire, whether stopping it now would interrupt work. */
 async function confirmInterrupt(action: 'quit' | 'restart'): Promise<boolean> {
   const current = live
@@ -345,7 +404,7 @@ async function confirmInterrupt(action: 'quit' | 'restart'): Promise<boolean> {
     state.approvals > 0 ? `${state.approvals} approval${state.approvals === 1 ? '' : 's'} waiting` : '',
   ].filter(Boolean)
   const what = state.unknown ? "MiniDSH could not tell whether work is running." : `Work is running: ${parts.join(', ')}.`
-  const result = await dialog.showMessageBox(win, {
+  const response = await ask({
     type: 'warning',
     title: 'MiniDSH',
     message: action === 'quit' ? 'Quit MiniDSH?' : "Restart MiniDSH's runtime?",
@@ -355,7 +414,8 @@ async function confirmInterrupt(action: 'quit' | 'restart'): Promise<boolean> {
     cancelId: 1,
     noLink: true,
   })
-  return result.response === 0
+  // No window left to ask on: the person closed it, and that was the answer.
+  return response === undefined || response === 0
 }
 
 /** Stop the runtime gracefully (stdin end), behind the stopping view, with the web page gone first so no prompt races the stop. */
@@ -418,6 +478,13 @@ function applyPendingChanges(): void {
   if (pendingChanges.length === 0) return
   const changes = pendingChanges
   pendingChanges = []
+  // The person chose or removed a folder: the one kind of write that may
+  // replace a settings file this launch could not read (they were told so in
+  // the welcome view).
+  if (settingsHeld !== undefined) {
+    log(`settings: the file that ${settingsHeld} is replaced now, by a folder change`)
+    settingsHeld = undefined
+  }
   persist(changes.reduce((next, change) => change(next), settings))
 }
 
@@ -427,20 +494,26 @@ function requestQuit(): void {
   // so the quit queued behind it waits seconds, not the boot's two minutes.
   if (starting && !live) void starting.stop({ deadlineMs: 5_000 })
   serialize(async () => {
-    if (!(await confirmInterrupt('quit'))) {
-      quitting = false
-      // A folder change that arrived behind this quit runs now.
-      if (pendingChanges.length > 0) reconcile()
-      return
+    try {
+      if (!(await confirmInterrupt('quit'))) {
+        // A folder change that arrived behind this quit runs now.
+        if (pendingChanges.length > 0) reconcile()
+        return
+      }
+      // Folder changes the person asked for before quitting are kept for the next launch.
+      applyPendingChanges()
+      await stopRuntime(false)
+      exiting = true
+      // Both ends of the quit are logged: an app that stayed up after its
+      // runtime stopped (seen on a macOS runner, S22.5) must say how far it got.
+      log('quit: runtime stopped, closing')
+      app.quit()
+    } finally {
+      // A quit that was cancelled, or that threw on its way (`serialize` logs
+      // it), is no quit: left set, `quitting` would make every later start
+      // return early until the person closed the window again.
+      if (!exiting) quitting = false
     }
-    // Folder changes the person asked for before quitting are kept for the next launch.
-    applyPendingChanges()
-    await stopRuntime(false)
-    exiting = true
-    // Both ends of the quit are logged: an app that stayed up after its
-    // runtime stopped (seen on a macOS runner, S22.5) must say how far it got.
-    log('quit: runtime stopped, closing')
-    app.quit()
   }, true)
 }
 
@@ -466,10 +539,15 @@ function reconcile(change?: (current: DesktopSettings) => DesktopSettings, confi
 
 // ---------------------------------------------------------------- folders
 
+/** The settings to disk, unless the file there is one this launch could not read (`settingsHeld`). */
+function storeSettings(): void {
+  if (settingsHeld === undefined) writeSettings(settingsFile, settings)
+}
+
 function persist(next: DesktopSettings): void {
   settings = next
   try {
-    writeSettings(settingsFile, next)
+    storeSettings()
   } catch (error) {
     log(`settings not saved: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -483,7 +561,7 @@ async function openFolder(): Promise<void> {
   if (picked.canceled || chosen === undefined) return
   const verdict = admitFolder(chosen, folderContext())
   if (!verdict.ok) {
-    await dialog.showMessageBox(win, { type: 'error', title: 'MiniDSH', message: 'MiniDSH cannot work in that folder', detail: verdict.reason, buttons: ['OK'], noLink: true })
+    await ask({ type: 'error', title: 'MiniDSH', message: 'MiniDSH cannot work in that folder', detail: verdict.reason, buttons: ['OK'], noLink: true })
     return
   }
   reconcile((current) => withCurrentFolder(current, verdict.path))
@@ -491,7 +569,7 @@ async function openFolder(): Promise<void> {
 
 async function removeFolder(folder: string): Promise<void> {
   if (!win) return
-  const answer = await dialog.showMessageBox(win, {
+  const response = await ask({
     type: 'question',
     title: 'MiniDSH',
     message: `Remove ${folder} from MiniDSH?`,
@@ -501,7 +579,7 @@ async function removeFolder(folder: string): Promise<void> {
     cancelId: 1,
     noLink: true,
   })
-  if (answer.response !== 0) return
+  if (response !== 0) return
   // With no folder left, the start shows the welcome view.
   reconcile((current) => withoutFolder(current, folder))
 }
@@ -634,7 +712,7 @@ function saveBounds(): void {
   const bounds = maximized ? (settings.window ?? win.getNormalBounds()) : win.getBounds()
   settings = { ...settings, window: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, maximized } }
   try {
-    writeSettings(settingsFile, settings)
+    storeSettings()
   } catch {
     // Best effort.
   }
@@ -663,6 +741,7 @@ function createWindow(): void {
   })
   if (usable && remembered.maximized) win.maximize()
   const web = win.webContents
+  webViewId = web.id
   guardWebView(web)
   overlay = new WebContentsView({
     webPreferences: {
@@ -684,6 +763,19 @@ function createWindow(): void {
     overlay?.webContents.send('shell:view', shellState())
     win?.show()
   })
+  // The window is shown once the shell page has drawn. A shell page that fails
+  // to load, or never finishes, must not leave a running app with no window:
+  // it is shown anyway, and the log says why.
+  overlay.webContents.once('did-fail-load', (_event, code, description) => {
+    log(`the shell page did not load (${String(code)} ${description}); showing the window anyway`)
+    win?.show()
+  })
+  const unseen = setTimeout(() => {
+    if (!win || win.isDestroyed() || win.isVisible()) return
+    log('the shell page has not finished loading after 15 s; showing the window anyway')
+    win.show()
+  }, 15_000)
+  win.once('closed', () => clearTimeout(unseen))
   win.on('resize', layoutOverlay)
   win.on('resized', saveBounds)
   win.on('moved', saveBounds)
@@ -712,6 +804,7 @@ function createWindow(): void {
     const gone = overlay
     win = undefined
     overlay = undefined
+    webViewId = undefined
     // Typed as always present, but a view whose contents went with the window
     // answers `undefined` here, not a destroyed object: reading `isDestroyed`
     // off it threw in one macOS run of six, from this very handler (S22.5).
@@ -811,7 +904,9 @@ function installHandoff(): void {
   void web.setProxy({ mode: 'direct' })
   web.webRequest.onBeforeSendHeaders({ urls: ['http://127.0.0.1/*', 'ws://127.0.0.1/*'] }, (details, callback) => {
     const current = live
-    if (current?.cookie && win && details.webContentsId === win.webContents.id && isHostUrl(details.url)) {
+    // The id captured at creation, never read off the window here: this runs
+    // for every request, a window being torn down included.
+    if (current?.cookie && webViewId !== undefined && details.webContentsId === webViewId && isHostUrl(details.url)) {
       callback({ requestHeaders: { ...details.requestHeaders, Cookie: current.cookie } })
       return
     }
@@ -881,19 +976,19 @@ async function checkUpdates(): Promise<void> {
   if (!win) return
   const result = await checkForUpdate({ current: app.getVersion(), fetchImpl: (input, init) => net.fetch(input, init) })
   if (result.kind === 'newer') {
-    const answer = await dialog.showMessageBox(win, { type: 'info', title: 'MiniDSH', message: `MiniDSH ${result.version} is available`, detail: `You have ${app.getVersion()}. The release page has the installer; quit MiniDSH before running it.`, buttons: ['Open the release page', 'Later'], defaultId: 0, cancelId: 1, noLink: true })
-    if (answer.response === 0) openExternalSafe(result.url)
+    const response = await ask({ type: 'info', title: 'MiniDSH', message: `MiniDSH ${result.version} is available`, detail: `You have ${app.getVersion()}. The release page has the installer; quit MiniDSH before running it.`, buttons: ['Open the release page', 'Later'], defaultId: 0, cancelId: 1, noLink: true })
+    if (response === 0) openExternalSafe(result.url)
   } else if (result.kind === 'current') {
-    await dialog.showMessageBox(win, { type: 'info', title: 'MiniDSH', message: `MiniDSH ${app.getVersion()} is the latest release`, buttons: ['OK'], noLink: true })
+    await ask({ type: 'info', title: 'MiniDSH', message: `MiniDSH ${app.getVersion()} is the latest release`, buttons: ['OK'], noLink: true })
   } else {
-    await dialog.showMessageBox(win, { type: 'warning', title: 'MiniDSH', message: 'Could not check for updates', detail: result.message, buttons: ['OK'], noLink: true })
+    await ask({ type: 'warning', title: 'MiniDSH', message: 'Could not check for updates', detail: result.message, buttons: ['OK'], noLink: true })
   }
 }
 
 function about(): void {
   if (!win) return
   const runtime = live?.ready.version
-  void dialog.showMessageBox(win, {
+  void ask({
     type: 'info',
     title: 'About MiniDSH',
     message: `MiniDSH ${app.getVersion()}`,
@@ -999,6 +1094,7 @@ void app.whenReady().then(() => {
   settingsFile = join(app.getPath('userData'), 'settings.json')
   const read = readSettings(settingsFile)
   settings = read.settings
+  settingsHeld = read.unreadable
   for (const problem of read.problems) log(`settings: ${problem}`)
   log(`MiniDSH ${app.getVersion()} starting (Electron ${process.versions.electron})`)
   // An AppImage's launcher adds this where unprivileged user namespaces are
