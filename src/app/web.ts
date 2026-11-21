@@ -14,6 +14,13 @@
  * - Every later request and the WebSocket upgrade check that cookie, plus a
  *   Host/Origin fence, so another page in the same browser cannot drive it.
  *
+ * What that fence stops is a PAGE, not a process. The cookie is host-only
+ * (`Path=/`, no `Domain`), and a browser scopes a cookie by name, never by
+ * port: it also sends this one to any other server on the same loopback name,
+ * and that server, presenting it with a matching `Host` and no `Origin`, opens
+ * the upgrade. Documented, not closed (ARCHITECTURE §13, SECURITY.md); the
+ * desktop is not affected, because its cookie never enters a jar.
+ *
  * There is no per-user identity here, and none is implied: many windows, one
  * principal — whoever launched the process.
  */
@@ -25,7 +32,7 @@ import type { Context } from '../kernel/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
 import type { Agent } from '../core/agent/index.ts'
 import { canonicalPath } from '../core/sandbox/paths.ts'
-import { protocolPlugin, upgradeWasHandled, type ProtocolConfig } from '../capabilities/protocol/index.ts'
+import { protocolPlugin, refuseUpgrade, upgradeWasHandled, type ProtocolConfig } from '../capabilities/protocol/index.ts'
 import { defineRow, defaultAgentOptions } from './compose.ts'
 import { VERSION } from './version.ts'
 import { applyAuthority, bootComposition, type BootOptions } from './headless.ts'
@@ -61,7 +68,9 @@ export interface WebHostHandle {
    * sequential disposal run — so a stop that a supervisor bounds loses no
    * turn's ending to the order the agents happen to unwind in. Each phase is bounded (`cancelBoundMs`, default
    * 5 s; `disposeBoundMs`, default 20 s); `'deadline'` says one ran out, and
-   * the caller then owns what is left (the CLI exits 1). Idempotent.
+   * the caller then owns what is left (the CLI exits 1). Idempotent. From the
+   * call on, a client's prompt, resume or fork is refused ("the host is
+   * shutting down") rather than accepted and lost.
    */
   stop(options?: { readonly cancelBoundMs?: number; readonly disposeBoundMs?: number }): Promise<'stopped' | 'deadline'>
 }
@@ -75,14 +84,27 @@ export interface WorkspaceRecord {
 const CANCEL_BOUND_MS = 5_000
 const DISPOSE_BOUND_MS = 20_000
 
-/** Header terminator, spelled out so no editor or tool can eat the escape. */
-const CRLF = String.fromCharCode(13, 10)
 const CLIENT_ROOT = join(import.meta.dirname, 'web')
 const COOKIE = 'minidsh_session'
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+}
+
+/**
+ * The asset a request path names, or `undefined`. No path traversal: one flat
+ * directory of assets, named exactly. The request target is never
+ * percent-decoded and the URL parser has already folded every dot segment, so
+ * nothing that reaches here can climb out of the directory today; the name
+ * rule is what keeps that true should either ever change, and it refuses a
+ * nested path, or a name with a trailing separator, outright. A function of
+ * its own, and exported, so that rule has a test: against a flat directory
+ * hardly any request can tell it from the type rule.
+ */
+export function assetName(pathname: string): string | undefined {
+  const name = pathname === '/' ? 'index.html' : pathname.slice(1)
+  return /^[\w.-]+$/.test(name) && extname(name) in TYPES ? name : undefined
 }
 
 /** A signed bearer for this process alone: the secret dies with it, so no cookie outlives a restart. */
@@ -115,20 +137,41 @@ function cookieOf(request: IncomingMessage): string | undefined {
 }
 
 /**
+ * What a client sends as `Host` (and, after the scheme, as `Origin`) for one
+ * bound name. A browser sends the authority as the URL standard serializes it:
+ * a name in lower case, an IPv6 literal bracketed and compressed, and no port
+ * at all when it is the scheme's default. A list of `${bind}:${port}` matched
+ * none of those, so `--host MyBox`, `--host 2001:db8::5` and `--port 80` each
+ * answered 403 to every request, the token exchange included. The standard's
+ * own serializer is asked, so the list cannot drift from what a browser does;
+ * a bind it cannot parse keeps its literal spelling.
+ */
+function hostSpellings(name: string, port: number): string[] {
+  // A zone (`fe80::1%eth0`) names an interface of THIS machine, and is no part of what a client sends.
+  const literal = name.includes(':') && !name.startsWith('[') ? `[${name.split('%', 1)[0]}]` : name
+  const host = (URL.parse(`http://${literal}:${port}/`)?.hostname ?? literal).toLowerCase()
+  // On the default port a browser leaves it out, and a client that writes it is not wrong.
+  return port === 80 ? [host, `${host}:80`] : [`${host}:${port}`]
+}
+
+/**
  * The authorities this host answers to. A `Host` header is attacker-controlled,
  * so it is checked against a list built from what was actually bound — never
  * against itself, which is how a DNS-rebinding check quietly becomes a no-op.
+ * Exported for its test: no test can bind port 80 or an address the machine
+ * does not have.
  */
-function authoritiesFor(bind: string, port: number): ReadonlySet<string> | undefined {
+export function authoritiesFor(bind: string, port: number): ReadonlySet<string> | undefined {
   // A WILDCARD bind has no authority of its own: `0.0.0.0` is never a Host
   // header any client sends, so an allow-list built from it would refuse every
   // request — the `--host` flag would be offered and broken. Undefined means
   // "any Host, but an Origin must match it", which is the strongest check that
   // is still meaningful when the host does not know its own names.
   if (bind === '0.0.0.0' || bind === '::' || bind === '') return undefined
-  const loopback = bind === '127.0.0.1' || bind === '::1' || bind === 'localhost'
-  const hosts = loopback ? ['127.0.0.1', 'localhost', '[::1]'] : [bind]
-  return new Set(hosts.map((host) => `${host}:${port}`))
+  const name = bind.toLowerCase()
+  const loopback = name === '127.0.0.1' || name === '::1' || name === 'localhost'
+  const hosts = loopback ? ['127.0.0.1', 'localhost', '::1'] : [bind]
+  return new Set(hosts.flatMap((host) => hostSpellings(host, port)))
 }
 
 /**
@@ -139,10 +182,19 @@ function authoritiesFor(bind: string, port: number): ReadonlySet<string> | undef
  * nothing on Windows. A wildcard therefore prints the loopback of its own
  * family, which the wildcard rule in `authoritiesFor` already accepts.
  */
-function printableAuthority(bind: string, port: number): string {
+export function printableAuthority(bind: string, port: number): string {
   if (bind === '0.0.0.0' || bind === '') return `127.0.0.1:${port}`
   if (bind === '::') return `[::1]:${port}`
   return `${bind.includes(':') ? `[${bind}]` : bind}:${port}`
+}
+
+/**
+ * The authority a request names, in lower case: a host name is not case
+ * sensitive, every entry of the allow-list is its lower-case spelling, and the
+ * cookie is bound to this same string.
+ */
+function hostOf(request: IncomingMessage): string | undefined {
+  return request.headers.host?.toLowerCase()
 }
 
 /**
@@ -152,10 +204,10 @@ function printableAuthority(bind: string, port: number): string {
  * reason the check exists.
  */
 function sameAuthority(request: IncomingMessage, authorities: ReadonlySet<string> | undefined): boolean {
-  const host = request.headers.host
+  const host = hostOf(request)
   if (host === undefined) return false
   if (authorities !== undefined && !authorities.has(host)) return false
-  const origin = request.headers.origin
+  const origin = request.headers.origin?.toLowerCase()
   if (origin === undefined) return true
   const originAuthority = origin.replace(/^https?:\/\//, '')
   return authorities === undefined ? originAuthority === host : authorities.has(originAuthority)
@@ -230,15 +282,14 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   // `new Set()` (not undefined) until the port is known: an empty allow-list
   // refuses everything, and undefined would mean the wildcard rule.
   let authorities: ReadonlySet<string> | undefined = new Set()
-  const authorized = (request: IncomingMessage): boolean =>
-    sameAuthority(request, authorities) && verify(secret, request.headers.host ?? '', cookieOf(request))
+  const authorized = (request: IncomingMessage): boolean => sameAuthority(request, authorities) && verify(secret, hostOf(request) ?? '', cookieOf(request))
 
   // A launch token is spent by the first exchange that succeeds. The URL is
   // printed once and swapped for a cookie once; leaving it live would make a
   // shell history entry a standing full-authority credential.
   let tokenSpent = false
   const server: Server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    const authority = request.headers.host ?? ''
+    const authority = hostOf(request) ?? ''
     // Top-level only. The cookie and the Host/Origin fence stop another page
     // DRIVING this one, not HOLDING it: a frame navigation sends no Origin,
     // and a SameSite=Strict cookie still rides a same-site embed — and every
@@ -269,6 +320,15 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
       // history, a referrer, or a screenshot.
       const digest = createHash('sha256').update(given).digest()
       if (tokenSpent || digest.length !== tokenDigest.length || !timingSafeEqual(digest, tokenDigest)) {
+        // A browser that is ALREADY signed in and opens the printed link again
+        // (a closed tab, the one URL the person was given) is where it meant
+        // to be: it holds the cookie this link once bought, so it is sent to
+        // the page. The spent token buys nothing here, and anyone without the
+        // cookie still gets the refusal below.
+        if (verify(secret, authority, cookieOf(request))) {
+          response.writeHead(303, { location: '/' }).end()
+          return
+        }
         response.writeHead(401).end(tokenSpent ? 'that link has already been used' : 'bad token')
         return
       }
@@ -284,9 +344,8 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
       response.writeHead(401).end('open the URL this process printed')
       return
     }
-    const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1)
-    // No path traversal: one flat directory of assets, named exactly.
-    if (!/^[\w.-]+$/.test(name) || !(extname(name) in TYPES)) {
+    const name = assetName(url.pathname)
+    if (name === undefined) {
       response.writeHead(404).end('not found')
       return
     }
@@ -299,8 +358,14 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   })
 
   const workspaces = workspaceRecords(options)
+  // Set the moment this host begins to stop, by `stop()` or by `dispose()`.
+  // The sockets stay open until the protocol row unloads, which can be many
+  // seconds later, and the wire must not accept in that window what the
+  // disposal is about to drop (`ProtocolConfig.stopping`).
+  let stopping = false
   const protocolConfig: ProtocolConfig = {
     serverVersion: VERSION,
+    stopping: () => stopping,
     // An explicit authority flag is a durable switch on every session this
     // process continues, a wire resume included (ARCHITECTURE §9).
     onContinued: (agent, ctx) => applyAuthority(ctx, agent, options),
@@ -335,7 +400,9 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   // otherwise be held open forever with no credential ever checked.
   server.on('upgrade', (_request, socket) => {
     if (upgradeWasHandled(socket)) return
-    socket.end('HTTP/1.1 404 Not Found' + CRLF + 'Connection: close' + CRLF + CRLF)
+    // Answered before any credential is looked at, so this is the refusal
+    // anyone at all can reach: it has to survive its peer (`refuseUpgrade`).
+    refuseUpgrade(socket, 404, 'Not Found')
   })
   const bind = options.host ?? '127.0.0.1'
   try {
@@ -354,6 +421,7 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   let disposed: Promise<void> | undefined
   const dispose = (): Promise<void> =>
     (disposed ??= (async () => {
+      stopping = true
       await root.dispose()
       await new Promise<void>((resolve) => server.close(() => resolve()))
       resolveClosed()
@@ -361,6 +429,11 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
   let stopped: Promise<'stopped' | 'deadline'> | undefined
   const stop = (bounds: { readonly cancelBoundMs?: number; readonly disposeBoundMs?: number } = {}): Promise<'stopped' | 'deadline'> =>
     (stopped ??= (async () => {
+      // First, and synchronously with the call: from here the wire refuses a
+      // prompt, a resume and a fork. A steer to an agent phase 1 has cancelled
+      // would be recorded quiet and answered as accepted, and a session
+      // created now would have its first turn ended before it said anything.
+      stopping = true
       // Phase 1 is exactly the first step of every agent's own disposal
       // (`core/loop/factory.ts`), taken for all of them at once: disposal runs
       // agent by agent, so without it the last agent's turn could still be
@@ -369,9 +442,10 @@ export async function startWebHost(options: WebOptions): Promise<WebHostHandle> 
       // a delegated child is cancelled by its parent's call ending, which is
       // the one order its parent's log can explain.
       //
-      // Re-listed until the set holds still: a client can still create a
-      // session while phase 1 waits (the WebSocket stays open until disposal),
-      // and that agent's turn is owed the same first closer. Bounded together.
+      // Re-listed until the set holds still: the wire's door is closed, but an
+      // agent can still appear while phase 1 waits (a creation the wire
+      // admitted just before the stop, or one anything else in the composition
+      // makes), and its turn is owed the same first closer. Bounded together.
       const cancelled = new Set<Agent>()
       const topLevel = (): Agent[] =>
         (disposed === undefined ? (root.tryGet(AGENTS)?.list() ?? []) : []).filter((agent) => agent.session.header.delegatedBy === undefined && agent.session.header.delegatedByCallId === undefined)
