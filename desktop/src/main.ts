@@ -712,7 +712,16 @@ function createWindow(): void {
     const gone = overlay
     win = undefined
     overlay = undefined
-    if (gone && !gone.webContents.isDestroyed()) gone.webContents.close()
+    // Typed as always present, but a view whose contents went with the window
+    // answers `undefined` here, not a destroyed object: reading `isDestroyed`
+    // off it threw in one macOS run of six, from this very handler (S22.5).
+    // Closing what is left must never be the thing that fails a quit.
+    const contents = gone?.webContents as WebContents | undefined
+    try {
+      if (contents !== undefined && !contents.isDestroyed()) contents.close()
+    } catch (error) {
+      log(`the shell view did not close cleanly: ${error instanceof Error ? error.message : String(error)}`)
+    }
   })
   void web.loadURL('about:blank')
 }
