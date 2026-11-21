@@ -162,20 +162,23 @@ describe('the sign-in handoff', () => {
   })
 
   it('refuses anything but one 303 with exactly one well-formed minidsh_session cookie, quoting no secret', async () => {
-    const cases: [Response | Error, RegExp][] = [
-      [redirect([`minidsh_session=${COOKIE_VALUE}`], 200), /answered 200/],
-      [new Response('that link has already been used', { status: 401 }), /answered 401/],
-      [redirect([]), /0 cookies/],
-      [redirect([`minidsh_session=${COOKIE_VALUE}`, `minidsh_session=${COOKIE_VALUE}`]), /2 cookies/],
-      [redirect([`other=${COOKIE_VALUE}`]), /other than minidsh_session/],
-      [redirect([COOKIE_VALUE]), /other than minidsh_session/],
-      [redirect(['minidsh_session=']), /malformed/],
-      [redirect(['minidsh_session="quoted value"']), /malformed/],
-      [new Error(`connect ECONNREFUSED for http://127.0.0.1:1/?token=${TOKEN}`), /did not answer/],
+    // The last column is the status the host answered with: a refusal is an
+    // answer, and silence (the last case) is not one.
+    const cases: [Response | Error, RegExp, number | undefined][] = [
+      [redirect([`minidsh_session=${COOKIE_VALUE}`], 200), /answered 200/, 200],
+      [new Response('that link has already been used', { status: 401 }), /answered 401/, 401],
+      [redirect([]), /0 cookies/, 303],
+      [redirect([`minidsh_session=${COOKIE_VALUE}`, `minidsh_session=${COOKIE_VALUE}`]), /2 cookies/, 303],
+      [redirect([`other=${COOKIE_VALUE}`]), /other than minidsh_session/, 303],
+      [redirect([COOKIE_VALUE]), /other than minidsh_session/, 303],
+      [redirect(['minidsh_session=']), /malformed/, 303],
+      [redirect(['minidsh_session="quoted value"']), /malformed/, 303],
+      [new Error(`connect ECONNREFUSED for http://127.0.0.1:1/?token=${TOKEN}`), /did not answer/, undefined],
     ]
-    for (const [response, why] of cases) {
+    for (const [response, why, status] of cases) {
       const error = await handoffError(signIn(31_000, TOKEN, answering(response).fetch))
       expect(error.message).toMatch(why)
+      expect(error.status, String(why)).toBe(status)
     }
   })
 })

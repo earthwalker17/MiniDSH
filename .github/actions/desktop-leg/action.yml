@@ -1,9 +1,9 @@
 # One desktop leg: pack this runner's artifact, prove the runtime out of it,
-# and drive the app keyless. `check.yml` runs these steps on every push,
-# packing the checkout; `release.yml` runs the SAME steps on the gate's
-# tarball. So nothing a release's desktop legs do is done for the first time
-# on a tag, and the two workflows cannot drift apart: before S22.5 they were
-# two copies, and the release's copy had never run anywhere.
+# read its fuses back, and drive the app keyless. `check.yml` runs these
+# steps on every push, packing the checkout; `release.yml` runs the SAME steps
+# on the gate's tarball. So nothing a release's desktop legs do is done for
+# the first time on a tag, and the two workflows cannot drift apart: before
+# S22.5 they were two copies, and the release's copy had never run anywhere.
 #
 # The job that uses this has checked out the repository; the runtime and pnpm
 # are set up here, because one platform needs them set up differently.
@@ -101,6 +101,15 @@ runs:
         echo "MINIDSH_DESKTOP_EXE=$EXE" >> "$GITHUB_ENV"
         echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
         node desktop/scripts/smoke-runtime.ts "$RESOURCES"
+
+    # "Electron main runs no user code" (ARCHITECTURE §9) is four fuses that
+    # package.ts only asks electron-builder for. Read back here, out of the
+    # binary this leg unpacked from its own artifact: one left on, or an
+    # option electron-builder stopped honouring, fails the leg (the app run as
+    # a Node interpreter by an environment variable is what they prevent).
+    - name: The fuses, read back out of the binary that ships
+      shell: bash
+      run: node desktop/scripts/check-fuses.ts "$MINIDSH_DESKTOP_EXE"
 
     # The app itself, as a person uses it (desktop/e2e/app.e2e.test.ts): its
     # lifecycle on what was just unpacked, and on Windows the installer too — a

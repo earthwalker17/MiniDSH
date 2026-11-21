@@ -33,6 +33,11 @@ minidsh() { node "$PKG/bin/minidsh.js" "$@"; }
 # refuse to strip types under node_modules anyway.
 test ! -e "$PKG/src"
 test -f "$PKG/dist/app/cli.js"
+# The licence and the attribution notice travel with the code: `files` in
+# package.json is the only thing that ships them, and nothing else here would
+# notice either one dropping out of the tarball.
+test -s "$PKG/LICENSE"
+test -s "$PKG/NOTICE"
 # The web client: EVERY asset the page loads — one missing, and the installed
 # browser client is a blank page. The list is `WEB_ASSETS` in build.ts, the
 # one list (src/app/web/assets.test.ts holds it to what the page loads),

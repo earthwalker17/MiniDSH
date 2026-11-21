@@ -253,7 +253,9 @@ async function bundle(): Promise<void> {
     ],
     // The main process runs no user code; nothing may turn it into a Node
     // interpreter or attach a debugger to it, and `file:` pages get no extra
-    // reach (the shell is served from its own scheme).
+    // reach (the shell is served from its own scheme). Asked for here and
+    // read back out of the packed binary by `check-fuses.ts` on every desktop
+    // leg; `scripts/release-pins.test.ts` holds this block to that list.
     electronFuses: {
       runAsNode: false,
       enableNodeOptionsEnvironmentVariable: false,

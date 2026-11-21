@@ -63,8 +63,10 @@ describe('the desktop against the real runtime contract', () => {
 
     const cookie = await signIn(ready.port, ready.token)
     expect(cookie).toMatch(/^minidsh_session=[A-Za-z0-9_.-]+$/)
-    // One-shot: the same token a second time is refused, so a page that saw it could not use it.
-    await expect(signIn(ready.port, ready.token)).rejects.toThrow()
+    // One-shot: the same token a second time is REFUSED, an answer from the
+    // host (401) and not a failure to reach it, so a page that saw the token
+    // could not use it.
+    await expect(signIn(ready.port, ready.token)).rejects.toMatchObject({ name: 'HandoffError', status: 401 })
 
     const page = await fetch(`http://127.0.0.1:${ready.port}/`, { headers: { cookie } })
     expect(page.status).toBe(200)

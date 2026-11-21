@@ -121,10 +121,11 @@ jobs:
   # packaging toolchain (desktop/package.json) is installed here alone, so the
   # gate above stays lean. Each leg packs the artifact it would ship, runs the
   # runtime out of it the way the app does (the bundled Node, `web --json`, the
-  # one-shot handoff, every asset, a leased session, a graceful stop), then
-  # drives the app itself keyless; Windows also installs and uninstalls the
-  # installer. The steps are `.github/actions/desktop-leg`, which `release.yml`
-  # runs too, on the bytes it ships.
+  # one-shot handoff, every asset, a leased session, a graceful stop), reads
+  # the fuses back out of its binary, then drives the app itself keyless;
+  # Windows also installs and uninstalls the installer. The steps are
+  # `.github/actions/desktop-leg`, which `release.yml` runs too, on the bytes
+  # it ships.
   #
   # The two macOS legs are the only evidence this project has that the app
   # launches there at all (there is no Mac anywhere else in it). They prove a

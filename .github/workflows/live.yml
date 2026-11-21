@@ -131,7 +131,7 @@ jobs:
           set -euo pipefail
           pnpm pack --pack-destination "$RUNNER_TEMP"
           cd "$RUNNER_TEMP"
-          mkdir -p installed/proj installed/ws installed/home && cd installed/proj
+          mkdir -p installed/proj installed/ws installed/home installed/judge && cd installed/proj
           npm init -y > /dev/null
           npm install --no-audit --no-fund ../../minidsh-*.tgz
           cat > ../ws/slug.mjs <<'JS'
@@ -147,10 +147,18 @@ jobs:
             assert.strictEqual(slugify('Hello World'), 'hello-world')
           })
           JS
+          # The JUDGE: the same test, made now and kept beside the workspace,
+          # not in it, reading the workspace's slug.mjs. The agent runs with
+          # --approve and may edit anything under its --cwd, its copy of the
+          # test included: a model that made the test agree with the bug,
+          # instead of fixing the bug, used to turn this step green.
+          sed "s#'./slug.mjs'#'../ws/slug.mjs'#" ../ws/slug.test.mjs > ../judge/slug.test.mjs
+          grep -q "'../ws/slug.mjs'" ../judge/slug.test.mjs
+          judge() { (cd ../judge && node --test slug.test.mjs); }
           # It must fail first, or what follows proves nothing.
-          if (cd ../ws && node --test slug.test.mjs > /dev/null 2>&1); then
+          if judge > /dev/null 2>&1; then
             echo "the fixture test passed before the agent ran: this step would prove nothing"; exit 1
           fi
           MINIDSH_HOME=../home node node_modules/minidsh/bin/minidsh.js run "slug.test.mjs fails against slug.mjs. Read both with the editor tool, fix slug.mjs so the test passes, and say what you changed. Use relative paths." --cwd ../ws --approve --max-steps 12
-          # The WORLD, not the agent's account of it.
-          cd ../ws && node --test slug.test.mjs
+          # The WORLD, not the agent's account of it, and not its copy of the test.
+          judge

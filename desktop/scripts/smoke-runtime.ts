@@ -13,11 +13,21 @@
  * 0 and releases that lease. It drives the app's own modules
  * (`desktop/src/runtime.ts`), so the smoke and the app cannot disagree on
  * the contract.
+ *
+ * "Every asset the page loads" is read off the PAGE: the served index.html's
+ * own references, then the static imports of each script it reaches and what
+ * each stylesheet pulls in, every one of them fetched from the running host.
+ * That is the set a browser would ask for, so a file the packer dropped is a
+ * 404 here whatever else the package still lists. (Fetching the package's own
+ * listing instead, as this did, proved only that the host serves what is
+ * there.) The listing is the second check: it must be that same set, so a
+ * walk that under-read the page cannot pass by having asked for less.
  */
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { choosePort, probePort, RuntimeProcess, signIn } from '../src/runtime.ts'
+import { collectImports } from '../../scripts/deps-graph.ts'
+import { choosePort, HandoffError, probePort, RuntimeProcess, signIn } from '../src/runtime.ts'
 
 const resources = resolve(process.argv[2] ?? fail('usage: smoke-runtime.ts <resources directory>'))
 
@@ -35,6 +45,33 @@ function refuse(message: string): never {
   throw new Error(message)
 }
 
+/** A reference a served file makes, as the flat name this host serves it under; `undefined` for what is no file of the host's (a fragment, inline data, another origin). */
+function assetName(reference: string, from: string): string | undefined {
+  if (/^(#|data:|blob:|[a-z][a-z0-9+.-]*:)/i.test(reference)) return undefined
+  const name = reference.replace(/[?#].*$/, '').replace(/^\.?\//, '')
+  // The host serves one flat directory (`app/web.ts`): a nested path is a 404 in a browser.
+  if (name.length === 0 || name.includes('/')) refuse(`${from} references "${reference}", which is not a flat asset the host serves`)
+  return name
+}
+
+/**
+ * What one served file makes a browser fetch next: the same reading
+ * `src/app/web/assets.test.ts` gives the source tree (and the same import
+ * extractor, so a JSDoc type import, which is a comment, is not a fetch).
+ */
+function referencesOf(name: string, text: string): string[] {
+  const found: (string | undefined)[] = []
+  if (name.endsWith('.html')) {
+    for (const match of text.matchAll(/\s(?:src|href)\s*=\s*["']([^"']+)["']/gi)) found.push(assetName(match[1]!, name))
+  } else if (name.endsWith('.js')) {
+    for (const ref of collectImports(text)) if (!ref.typeOnly) found.push(assetName(ref.spec, name))
+  } else if (name.endsWith('.css')) {
+    for (const match of text.matchAll(/@import\s+(?:url\()?\s*["']?([^"')\s;]+)/g)) found.push(assetName(match[1]!, name))
+    for (const match of text.matchAll(/url\(\s*["']?([^"')]+?)["']?\s*\)/g)) found.push(assetName(match[1]!, name))
+  }
+  return found.filter((one): one is string => one !== undefined)
+}
+
 const node = process.platform === 'win32' ? join(resources, 'node', 'node.exe') : join(resources, 'node', 'bin', 'node')
 const bin = join(resources, 'runtime', 'node_modules', 'minidsh', 'bin', 'minidsh.js')
 for (const required of [node, bin]) if (!existsSync(required)) fail(`the package lacks ${required}`)
@@ -48,32 +85,50 @@ let port = choosePort()
 for (let attempt = 0; attempt < 20 && !(await probePort(port)); attempt++) port = choosePort()
 const runtime = new RuntimeProcess()
 const stderr: Buffer[] = []
+let failure: string | undefined
 try {
   const ready = await runtime.start({ node, bin, port, cwd: folder, folders: [folder], env, onStderr: (chunk) => stderr.push(chunk) })
   const version = (JSON.parse(readFileSync(join(resources, 'runtime', 'node_modules', 'minidsh', 'package.json'), 'utf8')) as { version: string }).version
   if (ready.version !== version) refuse(`the runtime reports ${ready.version}, its package ${version}`)
   const cookie = await signIn(ready.port, ready.token)
-  // One-shot: the same token a second time is refused.
-  const reused = await signIn(ready.port, ready.token).then(
-    () => true,
-    () => false,
+  // One-shot: the same token a second time is REFUSED, which is an answer
+  // from the host saying no (app/web.ts answers 401). A timeout, a dropped
+  // connection or a malformed answer is some other failure, and passes nothing.
+  const again: unknown = await signIn(ready.port, ready.token).then(
+    () => 'accepted',
+    (error: unknown) => error,
   )
-  if (reused) refuse('the launch token was accepted twice')
+  if (again === 'accepted') refuse('the launch token was accepted twice')
+  if (!(again instanceof HandoffError) || again.status === undefined || again.status < 400 || again.status >= 500) {
+    refuse(`the second sign-in was not refused, it failed another way: ${again instanceof Error ? again.message : String(again)}`)
+  }
   const origin = `http://127.0.0.1:${ready.port}`
 
   const index = await fetch(`${origin}/`, { headers: { cookie } })
   if (index.status !== 200) refuse(`GET / answered ${index.status}`)
   const html = await index.text()
-  const assets = readdirSync(join(resources, 'runtime', 'node_modules', 'minidsh', 'dist', 'app', 'web')).filter((name) => /\.(js|css|html)$/.test(name))
-  // The page loads about twenty files; a listing that came back empty would
-  // make the loop below prove nothing.
-  if (assets.length < 10) refuse(`only ${assets.length} browser assets in the package`)
-  for (const asset of assets) {
-    const answer = await fetch(`${origin}/${asset}`, { headers: { cookie } })
-    if (answer.status !== 200) refuse(`GET /${asset} answered ${answer.status}`)
-    await answer.arrayBuffer()
-  }
   if (!html.includes('<title>MiniDSH</title>')) refuse('the page is not the Web UI')
+  // Every asset, with the file that first asked for it: what a 404 must name.
+  const loadedBy = new Map<string, string>([['index.html', 'the page itself']])
+  const queue = ['index.html']
+  for (let name = queue.shift(); name !== undefined; name = queue.shift()) {
+    let text = html
+    if (name !== 'index.html') {
+      const answer = await fetch(`${origin}/${name}`, { headers: { cookie } })
+      if (answer.status !== 200) refuse(`GET /${name} answered ${answer.status}: ${loadedBy.get(name)} loads it, and the package does not serve it`)
+      text = await answer.text()
+    }
+    for (const next of referencesOf(name, text)) {
+      if (loadedBy.has(next)) continue
+      loadedBy.set(next, name)
+      queue.push(next)
+    }
+  }
+  const listed = readdirSync(join(resources, 'runtime', 'node_modules', 'minidsh', 'dist', 'app', 'web')).filter((name) => /\.(js|css|html)$/.test(name))
+  const unreached = listed.filter((name) => !loadedBy.has(name))
+  if (unreached.length > 0) refuse(`the package ships ${unreached.join(', ')}, which nothing the page loads reaches: the page was read short, or the package holds what it should not`)
+  const unlisted = [...loadedBy.keys()].filter((name) => !listed.includes(name))
+  if (unlisted.length > 0) refuse(`the host served ${unlisted.join(', ')}, which the package's own web directory does not list`)
 
   // initialize, then a prompt that creates a session (no key: its turn fails
   // at once, which is fine — the session exists and holds its lease).
@@ -109,11 +164,28 @@ try {
   const sessions = join(home, 'sessions')
   const locks = existsSync(sessions) ? readdirSync(sessions).filter((name) => name.endsWith('.lock')) : []
   if (locks.length > 0) refuse(`leases left behind: ${locks.join(', ')}`)
-  process.stdout.write(`desktop smoke: runtime ${version} on the bundled node ${process.platform}-${process.arch}: ready, one-shot handoff, ${assets.length} assets, initialize, a leased session, graceful stop releasing it\n`)
+  const done = `desktop smoke: runtime ${version} on the bundled node ${process.platform}-${process.arch}: ready, one-shot handoff (a second use answered ${again.status}), the ${loadedBy.size} assets the page loads, initialize, a leased session, graceful stop releasing it\n`
+  // Written out before the exit below can cut it short.
+  await new Promise<void>((written) => process.stdout.write(done, () => written()))
 } catch (error) {
+  failure = `${error instanceof Error ? error.message : String(error)}\n${Buffer.concat(stderr).toString().slice(-4000)}`
+  // The runtime must be gone before its home can be: wait for the kill, to a bound.
   runtime.kill()
-  fail(`${error instanceof Error ? error.message : String(error)}\n${Buffer.concat(stderr).toString().slice(-4000)}`)
+  await Promise.race([runtime.exited, new Promise((bound) => setTimeout(bound, 5_000))])
 } finally {
-  rmSync(home, { recursive: true, force: true })
-  rmSync(folder, { recursive: true, force: true })
+  // After the catch, not instead of it: a failed run used to exit from inside
+  // the catch, which skipped this and left both folders behind. A folder that
+  // will not go is said, and never replaces the verdict above.
+  for (const dir of [home, folder]) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    } catch (error) {
+      process.stderr.write(`desktop smoke: left ${dir} behind (${error instanceof Error ? error.message : String(error)})\n`)
+    }
+  }
 }
+if (failure !== undefined) fail(failure)
+// Said, not left to the event loop: the stop's deadline is a timer nothing
+// cancels, and this process sat out its thirty seconds after it had finished,
+// on every leg.
+process.exit(0)

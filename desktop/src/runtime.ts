@@ -184,6 +184,18 @@ export class RecordReader {
 /** The launch token could not be exchanged: spent elsewhere, or the port is not this runtime's. Never retried. */
 export class HandoffError extends Error {
   override readonly name = 'HandoffError'
+  /**
+   * The HTTP status the listener answered with, or `undefined` when nothing
+   * answered (a refused connection, a timeout). Main treats both alike; the
+   * packaged smoke needs the difference, because "the token is refused a
+   * second time" is an ANSWER, and silence would otherwise pass for it.
+   */
+  readonly status: number | undefined
+
+  constructor(message: string, status?: number) {
+    super(message)
+    this.status = status
+  }
 }
 
 export const SESSION_COOKIE = 'minidsh_session'
@@ -212,14 +224,15 @@ export async function signIn(port: number, token: string, fetchImpl: FetchLike =
     throw new HandoffError('the runtime did not answer the sign-in')
   }
   try {
-    if (response.status !== 303) throw new HandoffError(`the sign-in was answered ${response.status}, not 303`)
+    const { status } = response
+    if (status !== 303) throw new HandoffError(`the sign-in was answered ${status}, not 303`, status)
     const cookies = response.headers.getSetCookie()
-    if (cookies.length !== 1) throw new HandoffError(`the sign-in set ${cookies.length} cookies, not exactly one`)
+    if (cookies.length !== 1) throw new HandoffError(`the sign-in set ${cookies.length} cookies, not exactly one`, status)
     const pair = cookies[0]!.split(';', 1)[0]!
     const at = pair.indexOf('=')
-    if (at < 0 || pair.slice(0, at).trim() !== SESSION_COOKIE) throw new HandoffError(`the sign-in set a cookie other than ${SESSION_COOKIE}`)
+    if (at < 0 || pair.slice(0, at).trim() !== SESSION_COOKIE) throw new HandoffError(`the sign-in set a cookie other than ${SESSION_COOKIE}`, status)
     const value = pair.slice(at + 1).trim()
-    if (!COOKIE_VALUE.test(value)) throw new HandoffError('the sign-in cookie is malformed')
+    if (!COOKIE_VALUE.test(value)) throw new HandoffError('the sign-in cookie is malformed', status)
     return `${SESSION_COOKIE}=${value}`
   } finally {
     await response.body?.cancel().catch(() => undefined)
