@@ -130,6 +130,10 @@ export function createSettings(options) {
         await options.wire().request('settings/set', { ns, patch: entry.patch, expectedRevision: entry.revision, replace: true })
       }
       toast('Saved. New sessions start with these defaults.')
+      // HERE, not only in the `close` event: this save's own `settings.changed`
+      // may have started a refresh whose answer arrives before that event is
+      // dispatched, and a refresh still current would reopen what this closes.
+      generation++
       dialog.close()
     } catch (error) {
       fail(error)

@@ -315,6 +315,9 @@ export async function startWebUi(options: { readonly window?: { readonly width: 
       cwd: workspace,
       sessionsRoot: join(root, 'sessions'),
       attachmentsRoot: join(root, 'attachments'),
+      // The settings store every real `minidsh web` has (its home's settings.json): without the row
+      // `settings/describe` names nothing, and the Settings dialog has no defaults page to test.
+      settingsStorePath: join(root, 'settings.json'),
       logger: silent,
       // A stamp's recorded shape must not depend on whether this machine can confine a shell.
       confinement: 'none',

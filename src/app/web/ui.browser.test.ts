@@ -777,4 +777,105 @@ describe.runIf(testBrowser)('the web UI in a real browser', { timeout: TEST_MS }
     expect(Math.abs(after!.top - before.top), `that block moved from ${before.top}px to ${after!.top}px below the top`).toBeLessThanOrEqual(2)
     expect(await reader.unexpectedProblems()).toEqual([])
   })
+
+  // The settings dialog's two rules for the host's defaults (settings.js): a
+  // save names the revision the page was SHOWN, and it replaces the user layer
+  // with what the fields hold, so a field a person cleared clears its override
+  // instead of leaving the old one standing. Read off the frames the page
+  // sends and off what the host then shows a page that asks again.
+  it('saves a default for new sessions under the revision it was shown, and a cleared field clears the override', async () => {
+    const page = await openPage()
+    await page.evaluate(`(() => {
+      const send = WebSocket.prototype.send
+      window.__settingsSet = []
+      WebSocket.prototype.send = function (data) {
+        window.__socket = this
+        try {
+          const frame = JSON.parse(data)
+          if (frame.method === 'settings/set') window.__settingsSet.push(frame.params)
+        } catch {}
+        return send.call(this, data)
+      }
+    })()`)
+    const FIELD = `document.querySelector('#settings input[data-key="maxSteps"]')`
+    const SAVE = `[...document.querySelectorAll('#settings .modal-actions .btn.primary')].find((button) => button.textContent === 'Save')`
+    interface Shown {
+      readonly ns: string
+      readonly value: string
+      readonly revision: number
+    }
+    /** Opens Settings on the host's defaults, read fresh from the host, and says what the field shows. */
+    const openDefaults = async (): Promise<Shown> => {
+      await page.click('#sidebar-foot .foot-btn[aria-label="Settings"]')
+      await page.waitFor("document.querySelector('#settings').open")
+      await page.evaluate(`[...document.querySelectorAll('#settings .nav-item')].find((item) => item.textContent === 'New sessions').click()`)
+      await page.waitFor(`${FIELD} !== null`)
+      return JSON.parse(await page.evaluate<string>(`JSON.stringify({ ns: ${FIELD}.dataset.ns, value: ${FIELD}.value, revision: Number(${FIELD}.dataset.revision) })`)) as Shown
+    }
+    /**
+     * Saves, and returns the frame sent for `ns` once the save has closed the
+     * dialog AND the page has heard everything it was waiting for: a request of
+     * the test's own goes out on the page's socket behind whatever the page had
+     * in flight, and answers come back in order, so when it is home every
+     * earlier answer has been handled. No sleep stands in for "nothing more is
+     * coming", which is what a refresh that reopens the dialog would need.
+     */
+    const save = async (ns: string): Promise<{ ns: string; patch: Record<string, unknown>; expectedRevision: number; replace: boolean }> => {
+      await page.evaluate('window.__settingsSet.length = 0; window.__dialog.length = 0; window.__home = false')
+      await page.evaluate(`${SAVE}.click()`)
+      await page.waitFor(`window.__dialog.includes('close') || ${ERROR_TOAST} !== null`)
+      expect(await page.evaluate<string>(`${ERROR_TOAST}?.innerText ?? ''`), 'the save was refused').toBe('')
+      await page.evaluate('window.__roundTrip()')
+      await page.waitFor('window.__home === true')
+      expect(
+        JSON.parse(await page.evaluate<string>(`JSON.stringify({ dialog: window.__dialog, open: document.querySelector('#settings').open })`)),
+        'a saved dialog closes and stays closed: nothing the save itself set off may bring it back',
+      ).toEqual({ dialog: ['close'], open: false })
+      const frames = JSON.parse(await page.evaluate<string>('JSON.stringify(window.__settingsSet)')) as { ns: string; patch: Record<string, unknown>; expectedRevision: number; replace: boolean }[]
+      const sent = frames.filter((frame) => frame.ns === ns)
+      expect(sent, `settings/set frames for ${ns}: ${JSON.stringify(frames)}`).toHaveLength(1)
+      return sent[0]!
+    }
+
+    const first = await openDefaults()
+    // What the dialog is told to do, in order (a save that closes it and a
+    // refresh that reopens it look the same a moment later), and a round trip
+    // of the test's own on the socket the page uses.
+    await page.evaluate(`(() => {
+      const dialog = document.querySelector('#settings')
+      const calls = (window.__dialog = [])
+      const close = dialog.close.bind(dialog)
+      const showModal = dialog.showModal.bind(dialog)
+      dialog.close = () => { calls.push('close'); close() }
+      dialog.showModal = () => { calls.push('showModal'); showModal() }
+      let next = 9_000_000
+      window.__roundTrip = () => {
+        const id = ++next
+        const socket = window.__socket
+        const heard = (event) => {
+          if (JSON.parse(event.data).id !== id) return
+          socket.removeEventListener('message', heard)
+          window.__home = true
+        }
+        socket.addEventListener('message', heard)
+        socket.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'settings/describe' }))
+      }
+    })()`)
+    expect(first.value, 'this host starts with no override of its own').toBe('')
+    await page.type('#settings input[data-key="maxSteps"]', '41')
+    const written = await save(first.ns)
+    expect({ expectedRevision: written.expectedRevision, replace: written.replace, maxSteps: written.patch.maxSteps }, 'a number, under the revision the page read').toEqual({ expectedRevision: first.revision, replace: true, maxSteps: 41 })
+
+    // Asked again, the host shows what was saved, under its next revision.
+    const second = await openDefaults()
+    expect(second).toEqual({ ns: first.ns, value: '41', revision: first.revision + 1 })
+    // The field cleared: the save carries no value for it, and the override is gone.
+    await page.evaluate(`${FIELD}.value = ''`)
+    const cleared = await save(first.ns)
+    expect({ expectedRevision: cleared.expectedRevision, replace: cleared.replace, hasMaxSteps: 'maxSteps' in cleared.patch }).toEqual({ expectedRevision: second.revision, replace: true, hasMaxSteps: false })
+    const third = await openDefaults()
+    expect(third, 'the override a person cleared is still standing').toEqual({ ns: first.ns, value: '', revision: second.revision + 1 })
+    await page.evaluate("document.querySelector('#settings').close()")
+    expect(await page.unexpectedProblems()).toEqual([])
+  })
 })
