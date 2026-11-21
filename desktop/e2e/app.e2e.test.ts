@@ -21,20 +21,23 @@
  *
  * `MINIDSH_DESKTOP_INSTALLER` (Windows) adds the installed path: a silent
  * install to a folder whose name has a space and a non-ASCII letter, the
- * installer refusing while the app runs, and a silent uninstall that leaves
- * MINIDSH_HOME untouched.
+ * installer refusing while the app runs, and a silent uninstall that removes
+ * the app and its registration. That one test is NOT hermetic the way the
+ * launches are (it is a real per-user install under the product's app id), so
+ * it refuses to run for a user who already has MiniDSH installed
+ * (`installedBesideUs`).
  *
  * Self-skips without the executable; `MINIDSH_EXPECT_DESKTOP=1` (CI's desktop
  * job) makes that skip a failure.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { alive, answerNativeDialog, killDesktopApps, type DesktopApp, type DesktopLaunch } from '../../src/test-support/desktop-app.ts'
-import { launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, storedEvents, turnEnds, waitUntil, type Cleanup } from './support.ts'
+import { alive, answerNativeDialog, installedBesideUs, killDesktopApps, registeredInstall, type DesktopApp, type DesktopLaunch } from '../../src/test-support/desktop-app.ts'
+import { holdRuntimeStart, launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, storedEvents, turnEnds, waitUntil, type Cleanup } from './support.ts'
 
 const EXE = process.env.MINIDSH_DESKTOP_EXE
 const INSTALLER = process.env.MINIDSH_DESKTOP_INSTALLER
@@ -50,6 +53,22 @@ afterAll(() => killDesktopApps())
 
 const scratch = (prefix: string): string => scratchOwned(cleanup, prefix)
 const launchApp = (launch: DesktopLaunch): DesktopApp => launchOwned(cleanup, launch)
+
+/**
+ * What main.log must not hold after a quit that landed in a start: each is the
+ * start going on as if nobody had quit (a sign-in to a runtime that is closing
+ * reads as a refused handoff, a page loaded into a window that is going, the
+ * stopped view shown on the way out), or main throwing on its way.
+ */
+const START_WENT_ON = /handoff refused|web ui did not load|MiniDSH could not sign in|uncaught exception/
+
+/** The runtime this launch was given, found by the folder it was started for (`--cwd <folder>`), whether or not its app is still its parent. */
+function runtimesFor(folder: string): string {
+  const found = spawnSync('pgrep', ['-f', folder], { encoding: 'utf8', timeout: 10_000 })
+  // pgrep exits 1 when nothing matched; anything else that is not 0 is the lookup failing.
+  if (found.error !== undefined || (found.status !== 0 && found.status !== 1)) throw new Error(`pgrep could not look for a runtime of ${folder}: ${found.error?.message ?? `status ${String(found.status)} ${found.stderr}`}`)
+  return found.stdout.trim()
+}
 
 /** A model endpoint that takes every request and never answers it: a turn that stays running. */
 async function hangingModel(): Promise<{ url: string; requests: () => number }> {
@@ -135,18 +154,36 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
   })
 
   // Found by this suite: a close landing while the start was still loading
-  // the page was dropped, and the app never quit. The window shows once the
-  // shell is drawn, while the runtime is still booting: close right then.
-  it('a close while the runtime is still starting is honoured, never dropped', { timeout: 120_000 }, async () => {
+  // the page was dropped, and the app never quit.
+  //
+  // The start is HELD here (`holdRuntimeStart`), so the close lands in it on
+  // every run and on every host. It used to be sent the moment the shell page
+  // existed, on the hope that the runtime was still booting: a close that
+  // arrived after `ready` took the ordinary idle quit and passed as well, so
+  // nothing said which of the two a run had tested. The evidence is main's own
+  // log and the process table: a runtime child exists and is not ready when
+  // the close is sent, it never becomes ready, and it is gone afterwards.
+  // (No lease is asserted: no session ever existed in this home to hold one.)
+  it('a close while the runtime is still starting is honoured, never dropped', { timeout: 180_000 }, async () => {
     const userData = scratch('minidsh-e2e-ud-')
     const home = scratch('minidsh-e2e-home-')
     seed(userData, [scratch('minidsh-e2e-ws-')])
+    holdRuntimeStart(home)
     const app = launchApp({ exe, userData, home, drop: KEYS })
     await app.page('minidsh-shell:')
+    let starting: number | undefined
+    await waitUntil('the runtime to be spawned', () => (starting = app.runtimePid()) !== undefined, 60_000)
+    expect(app.mainLog(), 'the runtime is ready although its start is held: the close below would not land in a start').not.toMatch(/runtime ready/)
     app.closeWindow()
     const end = await app.waitForExit(60_000)
-    expect(end.code, app.mainLog()).toBe(0)
-    expect(locksUnder(home)).toEqual([])
+    const log = app.mainLog()
+    expect(end.code, log).toBe(0)
+    // A quit that interrupted the start leaves no line about a start at all:
+    // not that it became usable, and not that anything went wrong with it.
+    expect(log, 'the start finished, so this run closed after it and not during it').not.toMatch(/runtime ready/)
+    expect(log).not.toMatch(START_WENT_ON)
+    expect(log).not.toMatch(/start failed|lifecycle action failed/)
+    await waitUntil(`the runtime that was starting (pid ${String(starting)}) to be gone`, () => !alive(starting!), 30_000)
   })
 
   // Found by CI, not by this suite: on a fast macOS runner the app stayed up
@@ -170,16 +207,21 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
       const end = await app.waitForExit(30_000).catch((error: Error) => ({ code: -1, signal: null, hung: error.message }))
       // The runtime is started with `--cwd <folder>`: by that, whenever it was
       // spawned (before the quit, or in the instant after it was asked for).
-      const runtimes = (): string => spawnSync('pgrep', ['-f', folder], { encoding: 'utf8', timeout: 10_000 }).stdout.trim()
-      const left = await waitUntil('no runtime of this launch to be left', () => runtimes() === '', 30_000).then(
+      // `runtimesFor` throws when the lookup itself fails: an empty answer
+      // from a pgrep that could not run read as "none left".
+      const left = await waitUntil('no runtime of this launch to be left', () => runtimesFor(folder) === '', 30_000).then(
         () => '',
-        () => `; a runtime was left (pid ${runtimes().replace(/\s+/g, ' ')})`,
+        (error: Error) => (/timed out/.test(error.message) ? `; a runtime was left (pid ${runtimesFor(folder).replace(/\s+/g, ' ')})` : `; ${error.message}`),
       )
       const log = app.mainLog()
       // Before Electron is ready the signal ends the process itself (no code):
       // that is a quit honoured too. After that the app must end with 0.
       const clean = 'hung' in end ? `hung: ${end.hung.slice(0, 600)}` : end.code === 0 || (end.code === null && end.signal === 'SIGTERM' && log === '') ? 'ok' : `code ${String(end.code)} signal ${String(end.signal)}`
-      outcomes.push(`${delayMs} ms: ${clean}${/uncaught exception/.test(log) ? `; ${log.slice(log.indexOf('uncaught exception'), log.indexOf('uncaught exception') + 500)}` : ''}${left}${locksUnder(home).length > 0 ? '; a lease was left' : ''}`)
+      // And the start did not go on as if nobody had quit (a quit that lands
+      // in one leaves "quit: the runtime that was starting was stopped before
+      // it was used", and none of these).
+      const wentOn = START_WENT_ON.exec(log)
+      outcomes.push(`${delayMs} ms: ${clean}${wentOn === null ? '' : `; ${log.slice(wentOn.index, wentOn.index + 500)}`}${left}${locksUnder(home).length > 0 ? '; a lease was left' : ''}`)
     }
     expect(outcomes).toEqual([150, 300, 450, 600, 800, 1100, 1500, 2200].map((delayMs) => `${delayMs} ms: ok`))
   })
@@ -289,15 +331,21 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     await shell.click('button.primary')
     const back = await third.page('http://127.0.0.1')
     await back.waitFor(`document.querySelector('#hero')?.textContent.includes('works in') && location.port === '${port}'`, 60_000)
-    expect(third.runtimePid()).not.toBe(runtime)
+    // A NEW runtime, which is one that was found: "not the old pid" alone is
+    // also true of a lookup that found nothing.
+    const restarted = third.runtimePid()
+    expect(restarted, 'no runtime child after Restart').toBeDefined()
+    expect(restarted, 'Restart left the killed runtime as the live one').not.toBe(runtime)
+    expect(alive(restarted!)).toBe(true)
 
     // The app is killed outright: its runtime goes with it (a kill-on-close
     // Job on Windows; its stdin's end elsewhere), and the next launch
     // reclaims the lease and lists the stored session.
-    const orphan = third.runtimePid()!
+    const orphan = third.runtimePid()
+    expect(orphan, 'the runtime child was not found, so nothing can be said about what a kill does to it').toBe(restarted)
     third.child.kill('SIGKILL')
     await third.waitForExit(15_000)
-    await waitUntil('the runtime to end with its app', () => !alive(orphan), 30_000)
+    await waitUntil('the runtime to end with its app', () => !alive(orphan!), 30_000)
     const fourth = relaunch()
     const resumed = await fourth.page('http://127.0.0.1')
     await resumed.waitFor(`document.querySelectorAll('#sessions .session-row').length > 0`, 60_000)
@@ -308,16 +356,30 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
 })
 
 describe.runIf(EXE && INSTALLER && win)('the installed desktop app (Windows)', () => {
-  it('installs silently, refuses to reinstall while running, uninstalls leaving MINIDSH_HOME', { timeout: 300_000 }, async () => {
+  // What this shows is in its name, and no more. It used to end "uninstalls
+  // leaving MINIDSH_HOME", asserted by a file in a scratch home surviving —
+  // and the uninstaller is never told of that home or of the scratch userData
+  // (both reach the app as environment variables), so the file survived
+  // whatever the uninstaller did. What an uninstall leaves of a person's data
+  // is decided by `deleteAppDataOnUninstall: false` in desktop/scripts/
+  // package.ts, about the DEFAULT userData, which no hermetic test may touch.
+  it('installs silently and registers itself, refuses to reinstall while running, and uninstalls silently: the app and its registration are gone', { timeout: 300_000 }, async () => {
+    // A real per-user install: never beside one the person already has.
+    const beside = installedBesideUs()
+    if (beside !== undefined) expect.fail(beside)
     const root = scratch('minidsh-e2e-install-')
     const dir = join(root, 'Mini DSH ü')
     const home = scratch('minidsh-e2e-home-')
-    writeFileSync(join(home, 'keep.txt'), 'the home is the person\'s, never the installer\'s\n')
     const install = nsis(INSTALLER!, ['/S', `/D=${dir}`])
     expect(install.status).toBe(0)
     const exe = join(dir, 'MiniDSH.exe')
     expect(existsSync(exe)).toBe(true)
     expect(existsSync(join(dir, 'resources', 'node', 'node.exe'))).toBe(true)
+    // The registration the refusal above looks for is the one this install
+    // writes: seen here, so that lookup is known to find a MiniDSH that is there.
+    const registered = registeredInstall()
+    expect(registered, 'the installer registered nothing this test can find: the refusal above could not see a real install either').toBeDefined()
+    expect(registered!.uninstaller.toLowerCase(), 'the registration names another folder').toContain(dir.toLowerCase())
 
     const userData = scratch('minidsh-e2e-ud-')
     const folder = scratch('minidsh-e2e-ws-')
@@ -327,18 +389,19 @@ describe.runIf(EXE && INSTALLER && win)('the installed desktop app (Windows)', (
     await web.waitFor(`document.querySelector('#hero')?.textContent.includes('works in')`, 60_000)
 
     // While it runs, the installer refuses (exit 2) and kills nothing.
-    const runtime = app.runtimePid()!
+    const runtime = app.runtimePid()
+    expect(runtime, 'the runtime child was not found, so "kills nothing" would be said of nothing').toBeDefined()
     const refused = nsis(INSTALLER!, ['/S', `/D=${dir}`])
     expect(refused.status).toBe(2)
-    expect(alive(app.pid) && alive(runtime)).toBe(true)
+    expect({ app: alive(app.pid), runtime: alive(runtime!) }).toEqual({ app: true, runtime: true })
 
     app.closeWindow()
     expect((await app.waitForExit(60_000)).code).toBe(0)
-    await waitUntil('every MiniDSH process under the install to end', () => !alive(runtime), 30_000)
+    await waitUntil('every MiniDSH process under the install to end', () => !alive(runtime!), 30_000)
     // `_?=` runs the uninstaller in place, so the wait is real (it leaves itself behind).
     const uninstall = nsis(join(dir, 'Uninstall MiniDSH.exe'), ['/currentuser', '/S', `_?=${dir}`])
     expect(uninstall.status).toBe(0)
     expect(existsSync(exe)).toBe(false)
-    expect(readFileSync(join(home, 'keep.txt'), 'utf8')).toMatch(/never the installer's/)
+    expect(registeredInstall(), 'the uninstall left its registration behind').toBeUndefined()
   })
 })

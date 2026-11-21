@@ -8,9 +8,11 @@
  * into a path with a space and a non-ASCII letter, then uninstalled) or
  * MINIDSH_DESKTOP_EXE.
  *
- * The world is asserted, never the model's word: the fixture's tests pass
- * when THIS process runs them; the log holds the person's decisions, the
- * repair a killed runtime left for its resume, and the cancel a quit wrote.
+ * The world is asserted, never the model's word: the fixture's module passes
+ * a test THIS process wrote and runs outside the folder the agent works in
+ * (`judgeSlug`: the folder's own test file is the agent's to rewrite); the log
+ * holds the person's decisions, the repair a killed runtime left for its
+ * resume, and the cancel a quit wrote.
  * The app's PATH carries no node of the person's, so the `node` the agent's
  * shell runs is the app's bundled one (24.22.3), which only running it can
  * report — that is the separating assertion for the bundled-node claim.
@@ -23,19 +25,29 @@
  *   4. a fresh profile with no key in the environment: the welcome view's
  *      form saves one, and a session in the next launch uses it.
  */
-import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { answerNativeDialog, killDesktopApps, type DesktopApp, type DesktopLaunch } from '../../src/test-support/desktop-app.ts'
+import { answerNativeDialog, installedBesideUs, killDesktopApps, type DesktopApp, type DesktopLaunch } from '../../src/test-support/desktop-app.ts'
+import { expectKeys } from '../../src/test-support/expect-keys.ts'
 import { APPROVAL_ARMED, type UiPage } from '../../src/test-support/web-ui.ts'
-import { launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, storedEvents, turnEnds, waitUntil, type Cleanup } from './support.ts'
+import { judgeSlug, launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, storedEvents, turnEnds, waitUntil, type Cleanup } from './support.ts'
 
 const KEY = process.env.DEEPSEEK_API_KEY
 const INSTALLER = process.env.MINIDSH_DESKTOP_INSTALLER
 const EXE = process.env.MINIDSH_DESKTOP_EXE
 const SHOTS = process.env.MINIDSH_DESKTOP_SHOTS
 const BUNDLED_NODE = 'v24.22.3'
+const win = process.platform === 'win32'
+
+// Both flags are held HERE as well as in app.e2e.test.ts: a run filtered to
+// this file loads no other, and it then skipped green whatever was promised.
+expectKeys('the desktop live arc', ['DEEPSEEK_API_KEY'])
+describe.runIf(process.env.MINIDSH_EXPECT_DESKTOP === '1' && win && !INSTALLER && !EXE)('the desktop live arc', () => {
+  it('needs MINIDSH_DESKTOP_INSTALLER or MINIDSH_DESKTOP_EXE when MINIDSH_EXPECT_DESKTOP=1', () => {
+    expect.fail('MINIDSH_EXPECT_DESKTOP=1 on Windows, and neither MINIDSH_DESKTOP_INSTALLER nor MINIDSH_DESKTOP_EXE names an app: build one (node desktop/scripts/package.ts) and point at it')
+  })
+})
 
 const cleanup: Cleanup = []
 afterAll(async () => {
@@ -54,6 +66,12 @@ function pathWithoutNode(): string {
     .join(delimiter)
 }
 
+/** The test the fixture starts with, and the judge's own copy of it: what step 1 must make pass. */
+const FIRST_TEST =
+  "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\nimport { slugify } from './slug.mjs'\n\ntest('lowercases and joins words with single hyphens', () => {\n  assert.equal(slugify('Hello World'), 'hello-world')\n  assert.equal(slugify('Many   Spaces Here'), 'many-spaces-here')\n})\n"
+/** What step 2 asks for on top of it, as THIS process words it: the agent writes its own in the folder, and is not judged by that one. */
+const SECOND_TEST = `${FIRST_TEST}\ntest('trims the ends', () => {\n  assert.equal(slugify('  Trim Me  '), 'trim-me')\n})\n`
+
 /** A small repository with one failing test (node:test, no dependencies). */
 function fixture(dir: string): void {
   writeFileSync(join(dir, 'package.json'), '{ "name": "slug-fixture", "type": "module", "private": true }\n')
@@ -61,13 +79,8 @@ function fixture(dir: string): void {
     join(dir, 'slug.mjs'),
     "// Turn a title into a URL slug: lowercase, words joined by single hyphens.\nexport function slugify(title) {\n  return title.split(' ').join('-')\n}\n",
   )
-  writeFileSync(
-    join(dir, 'slug.test.mjs'),
-    "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\nimport { slugify } from './slug.mjs'\n\ntest('lowercases and joins words with single hyphens', () => {\n  assert.equal(slugify('Hello World'), 'hello-world')\n  assert.equal(slugify('Many   Spaces Here'), 'many-spaces-here')\n})\n",
-  )
+  writeFileSync(join(dir, 'slug.test.mjs'), FIRST_TEST)
 }
-
-const testsPass = (dir: string): boolean => spawnSync(process.execPath, ['--test'], { cwd: dir, encoding: 'utf8' }).status === 0
 
 /**
  * Answer every armed approval with the primary button (allow once) until
@@ -93,6 +106,9 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     let exe = EXE!
     let installDir: string | undefined
     if (INSTALLER) {
+      // A real per-user install: never beside one the person already has.
+      const beside = installedBesideUs()
+      if (beside !== undefined) expect.fail(beside)
       installDir = join(scratch('minidsh-live-install-'), 'Mini DSH ü')
       expect(nsis(INSTALLER, ['/S', `/D=${installDir}`]).status).toBe(0)
       exe = join(installDir, 'MiniDSH.exe')
@@ -100,7 +116,12 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     const repo = join(scratch('minidsh-live-ws-'), 'slug repo')
     mkdirSync(repo)
     fixture(repo)
-    expect(testsPass(repo), 'the fixture must start red').toBe(false)
+    // The judge: outside the folder the app works in, with this process's own
+    // test. The agent runs approved in `repo` and may edit `slug.test.mjs`
+    // there (step 2 asks it to), so that file's verdict is the agent's own.
+    const judgeDir = scratch('minidsh-live-judge-')
+    const judged = (test: string): { pass: boolean; output: string } => judgeSlug(repo, judgeDir, test)
+    expect(judged(FIRST_TEST).pass, 'the fixture must start red').toBe(false)
     const home = scratch('minidsh-live-home-')
     const userData = scratch('minidsh-live-ud-')
     seed(userData, [repo])
@@ -121,7 +142,8 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     const clicks = await consentUntil(web, 'the first turn to end', () => turnEnds(home).length >= 1, 480_000)
     evidence.push(`1. fix: ${Math.round((Date.now() - started) / 1000)} s, ${clicks} approval(s) clicked`)
     expect(turnEnds(home), `main.log:\n${app.mainLog()}`).toEqual(['completed'])
-    expect(testsPass(repo), 'the fix holds when this process runs the tests').toBe(true)
+    const fixed = judged(FIRST_TEST)
+    expect(fixed.pass, `the fix does not hold against this process's own copy of the test:\n${fixed.output}`).toBe(true)
     const events = storedEvents(home)
     const decided = events.filter((event) => event.type === 'approval/decided')
     expect(clicks).toBeGreaterThan(0)
@@ -139,8 +161,9 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     const before = storedEvents(home).length
     await web.press('Enter')
     await waitUntil('the second turn to dispatch a tool or ask', () => storedEvents(home).slice(before).some((event) => event.type === 'tool/dispatch' || event.type === 'approval/asked'), 240_000)
-    const runtime = app.runtimePid()!
-    process.kill(runtime, 'SIGKILL')
+    const runtime = app.runtimePid()
+    expect(runtime, 'the runtime child was not found, so there is nothing to kill mid-turn').toBeDefined()
+    process.kill(runtime!, 'SIGKILL')
     const shell = await app.page('minidsh-shell:')
     await shell.waitFor(`document.querySelector('h1')?.textContent.includes('stopped unexpectedly')`, 30_000)
     await shell.click('button.primary')
@@ -155,8 +178,11 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     expect(ends.slice(0, 1)).toEqual(['completed'])
     expect(ends, 'the repair a resume wrote for the killed turn').toContain('interrupted')
     expect(ends.at(-1)).toBe('completed')
-    evidence.push(`2. killed runtime ${runtime}, restarted, resumed: turn ends ${ends.join(' → ')}`)
-    expect(testsPass(repo)).toBe(true)
+    evidence.push(`2. killed runtime ${String(runtime)}, restarted, resumed: turn ends ${ends.join(' → ')}`)
+    // The module does what was asked, by this process's own wording of both
+    // tests; and the agent did add one of its own to the folder, as asked.
+    const trimmed = judged(SECOND_TEST)
+    expect(trimmed.pass, `slug.mjs fails this process's own two tests:\n${trimmed.output}`).toBe(true)
     expect(readFileSync(join(repo, 'slug.test.mjs'), 'utf8')).toMatch(/Trim Me/)
 
     // ---- 3. quit mid-turn: the confirm names the work ---------------------
@@ -192,8 +218,11 @@ describe.runIf(KEY && (INSTALLER || EXE) && process.platform === 'win32')('the i
     await welcome.type('input[aria-label="DEEPSEEK_API_KEY value"]', KEY!)
     await welcome.click('input[aria-label="DEEPSEEK_API_KEY value"] + button')
     await welcome.waitFor(`[...document.querySelectorAll('.row')].some((row) => row.textContent.includes('DEEPSEEK_API_KEY') && row.textContent.includes('saved'))`, 60_000)
-    expect(JSON.parse(readFileSync(join(home2, 'credentials.json'), 'utf8'))).toHaveProperty('DEEPSEEK_API_KEY')
-    expect(keyless.mainLog()).not.toContain(KEY!)
+    // Both by a form that cannot print the key: a failed `toHaveProperty`
+    // shows the object it was given, a failed `not.toContain` the whole log it
+    // searched — and this one fails exactly when the key has reached a log.
+    expect(Object.keys(JSON.parse(readFileSync(join(home2, 'credentials.json'), 'utf8')) as Record<string, unknown>)).toContain('DEEPSEEK_API_KEY')
+    expect(keyless.mainLog().includes(KEY!), 'main.log holds the provider key that was just typed into the welcome view').toBe(false)
     keyless.closeWindow()
     expect((await keyless.waitForExit(30_000)).code).toBe(0)
     seed(userData2, [repo])
