@@ -2042,7 +2042,11 @@ describe('the command lines the skills give', () => {
       readdirSync(join(SKILLS, dir))
         .filter((file) => file.endsWith('.md'))
         .flatMap((file) => [...readFileSync(join(SKILLS, dir, file), 'utf8').matchAll(/^ *```[^\n]*\n([^]*?)\n *```/gm)].flatMap((m) => m[1]!.split('\n').map((line) => line.trim())))
-        .filter((line) => line.startsWith(windows ? '& "' : '"')),
+        // A command line begins with a quoted PROGRAM placeholder. A bare
+        // leading quote also begins every key of the JSON specs these
+        // documents show, which is what this counted on sh (11 lines for 3,
+        // on the Linux and macOS runners: the lane that wrote it ran Windows).
+        .filter((line) => line.startsWith(windows ? '& "<' : '"<')),
     )
     // The browser print and the soffice conversion in pdf, the soffice conversion in office.
     expect(lines.length, `the lines for ${windows ? 'PowerShell' : 'sh'}:\n${lines.join('\n')}`).toBe(3)
