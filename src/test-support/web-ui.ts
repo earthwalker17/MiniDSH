@@ -222,7 +222,7 @@ export function pageFor(cdp: CdpConnection, sessionId: string, problems: UiProbl
  * names: the first page trades the one-shot token, every later one rides the
  * cookie it minted. Every page carries the tripwire.
  */
-function pageOpener(launched: LaunchedBrowser, signInUrl: string): { openPage: () => Promise<UiPage>; closePages: () => Promise<void> } {
+export function pageOpener(launched: LaunchedBrowser, signInUrl: string): { openPage: () => Promise<UiPage>; closePages: () => Promise<void> } {
   const origin = new URL(signInUrl).origin
   /** Tripwires by CDP session id: one listener for the whole browser, routed per page. */
   const tripwires = new Map<string, UiProblem[]>()
