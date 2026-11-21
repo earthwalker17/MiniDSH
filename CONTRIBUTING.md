@@ -29,7 +29,7 @@ pnpm build        # emits dist/; prepack runs it
 pnpm minidsh …    # run the checkout
 ```
 
-[`desktop/README.md`](desktop/README.md) covers building the desktop app. Its E2E drives the app `MINIDSH_DESKTOP_EXE` names and, on Windows, the installer `MINIDSH_DESKTOP_INSTALLER` names.
+[`desktop/README.md`](desktop/README.md) covers building the desktop app. Its E2E drives the app `MINIDSH_DESKTOP_EXE` names and, on Windows, the installer `MINIDSH_DESKTOP_INSTALLER` names. That one is a real per-user install, and it refuses to run where MiniDSH is already installed.
 
 A test whose tool is missing skips itself, and a skip looks like a pass. Each flag turns one skip into a failure. CI sets them.
 

@@ -133,7 +133,7 @@ The model proposes, policy decides, the effect boundary enforces.
 - **Every decision is durable.** The setter IS the event (`sandbox/mode`, `approval/policy`, acceptance, grants): `change` only on change, sandbox `resume` when a resumed host enforces differently; `context-runtime`, never the service, tells the model. Precedence: approved one-shot escalation > recorded fold > composition default. `approval-headless` fails closed (`unavailable`) except under `--approve` or an exact `allow` entry.
 - **A delegated child opens under a ceiling.** `tool-subagent` captures the parent's authority and stamps it in `setup`: the mode as a CEILING, approvals pinned `never`, acceptance `strictest(parent, row)` as a PIN. Widening is refused and so is `setAcceptance` on any delegated session; narrowing is legal. A continuation keeps them: one whose seed lacks the opening stamps is refused (`core/agent/index.ts`). What the row NARROWS is the child's `agent/narrowing` (§4): scoping, not the fence.
 - **A network tool asks per call and never reaches a child.** A `NETWORK_TOOL`-tagged tool asks consent in its body before any byte leaves, with exact grants (`tool-web-search`); `tool-subagent`'s narrowing hides every such tool from a child by kind (`core/tools/types.ts`; §13).
-- **The browser is fenced, not consented** (`tool-browser`, deliberately not `NETWORK_TOOL`, so a child may use it). A harness process over a CDP pipe, never a port; a fresh profile; downloads denied. Chrome itself reaches and resolves only loopback (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`; no other `127/8` address) and row-config `allowHosts`, and loads `file:` only inside the workspace; a canary proves the fence per launch (`fence.ts`, `launch.ts`).
+- **The browser is fenced, not consented** (`tool-browser`, deliberately not `NETWORK_TOOL`, so a child may use it). A harness process over a CDP pipe, never a port; a fresh profile; downloads denied. Chrome itself reaches and resolves only loopback (its four names; no other `127/8` address) and row-config `allowHosts`, and loads `file:` only inside the workspace; a canary proves the fence per launch (`fence.ts`, `launch.ts`).
 - **A job runs under the stamp its start resolved, never an escalation**, and a `change` of `sandbox/mode` or `sandbox/acceptance` ends its owner's jobs, a start in flight included (`core/jobs/index.ts`).
 - **Presets select, the knobs decide.** `authority/preset` is a log-only intent written before `setMode`/`setPolicy` (`core/presets`). A SET of switches is held to a delegated session's ceiling and pins before any lands (`authoritySwitchRefusal`).
 - **Consent-by-composition.** A preset-mounted (§9) answerer hears its own agent's `approval/request` (§2) and can auto-approve: code-equivalent trust, every pair audited. It cannot widen enforcement (the fence and shell resolve the global `SANDBOX`) nor reach a deployment-global registry.
@@ -204,10 +204,10 @@ MiniDSH IS data: composition rows plus disk layers (`app/compose.ts`, `app/confi
 
 ## 10. Verification
 
-Tests mount real compositions; only the model is scripted or replayed (`test-support/llm-replay.ts`). E2E asserts the world where one exists.
+Tests mount real compositions; only the model is scripted or replayed (`test-support/llm-replay.ts`, a two-sided oracle). E2E asserts the world where one exists.
 
-- **Runtime invariants run in every test and live**; cross-capability claims on the full composition (`app.test.ts`); every reader runs on old real logs (`fixtures.test.ts`).
-- **Gates.** A tag publishes only after `check.yml` and an unfiltered `live.yml` passed its commit (`release.yml`; legs: `CONTRIBUTING.md`). A `MINIDSH_EXPECT_*` flag fails the skip it names.
+- **Runtime invariants run in every test and live**, and a violation fails its test; cross-capability claims on the full composition (`app.test.ts`); every reader runs on old real logs (`fixtures.test.ts`).
+- **Gates.** A tag publishes only after `check.yml` and an unfiltered `live.yml` passed its commit (`release.yml`; legs: `CONTRIBUTING.md`). A `MINIDSH_EXPECT_*` flag fails the skip it names, in a filtered run too.
 - **Live arcs**: the OpenAI leg, its drift probe and `search` are LOCAL (`live.yml` holds no OpenAI or Tavily key).
 
 | arc | what it proves |
@@ -331,7 +331,7 @@ Upstream facts and verdicts: `references/assumptions.md`.
 - Under bwrap a path in the ephemeral `/tmp` is invisible, its denial unhinted; on macOS a tool needing a writable temp escalates.
 - Composition changes need a restart; after a live `reconfigure` of `shell` (outside the spine, §9), `enforcementFor` and stamps describe a world no command runs in.
 - A module-loaded plugin is arbitrary code, `minidsh config`'s warnings advisory; an installed package reaches seams only by deep path into `dist/` (§9).
-- A shell child's environment withholds variables, not credentials (§9; `core/process.ts`): undeclared secrets, `SSH_AUTH_SOCK` and proxies pass; `credentials.json` is readable, the network open. Under bwrap an agent socket in the masked runtime directory is gone with it, unhinted (`confine/bwrap.ts`).
+- A shell child's environment withholds variables, not credentials (§9; `core/process.ts`): undeclared secrets, `SSH_AUTH_SOCK` and proxies pass; `credentials.json` is readable, the network open. Under bwrap an ssh-agent socket in the masked runtime directory is gone too, unhinted.
 - A network tool is consented, never confined or recorded (§7); headless, only `--approve` allows one.
 - `tool-browser` reaches EVERY loopback service, in any mode and from a child, unconsented and unrecorded (§7), each able to act or relay on its own authority.
 - `tool-browser`'s `file:` fence is each page's own: what a popup loads before its close lands is neither paused nor read (`tool-browser/page.ts`).
@@ -343,7 +343,7 @@ Upstream facts and verdicts: `references/assumptions.md`.
 - Document skills check content, not appearance.
 - The compaction budget sizes only the kept tail: a `compaction` role with a smaller window is asked to read past it (`compaction-basic`).
 - The meter sees a prompt or tool-set change a step late and charges images on text-only routes.
-- Workspace instructions are read once per entry, not watched; an overflow compaction's retried request lacks them and the skill list (`core/loop/driver.ts`); shadowed and no longer renderable, they are searched for again at each later step of that turn.
+- Workspace instructions are read once per entry, not watched; an overflow compaction's retried request lacks them and the skill list (`core/loop/driver.ts`); shadowed and unrenderable, they are searched for again each later step.
 - An unreadable user or bundled skill root freezes the skill list; no `/name` invokes a skill.
 - A notice the wake budget held waits for a human message.
 
@@ -373,13 +373,14 @@ Upstream facts and verdicts: `references/assumptions.md`.
 - An unconfined POSIX shell shares the terminal: a command opening /dev/tty draws over the screen; Ctrl+L repaints (`tty.ts`).
 - One principal, no accounts. The browser changes a stored session's route and authority only once a message resumes it (`app.js`).
 - `web`'s cookie is scoped to the host name, not the port: any other server on that loopback name receives it, and with a matching `Host` and no `Origin` it opens the WebSocket (`app/web.ts`; `SECURITY.md`).
+- `web --json` reads stdin's end only once ready: ending it during the boot waits for the boot (the desktop kills at 5 s).
 - `workspaceRoots` bounds only where a session is first CREATED: a wire client may resume or fork one outside them (`protocol/host.ts`).
 - The Windows installer's is-it-running check is an exact PowerShell query, then the image name, then nothing where neither answers (`desktop/installer.nsh`).
 - A killed or logged-off Windows desktop ends its runtime at once (libuv's Job); the next resume repairs and, the lease rule permitting, reclaims.
 - The desktop's four installers carry no publisher signature and never self-update; the two macOS builds ran on CI runners only, the Intel one on an image GitHub will retire (`check.yml`).
 - Its per-user install is user-writable (code-equivalent); Help's DevTools show the injected cookie; its runtime inherits `NODE_OPTIONS`; on Windows `credentials.json` keeps its folder's ACL.
 - A macOS or Linux GUI launch lacks the login shell's environment; without unprivileged user namespaces an AppImage renders outside Chromium's sandbox (logged), and SIGTERM stops its wrapper, not the app.
-- The agent's `node` is the person's own when on PATH (an old one fails the bundled skills), else the bundled one, which with the bundled skills sits under `/tmp` in the AppImage: a bwrap-confined command sees them only through the shell row's `expose` (§9).
+- The agent's `node` is the person's own when on PATH (an old one fails the bundled skills), else the bundled one; in the AppImage it and the skills sit under `/tmp`, which a confined command sees only through `expose` (§9).
 
 **Delegation and providers**
 
@@ -410,7 +411,7 @@ src/capabilities/
   protocol/ (frames · host · connection · transport-*)
 src/app/ cli · home · compose · config · settings · headless · serve · web · present · inspect
   web/ (conversation · cards · transcript · rows · wire …) · terminal/ (controller · tui · line · tty · keys · blocks · screen …) · *.e2e.test.ts
-src/test-support/ scripted-adapter · harness · llm-replay · {serve,web}-process · desktop-app · fixtures/ (logs, plugins, pdf)
+src/test-support/ scripted-adapter · harness · llm-replay · arc-evidence · expect-keys · {serve,web}-process · desktop-app · fixtures/ (logs, plugins, pdf)
 desktop/ src/ (main; pure runtime · inspect · folders · guards …) · shell/ · scripts/ (package · smoke-runtime · check-fuses) · e2e/
 skills/ bundled office/ · pdf/ (README)
 scripts/ build · check-deps (+ deps-graph) · check-docs · doc-registers · count-lines (counts: BLUEPRINT §4) · smoke-installed.sh
