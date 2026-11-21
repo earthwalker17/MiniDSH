@@ -33,7 +33,7 @@
  */
 import type { SandboxEnforcement, SandboxMode } from '../sandbox/events.ts'
 import { eventKind } from '../session/types.ts'
-import { isInvisible, printableText } from '../text.ts'
+import { clip, isInvisible, printableText } from '../text.ts'
 
 /** What happened, per family. Closed: a third family is a deliberate vocabulary change. */
 export type EffectRecord =
@@ -223,7 +223,7 @@ export function clampIntent(intent: EffectIntent): EffectIntent {
   const escaped = hasControls(intent.command)
   const base = escaped ? { ...intent, command: escapeControls(intent.command), escaped: true as const } : intent
   if (base.command.length <= MAX_INTENT_CHARS) return base
-  return { ...base, command: base.command.slice(0, MAX_INTENT_CHARS), truncated: true }
+  return { ...base, command: clip(base.command, MAX_INTENT_CHARS), truncated: true }
 }
 
 function clampNetwork(intent: NetworkIntent): NetworkIntent {
@@ -238,7 +238,7 @@ function clampNetwork(intent: NetworkIntent): NetworkIntent {
       }
     : intent
   if (base.payload.length <= MAX_INTENT_CHARS && base.destination.length <= MAX_INTENT_CHARS) return base
-  return { ...base, destination: base.destination.slice(0, MAX_INTENT_CHARS), payload: base.payload.slice(0, MAX_INTENT_CHARS), truncated: true }
+  return { ...base, destination: clip(base.destination, MAX_INTENT_CHARS), payload: clip(base.payload, MAX_INTENT_CHARS), truncated: true }
 }
 
 /**

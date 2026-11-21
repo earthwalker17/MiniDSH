@@ -31,7 +31,7 @@ import { AGENTS, type Agent, type Agents } from '../agent/index.ts'
 import { SANDBOX_ACCEPTANCE, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../sandbox/events.ts'
 import { matches, SESSION_EVENT, type EventEnvelope, type Session } from '../session/index.ts'
 import { SPILL, type SpillStream } from '../spill/index.ts'
-import { printableText } from '../text.ts'
+import { clip, printableText } from '../text.ts'
 import { foldJobWakes, JOB_END, JOB_START, jobNotice, type JobCanceller, type JobEnd, type JobKind, type JobStart } from './events.ts'
 
 export * from './events.ts'
@@ -266,7 +266,7 @@ class JobsService implements Jobs {
       jobId: this.mintId(owner),
       owner,
       kind: spec.kind,
-      label: printableText(spec.label).trim().slice(0, 2000),
+      label: clip(printableText(spec.label).trim(), 2000),
       callId: spec.callId,
       startedAt: Date.now(),
       done: false,
@@ -308,7 +308,7 @@ class JobsService implements Jobs {
       jobId: entry.jobId,
       ...(spec.callId === undefined ? {} : { callId: spec.callId }),
       kind: spec.kind,
-      label: entry.label.slice(0, 200),
+      label: clip(entry.label, 200),
       ...(process.pid === undefined ? {} : { pid: process.pid }),
       mode: process.mode,
       enforcement: process.enforcement,
@@ -473,7 +473,7 @@ class JobsService implements Jobs {
       ...(cancel !== undefined
         ? { cause: 'cancelled' as const, ...exited, by: cancel.by }
         : exit.failure !== undefined
-          ? { cause: 'failed' as const, ...exited, detail: printableText(exit.failure).slice(0, 400) }
+          ? { cause: 'failed' as const, ...exited, detail: clip(printableText(exit.failure), 400) }
           : { cause: 'exited' as const, ...exited }),
       ...(reportedBy === undefined ? {} : { reportedBy }),
       durationMs,

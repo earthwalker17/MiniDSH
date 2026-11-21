@@ -111,19 +111,24 @@ class InvariantRegistry implements Invariants {
       throw new KernelError('SCOPED_OWNER', `invariant "${packageName}" cannot be registered from a scoped context; invariants are deployment-global`)
     }
     if (this.reserved.has(packageName)) throw new Error(`invariant "${packageName}" is already registered`)
-    this.reserved.add(packageName)
-    let disposeChild: Disposer = async () => {}
-    if (this.selected(packageName)) {
-      const child = owner.child({ label: `invariant:${packageName}` })
-      const fail: InvariantFailure = (message) => {
-        throw new InvariantError(packageName, message)
+    // The reservation inside the effect, so the owner is admitted before it
+    // (kernel `admit`): reserved first, a refused owner (one being disposed)
+    // left its name taken for the life of the process, with no effect to free it.
+    return owner.effect(() => {
+      let disposeChild: Disposer = async () => {}
+      if (this.selected(packageName)) {
+        const child = owner.child({ label: `invariant:${packageName}` })
+        const fail: InvariantFailure = (message) => {
+          throw new InvariantError(packageName, message)
+        }
+        void installer(child, fail)
+        disposeChild = () => child.dispose()
       }
-      void installer(child, fail)
-      disposeChild = () => child.dispose()
-    }
-    return owner.effect(() => async () => {
-      this.reserved.delete(packageName)
-      await disposeChild()
+      this.reserved.add(packageName)
+      return async () => {
+        this.reserved.delete(packageName)
+        await disposeChild()
+      }
     }, `invariant("${packageName}")`)
   }
 }

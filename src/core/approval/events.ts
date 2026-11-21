@@ -6,7 +6,7 @@
  */
 import { intentKey, type EffectIntent } from '../effects/events.ts'
 import { eventKind, matches, TOOL_CALL, type EventEnvelope } from '../session/types.ts'
-import { printableText } from '../text.ts'
+import { clip, printableText } from '../text.ts'
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 const VALID_OUTCOMES: ReadonlySet<string> = new Set<ApprovalOutcome>(['allowed-once', 'rejected', 'cancelled', 'unavailable'])
@@ -275,7 +275,8 @@ const MAX_CALL_CHARS = 16_384
 function boundedCall(name: string, args: string): ApprovedCall {
   const safe = printableText(args)
   if (safe.length <= MAX_CALL_CHARS) return { name, arguments: safe }
-  return { name, arguments: safe.slice(0, MAX_CALL_CHARS), omittedChars: safe.length - MAX_CALL_CHARS }
+  const shown = clip(safe, MAX_CALL_CHARS)
+  return { name, arguments: shown, omittedChars: safe.length - shown.length }
 }
 
 /**

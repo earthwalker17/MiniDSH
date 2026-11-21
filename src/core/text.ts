@@ -52,6 +52,20 @@ export function isInvisible(ch: string): boolean {
 }
 
 /**
+ * At most the first `maxUnits` UTF-16 units of `text`, never ending on half of
+ * a surrogate pair. A bound applied with `slice` alone can cut an emoji or a
+ * CJK extension character in two; the half left behind is a lone surrogate,
+ * which a reader sees as U+FFFD and which no provider accepts in a request.
+ * So the result may be one unit shorter than asked, and a caller that reports
+ * what it left out counts from the result.
+ */
+export function clip(text: string, maxUnits: number): string {
+  if (text.length <= maxUnits) return text
+  const last = text.charCodeAt(maxUnits - 1)
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? maxUnits - 1 : maxUnits)
+}
+
+/**
  * The same rule for text that keeps its LINES: `\n` and `\t` survive, every
  * other control character becomes a space. For a streamed answer, whose
  * paragraphs and code blocks are the model's own structure; `printableText`

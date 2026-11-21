@@ -4,7 +4,7 @@
  * or renders as nothing.
  */
 import { describe, expect, it } from 'vitest'
-import { isInvisible, printableLines, printableText } from './text.ts'
+import { clip, isInvisible, printableLines, printableText } from './text.ts'
 
 describe('printableText', () => {
   it('blanks controls and every character that renders as nothing, and keeps ordinary text', () => {
@@ -26,6 +26,20 @@ describe('printableText', () => {
       expect(isInvisible(ch), ch.codePointAt(0)!.toString(16)).toBe(true)
     }
     for (const ch of ['a', 'é', '中', '✓', ' ']) expect(isInvisible(ch), ch).toBe(false)
+  })
+})
+
+describe('clip', () => {
+  it('bounds by UTF-16 units and never leaves half of a surrogate pair', () => {
+    expect(clip('abcdef', 4)).toBe('abcd')
+    expect(clip('abc', 4)).toBe('abc')
+    // U+1F600 is two units. A bound landing between them gives the pair up.
+    const text = 'ab\u{1f600}cd'
+    expect(clip(text, 3)).toBe('ab')
+    expect(clip(text, 4)).toBe('ab\u{1f600}')
+    expect([1, 2, 3, 4, 5, 6].map((bound) => clip(text, bound).isWellFormed())).toEqual([true, true, true, true, true, true])
+    // What the plain cut it replaces would have produced.
+    expect(text.slice(0, 3).isWellFormed()).toBe(false)
   })
 })
 

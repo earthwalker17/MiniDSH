@@ -56,4 +56,19 @@ describe('prompt interpolation', () => {
     expect(ends).toEqual([{ kind: 'completed' }])
     expect(harness.adapter.calls.map((call) => call.system)).toEqual([`You are a test agent.\n\nWorking directory: ${cwd}`])
   })
+
+  // A section renders text nobody here wrote. A lone surrogate in it rides
+  // every request of the session, and each provider answers that with HTTP 400
+  // (measured on all three, S22.5): the messages are made well-formed where
+  // they are built, and the prompt where it is assembled.
+  it('assembles a well-formed prompt from a section that holds a lone surrogate, from a function or a template', async () => {
+    harness = await coreHarness()
+    const prompt = harness.root.get(PROMPT)
+    prompt.variable(harness.root, 'half', () => 'b\u{dc00}')
+    prompt.section(harness.root, { name: 'rendered', order: 10, text: () => 'dir a\u{d83d}' })
+    prompt.section(harness.root, { name: 'template', order: 20, text: 'var {{half}} pair \u{1f600}' })
+    const { system } = await prompt.assemble()
+    expect(system.isWellFormed()).toBe(true)
+    expect(system).toBe('You are a test agent.\n\ndir a\u{fffd}\n\nvar b\u{fffd} pair \u{1f600}')
+  })
 })

@@ -104,7 +104,12 @@ class PromptRegistry implements Prompt {
     // every step of such a session with an error about a variable it never had.
     const render = (section: PromptSection): string =>
       typeof section.text === 'function' ? section.text(agent) : this.interpolate(section.text, agent)
-    const system = complete.length === 1 ? render(complete[0]!) : ordered.map(render).filter((text) => text.length > 0).join('\n\n')
+    const rendered = complete.length === 1 ? render(complete[0]!) : ordered.map(render).filter((text) => text.length > 0).join('\n\n')
+    // A section renders text this runtime did not author (a working directory,
+    // a skill's description, an instruction file), and a lone surrogate in it
+    // is in EVERY request of the session: each provider answers HTTP 400. The
+    // messages have `wellFormedContent`; this is the same rule for the prompt.
+    const system = rendered.toWellFormed()
 
     const tools = this.ctx.tryGet(TOOLS)?.schemas(agent) ?? []
     return { system, tools }

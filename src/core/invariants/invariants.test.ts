@@ -97,6 +97,29 @@ describe('invariant registration', () => {
     await root.dispose()
   })
 
+  // The name was reserved before the kernel admitted the owner: a plugin
+  // registering while it unloads was refused and still held the name, so the
+  // reload that followed met "already registered" with no disposer to call.
+  it('refuses an owner that is no longer live, and leaves the name free and the installer unrun', async () => {
+    const root = await mounted()
+    const registry = root.get(INVARIANTS)
+    const gone = root.child({ label: 'gone' })
+    await gone.dispose()
+    let ran = 0
+    let refused: unknown
+    try {
+      registry.register(gone, 'reloaded', () => void ran++)
+    } catch (error) {
+      refused = error
+    }
+    expect(refused).toBeInstanceOf(KernelError)
+    expect({ code: (refused as KernelError).code, ran }).toEqual({ code: 'INACTIVE_OWNER', ran: 0 })
+    let reran = 0
+    expect(() => registry.register(root, 'reloaded', () => void reran++)).not.toThrow()
+    expect(reran).toBe(1)
+    await root.dispose()
+  })
+
   it('gives an installer a context that observes the root pre-commit, a failure that names its package, and a lifetime its disposer ends', async () => {
     const root = await mounted()
     const heard: number[] = []

@@ -33,7 +33,7 @@ import type { Message } from '../llm/types.ts'
 import { INBOX_SPLICED, type InboxSplice } from '../agent/events.ts'
 import type { SandboxEnforcement, SandboxMode } from '../sandbox/events.ts'
 import { eventKind, matches, TOOL_RESULT, TURN_END, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/types.ts'
-import { printableText } from '../text.ts'
+import { clip, printableText } from '../text.ts'
 
 /** What produced the job. Closed: a second producer (S21's background child) is a vocabulary change. */
 export type JobKind = 'shell'
@@ -108,7 +108,7 @@ export function isJobNotice(message: Message): boolean {
 /** A label as a reader sees it: one line, neutralized, bounded. */
 export function jobLabel(command: string): string {
   const flat = printableText(command).trim()
-  return flat.length <= 200 ? flat : `${flat.slice(0, 199)}…`
+  return flat.length <= 200 ? flat : `${clip(flat, 199)}…`
 }
 
 function seconds(ms: number | undefined): string {
