@@ -957,6 +957,19 @@ app.on('window-all-closed', () => {
 })
 app.on('will-quit', () => log('quit: every window closed'))
 
+// Electron shows an uncaught exception in main in a MODAL box, which parks the
+// main thread until someone answers it. While quitting there is nobody to
+// answer and nothing left to protect: such a box kept the app alive, with no
+// window, after "every window closed" (sampled on a macOS runner in
+// `-[NSAlert runModal]`, S22.5). So the exception is always logged, and while
+// exiting the app ends, with a failing code. At any other time the person is
+// told, as Electron would have told them.
+process.on('uncaughtException', (error) => {
+  log(`uncaught exception: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
+  if (exiting) return app.exit(1)
+  dialog.showErrorBox('MiniDSH met an internal error', `${error instanceof Error ? error.message : String(error)}\n\nmain.log has the details (Help, Show Logs). Your sessions are kept.`)
+})
+
 void app.whenReady().then(() => {
   logsDir = app.getPath('logs')
   mkdirSync(logsDir, { recursive: true })

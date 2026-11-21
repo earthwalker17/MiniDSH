@@ -27,7 +27,7 @@
  * Self-skips without the executable; `MINIDSH_EXPECT_DESKTOP=1` (CI's desktop
  * job) makes that skip a failure.
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -147,6 +147,41 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     const end = await app.waitForExit(60_000)
     expect(end.code, app.mainLog()).toBe(0)
     expect(locksUnder(home)).toEqual([])
+  })
+
+  // Found by CI, not by this suite: on a fast macOS runner the app stayed up
+  // after its last window closed, in three runs of nine, because a quit can
+  // land at ANY moment of the start and one of them left a callback that used
+  // the destroyed window. An uncaught exception in main is a modal box, and a
+  // modal box nobody answers is an app that never exits. So the quit is sent
+  // at a spread of moments (SIGTERM, which Electron turns into a quit; Windows
+  // has no equivalent before the window exists), and every one must end the
+  // app cleanly with no exception logged and no runtime left behind.
+  it.skipIf(win)('a quit at any moment of the start ends the app, with no exception and no runtime left', { timeout: 240_000 }, async () => {
+    const outcomes: string[] = []
+    for (const delayMs of [150, 300, 450, 600, 800, 1100, 1500, 2200]) {
+      const userData = scratch('minidsh-e2e-ud-')
+      const home = scratch('minidsh-e2e-home-')
+      const folder = scratch('minidsh-e2e-ws-')
+      seed(userData, [folder])
+      const app = launchApp({ exe, userData, home, drop: KEYS })
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+      app.closeWindow()
+      const end = await app.waitForExit(30_000).catch((error: Error) => ({ code: -1, signal: null, hung: error.message }))
+      // The runtime is started with `--cwd <folder>`: by that, whenever it was
+      // spawned (before the quit, or in the instant after it was asked for).
+      const runtimes = (): string => spawnSync('pgrep', ['-f', folder], { encoding: 'utf8', timeout: 10_000 }).stdout.trim()
+      const left = await waitUntil('no runtime of this launch to be left', () => runtimes() === '', 30_000).then(
+        () => '',
+        () => `; a runtime was left (pid ${runtimes().replace(/\s+/g, ' ')})`,
+      )
+      const log = app.mainLog()
+      // Before Electron is ready the signal ends the process itself (no code):
+      // that is a quit honoured too. After that the app must end with 0.
+      const clean = 'hung' in end ? `hung: ${end.hung.slice(0, 600)}` : end.code === 0 || (end.code === null && end.signal === 'SIGTERM' && log === '') ? 'ok' : `code ${String(end.code)} signal ${String(end.signal)}`
+      outcomes.push(`${delayMs} ms: ${clean}${/uncaught exception/.test(log) ? `; ${log.slice(log.indexOf('uncaught exception'), log.indexOf('uncaught exception') + 500)}` : ''}${left}${locksUnder(home).length > 0 ? '; a lease was left' : ''}`)
+    }
+    expect(outcomes).toEqual([150, 300, 450, 600, 800, 1100, 1500, 2200].map((delayMs) => `${delayMs} ms: ok`))
   })
 
   it('a folder: the Web UI with the credential injected; busy close asks, Cancel keeps, Quit stops gracefully; a second launch defers', { timeout: 240_000 }, async () => {
