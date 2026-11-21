@@ -25,9 +25,10 @@
 #             artifact and each app driven; on Windows the installer that
 #             ships is installed and uninstalled. Unsigned until a signing
 #             identity exists.
-#   assemble  `contents: write`, no `id-token`. Exactly the six assets by
-#             name, one SHA256SUMS over them, a DRAFT release holding them,
-#             read back and verified.
+#   assemble  `contents: write`, no `id-token`. Exactly five files by name
+#             (the four installers and the tarball), one SHA256SUMS over
+#             them, and a DRAFT release holding all six assets, read back
+#             and verified.
 #   publish   `id-token: write`. Publishes the gate's tarball through OIDC,
 #             installs it from the public registry, verifies its attestation,
 #             smokes it, and makes the draft public. It installs no

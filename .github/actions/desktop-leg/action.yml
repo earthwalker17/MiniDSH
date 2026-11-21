@@ -60,8 +60,9 @@ runs:
         fi
 
     # The artifact's NAME is a contract (desktop/release-assets.json): the
-    # README's download links and the release's asset check both read it, so a
-    # packer that wrote another name fails here, on every push.
+    # documents' download links (held to it by scripts/check-docs.ts) and the
+    # release's asset check both read it, so a packer that wrote another name
+    # fails here, on every push.
     #
     # Then the runtime as the app starts it, out of the artifact that ships:
     # the AppImage and the zip are unpacked first, so a file the packer dropped
@@ -92,7 +93,7 @@ runs:
             codesign --verify --deep --strict "$RUNNER_TEMP/mac/MiniDSH.app"
             # Reported, never required: an ad-hoc signature is not a Developer
             # ID, so Gatekeeper's verdict on a DOWNLOADED copy is expected to be
-            # a refusal a person overrides (README). This line is the record.
+            # a refusal a person overrides (docs/GUIDE.md). This line is the record.
             spctl --assess --type execute -vv "$RUNNER_TEMP/mac/MiniDSH.app" || echo "spctl: not accepted, as expected of an ad-hoc signature"
             RESOURCES="$RUNNER_TEMP/mac/MiniDSH.app/Contents/Resources"
             EXE="$RUNNER_TEMP/mac/MiniDSH.app/Contents/MacOS/MiniDSH" ;;

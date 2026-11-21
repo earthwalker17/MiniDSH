@@ -1,7 +1,7 @@
 /**
  * Documentation gates. The documents are MAPS sized to what a session reads
  * before it starts work (CLAUDE.md §5); this script is the only place their
- * numbers live. Five rules, one script:
+ * numbers live. Nine rules, one script:
  *
  * 1. Size budgets. Every document a session reads at its start is a per-session
  *    cost, so each has a hard ceiling set from a reading load, not from what
@@ -29,6 +29,19 @@
  *    a per-section target whose overrun warns, so growth is caught in the
  *    section where it happens rather than when the ceiling breaks.
  *
+ * 6. The reader documents (the guide, the case study, the module READMEs,
+ *    CONTRIBUTING): a ceiling each, and the README's eleven sections by name
+ *    and order.
+ *
+ * 7. A layer README names every module of its layer.
+ *
+ * 8. Every `minidsh` command and `--flag` the README and the guide tell a
+ *    person to type exists in the CLI's own tables.
+ *
+ * 9. Every picture a document shows exists, every picture under
+ *    `docs/images/` is shown or listed, and every download link names an
+ *    asset the release uploads.
+ *
  * Run: `node scripts/check-docs.ts` (part of `pnpm check`); `--sections` also
  * prints each budgeted document's `##` sections by size, the input a
  * compaction starts from (`.claude/skills/docs-maintenance/SKILL.md`).
@@ -45,7 +58,8 @@ const ROOT = resolve(import.meta.dirname, '..')
  * read only when compacting. A ceiling moves only with the user's agreement.
  */
 const BUDGETS: Record<string, number> = {
-  'docs/PROJECT.md': 26 * 1024,
+  'CLAUDE.md': 16 * 1024,
+  'docs/PROJECT.md': 17 * 1024,
   'docs/ARCHITECTURE.md': 56 * 1024,
   'docs/BLUEPRINT.md': 30 * 1024,
   'README.md': 32 * 1024,
@@ -60,8 +74,8 @@ const ARCHITECTURE = 'docs/ARCHITECTURE.md'
 const PARAGRAPH_MAX = 700
 const CELL_MAX = 450
 const SECTION_TARGETS: Record<number, number> = {
-  0: 1000, 1: 1050, 2: 1850, 3: 4900, 4: 5400, 5: 1900, 6: 4350, 7: 6450,
-  8: 4450, 9: 3250, 10: 2400, 11: 3350, 12: 2500, 13: 6650, 14: 2100,
+  0: 700, 1: 1050, 2: 1500, 3: 4350, 4: 4800, 5: 1750, 6: 4050, 7: 5950,
+  8: 4550, 9: 3450, 10: 2100, 11: 3400, 12: 2450, 13: 9400, 14: 2000,
 }
 const SECTION_WARN = 1.15
 
@@ -324,6 +338,174 @@ for (const file of walk(ROOT)) {
   }
 }
 console.log(`checked ${tables} tables`)
+
+/**
+ * Rule 6. The reader documents. Not session context (CLAUDE.md §5): a visitor,
+ * a user or someone reading the code opens them, so each has a ceiling that
+ * keeps it something a person finishes, and the README keeps its eleven
+ * sections, by name and in order.
+ */
+const READER_BUDGETS: Record<string, number> = {
+  'docs/GUIDE.md': 18 * 1024,
+  'docs/CASE-STUDY.md': 10 * 1024,
+  'src/README.md': 8 * 1024,
+  'src/kernel/README.md': 4 * 1024,
+  'src/core/README.md': 7 * 1024,
+  'src/capabilities/README.md': 7 * 1024,
+  'src/app/README.md': 6 * 1024,
+  'src/capabilities/protocol/README.md': 5 * 1024,
+  'desktop/README.md': 4 * 1024,
+  'skills/README.md': 5 * 1024,
+  'CONTRIBUTING.md': 7 * 1024,
+}
+for (const [file, ceiling] of Object.entries(READER_BUDGETS)) {
+  const path = join(ROOT, file)
+  if (!existsSync(path)) {
+    failures.push(`${file}: missing (a reader document other documents link to)`)
+    continue
+  }
+  const bytes = statSync(path).size
+  if (bytes > ceiling) failures.push(`${file}: ${bytes} bytes exceeds its ${ceiling}-byte ceiling: move the detail to the document that owns it`)
+  else console.log(`${file}: ${bytes} bytes (${Math.round((bytes / ceiling) * 100)}% of ${ceiling})`)
+}
+
+const README_HEADINGS = [
+  '## What MiniDSH is',
+  '## Quick start',
+  '## What you get',
+  '## Status and limitations',
+  '## The question it investigates',
+  '## Architecture',
+  '## What MiniDSH learned from DeepSeek Harness',
+  '## The architecture-first experiment',
+  '## Verification',
+  '## Documents and help',
+  '## License and attribution',
+]
+{
+  const headings = sectionsOf(readFileSync(join(ROOT, 'README.md'), 'utf8'))
+    .map((section) => section.heading)
+    .filter((heading) => heading.startsWith('## '))
+  if (headings.join('\n') !== README_HEADINGS.join('\n')) failures.push(`README.md: its eleven sections changed (CLAUDE.md §5 fixes them by name and order). Found: ${headings.join(' | ')}`)
+}
+
+/**
+ * Rule 7. A layer README is a way INTO its layer, so it names every module of
+ * it: a directory added without a line there is a module a reader is never
+ * pointed at. Names only; what the README says about each is a person's to judge.
+ */
+const LAYER_READMES: Record<string, 'dirs' | 'files'> = { 'src/kernel': 'files', 'src/core': 'dirs', 'src/capabilities': 'dirs', 'src/app': 'dirs' }
+for (const [layer, kind] of Object.entries(LAYER_READMES)) {
+  const readme = join(ROOT, layer, 'README.md')
+  if (!existsSync(readme)) continue // reported above
+  const text = readFileSync(readme, 'utf8')
+  const entries = readdirSync(join(ROOT, layer), { withFileTypes: true })
+  const names =
+    kind === 'dirs'
+      ? entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+      : entries.filter((entry) => entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')).map((entry) => entry.name)
+  // Whole names in a code span: `tool-shell`, `tool-shell/`, `bus.ts`.
+  const missing = names.filter((name) => !new RegExp('`' + name.replace(/[.]/g, '\\.') + '/?`').test(text))
+  if (missing.length > 0) failures.push(`${layer}/README.md: does not name ${missing.map((name) => `\`${name}\``).join(', ')}: every ${kind === 'dirs' ? 'directory' : 'source file'} of the layer has a line there`)
+}
+
+/**
+ * Rule 8. What a person is told to type exists. In the README and the guide,
+ * every `--flag` on a line or in a code span that names `minidsh`, and every
+ * word that follows `minidsh` as a command, is looked up in the CLI's own
+ * tables (`FLAGS` and `COMMANDS` in `src/app/cli.ts`), read as text so this
+ * script needs no runtime.
+ */
+{
+  const cli = readFileSync(join(ROOT, 'src/app/cli.ts'), 'utf8')
+  const block = (name: string): string => {
+    const start = cli.indexOf(`const ${name}`)
+    if (start === -1) throw new Error(`check-docs: src/app/cli.ts has no ${name} table to read`)
+    return cli.slice(start, cli.indexOf('\n}', start))
+  }
+  const flags = new Set([...block('FLAGS').matchAll(/'(--[a-z][a-z-]*)/g)].map((match) => match[1]!))
+  for (const always of ['--help', '--version']) flags.add(always)
+  const commands = new Set([...block('COMMANDS').matchAll(/^\s{2}([a-z][a-z-]*): \{/gm)].map((match) => match[1]!))
+  for (const always of ['help', 'version']) commands.add(always)
+  if (flags.size < 10 || commands.size < 8) failures.push(`check-docs: read only ${flags.size} flags and ${commands.size} commands from src/app/cli.ts; its tables changed shape`)
+  for (const file of ['README.md', 'docs/GUIDE.md']) {
+    const path = join(ROOT, file)
+    if (!existsSync(path)) continue
+    const lines = readFileSync(path, 'utf8').split('\n')
+    let inFence = false
+    lines.forEach((line, i) => {
+      if (/^\s*```/.test(line)) {
+        inFence = !inFence
+        return
+      }
+      // In a fence the whole line is a command; in prose, each code span is.
+      const spans = inFence ? [line] : [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1]!)
+      for (const span of spans) {
+        const ours = /(^|[\s;&|(])minidsh(\s|$)/.test(span)
+        for (const match of span.matchAll(/(^|[\s;&|(])minidsh\s+([a-z][a-z-]*)(?=\s|$)/g)) {
+          if (!commands.has(match[2]!)) failures.push(`${file}:${i + 1}: \`minidsh ${match[2]}\` is not a command (src/app/cli.ts COMMANDS)`)
+        }
+        // A bare flag in prose (`--approve`) is ours too; inside a fence only on a minidsh line.
+        if (!ours && (inFence || !/^--[a-z]/.test(span.trim()))) continue
+        for (const match of span.matchAll(/(?<![\w-])(--[a-z][a-z-]*)/g)) {
+          if (!flags.has(match[1]!)) failures.push(`${file}:${i + 1}: \`${match[1]}\` is not a flag of minidsh (src/app/cli.ts FLAGS)`)
+        }
+      }
+    })
+  }
+}
+
+/**
+ * Rule 9. Pictures and downloads. An `<img src>` is a link like any other
+ * (rule 2 reads only Markdown's own syntax); a picture under `docs/images/`
+ * that nothing shows is a file nobody will ever retake; and a download link
+ * names an asset the release workflow actually uploads
+ * (`desktop/release-assets.json`, the tarball, the checksum file).
+ */
+{
+  const shown = new Set<string>()
+  for (const file of walk(ROOT)) {
+    if (!file.endsWith('.md')) continue
+    const text = readFileSync(file, 'utf8')
+    const rel = relative(ROOT, file).replace(/\\/g, '/')
+    const sources = [...text.matchAll(/<img\b[^>]*?\bsrc="([^"]+)"/g)].map((match) => match[1]!)
+    const markdown = [...text.matchAll(/!\[[^\]]*\]\(([^)\s]+)/g)].map((match) => match[1]!)
+    for (const source of sources) {
+      if (/^[a-z]+:/i.test(source)) continue
+      if (!existsSync(resolve(dirname(file), decodeURIComponent(source)))) failures.push(`${rel}: image does not exist: ${source}`)
+    }
+    for (const source of [...sources, ...markdown]) {
+      if (/^[a-z]+:/i.test(source)) continue
+      shown.add(relative(ROOT, resolve(dirname(file), decodeURIComponent(source))).replace(/\\/g, '/'))
+    }
+    // A plain mention counts as shown too: docs/images/README.md lists what each file is.
+    for (const match of text.matchAll(/docs\/images\/[\w./-]+\.(?:png|svg|jpg|webp)/g)) shown.add(match[0])
+    for (const match of text.matchAll(/`([\w./-]+\.(?:png|svg|jpg|webp))`/g)) shown.add(relative(ROOT, resolve(dirname(file), match[1]!)).replace(/\\/g, '/'))
+  }
+  const images = join(ROOT, 'docs', 'images')
+  const pictures = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? pictures(join(dir, entry.name)) : /\.(png|svg|jpg|webp)$/.test(entry.name) ? [join(dir, entry.name)] : []))
+  for (const picture of pictures(images)) {
+    const rel = relative(ROOT, picture).replace(/\\/g, '/')
+    if (!shown.has(rel)) failures.push(`${rel}: no document shows or lists this picture (docs/images/README.md says what each one is)`)
+  }
+
+  const assets = JSON.parse(readFileSync(join(ROOT, 'desktop', 'release-assets.json'), 'utf8')) as { installers: Record<string, string> }
+  const version = (JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string }).version
+  const uploaded = new Set([...Object.values(assets.installers), 'SHA256SUMS', `minidsh-${version}.tgz`])
+  let downloads = 0
+  for (const file of walk(ROOT)) {
+    if (!file.endsWith('.md')) continue
+    const rel = relative(ROOT, file).replace(/\\/g, '/')
+    // The changelog's older entries name what older releases shipped.
+    for (const match of readFileSync(file, 'utf8').matchAll(/earthwalker17\/MiniDSH\/releases\/(latest\/download|download\/v([\d.]+))\/([\w.-]+)/g)) {
+      if (match[2] !== undefined && match[2] !== version) continue
+      downloads++
+      if (!uploaded.has(match[3]!)) failures.push(`${rel}: download link names ${match[3]}, which the release does not upload (desktop/release-assets.json)`)
+    }
+  }
+  console.log(`checked ${shown.size} pictures shown and ${downloads} download links`)
+}
 
 for (const warning of warnings) console.warn(`WARN ${warning}`)
 if (failures.length > 0) {

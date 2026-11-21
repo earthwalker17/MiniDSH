@@ -1,8 +1,9 @@
-# The repository gate, on the three platforms MiniDSH claims to run on.
+# The repository gate, on the three platforms MiniDSH claims to run on, and the
+# desktop app packed and driven on each of its four targets.
 #
-# `pnpm check` is typecheck + lint + the dependency gate + the unit suite. The
-# live arcs are NOT here: they cost real provider calls and live in `live.yml`,
-# which only a person can start.
+# `pnpm check` is typecheck + lint + the dependency gate + the documentation
+# gate + the unit suite. The live arcs are NOT here: they cost real provider
+# calls and live in `live.yml`, which only a person can start.
 #
 # The Linux and macOS legs additionally exist to prove OS confinement, so they
 # set MINIDSH_EXPECT_CONFINEMENT=1, which turns a self-skipped confinement test
