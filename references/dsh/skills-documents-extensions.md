@@ -7,23 +7,18 @@
 | Component | Path | Status | Purpose |
 |---|---|---|---|
 | `ctx.skills` registry | `packages/skill/skill` | base | Host + per-scope layers: the nearest layer wins a name, rank only within it; runtime `register()` at 250 |
-| Filesystem provider | `packages/skill/skill-filesystem` | base; Web: every preset but `minimal` | Project `.dsh/skills` 100, `.agents/skills` 200, custom 300, user 400/500, bundled 600; `<name>/SKILL.md` or flat `<name>.md`, one level deep; watched; bodies never cached |
-| `skill` tool | `packages/skill/tool-skill` | as the provider | The catalog message, `skill({name})`, the `/name` gesture |
+| Filesystem provider | `packages/skill/skill-filesystem` | base; Web: every preset but `minimal` | Project `.dsh/skills` 100, `.agents/skills` 200, custom 300, user 400/500, bundled 600; `<name>/SKILL.md` or flat `<name>.md`, one level deep; watched; bodies never cached; the front-matter keys |
+| `skill` tool | `packages/skill/tool-skill` | as the provider | The catalog message (recomputed every `agent/pre-step`), the `skill({name})` loader, the `/name` gesture |
 | Plugin skills | `packages/sandbox/sandbox-windows-acl/src/acl-skill.ts`, `packages/connector/upstream-skills` | win32; base | `registerProvider` at rank 600; a connector's entry skill over vendor files fetched at a pinned commit |
 | Office skills | `packages/skill/skill-office` | Web, Desktop, SDK | Four instruction-only skills: an `office` router, docx/pptx/xlsx authoring over Python (bundled on Desktop and the packaged SDK, else the user's); an appearance or slide change requires a render; no PDF skill |
-| Office tools | `packages/document/tool-office` | `standard`, `ptc`, SDK (2026-11-04) | `office_render` (pages as images, PDF too), `office_convert`, `office_recalculate`: LibreOffice Kit in the Host process, outside the shell sandbox; declared only after an Office skill loads |
+| Office tools | `packages/document/tool-office` | `standard`, `ptc`, SDK (2026-11-04) | `office_render` (pages as images, PDF too), `office_convert`, `office_recalculate`: LibreOffice Kit in the Host process, outside the shell sandbox; declared only after an Office skill loads; output lands in a Host store |
 | Workspace deps tool | `packages/skill/tool-workspace-dependencies` | Desktop or SDK with `DSH_PRIMARY_RUNTIME` | `load_workspace_dependencies`: absolute paths to a bundled Python, Node, pnpm; PATH untouched |
 | `present` | `packages/deliverables/tool-present` | `standard`, `ptc`, `cordis`, SDK | `maxFiles` 8 (4 advised); absolute paths, outside the workspace too; one log-only event |
 | Plugin Manager | `packages/boot/plugin-manager` | base; tool in Standard, Creator, the SDK | Persistent profile-wide bundles, in-process and unsandboxed; EVERY action, a list too, behind `danger-full-access` or a per-call approval. The market (`packages/boot/plugin-market`) is read-only, in no shipped profile |
 | Extensions | `packages/extensions` | Web; `cordis_inspect` in Standard and Creator | Read-only inspection; process-local `node:vm` definitions (no boundary) that no model tool creates |
-| Creator skill | `packages/preset/agent-preset/skills/dsh-doc` | Standard and Creator | ONE skill since 2026-11-05, through `customSkillDirs` |
+| Creator skill | `packages/preset/agent-preset/skills/dsh-doc` | Standard and Creator | ONE skill, through `customSkillDirs` |
 | MCP | `packages/mcp`, `packages/connector` | `mcp-manager` in Web; `mcp-resources` in base; no server by default | A fleet of clients from settings and plugins (Linear, Notion); OAuth only for plugin-registered servers; `toolLoading: on-demand`; prompt templates unsupported; stdio env scrubbed |
-| PTC | `packages/ptc-runtime` | Node runtime in base; executor in the `ptc` preset | A fresh Node per call under the Session's sandbox policy (no confinement fails the run), or opt-in retained state; the Python runtime was removed 2026-11-11 (`d1cf1ded`) |
-
-- **The catalog.** Recomputed at every `agent/pre-step`: a sha256 over JSON `[name, description]` entries plus completeness, against the newest LIVE `skill-catalog` message; a change appends the whole list, an emptied list one replacement, a failed root the confirmed subset marked `incomplete`. A user-role `<system-reminder>`, descriptions capped at 500, no path, worded as mandatory. `packages/skill/tool-skill/src/index.ts`
-- **The loader.** `skill({name})` re-reads the file and reveals only a resource base (directory, URL or opaque); `allowed-tools`, `model` and argument substitution are unparsed. Same file.
-- **Front-matter.** `name`, `description`, `whenToUse`, `metadata`, `disable-model-invocation`, `user-invocable`; a camelCase flag drops the skill. `packages/skill/skill-filesystem/src/index.ts`
-- **Office output.** A conversion lands in a Host output store; the model copies it out with the shell, whose sandbox and approvals govern where. `packages/document/tool-office/README.md`
+| PTC | `packages/ptc-runtime` | Node runtime in base; executor in the `ptc` preset | A fresh Node per call under the Session's sandbox policy (no confinement fails the run), or opt-in retained state; no Python runtime since 2026-11-11 |
 
 ## Open for the route
 
@@ -31,13 +26,13 @@
 - **later, an importable surface.** A bundle declares `engines.dsh` and DSH peers; an unmet one is refused before pnpm runs; an exemption names one plugin and one runtime version, with `acceptRisk`. `packages/boot/plugin-manager/README.md`
 - **later, workspace-lifetime grants.** This area's persisted approvals live in the PROFILE, never a log (`pnpm-workspace.yaml`, `compatibility.json`); the service checks names, not the conversation. Same file.
 - **later, an unreadable root.** Omitted, the rest published; a lower-priority same-name skill may answer meanwhile. `packages/skill/skill-filesystem/README.md`
-- **later, user invocation.** A `/name` token in a user text block injects the body as a `skill-invocation` user message, last in the step; a `disable-model-invocation` skill is reachable only so. `packages/skill/tool-skill/src/index.ts`
+- **later, user invocation.** The ledger has the `/name` gesture. `packages/skill/tool-skill/src/index.ts`
 
 ## Sources
 
 | Path | What it establishes | Checked |
 |---|---|---|
-| `packages/skill/{tool-skill,skill-filesystem}/src/index.ts` | Catalog, loader, gesture; ranks, front-matter, `trustedHost` a read path | 2026-11-21 |
+| `packages/skill/{tool-skill,skill-filesystem}/src/index.ts` | Catalog (its digest, wording and caps), loader, gesture; ranks, front-matter, `trustedHost` a read path | 2026-11-21 |
 | `docs/subsystems/skills.md` | Layers, caching, "optional instructions, not session events" | 2026-11-21 |
 | `packages/skill/skill-office/README.md`, `packages/document/{tool-office,office-kit}/README.md` | The four skills, the three tools, the output store | 2026-11-21 |
 | `packages/bundle/{base,web-app,sdk-app}/cordis.patch.yml`, `packages/bundle/web-app/presets/*.patch.yml` | Which row mounts where | 2026-11-21 |

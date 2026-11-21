@@ -9,7 +9,7 @@ A curated local map of DeepSeek Harness (DSH) for MiniDSH sessions: **where an u
 | File | Area | Read first for |
 |---|---|---|
 | [dsh/architecture-map.md](dsh/architecture-map.md) | the two composition planes, the subsystem map, presets | every session: the entry map |
-| [dsh/session-durability.md](dsh/session-durability.md) | the session log, crash repair, format generations, locking, the two backends, projections, replay | a per-boot lease identity, a rename projection |
+| [dsh/session-durability.md](dsh/session-durability.md) | the session log, crash repair, format generations, locking, the two backends, projections, replay | a per-boot lease identity off Linux, a rename projection |
 | [dsh/execution-jobs-agents.md](dsh/execution-jobs-agents.md) | loop, tool pipeline, jobs, subagents, teams, workflow, schedule | detached children, stopping one child |
 | [dsh/authority.md](dsh/authority.md) | sandbox backends (Windows included), approvals, grants, presets, hooks, the model reviewer | workspace-lifetime grants, an egress provider |
 | [dsh/skills-documents-extensions.md](dsh/skills-documents-extensions.md) | skills, document tooling, deliverables, extensions, MCP, PTC | a document input kind, an importable surface |
@@ -37,7 +37,7 @@ gh api -X GET search/code -f q='<terms> repo:deepseek-ai/deepseek-harness' --jq 
 
 For a broad pass, a partial checkout is cheaper: `git fetch --depth 1 --filter=blob:limit=200k origin <sha>` into a scratch directory outside this repository, checking out only `docs`, `packages/README.md`, `packages/bundle`, `packages/preset` and `AGENTS.md`; skip `*.zh.md` and `*.i18n.yaml`.
 
-**An absent file is not an absent fact.** That blob limit silently omits large generated files, among them `docs/persistence-catalog.md` and `docs/persistence-schema.json`, the AUTHORITY on what upstream persists: S13 "verified" DSH's inbox as live-only from a diagram in a checkout lacking the catalog, which lists `agent/inbox/spliced` as persisted. For "is X durable upstream", read the catalog through `gh api`.
+**An absent file is not an absent fact.** That blob limit silently omits large generated files, among them `docs/persistence-catalog.md` and `docs/persistence-schema.json`, the AUTHORITY on what upstream persists. For "is X durable upstream", read the catalog through `gh api`.
 
 ## Naming traps
 
@@ -47,9 +47,8 @@ For a broad pass, a partial checkout is cheaper: `git fetch --depth 1 --filter=b
 - `packages/terminal` is a persistent PTY for model tools, not a TUI. DSH ships no TUI.
 - `packages/preset` holds the preset registry, the declaration plugin and the persona; the shipped preset declarations are `packages/bundle/web-app/presets/<id>.patch.yml` (since 2026-09-21; `packages/preset/agent-presets/presets` is dead). The host plane is `packages/bundle/*/cordis.patch.yml` (older notes say `base.cordis.yml`).
 - "Profiles" (`web`, `headless`, `sdk`, `sdk-minimal`, `acp`, Electron's reserved `desktop`) are composition stacks, not wire protocols.
-- `packages/account` holds `deepseek-account` (moved out of `packages/credentials` in 0.2.2-rc.3) and `deepseek-auth`; `packages/credentials` is the key store.
-- Agent Teams is `packages/team` since November 2026, no longer `packages/experimental/agent-team*`.
+- `packages/credentials` is the key store; account sign-in and `deepseek-auth` are `packages/account`.
 - Upstream `present` is a model tool that declares deliverable files (`packages/deliverables/tool-present`); MiniDSH's `app/present.ts` is the plain-text renderer of log lines.
-- Code Mode was renamed TO PTC (programmatic tool calls), never the reverse; the v2→v3 migration renamed the log tags too: `tool/ptc-dispatch-start|dispatch`.
+- Code Mode was renamed TO PTC (programmatic tool calls), never the reverse.
 
 Budgets are in `scripts/check-docs.ts` (`--sections`): an area file that outgrows its ceiling has started copying. Nothing here ships (`package.json` `files` is a whitelist).

@@ -1,419 +1,188 @@
 # MiniDSH — Project Thesis and Direction
 
+This is the project's thesis, first written on 2026-08-22 and since cut to what still positions it. Where a question has been answered, a line beginning "Outcome:" names where the answer lives.
+
 ## 1. What MiniDSH Is
 
 MiniDSH is an architecture-first experiment in building a **minimal but architecturally complete agent harness**.
 
-It is inspired by DeepSeek Harness (DSH), but it should not be developed as a fork whose main strategy is deleting packages until the repository becomes smaller. DeepSeek Harness is instead treated as:
+It is inspired by DeepSeek Harness (DSH). It should not be developed as a fork that gets smaller by deleting packages. DSH is treated as:
 
-- an **architecture textbook** — a mature implementation to study;
-- a **behavioral oracle** — a source of concrete behaviors, invariants, tests, and failure cases;
-- a **design dataset** — evidence about what a modern agent harness eventually needs and where complexity tends to accumulate.
+- an **architecture textbook**: a mature implementation to study
+- a **behavioral oracle**: concrete behaviors, invariants, tests and failure cases
+- a **design dataset**: what a modern agent harness ends up needing, and where complexity accumulates
 
-MiniDSH should then re-derive a smaller system from first principles.
-
-The project is primarily a learning, research, and public-build project. A useful product should emerge from it, but product competition is not the objective.
-
-The core thesis is:
+MiniDSH should then re-derive a smaller system from first principles. It is a learning and research project. Product competition is not the objective.
 
 > **Minimal surface. Complete architecture.**
 
-The interesting question is not “How much of DeepSeek Harness can we delete?”
-
-It is:
+The question it asks:
 
 > **What is the minimum modern agent harness that still preserves the architectural properties required for long-term composition, observability, verification, multi-surface evolution, and maintainability?**
 
----
-
 ## 2. Why This Project Exists
 
-Earlier agent projects proved that AI coding tools can build a large amount of working functionality quickly. They also exposed a recurring failure mode.
+AI coding tools build working functionality quickly. A common pattern splits a product's features across sessions, and each session implements locally reasonable modules. The result can pass its tests and look complete while becoming structurally weak. The failure is **architectural accretion**:
 
-A common AI-assisted development pattern is:
+- features acquire local homes rather than principled homes
+- ownership becomes ambiguous
+- state crosses subsystem boundaries
+- new capabilities require editing unrelated modules
+- application and UI concerns leak into runtime semantics
+- abstractions arise after the fact as compatibility patches
+- future agents must repeatedly rediscover why the system looks the way it does
 
-1. define a product;
-2. invent a sequence of features;
-3. assign one feature cluster to each session;
-4. implement locally reasonable modules;
-5. repeat until the repository contains many capabilities.
-
-The result can pass tests and appear feature-complete while becoming structurally weak.
-
-The problem is not simply directory depth or file count. A repository with two directory levels can have excellent architecture, while a deeply nested repository can be badly coupled.
-
-The deeper failure is **architectural accretion**:
-
-- features acquire local homes rather than principled homes;
-- ownership becomes ambiguous;
-- state crosses subsystem boundaries;
-- new capabilities require editing unrelated modules;
-- application/UI concerns leak into runtime semantics;
-- abstractions arise after the fact as compatibility patches;
-- future agents must repeatedly rediscover why the system looks the way it does.
-
-MiniDSH reverses this process.
-
-The system space should be understood and designed first. Features should then enter that space through known seams.
-
-Architecture decides what a session should do.
-
-Sessions do not gradually invent the architecture.
-
----
+MiniDSH reverses the process. The system space is designed first. Features then enter it through known seams. Architecture decides what a session should do.
 
 ## 3. What DeepSeek Harness Teaches
 
-DeepSeek Harness is especially useful because its central idea goes deeper than “it has many plugins.”
+DSH is built on Cordis, and its model adapters, tools, session infrastructure, agent loop and UI capabilities compose as plugins. The lesson is not the word **plugin**. It is that capabilities have explicit lifecycle, dependency and composition semantics. Cordis frames this as **spatiotemporal composability**:
 
-Its public architecture is built around Cordis and the statement that major parts of the harness — model adapters, tools, session infrastructure, the agent loop, UI-related capabilities, and other services — can be composed as plugins.
+- **temporal composability**: a component's effects can be unwound when it is removed
+- **spatial composability**: a component declares dependencies on capabilities in its context and reacts as they appear, disappear or change
 
-The important lesson is not the word **plugin** itself.
+> **Capabilities are mounted into the runtime. They are not permanently baked into a monolithic Agent.**
 
-The important lesson is that capabilities have explicit lifecycle, dependency, and composition semantics.
-
-Cordis frames this in terms of **spatiotemporal composability**:
-
-- **temporal composability** — a component’s effects can be unwound when it is removed;
-- **spatial composability** — a component can declare dependencies on capabilities in its context and react as those capabilities appear, disappear, or change.
-
-This suggests a different model from the conventional object that imports every feature it owns.
-
-Instead of treating “the Agent” as one class containing search, tools, memory, sandboxing, models, and UI, the runtime can be understood as a composition of capabilities that are present for a particular scope.
-
-A useful conceptual shift is:
-
-> **Capabilities are mounted into the runtime; they are not permanently baked into a monolithic Agent.**
-
-That makes replacement, experimentation, isolation, and evolution structurally easier.
-
-Official references:
-
-- DeepSeek Harness repository: https://github.com/deepseek-ai/deepseek-harness
-- DeepSeek Harness architecture: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md
-- Package hierarchy: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md
-- Module dependency graph: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md
-- Subsystem documentation: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
-- Cordis paper: https://github.com/cordiverse/paper
-
-These sources are actively changing, and DSH's notes move between `proposed/`, `implemented/` and `archived/` as they age, so a deep link into `.agents/notes` can go stale within weeks. Claude Code should inspect the current repository and primary docs whenever a design decision depends on them. Links here were last checked on 2026-10-25.
-
----
+Primary sources: the [repository](https://github.com/deepseek-ai/deepseek-harness) and the [Cordis paper](https://github.com/cordiverse/paper). Deep links into upstream go stale within weeks, so every other upstream path lives in [`references/`](../references/README.md), pinned to a commit and a date.
 
 ## 4. “Self-Evolving” Should Be Treated Carefully
 
-DeepSeek Harness's `plugin_manager` lets an agent install persistent packages into its own runtime, behind full access or a per-call approval (in its default preset since 2026-10-21), which is sometimes summarised as self-evolution. The direction is useful, but the architectural claim should be more precise.
+DSH's `plugin_manager` lets an agent install persistent packages into its own runtime, behind full access or a per-call approval (in its default preset since 2026-10-21). This is sometimes summarised as self-evolution. The claim needs more care. A dynamically composable harness does not by itself solve:
 
-A dynamically composable harness does not automatically solve:
+- how an agent decides that it needs a new capability
+- whether generated extensions are safe
+- whether a replacement is better than the previous implementation
+- who grants authority to modify the runtime
+- how an unsuccessful mutation is evaluated and rolled back
+- how persistent self-modification is governed
 
-- how an agent decides that it needs a new capability;
-- whether generated extensions are safe;
-- whether a replacement is better than the previous implementation;
-- who grants authority to modify the runtime;
-- how an unsuccessful mutation is evaluated and rolled back;
-- how persistent self-modification is governed.
+The substrate enables a **self-recomposable runtime**. Autonomous evolution can be built on it with policy, verification, evaluation, sandboxing and durable state. Dynamic composition is infrastructure. Self-improvement is behavior built on infrastructure.
 
-The architectural substrate is better understood as enabling a **self-recomposable runtime**.
-
-Autonomous evolution can then be built on top of that substrate using policy, verification, evaluation, sandboxing, and durable state.
-
-MiniDSH should preserve this distinction.
-
-Dynamic composition is infrastructure.
-
-Self-improvement is behavior built on infrastructure.
-
----
+Outcome: model-written extensions stay refused (BLUEPRINT §2, "Still refused"). What ships is a composition row that names a module (ARCHITECTURE §9).
 
 ## 5. The Main Simplification Thesis
 
-DeepSeek Harness already ships a minimal composition with a deliberately tiny model-facing tool surface. Its current minimal preset demonstrates an important point: a useful coding agent does not need dozens of overlapping tools.
+DSH already ships a `minimal` preset with a small model-facing tool surface: a persona and one persistent shell, plus image-only file reading and compaction since 2026-10-12 (`references/assumptions.md`). A useful coding agent does not need dozens of overlapping tools. So MiniDSH cannot justify itself by having a "minimal mode".
 
-The official minimal configuration exposes essentially a persistent shell, plus image-only file reading and compaction, while omitting many higher-level conveniences (as of October 2026; until September it paired the shell with a structured file editor).
+DSH's minimal preset minimizes what the model sees. MiniDSH should investigate how far the **whole system** can be simplified while preserving the architectural properties. The measures that matter:
 
-References:
+- concepts a contributor must understand
+- modules a new capability must touch
+- how clearly state ownership is defined
+- implementation details that leak through contracts
+- how easily a provider, tool or capability is replaced or removed
+- schema and context exposed to the model
+- code a new surface must duplicate
+- repository exploration a future coding agent needs
+- whether execution can be understood from canonical events, not UI reconstruction
 
-- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml
-- The SDK (newline-delimited JSON-RPC over stdio): https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/README.md
-- Tool-surface simplification note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/archived/simplification/2026-08-10-default-presets-single-editor.md
-
-This means MiniDSH cannot justify itself merely by claiming to have a “minimal mode.”
-
-The more interesting target is:
-
-> **Capability minimalism with architectural completeness.**
-
-DeepSeek’s minimal preset minimizes what the model sees.
-
-MiniDSH should investigate how far the **whole system** can be simplified while preserving the important architectural properties.
-
-The objective is therefore not primarily fewer lines or fewer files.
-
-More meaningful simplification metrics include:
-
-- how many concepts a contributor must understand;
-- how many modules a new capability must touch;
-- how clearly state ownership is defined;
-- how many implementation details leak through contracts;
-- how easily a provider or tool can be replaced;
-- how easily a capability can be removed;
-- how much schema/context is exposed to the model;
-- how much code a new surface must duplicate;
-- how much repository exploration a future coding agent needs;
-- whether execution can be understood from canonical events rather than UI reconstruction.
-
-The goal is:
-
-> **fewer concepts + stronger invariants**
-
-rather than merely:
-
-> fewer source lines.
-
----
+The goal is **fewer concepts + stronger invariants**, not fewer source lines.
 
 ## 6. Everything Evolvable Has a Seam
 
-MiniDSH should learn from “Everything is a Plugin” without copying it as a universal rule.
-
-Plugin systems have costs:
-
-- lifecycle machinery;
-- service definitions;
-- dependency resolution;
-- configuration;
-- package boundaries;
-- debugging indirection;
-- more concepts for contributors to learn.
-
-DeepSeek Harness accepts much of this cost because it aims to support a broad, dynamically composable ecosystem.
-
-MiniDSH can be more selective.
-
-A better working principle is:
+MiniDSH should learn from "Everything is a Plugin" without copying it as a universal rule. Plugin systems cost lifecycle machinery, service definitions, dependency resolution, configuration, package boundaries, debugging indirection and more concepts to learn. MiniDSH can be more selective than DSH:
 
 > **Everything evolvable has a seam.**
 
 A capability deserves a first-class composition boundary when it may realistically need to be:
 
-- replaced;
-- isolated;
-- scoped;
-- dynamically enabled or disabled;
-- supplied by another implementation;
-- owned by a different lifecycle;
-- independently tested or distributed.
+- replaced
+- isolated
+- scoped
+- dynamically enabled or disabled
+- supplied by another implementation
+- owned by a different lifecycle
+- independently tested or distributed
 
-Pure helpers, local algorithms, types, and implementation details do not need to become plugins merely for ideological consistency.
-
-This is one of the most important research questions of the project:
+Pure helpers, local algorithms, types and implementation details do not become plugins for consistency. That leaves a research question:
 
 > **Where should dynamic composition stop?**
 
----
+Outcome: at a kernel of five mechanisms and nineteen service keys, with everything else ordinary code (ARCHITECTURE §2, §3).
 
 ## 7. The Long-Term Architectural Questions
 
-MiniDSH should maintain explicit answers to a small number of durable questions.
+MiniDSH should maintain explicit answers to a few durable questions. CLAUDE.md §3 holds them as session rules. The current answers are in ARCHITECTURE.md.
 
 ### 7.1 Capability
 
-What is a capability?
+What is a capability, and how is it declared, provided, discovered, scoped, replaced and removed?
 
-How is it declared, provided, discovered, scoped, replaced, and removed?
-
-How does the runtime distinguish a capability seam from ordinary internal code?
+Outcome: ARCHITECTURE §2 and §3.
 
 ### 7.2 State Ownership
 
-Who owns:
+Who owns session, agent, workspace, provider, tool, process, policy, configuration and client state? State should not drift between layers because sharing a mutable object is convenient.
 
-- session history;
-- agent state;
-- workspace state;
-- provider state;
-- tool state;
-- process state;
-- policy/approval state;
-- runtime configuration;
-- client/UI state?
-
-State should not drift between layers simply because sharing a mutable object is convenient.
+Outcome: the ownership table in ARCHITECTURE §3.
 
 ### 7.3 Runtime Composition
 
-Is an agent fundamentally a class with many imported features, or a runtime scope composed from capabilities?
+Is an agent a class with many imported features, or a runtime scope composed from capabilities? Which parts are fixed kernel, which replaceable, which application assembly?
 
-Which parts are fixed kernel behavior?
-
-Which parts are replaceable?
-
-Which parts are merely application assembly?
+Outcome: ARCHITECTURE §1, §2 and §9.
 
 ### 7.4 Canonical Facts and Replay
 
-What is the authoritative record of execution?
+What is the authoritative record of execution? Can the system reconstruct what happened without reading UI state or scattered logs?
 
-Can the system reconstruct what happened without reading UI state or scattered logs?
-
-A durable event/session history should make inspection, resume, replay, fork, diagnostics, and verification natural rather than bolted-on.
-
-DeepSeek Harness’s subsystem model and session/event design are important references here.
+Outcome: ARCHITECTURE §4, and replay from recorded logs in §10.
 
 ### 7.5 Effects, Authority, and Safety
 
-Reasoning and authority are different concerns.
+The model may propose an action. It must not become the security boundary because it believes the action is safe.
 
-The model may propose an action. It must not become the security boundary merely because it believes an action is safe.
-
-Tool execution, sandboxing, policy, approvals, and auditing should have explicit ownership and contracts.
+Outcome: ARCHITECTURE §7, with the known gaps in §13.
 
 ### 7.6 Multiple Surfaces
 
-The long-term product may expose:
+Web, TUI, desktop and headless entry points should be surfaces over one runtime, never separate agent implementations.
 
-- Web;
-- TUI;
-- Desktop GUI;
-- headless/API/SDK entry points.
-
-These should not become separate agent implementations.
-
-They should be multiple surfaces over one runtime.
+Outcome: ARCHITECTURE §8.
 
 ### 7.7 Evolution
 
-A useful architectural test is:
-
 > If a new capability arrives later, can the system explain exactly where it belongs before implementation begins?
 
-If the answer is repeatedly “make another manager/module and connect it wherever needed,” the architecture is failing.
-
----
+Outcome: the table in ARCHITECTURE §11.
 
 ## 8. One Runtime, Multiple Surfaces
 
-The eventual Web + TUI + Desktop direction is valuable, but only if it is treated as an architectural test rather than three product rewrites.
+Web, TUI and desktop are worth building as an architectural test, not as three product rewrites. A surface implements presentation, transport and interaction. It reimplements nothing of session semantics, model routing, tool execution, approval rules, event history, orchestration or verification logic.
 
-The desired model is conceptually:
-
-```text
-                       Web
-                        │
-TUI ───────────── Client/Surface Contract ─────────── Desktop
-                        │
-                  Harness Runtime
-                        │
-        ┌───────────────┼────────────────┐
-      Models           Tools          Services
-```
-
-A future surface should primarily implement presentation, transport, and interaction behavior.
-
-It should not reimplement:
-
-- session semantics;
-- model routing;
-- tool execution;
-- approval rules;
-- event history;
-- orchestration;
-- verification logic.
-
-DeepSeek Harness already documents a similar host/client/carrier separation and ships web, headless and an Electron desktop application that share one runtime's code (the desktop carries its own copy and a private host).
-
-Reference:
-
-- Host/client package split and the carrier vocabulary: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md and https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
-- Web client architecture note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md
-
-MiniDSH does not need to copy this structure. It should understand the invariant:
+DSH documents a similar host, client and carrier separation, and ships web, headless and an Electron desktop application over one runtime's code (`references/dsh/surfaces.md`). MiniDSH need not copy that structure, only hold the invariant:
 
 > **Surface transport and presentation must not own harness semantics.**
 
-If adding a Desktop application later requires duplicating the runtime, the early architecture has failed.
+If adding a desktop application later requires duplicating the runtime, the early architecture has failed.
 
----
+Outcome: the terminal and the browser are clients of one protocol. The desktop app (S22.2, 2026-11-20) runs the CLI's `web --json` and does not import the runtime (ARCHITECTURE §8).
 
 ## 9. Models Should Be Capability Providers
 
-Multi-provider support is useful, but ordinary provider switching is no longer a distinctive idea by itself.
+DSH has a provider-neutral LLM seam, a direct DeepSeek adapter and one generic multi-provider adapter, with no first-party adapter for OpenAI or Anthropic (`references/dsh/llm-providers.md`). MiniDSH should treat provider abstraction as a foundation, not a headline feature.
 
-DeepSeek Harness already has:
+The more interesting direction is **capability-aware model routing**: one model for primary coding, a cheaper one for bounded subtasks, a multimodal one for screenshots, an independent one for review.
 
-- a provider-neutral LLM seam;
-- a direct DeepSeek adapter;
-- a generic multi-provider adapter;
-- current configuration paths for providers such as Anthropic and OpenAI, with broader catalog/provider support.
+> **The model is a capability provider. It is not identical to the Agent.**
 
-References:
-
-- LLM capability family: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/README.md
-- Generic provider adapter: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-pi-ai/README.md
-- Provider configuration: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md
-- Adding an LLM adapter: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cookbook/adding-an-llm-adapter.md
-
-MiniDSH should therefore view provider abstraction as a foundation, not a headline feature.
-
-A more interesting long-term direction is **capability-aware model routing**.
-
-For example:
-
-- one model may be best for primary coding/reasoning;
-- another may handle cheap bounded subtasks;
-- a multimodal model may inspect screenshots;
-- an independent model may perform verification or review.
-
-This suggests:
-
-> **The model is a capability provider; it is not identical to the Agent.**
-
-One runtime may use different cognition providers for different needs without turning each provider into a separate “agent product.”
-
----
+Outcome: three adapters behind one vocabulary, and model roles over a durable base route (ARCHITECTURE §4, §5, §11).
 
 ## 10. Multimodal Verification Is Architecturally Interesting
 
-DeepSeek’s own model path is not the only possible cognition path, and image support should not be treated merely as a chat attachment feature.
-
-DeepSeek Harness already contains a durable attachment seam where image bytes are persisted independently and session/model-visible state carries immutable references rather than temporary UI URLs or inline blobs.
-
-Reference:
-
-- Attachment subsystem: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/attachment.md
-- Attachment package family: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/attachment/README.md
-
-MiniDSH can eventually explore a higher-level question:
+Image support should not be treated as a chat attachment feature only. The higher-level question:
 
 > Can a text-oriented primary coding model delegate visual observation and verification to a model that is actually good at vision?
 
-That fits naturally with prior browser-verification experience, but here it should be designed as an architectural capability rather than a late feature.
+The architecture must have a clean place for such cognition specialization.
 
-Potential future examples include:
-
-- screenshot validation;
-- browser-state inspection;
-- visual regression judgment;
-- document/image understanding;
-- independent verifier models.
-
-The exact implementation is intentionally deferred.
-
-The important principle is that the architecture must have a clean place for such cognition specialization.
-
----
+Outcome: built in S8 and S20. A verifier is a `tool-subagent` row plus a `model-roles` entry (ARCHITECTURE §11). The `verification` and `browser` live tests exercise it (§10).
 
 ## 11. Architecture-First Development as the Real Experiment
 
-The deepest purpose of MiniDSH is not the harness itself.
+The deepest purpose of MiniDSH is not the harness. It is an experiment in building a large AI-assisted system without letting its architecture dissolve into local feature patches.
 
-The project is also an experiment in how to build large AI-assisted systems without allowing architecture to dissolve into local feature patches.
-
-AI coding agents are excellent at producing locally plausible implementations.
-
-They are much less reliable at preserving a global conceptual model across months of feature growth unless that model is explicit, inspectable, and continuously enforced.
-
-MiniDSH therefore tests a different development process:
+AI coding agents are good at locally plausible implementations. They are much less reliable at preserving a global conceptual model across months of growth, unless that model is explicit, inspectable and continuously enforced.
 
 ### Feature-first pattern
 
@@ -434,152 +203,55 @@ A new capability is proposed
 → implement through that seam
 ```
 
-The second process should make the repository increasingly easier to extend rather than increasingly harder to understand.
-
----
+Outcome: [CASE-STUDY.md](CASE-STUDY.md) tells how it went, including where it failed. The per-session record is BLUEPRINT §4.
 
 ## 12. What MiniDSH Is Not
 
 MiniDSH is not:
 
-- a stripped fork whose success metric is deleting most of DeepSeek Harness;
-- a clone of Claude Code, Codex, OpenCode, or DeepSeek Harness;
-- a contest to support the largest number of tools;
-- a “multi-agent swarm” project;
-- an attempt to maximize plugins or packages;
-- a project whose architecture is judged by directory depth;
-- a sequence of unrelated sessions that each add a new feature;
-- a product that needs three separate implementations for Web, TUI, and Desktop.
+- a stripped fork that succeeds by deleting most of DeepSeek Harness
+- a clone of Claude Code, Codex, OpenCode or DeepSeek Harness
+- a contest to support the largest number of tools
+- a "multi-agent swarm" project
+- an attempt to maximize plugins or packages
+- a project whose architecture is judged by directory depth
 
-It should resist feature pressure when a feature does not improve the architectural experiment or the minimal useful harness.
-
----
+It should resist feature pressure when a feature improves neither the architectural experiment nor the minimal useful harness.
 
 ## 13. Expected Value of the Project
 
-MiniDSH has three useful layers of value.
-
 ### Layer 1 — Useful software
 
-A lightweight agent harness that can perform real daily software-engineering tasks with low unnecessary overhead.
+A lightweight agent harness that does real daily software-engineering work with low overhead.
 
 ### Layer 2 — Reference architecture
 
-A codebase small enough to study, with architectural boundaries clear enough that another developer can understand how a modern agent harness is assembled.
+A codebase small enough to study, with boundaries clear enough to show another developer how a modern agent harness is assembled.
 
 ### Layer 3 — Systems-engineering experiment
 
-A practical answer to a broader question:
-
 > **Can an AI-assisted project be grown architecture-first, with strong boundaries and low conceptual entropy, instead of becoming a sequence of locally successful feature accretions?**
-
-Even if MiniDSH never attempts to become a major commercial agent product, success at the third layer makes the project worthwhile.
-
----
 
 ## 14. How to Study DeepSeek Harness
 
-Claude Code should use DeepSeek Harness selectively and deliberately.
+DSH should be read selectively, by tracing one architectural question through its primary sources, never linearly. Historical notes are evidence of design evolution, not automatically the current contract.
 
-Do not attempt to read the entire repository linearly.
-
-Instead, use targeted architectural questions and trace them through:
-
-1. official architecture docs;
-2. subsystem docs;
-3. package/group README files;
-4. module/dependency graph;
-5. service definitions and provider implementations;
-6. composition/configuration;
-7. tests;
-8. implemented architecture notes explaining why boundaries exist.
-
-Especially useful starting points:
-
-- Repository root: https://github.com/deepseek-ai/deepseek-harness
-- `AGENTS.md`: https://github.com/deepseek-ai/deepseek-harness/blob/master/AGENTS.md
-- Architecture: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md
-- Packages: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md
-- Module graph: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md
-- Subsystems: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/README.md
-- Cordis paper: https://github.com/cordiverse/paper
-- Package regrouping rationale: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/archived/architecture/2026-07-29-package-regrouping.md
-- Agent scope design: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md
-- Web client architecture note: https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md
-- LLM family: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/README.md
-- Minimal preset: https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml
-- Attachment subsystem: https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/attachment.md
-
-Search the current repository for newer decisions when these files reference superseded or archived notes.
-
-Historical notes are evidence of design evolution, not automatically the current contract.
-
----
+Outcome: [`references/`](../references/README.md) maps where each upstream subsystem lives. CLAUDE.md §4 holds the rules for using and refreshing it.
 
 ## 15. Initial Strategic Direction
 
-The first phase of the project should not begin by implementing a long feature checklist.
+The first phase should not begin with a feature checklist. It should first establish the system boundaries, the dependency direction, the composition rules, state ownership, the event model and a realistic macro sequence.
 
-It should first establish:
-
-- the architectural thesis;
-- the system boundaries;
-- the dependency direction;
-- capability/composition rules;
-- state ownership;
-- the canonical session/event model;
-- effect/authority boundaries;
-- application/surface boundaries;
-- provider/model boundaries;
-- repository topology;
-- verification philosophy;
-- a realistic macro sequence for implementing the system.
-
-Only then should concrete capabilities fill those spaces.
-
-The first implementation skeleton should be valuable because it makes the architecture executable and testable — not because it prematurely creates every future feature.
-
-A successful initial architecture should make future questions easier:
-
-- “Where does this belong?”
-- “What contract does it implement?”
-- “What state may it own?”
-- “What can depend on it?”
-- “Can it be replaced?”
-- “Can it be removed?”
-- “How is it tested?”
-- “Does a new UI need to know about it?”
-
-The architecture should give mostly unambiguous answers.
-
----
+Outcome: session 1 (2026-08-22) did this. The current shape is ARCHITECTURE.md and the route is BLUEPRINT §2.
 
 ## 16. Project Positioning
-
-A concise description of MiniDSH is:
 
 > **MiniDSH is an architecture-first, local-first reference harness that re-derives the essential structure of a modern coding agent from the minimum useful capability set. It studies DeepSeek Harness as an architectural reference rather than forking it, with the goal of building one small runtime that remains composable, observable, verifiable, provider-neutral, and extensible to multiple user surfaces.**
 
 The project should be presented publicly as an independent educational and engineering experiment inspired by DeepSeek Harness, not as an official DeepSeek project.
 
----
-
 ## 17. Final Principle
 
-The long-term success criterion is not that MiniDSH has many features.
+The long-term success criterion is not that MiniDSH has many features. It is that after the project grows, a new contributor, or a new coding-agent session, can still answer the questions of section 7 from the documents, and can say what the system is, how dependencies flow and how execution is verified.
 
-It is that after the project grows, a new contributor — or a new coding-agent session — can still answer:
-
-- what the system is;
-- what each layer owns;
-- where a capability belongs;
-- how dependencies flow;
-- where truth is stored;
-- how effects are controlled;
-- how execution is verified;
-- how a surface talks to the runtime;
-- how a component can evolve without destabilizing unrelated code.
-
-If those answers remain clear, MiniDSH is succeeding.
-
-If every new feature requires exceptions, cross-layer imports, compatibility glue, or new “manager” modules with ambiguous ownership, stop and repair the architecture before continuing.
+If every new feature requires exceptions, cross-layer imports, compatibility glue or new "manager" modules with ambiguous ownership, stop and repair the architecture before continuing.

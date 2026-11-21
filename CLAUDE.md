@@ -1,121 +1,128 @@
 # MiniDSH — Project Constitution
 ## 1. Mission
 MiniDSH is an architecture-first, local-first, small-but-complete agent harness reference implementation.
-Its purpose is not to compete with Claude Code, Codex, DeepSeek Harness, or other general-purpose agents. It is a learning and systems-engineering project: study a mature harness, identify the invariants that make it composable and evolvable, then rebuild the minimum system that preserves those properties.
+It is a learning and systems-engineering project, not a competitor to Claude Code, Codex, DeepSeek Harness (DSH) or other general-purpose agents: study a mature harness, find the invariants that make it composable and evolvable, rebuild the minimum system that keeps them.
 > **Minimal surface. Complete architecture.**
-DeepSeek Harness is an **architecture textbook and behavioral oracle**, not a repository to fork and prune.
-Prefer independent implementation. If code is copied or adapted, preserve required license/attribution and record provenance.
+
+DSH is an **architecture textbook and behavioral oracle**, not a repository to fork and prune. Prefer independent implementation. Copied or adapted code keeps its required license/attribution and a provenance record.
 
 ## 2. Architecture First
 Architecture defines sessions; sessions do not define architecture.
 Before implementing a meaningful capability, identify:
-- its architectural layer and owning subsystem;
+- its layer and owning subsystem;
 - its stable seam/contract;
 - the state it owns and must not own;
 - dependency direction;
 - lifecycle and effects;
-- how it is persisted, observed, verified, and removed;
+- how it is persisted, observed, verified and removed;
 - whether it is a runtime capability, ordinary internal logic, or application assembly;
-- how multiple surfaces should interact with it.
-If a feature has no clear home, treat that as an architecture problem before an implementation task.
-Architecture-first does **not** mean abstraction-first. Avoid speculative frameworks, empty layers, and indirection without real boundaries. Pre-design the system space; instantiate abstractions only when they express real invariants.
+- how multiple surfaces interact with it.
+
+A feature with no clear home is an architecture problem before an implementation task.
+Architecture-first is **not** abstraction-first: no speculative frameworks, empty layers, or indirection without real boundaries. Pre-design the system space. Instantiate abstractions only when they express real invariants.
 
 ## 3. Durable Architectural Questions
 Always preserve clear answers to:
-1. **Capability** — how capabilities are provided, discovered, replaced, scoped, and composed.
-2. **State ownership** — who owns session, workspace, provider, tool, runtime, policy, and UI state.
-3. **Composition** — what is fixed infrastructure, dynamically composable capability, or application assembly.
-4. **Facts/history** — what canonical record explains what happened and supports inspection/resume/replay/fork.
-5. **Effects/authority** — who authorizes side effects and how policy, sandboxing, approvals, and reasoning remain separate.
-6. **Surfaces** — how Web, TUI, Desktop, API, and headless clients share one runtime.
-7. **Evolution** — how capabilities can be added, replaced, or removed without unrelated implementation knowledge.
-> **Everything evolvable has a seam.**
-Do not turn “everything is a plugin” into dogma. Pure helpers, algorithms, types, and local implementation details do not need dynamic lifecycle machinery.
+1. **Capability**: how one is provided, discovered, replaced, scoped, composed.
+2. **State ownership**: who owns session, workspace, provider, tool, runtime, policy, UI state.
+3. **Composition**: what is fixed infrastructure, dynamically composable capability, or application assembly.
+4. **Facts/history**: which canonical record explains what happened and supports inspection, resume, replay, fork.
+5. **Effects/authority**: who authorizes side effects, with policy, sandboxing, approvals and reasoning kept separate.
+6. **Surfaces**: how Web, TUI, Desktop, API and headless clients share one runtime.
+7. **Evolution**: how a capability is added, replaced or removed without unrelated implementation knowledge.
+
+Everything evolvable has a seam, and "everything is a plugin" is not dogma (`docs/PROJECT.md` §6).
 
 ## 4. DeepSeek Harness as Reference
-For overlapping design questions, study the **current official repository and primary sources** before relying on community summaries.
-Prefer evidence in this order: current official code/behavior → official architecture/subsystem docs → implemented architecture notes/tests → Cordis paper and official DeepSeek material → secondary commentary.
-DeepSeek Harness evolves rapidly. Verify current behavior instead of freezing old assumptions. Reproduce principles and invariants, not implementation complexity.
-`references/` is the curated local map of DSH: what exists upstream, why it matters here, where the official source is, and what is likely to go stale, pinned to a commit and a date. It is a map, never a copy: no source dumps, every claim carries a repository path.
-- An **ordinary session** reads the `references/` files its task touches FIRST, then researches only those parts of the current DSH, and writes back what it falsified (the file, and `references/assumptions.md`).
+For overlapping design questions, study the **current official repository and primary sources**, in this order of evidence: current official code/behavior → official architecture/subsystem docs → implemented architecture notes/tests → Cordis paper and official DeepSeek material → secondary commentary.
+Verify current behavior. Do not freeze old assumptions. Reproduce principles and invariants, not implementation complexity.
+`references/` is the curated local map of DSH, pinned to a commit and a date. A map, never a copy: no source dumps, every claim carries a repository path.
+- An **ordinary session** reads the `references/` files its task touches FIRST, researches only those parts of the current DSH, and writes back what it falsified (the file and `references/assumptions.md`).
 - A **`.5` hardening session** re-researches the current DSH broadly, reruns the assumptions ledger, works through each file's "Not read" list, and moves the pin.
 
 ## 5. Project Documents
 Use exactly four primary context documents:
-- `CLAUDE.md` — stable constitution and execution rules; keep under 200 lines; change rarely.
-- `docs/PROJECT.md` — stable project thesis, positioning, scope, and research context; change rarely.
-- `docs/ARCHITECTURE.md` — the current architecture MAP: layers, owners, invariants, seams, where new things go, what is knowingly missing; current state, not history.
-- `docs/BLUEPRINT.md` — rolling long-term engineering plan plus compact development record; what comes next and why.
-`CLAUDE.md` and `README.md` stay at the repository root; the other three live in `docs/`. `references/` (§4) is consulted by topic, never reread whole, and `.claude/skills/docs-maintenance/SKILL.md` is the maintenance procedure, read only when maintaining documents: neither is a fifth context document.
-At every substantive session start, read all four documents and the session's own brief in `docs/BLUEPRINT.md`, then explore the code the task touches: the architecture map says where. A full-repository read is not a session-start ritual; it belongs to `.5` hardening sessions (§6).
-**The documents are maps.** They tell a session the system's shape, owners and invariants, where a capability belongs and what to read next; detail lives in the owning code's comment, in tests and in commits. Test every paragraph: *without it, would a future session misunderstand the system, choose the wrong home, or not know where to look next?* If not, delete it — rewriting it shorter is not compaction.
-**Growth rule.** A session adds rows and lines to `ARCHITECTURE.md` (an owner, an event kind, a home, an invariant with its owning file, a limitation) and puts detail and rationale in the owning code's comment; a reason stays only where its absence invites a plausible wrong change. The brief states the session's allowance (typically ≤ 3 KB), its record entry what it used.
-After each substantive session:
-- update `docs/ARCHITECTURE.md` to the actual implementation;
-- update `docs/BLUEPRINT.md`, compressing completed work and moving the next session to the top;
-- delete stale claims rather than accumulating contradictory history;
-- avoid duplicating the same truth across documents.
-**Budgets** come from a reading load: the four documents near 40k tokens, the map about 20k. Ceilings, per-section targets and form rules live only in `scripts/check-docs.ts` (`--sections` prints them); a ceiling moves only with the user's agreement.
-**Compaction is delegated** (the `docs-maintenance` skill). Past 90% of a ceiling, or on a section warning, the session sets per-section targets, runs the procedure in subagents (§8) and continues its own work, queuing its own additions to that document. It judges the claim review — run by agents other than the authors, over invariants, owners, must-not-own clauses, seams, homes, code-cited sections and pointers — not the prose, and rewrites text only where compaction surfaces an architectural decision.
-All three documents have fixed section responsibilities. New material goes into the section that owns its topic; never add a parallel section, a chronological appendix, or a second statement of a truth another section holds. Tables (ownership, RPC, change-location, file map, retention, arcs) are lookup material and keep every row. `README.md` keeps its eleven sections in order — what it is, quick start, what you get, status and limitations, the question, architecture, what it learned from DSH, the experiment, verification, documents and help, license — and is written for a first-time visitor: a user-facing command, flag, default or limitation goes into quick start or status; a claim that needs the architecture to parse belongs in `docs/ARCHITECTURE.md` with a link, not here.
+- `CLAUDE.md`: constitution and execution rules. Under 200 lines.
+- `docs/PROJECT.md`: thesis, positioning, scope, research context.
+- `docs/ARCHITECTURE.md`: the architecture MAP: current state, not history.
+- `docs/BLUEPRINT.md`: the rolling long-term plan and compact development record.
+
+The first two are stable and change rarely. `CLAUDE.md` and `README.md` stay at the repository root. The other three live in `docs/`.
+There is no fifth context document. `references/` (§4) is consulted by topic, never reread whole. `.claude/skills/docs-maintenance/SKILL.md`, the maintenance procedure, is read only when maintaining documents.
+Reader documents are NOT session context: `docs/GUIDE.md` (the user guide), `docs/CASE-STUDY.md` (the method, dated), `src/README.md`, the layer READMEs under `src/kernel`, `src/core`, `src/capabilities` and `src/app`, `src/capabilities/protocol/README.md`, `desktop/README.md`.
+At every substantive session start, read the four documents and the session's brief in `docs/BLUEPRINT.md`, then the code the task touches: the architecture map says where. A full-repository read belongs to `.5` checkpoints (§6).
+**The documents are maps.** Detail and rationale live in the owning code's comment, in tests and in commits. A paragraph stays only if a future session without it would misunderstand the system, choose the wrong home, or not know where to look next. Rewriting one shorter is not compaction.
+**Growth rule.** A session adds rows and lines to `ARCHITECTURE.md`: an owner, an event kind, a home, an invariant with its owning file, a limitation. A reason stays only where its absence invites a plausible wrong change. The brief states the session's allowance (typically ≤ 3 KB), its record entry what it used.
+After each substantive session, update `docs/ARCHITECTURE.md` to the actual implementation and `docs/BLUEPRINT.md` (compress completed work, move the next session to the top). Delete stale claims instead of accumulating contradictory history.
+State a truth once. Each of the three `docs/` context documents has fixed section responsibilities: new material goes into the section that owns its topic, never into a parallel section, a chronological appendix, or a second statement in another section or document. Tables (ownership, RPC, change-location, file map, retention, arcs) are lookup material and keep every row.
+**Budgets** live only in `scripts/check-docs.ts` (`--sections` prints them). A ceiling moves only with the user's agreement.
+**Compaction is delegated** (the `docs-maintenance` skill). Past 90% of a ceiling, or on a section warning, the session runs that procedure in subagents (§8) and keeps working, queuing its own additions to the document. It judges the claim review (run by agents other than the authors; invariants, owners, must-not-own clauses, seams, homes, code-cited sections, pointers), not the prose, and rewrites text only where compaction surfaces an architectural decision.
+`README.md` keeps eleven sections in order: what it is, quick start, what you get, status and limitations, the question, architecture, what it learned from DSH, the experiment, verification, documents and help, license. It is written for a first-time visitor. A user-facing command, flag, default or limitation goes into its quick start or status section, or into the guide. A claim that needs the architecture to parse belongs in `docs/ARCHITECTURE.md`, with a link.
 Project docs are canonical. Documentation drift is a defect.
 
 ## 6. Blueprint and Session Policy
-Session 1 must establish a coherent macro development route before feature accumulation begins.
-The blueprint should define the likely architectural sequence and approximate sessions, but it may change when evidence changes the architecture.
-A session exists to advance the architecture along that route. A new idea does not automatically deserve a new subsystem or session.
+The blueprint's macro route may change when evidence changes the architecture. A new idea does not automatically deserve a new subsystem or session.
 Use **Plan Mode** automatically for complex or architecture-affecting sessions.
 Before implementation, the plan must state: the boundary being changed, why the change belongs there, invariants/contracts to preserve, implementation phases, verification strategy, and documentation impact.
-Two kinds of session. An **ordinary session** advances one route entry: it starts from the documents, its brief and task-relevant exploration (§5), consults `references/` before any DSH research (§4), and validates in proportion (§10). A **`.5` hardening checkpoint** reviews the system as one architecture: a repo-wide read, invariants re-audited against the code, assumptions falsified, the current DSH re-researched and `references/` refreshed, the documents compacted where they are past 90%, and the broad live evidence rerun. Checkpoints are placed in the route after a CLUSTER of architectural change, where the whole deserves one look, never mechanically after every session.
-Architecture decides what each session should do.
+Two kinds of session:
+- An **ordinary session** advances one route entry. §4, §5 and §10 say what it researches, reads and validates.
+- A **`.5` hardening checkpoint** reviews the system as one architecture: a repo-wide read, invariants re-audited against the code, assumptions falsified, DSH and `references/` refreshed (§4), documents past 90% compacted (§5), the broad live evidence rerun (§10).
+
+Checkpoints follow a CLUSTER of architectural change, never mechanically after every session.
 
 ## 7. Execution and Commits
-Implement in bounded phases or modules.
-After each meaningful phase:
+Implement in bounded phases or modules. After each meaningful phase:
 1. run relevant verification;
 2. fix failures before expanding scope;
 3. make a focused Git commit when the phase is coherent and green.
+
 Do not hold a large session in one uncommitted diff.
-Keep simple work simple. For low-risk local tasks, use the shortest clear solution and avoid ceremonial abstractions or analysis loops.
+
+Keep simple work simple: for low-risk local tasks, the shortest clear solution, without ceremonial abstractions or analysis loops.
 
 ## 8. Sub-agents and Dynamic Workflows
-Use sub-agents for bounded research, independent inspection, parallelizable implementation, test analysis, and review when this protects the main context.
-The parent agent remains the architectural decision-maker and integrator.
-**Fix the agent count before the run, and never let it grow during one.** A workflow's total must be readable off its script without knowing a single result. A stage whose WIDTH comes from a previous stage's output is forbidden however small each agent looks — that is what "no per-finding fan-out" means operationally, and one agent per file, failure, finding, candidate or trivial task is the shape that turns a four-agent plan into fifty. A review of N dimensions is N agents, not N × findings × verifiers; a prohibition without a number in the script did not hold (S9 reached 46). State the ceiling in the plan before launching (a dozen is generous, twenty is a lot), and where a stage cannot be sized in advance, do it in the parent instead.
-**Verify and synthesize in the parent.** Adversarial checking is this agent reading the code, not another tier of agents; a finding worth keeping is one the parent can ground in a file and a line and, where it matters, reproduce. Prefer bounded reviewers or small fixed panels over recursive swarms.
-Each delegated task needs a narrow scope, explicit boundaries, and a compact expected return. Document compaction is delegated this way (§5).
-If delegation materially increases token use without increasing output quality, stop and simplify.
-A killed workflow can leave files behind in the repository: check `git status` before continuing.
-Never link this repository's `node_modules` into a worktree or scratch directory: a later recursive delete of that directory follows the link and destroys the real dependency tree. It has happened twice. A worktree that needs dependencies runs its own `pnpm install`; there is no build step, so `git show <rev>:<path>` usually removes the need for a worktree at all. `.claude/hooks/guard-repo.mjs` enforces this.
+Use sub-agents for bounded research, independent inspection, parallelizable implementation, test analysis and review, when this protects the main context. The parent remains the architectural decision-maker and integrator.
+**Fix the agent count before the run, and never let it grow during one.**
+- A workflow's total must be readable off its script without knowing a single result.
+- A stage whose WIDTH comes from a previous stage's output is forbidden ("no per-finding fan-out"): no agent per file, failure, finding, candidate or trivial task.
+- A review of N dimensions is N agents, not N × findings × verifiers.
+- A prohibition without a number in the script did not hold (S9 reached 46). State the ceiling in the plan before launching: a dozen is generous, twenty is a lot.
+- A stage that cannot be sized in advance is done in the parent.
+- The S22.5 release checkpoint ran under a ceiling of 70 agents, fixed in its plan and approved by the user as an exception that leaves the rule unchanged.
+
+**Verify and synthesize in the parent.** Adversarial checking is this agent reading the code, not another tier of agents. A finding worth keeping is one the parent can ground in a file and a line and, where it matters, reproduce. Prefer bounded reviewers or small fixed panels to recursive swarms.
+Each delegated task needs a narrow scope, explicit boundaries and a compact expected return. If delegation materially raises token use without raising output quality, stop and simplify.
+A killed workflow can leave files in the repository: check `git status` before continuing.
+Never link this repository's `node_modules` into a worktree or scratch directory: a later recursive delete of that directory follows the link and destroys the real dependency tree. It has happened twice. `.claude/hooks/guard-repo.mjs` enforces the rule. A worktree that needs dependencies runs its own `pnpm install`. The source runs without a build, so `git show <rev>:<path>` usually replaces a worktree.
 
 ## 9. Persistent Memory
-Use Claude Code's available persistent memory mechanism for concise cross-session handoff.
-At each substantive session end, persist: completion state; important architectural decisions not already duplicated in project docs; relevant environment facts; unresolved risks/questions; and the next intended session/goal.
-Consult that memory at the next session start.
-Memory is a handoff aid, not a competing source of project truth.
+Use Claude Code's persistent memory mechanism for concise cross-session handoff.
+At each substantive session end, persist: completion state; important architectural decisions not already in project docs; relevant environment facts; unresolved risks/questions; the next intended session/goal.
+Consult that memory at the next session start. It is a handoff aid, not a competing source of project truth.
 
 ## 10. Verification Standard
-Passing tests is necessary but not sufficient.
-Every substantive session must finish with:
+Passing tests is necessary but not sufficient. Every substantive session must finish with:
 - relevant automated tests;
 - typecheck/lint/build or equivalent checks;
 - targeted invariant checks where appropriate;
 - a bounded adversarial review;
 - a **live end-to-end run using a real model API**.
-The live E2E must exercise the real MiniDSH runtime against a real workspace/task and prove useful software-engineering work can be completed through the system. Mock-only success does not count.
-DeepSeek is the default development provider unless the architecture under test requires another provider. Choose the current suitable official model at setup time instead of hard-coding stale names.
-Use paid API calls deliberately and keep them bounded, but do not replace required live validation with mocks merely to save effort.
-**Validation is proportionate to what changed.** An ordinary session runs the FULL repository gates (`pnpm check` on Windows and under WSL 2 with the `MINIDSH_EXPECT_*` flags) and, live, the ONE arc that exercises its change, or the few arcs whose premises it touches, once. Repeated full suites (every arc three times per host, `live.yml`) are concentrated where the question is the whole system: `.5` hardening checkpoints, release candidates, and a change to the loop, the session log or the protocol host. A flake is never cleared by one lucky pass: an ordinary session that touches an arc with a recorded flake reruns THAT arc and reports the per-run numbers.
+
+The live E2E must exercise the real MiniDSH runtime against a real workspace/task and prove that useful software-engineering work can be completed through it. Mock-only success does not count: never replace required live validation with mocks to save effort. Use paid API calls deliberately and keep them bounded.
+DeepSeek is the default development provider unless the architecture under test requires another. Choose the current suitable official model at setup time. Never hard-code stale names.
+**Validation is proportionate to what changed.**
+- An ordinary session runs the FULL repository gates (`pnpm check` on Windows and under WSL 2 with the `MINIDSH_EXPECT_*` flags) and, live, once, the ONE arc that exercises its change or the few arcs whose premises it touches.
+- Repeated full suites (every arc three times per host, `live.yml`) belong to `.5` hardening checkpoints, release candidates, and a change to the loop, the session log or the protocol host.
+- A flake is never cleared by one lucky pass: an ordinary session that touches an arc with a recorded flake reruns THAT arc and reports the per-run numbers.
 
 ## 11. Environment and Secrets
 Inspect the actual local toolchain when work depends on it.
-If a missing runtime, dependency, credential, platform capability, or tool would materially lower implementation or validation quality, do not silently degrade or build a workaround merely to avoid the proper prerequisite. Tell the user, or install/configure it after authorization.
+If a missing runtime, dependency, credential, platform capability or tool would materially lower implementation or validation quality, do not silently degrade or work around it. Tell the user, or install/configure it after authorization.
 Toolchain upgrades are acceptable when justified.
-Never expose, print, commit, or store secrets in the repository. Credentials belong in appropriate machine/user environment or secure credential storage.
+Never expose, print, commit or store secrets in the repository. Credentials belong in the machine/user environment or secure credential storage.
 
 ## 12. Git and Push Discipline
 Remote: `https://github.com/earthwalker17/MiniDSH.git`
-Commit incrementally after verified phases.
 A session is eligible to push only after:
 1. planned work is complete;
 2. repository verification is green;
@@ -123,20 +130,18 @@ A session is eligible to push only after:
 4. real-model live E2E passes;
 5. `docs/ARCHITECTURE.md` and `docs/BLUEPRINT.md` are current;
 6. the user explicitly approves the session.
+
 Do not push without explicit user approval.
 
 ## 13. Design Restraints
 Do not optimize for raw feature count, package count, directory depth, or line-count reduction.
 Optimize for fewer concepts, stronger invariants, explicit ownership, narrow dependency edges, replaceable seams, readable composition, bounded model-facing surface, observable behavior, testable contracts, and low future exploration cost.
-A deeper directory tree is not architecture. Dependency topology and ownership matter more than nesting.
-Do not let UI state become runtime truth.
-Do not let provider-specific behavior leak through the system.
-Do not let model reasoning become the authority/security boundary.
-Do not build separate Web, TUI, and Desktop agents; build one runtime with multiple surfaces.
+Do not let UI state become runtime truth, provider-specific behavior leak through the system, or model reasoning become the authority/security boundary.
+A deeper directory tree is not architecture: dependency topology and ownership matter more than nesting.
+Do not build separate Web, TUI, and Desktop agents. Build one runtime with multiple surfaces.
 Do not add compatibility layers for contracts with no real external consumer unless evidence requires them.
 
 ## 14. Final Decision Rule
 When a locally convenient shortcut conflicts with a known architectural invariant, protect the invariant.
 When an elaborate abstraction has no demonstrated need but a simple implementation preserves the seam, choose the simple implementation.
-The goal is not maximum abstraction.
 The goal is a small system whose shape remains clear as it grows.

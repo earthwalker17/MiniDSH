@@ -1,88 +1,94 @@
 # Contributing to MiniDSH
 
-MiniDSH is an architecture-first project. Before it is a set of features, it is a set of answers: which layer a thing lives in, who owns what state, which direction dependencies point, and where the truth of an execution is recorded. A contribution is welcome when it keeps those answers clear, and the fastest way to get one merged is to start from the architecture rather than from the code.
+MiniDSH is built architecture-first: a change has a home and an owner before it has code. This page covers finding that home, running the checks and cutting a release.
 
 ## Read first
 
-- [`README.md`](README.md) — what the system is and how to run it.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the contract. Layers and the dependency rule (§1), what each service owns and must not own (§3), the session log (§4), the tool pipeline (§6), authority (§7), surfaces (§8), **where new things go (§11)**, deliberate divergences from DeepSeek Harness (§12) and the known limitations (§13).
-- [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) — what comes next, what is out of scope for now and why, and the development record.
-- [`docs/PROJECT.md`](docs/PROJECT.md) — the thesis.
-
-`CLAUDE.md` is the working constitution the coding-agent sessions that built the system run under. It is short, and it explains why the commits, the documents and the verification look the way they do.
+- [`README.md`](README.md): what the system is and how to run it.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): the contract. §1 layers and the dependency rule, §3 ownership, §4 the session log, §7 authority, §11 where new things go, §13 known limitations.
+- [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md): what comes next, and what is refused and why.
+- [`CLAUDE.md`](CLAUDE.md): the rules the sessions that wrote the system run under.
 
 ## Before writing code: find the home
 
-Every capability has an architectural home before it has an implementation. ARCHITECTURE §11 is a table from "new thing" to "where it goes". If your change fits a row, name the row in the pull request. If it fits no row, that is an architecture question rather than an implementation task: open an issue with the *architecture question* template before building anything. The discussion is the contribution.
-
-The questions a change should be able to answer (CLAUDE.md §2):
-
-- its layer and owning subsystem;
-- the seam or contract it implements;
-- the state it owns and the state it must not own;
-- the dependency direction;
-- its lifecycle and effects — how it is persisted, observed, verified and removed.
-
-A pure helper, an algorithm or a type does not need any of this. Architecture-first is not abstraction-first.
+ARCHITECTURE §11 is a table from a new thing to where it goes. If your change fits a row, name the row in the pull request. If it fits none, open an issue with the *architecture question* template before building. CLAUDE.md §2 lists what a change should state: its layer, seam, owned state, dependency direction and lifecycle. A pure helper, an algorithm or a type needs none of this.
 
 ## Toolchain
 
-- **Node 24** (`.nvmrc`). TypeScript runs natively; there is no build step in development. `bin/minidsh.js` runs the source in a checkout and the emitted `dist/` in an installed package.
-- **pnpm**, the version pinned in `package.json`'s `packageManager`: `corepack enable`, then `pnpm install`.
-- **Windows:** PowerShell 7 (`pwsh`) — the shell tool and its tests refuse to run under PowerShell 5.1. **Linux:** `bubblewrap` for the confinement tests. **macOS:** nothing extra.
-- **Every host:** Chrome, Edge or Chromium for the browser tests, and Python 3 for the bundled skills' independent document check. Each test that needs one skips without it, unless its `MINIDSH_EXPECT_*` flag says it must run.
-- Provider keys (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `TAVILY_API_KEY` for the search arc) are needed only by the live arcs. They are never committed, never logged, and read only through the credential seam. `MINIDSH_EXPECT_KEYS=DEEPSEEK_API_KEY,…` makes the live suite fail rather than skip when a named key is missing.
+- **Node 24** (`.nvmrc`). The TypeScript source runs directly. `bin/minidsh.js` runs `src/` in a checkout and the emitted `dist/` in an installed package.
+- **pnpm**, at the version `package.json` pins in `packageManager`: `corepack enable`, then `pnpm install`.
+- **Windows:** PowerShell 7 (`pwsh`). **Linux:** `bubblewrap`.
+- **Every host:** Chrome, Edge or Chromium for the browser tests, and Python 3 for the bundled skills' document check.
+- Only the live tests need provider keys: `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`. Never commit or log one.
 
 ```sh
 pnpm install
-pnpm check          # tsc --noEmit + oxlint + the dependency gate + the docs gate + vitest
-pnpm test:e2e       # the fourteen live arcs and the catalog drift probes: real provider calls, real cost, needs the keys
-pnpm build          # emits dist/ — what the package runs; `prepack` runs it for you
-pnpm minidsh …      # run the checkout
-
-pnpm --dir desktop install          # electron-builder, only to package the desktop app
-node desktop/scripts/package.ts     # this host's installer in desktop/build/dist (--dir: the unpacked app only)
+pnpm check        # typecheck, oxlint, the dependency gate, the docs gate, vitest
+pnpm test:e2e     # live tests ("arcs"), drift probes, desktop E2E: real provider calls
+pnpm build        # emits dist/; prepack runs it
+pnpm minidsh …    # run the checkout
 ```
 
-To drive the app, set `MINIDSH_DESKTOP_EXE` to the unpacked build (`desktop\build\dist\win-unpacked\MiniDSH.exe`, on Linux `linux-unpacked/minidsh-desktop`) and, on Windows, `MINIDSH_DESKTOP_INSTALLER` to the installer, then run `pnpm test:e2e desktop/e2e`: keyless everywhere, plus the live leg on Windows with a DeepSeek key.
+[`desktop/README.md`](desktop/README.md) covers building the desktop app. Its E2E drives the app `MINIDSH_DESKTOP_EXE` names and, on Windows, the installer `MINIDSH_DESKTOP_INSTALLER` names.
 
-Set `MINIDSH_EXPECT_SHELL=1`, `MINIDSH_EXPECT_PYTHON=1` and `MINIDSH_EXPECT_BROWSER=1` on every host, and `MINIDSH_EXPECT_CONFINEMENT=1` on Linux and macOS, so a test that would self-skip for a missing shell, interpreter, browser or backend fails instead. That is what CI does, and it is the difference between "green" and "green having proved nothing".
+A test whose tool is missing skips itself, and a skip looks like a pass. Each flag turns one skip into a failure. CI sets them.
+
+| Flag | Fails when |
+|---|---|
+| `MINIDSH_EXPECT_SHELL=1` | the host's shell is missing (`pwsh` on Windows) |
+| `MINIDSH_EXPECT_PYTHON=1` | no Python 3 |
+| `MINIDSH_EXPECT_BROWSER=1` | no Chrome, Edge or Chromium |
+| `MINIDSH_EXPECT_CONFINEMENT=1` | the host cannot confine a command (Linux, macOS) |
+| `MINIDSH_EXPECT_KEYS=NAME,…` | a named provider key is unset (live tests) |
+| `MINIDSH_EXPECT_DESKTOP=1` | the desktop E2E has no app to drive |
 
 ## What the gate enforces
 
-`pnpm check` is the repository gate, and it fails on more than type errors:
+`pnpm check` is the repository gate. Beyond type errors it enforces:
 
 | Rule | Where |
 |---|---|
-| Dependency direction: `kernel` imports nothing internal; `core` imports `kernel` and other `core` contracts (nothing but `app` and `test-support` imports `core/loop`); a capability imports `kernel` and `core` Definitions, never another capability and never `app`; `app` imports anything | `scripts/check-deps.ts` |
-| An event payload is read through `matches(event, KIND)`, never `event.data as {…}`, so a renamed field is a type error and not a `NaN` on a screen | `scripts/check-deps.ts` |
-| Core is acyclic at file level: each package's vocabulary (`events.ts`, `types.ts`) sits below its service | `scripts/check-deps.ts` |
-| The documents: size budgets (`node scripts/check-docs.ts --sections` prints them; a warning from 90%), the architecture document's pinned headings and map form; every internal link and `#fragment` in the repository's markdown and issue templates resolves; every table row has the header's cell count | `scripts/check-docs.ts` |
-| Strict TypeScript including `exactOptionalPropertyTypes` and `erasableSyntaxOnly` — no enums, no parameter properties; rewrite rather than relax the flag | `tsconfig.json` |
-| oxlint with the `correctness` category as errors | `.oxlintrc.json` |
+| The dependency direction of ARCHITECTURE §1. Core has no import cycle at file level. `desktop/src` imports only `electron`, `node:*` and itself | `scripts/check-deps.ts` |
+| An event payload is read through `matches(event, KIND)`, never a cast on `.data` | `scripts/check-deps.ts` |
+| Document budgets (`node scripts/check-docs.ts --sections`), ARCHITECTURE's pinned headings, every relative link and `#fragment`, table row widths | `scripts/check-docs.ts` |
+| Strict TypeScript with `exactOptionalPropertyTypes` and `erasableSyntaxOnly`: no enums, no parameter properties. Rewrite the code, do not relax a flag | `tsconfig.json` |
+| oxlint, with warnings denied | `.oxlintrc.json` |
 
-Tests mount real compositions through the kernel (`src/test-support/harness.ts`); only the model is scripted (`scripted-adapter`) or replayed from a recorded session log (`llm-replay`). Hand-wired mocks of services are not the house style, because a claim that spans capabilities is only true in the composition that ships — `src/app/app.test.ts` pins those against the full one. End-to-end tests assert the world (the file on disk, the test that now passes), never the agent's own account of it.
+Tests mount real compositions through the kernel (`src/test-support/harness.ts`). Services are not mocked: only the model is scripted (`scripted-adapter.ts`) or replayed from a recorded log (`llm-replay.ts`). A claim that spans capabilities is pinned in `src/app/app.test.ts`. End-to-end tests assert the file on disk, not the agent's account of it.
 
 ## Durable state lives in the log
 
-If a change needs state that must survive a restart, a resume or a fork, it is a new **log-only** session event kind with a fold — never a field a surface holds, and never a mutation of one of the three surface kinds. ARCHITECTURE §4 has the rules; the session invariants reject what they can before it enters the log.
+State that must survive a restart, a resume or a fork is a log-only session event kind with a fold, never a field a surface holds (ARCHITECTURE §4).
 
 ## Commits and pull requests
 
-- Small, focused commits, each green under `pnpm check`.
-- The pull request template asks for the boundary being changed, why the change belongs there, the invariants preserved, how it was verified, and the documentation impact. These are the questions the sessions that built the system answer in their plans; they are not ceremony.
-- **`docs/ARCHITECTURE.md` is a contract, not a history.** A pull request that changes documented behaviour changes the document in the same pull request. Documentation drift is a defect here, and the development record says what it has cost. It is a map with a size budget the gate enforces: add a line to the section that owns the topic and put the detail in the comment at the code that owns it — never a new parallel section.
-- A new or changed limitation is a line in ARCHITECTURE §13. A limitation that is stated is a contract; one that is not is a bug report waiting to happen.
-- If a change touches authority, the session log or the protocol, say which live arcs you ran. They cost money, so a maintainer may run them for you — say so rather than skipping them silently.
+- Small commits, each green under `pnpm check`.
+- The pull request template asks for the boundary changed, why it belongs there, the invariants kept, the verification and the documentation impact.
+- A change to documented behaviour changes `docs/ARCHITECTURE.md` in the same pull request, and a new or changed limitation is a line in its §13. Add a line to the section that owns the topic. Detail goes in a comment at the owning code.
+- If a change touches authority, the session log or the protocol, say which live tests you ran. They cost money, so a maintainer may run them for you.
 
 ## Releases
 
-A release is a tag. Bump `package.json` and `desktop/package.json` together (the packer refuses two versions), cut the CHANGELOG section, merge to `main`, and push `v<version>`: `release.yml` runs the whole gate, packs, drafts the GitHub release from that section, publishes the packed bytes through npm trusted publishing (no token exists anywhere in the repository or its secrets), installs the public package and verifies its provenance attestation, then publishes the draft with the three desktop installers built from those bytes and a `SHA256SUMS`. A tag that is not on `main`, that disagrees with `package.json`, or whose commit has no green `check.yml` run and no green unfiltered `live.yml` run, publishes nothing. The trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com.
+A release is a `v<version>` tag on a commit of `main`. Before the tag:
+
+1. Set one version in `package.json` and `desktop/package.json`. The packer refuses two.
+2. Add a `## [<version>]` section to `CHANGELOG.md`. The release notes are cut from it.
+3. Get the commit green in `check.yml` and in one `live.yml` run with a blank filter. `check.yml` runs on pushes to `main` and `release/**` and on pull requests: three gate legs (Linux, macOS, Windows) and four desktop legs (Windows, Linux, macOS arm64, macOS Intel). `live.yml` starts only by hand, because it spends provider credit.
+4. Rehearse by starting `release.yml` by hand. That dry run stops before publishing: it reads its draft release back, verifies it, deletes it, and never reaches npm.
+
+For a tag, `release.yml` runs four jobs:
+
+- **gate** refuses a tag that is not on `main` or disagrees with `package.json`, and a commit that lacks a successful `check.yml` run or a successful unfiltered `live.yml` run. Then it runs `pnpm check`, packs and smoke-installs the tarball.
+- **desktop** builds the four installers from that tarball, by the steps `check.yml` runs (`.github/actions/desktop-leg`).
+- **assemble** requires exactly the installers `desktop/release-assets.json` names (no version in a name) plus the tarball, writes `SHA256SUMS`, drafts the GitHub release, downloads it again and checks every checksum.
+- **publish** sends the tarball to npm through trusted publishing, installs it from the public registry, verifies its provenance attestation, then makes the draft public.
+
+No npm token exists: the trusted publisher (`earthwalker17` / `MiniDSH` / `release.yml`) is configured once on npmjs.com. If a run fails, re-run only the failed jobs. Once npm holds a version, its tag never moves. The installers carry no publisher signature yet.
 
 ## Scope
 
-BLUEPRINT §2 lists what is still refused — model-written extensions, an MCP bridge, a Windows confinement backend and Landlock, session deletion, PTC, a session search index, per-user identity, agent teams — each with the reason, and routes the rest (continuable children, signing and an updater for the desktop app); the README's *Not built* list is the refused one. A pull request for one of those is not refused on principle, but open an issue first: most of them are architecture decisions with a pending question in BLUEPRINT §3, and a good implementation of the wrong shape is the expensive kind of contribution.
+BLUEPRINT §2 lists what is refused and why, and §3 the open questions. Open an issue before working on one: most are architecture decisions.
 
 ## License and attribution
 
-Contributions are accepted under the MIT License. MiniDSH is an independent project; where you adapt a contract, a profile or wording from DeepSeek Harness, credit the source in the adjacent comment, as the existing code does (see [`NOTICE`](NOTICE)).
+Contributions are accepted under the MIT License. Credit anything adapted from DeepSeek Harness in the adjacent comment, as the existing code does (see [`NOTICE`](NOTICE)).

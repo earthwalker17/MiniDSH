@@ -6,12 +6,12 @@
 
 | Component | Path | Status | Purpose |
 |---|---|---|---|
-| Agent loop | `packages/core/agent-loop` | default | Inbox lanes (`followup` next turn, `steer` next step, both wake; `inject` never wakes); turn/step machine; `maxParallelToolCalls` (10) read per batch; a wake reaching a maintaining Agent, or since 2026-11-06 an aborted one, is latched and replayed |
-| Tool registry | `packages/core/tools` | default | Step-admitted `ResolvedToolSet`; `src/batch.ts`, the only scheduler: one serial lane (pre-execute → ask → guards, then commits) in model order, only bodies pooled; every opt-in is still `() => true`, declared since 2026-11-06 by every read-only tool (reads, searches, listings, web); `src/presentation.ts` the UI cards |
+| Agent loop | `packages/core/agent-loop` | default | Inbox lanes (`followup` next turn, `steer` next step, both wake; `inject` never wakes); turn/step machine; `maxParallelToolCalls` (10) read per batch; a latched wake for a maintaining or aborted Agent |
+| Tool registry | `packages/core/tools` | default | Step-admitted `ResolvedToolSet`; `src/batch.ts`, the only scheduler (the ledger has its lane, pool and opt-in rules); `src/presentation.ts` the UI cards |
 | Executors | `packages/core/tool-executor-{native,ptc}` | base; PTC row disabled | One per scope: parsing, scheduling, cancellation, `tool/call`/`tool/result` logging |
 | Subprocess, shell | `packages/subprocess`, `packages/shell` | default | Managed spawn: a user-systemd scope, a kill-on-close Windows Job (ordinary spawns only), else a process group; a job settles at its direct command's exit, survivors die at service disposal |
-| Jobs | `packages/jobs/*`; `packages/api/job-controller` (web-app) | base; not `minimal` | `ctx.jobs` in memory, owner-fenced, 10 per owner, never queued; log-only `job/registered`/`job/settled`; producers bash, pwsh, workflow, experimental `tool-terminal`; archiving kills running jobs |
-| Subagents | `packages/subagent` | base | `subagent` (spawn), `subagent_fork`; a separate `tool-subagent-control` row: `send_message`, `list_agents`, `wait_agent`; its `interrupt_agent` is off in every shipped composition since 2026-11-07; every instance owned by its tree's root, addressed by name; a cold resume mounts the saved preset, else the host's composition, and re-applies its descriptor; no child is a job |
+| Jobs | `packages/jobs/*`; `packages/api/job-controller` (web-app) | base; not `minimal` | `ctx.jobs` in memory, owner-fenced, 10 per owner, never queued; producers bash, pwsh, workflow, experimental `tool-terminal`; archiving kills running jobs |
+| Subagents | `packages/subagent` | base | `subagent` (spawn), `subagent_fork`; a separate `tool-subagent-control` row: `send_message`, `list_agents`, `wait_agent`, `interrupt_agent`; every instance owned by its tree's root, addressed by name (the ledger has activations, cold resume and the join) |
 | Workflow | `packages/workflow` | base | Model-written script; root runs bracketed in the parent log (`tool-workflow/run-start`, `run-end`); each `agent()` a managed Activation under the run's fixed parent, outside the parent's catalog and notices; a background run is a `workflow` job |
 | Schedule | `packages/schedule/schedule` | web-app, sdk-app | Host tasks: one timer and one FIFO, seven timing kinds, a 60 s floor per task, delivery an inbox write then a receipt; a delegated child is refused as a target |
 | Teams | `packages/team/{agent-team,tool-agent-team}` | base, per root Session | Out of `experimental`: Team mode adds a shared task board (log-only `team/task`) over ordinary subagent messaging; its roster and mailbox are historical |
@@ -19,9 +19,9 @@
 
 ## Open for the route
 
-- **later, stopping one child among several.** A person's Web Stop is `agent.cancel({kind:'user'},{keepInbox:true})` on the parent alone: running children continue and later wake it. A child is stopped by addressing ITS Session: a user interrupt (the Gateway checks the action on the child; no parent grant implies it) or an ancestor's `interrupt_agent` ends a local child's current turn, its queue parked, descendants running on, the child still continuable; an external child stops for good. No parent call is waiting upstream, so "which result" never arises. A browser prompt to a child picks Queue or Steer. `packages/api/session-controller/src/commands.ts:528-542`, `packages/subagent/subagent/src/{manager,control}.ts`
-- **later, detached children: why not jobs.** Children were jobs (2026-07-08), became continuable sessions 07-28 and activations 09-17: a job-backed child had "two FIFOs with no single ordering authority", duplicated the loop's admission, cancellation and quiescence, and one terminal result cannot hold a multi-turn residency. `.agents/notes/implemented/feature/2026-07-28-continuable-subagent-conversations.md`, `.agents/notes/implemented/simplification/2026-09-17-unified-subagent-activations.md`
-- **later, settlement.** `{kind:'subagent-settled', form:'notice'}`: followup when idle, steer when busy, inject only while the parent tears down; no wake budget; a parent not the exact live Agent loses it silently. "Done" is the tree's: headless waits `waitForTreeWork(root)`, teardown `drainDescendants([root])`. The end-turn guidance: 0/300 sleeps with it, 29/300 without. `packages/subagent/subagent/src/manager.ts:251-300,1125-1141`, `.agents/notes/implemented/bug-fix/2026-10-21-subagent-end-turn-guidance.md`, `packages/bundle/headless/src/index.ts`
+- **later, stopping one child among several.** A child is stopped by addressing ITS Session (the ledger has what a parent's Stop reaches): a user interrupt, which the Gateway checks on the child, or an ancestor's `interrupt_agent`, ends a local child's current turn, its queue parked, descendants running on, the child still continuable. No parent call is waiting upstream, so "which result" never arises. `packages/api/session-controller/src/commands.ts:528-542`, `packages/subagent/subagent/src/{manager,control}.ts`
+- **later, detached children: why not jobs.** Children were jobs, then continuable sessions, then activations: a job-backed child had "two FIFOs with no single ordering authority", duplicated the loop's admission, cancellation and quiescence, and one terminal result cannot hold a multi-turn residency. `.agents/notes/implemented/feature/2026-07-28-continuable-subagent-conversations.md`, `.agents/notes/implemented/simplification/2026-09-17-unified-subagent-activations.md`
+- **later, settlement.** A `subagent-settled` notice has no wake budget, and a parent that is not the exact live Agent loses it silently. "Done" is the tree's: headless waits `waitForTreeWork(root)`, teardown `drainDescendants([root])`. `packages/subagent/subagent/src/manager.ts:251-300,1125-1141`, `.agents/notes/implemented/bug-fix/2026-10-21-subagent-end-turn-guidance.md`, `packages/bundle/headless/src/index.ts`
 
 ## Sources
 
@@ -39,11 +39,11 @@
 ## Likely to go stale
 
 - The retirement window is still open: a settlement between the driver's last inbox check and its idle phase is injected and wakes nothing (`packages/jobs/tool-jobs/README.md`; `packages/core/agent-loop/src/agent.ts:235-246,278-285`). The steer-yielding wait is a FIXME heuristic (`packages/jobs/tool-jobs/src/index.ts:477`); the root-shutdown loss of a final `turn/end` has only a proposed fix (`.agents/notes/proposed/architecture/2026-10-09-cordis-cleanup-dependency-lifetimes.md`).
-- A shipped toggle is not a plugin default: `interrupt_agent` is off in base and three presets, on in the plugin (`docs/upgrade-guide/v0.2.2-rc.1/subagent-interrupt-default/guide.md`).
+- A shipped toggle is not a plugin default: `interrupt_agent` is off in base and three presets since 2026-11-07, on in the plugin (`docs/upgrade-guide/v0.2.2-rc.1/subagent-interrupt-default/guide.md`).
 - Numeric defaults (10 jobs per owner, 10 parallel calls, 8 active children, 2,048 B inline): `docs/config-catalog.md` rules.
 
 ## Not read
 
 - `packages/core/tool-executor-ptc/src/ptc.ts` beyond classification.
-- At this pin: `packages/core/tools/src/pipeline.ts` (cancellation contracts changed 11-05, 11-09), `packages/core/agent-loop/tests/tool-calls.spec.ts`, `packages/subprocess/win32-process`; `batch.ts` is unchanged since 10-21.
+- At this pin: `packages/core/tools/src/pipeline.ts`, `packages/core/agent-loop/tests/tool-calls.spec.ts`, `packages/subprocess/win32-process`.
 - `packages/team/*/README.md`; `packages/subagent/subagent/src/control.ts` beyond its schema; `packages/experimental/{worktree,tool-worktree}` (`enter_worktree`).
