@@ -389,12 +389,15 @@ describe('Anthropic adapter', () => {
       classifyHttp(404, '<html><body>404 page not found</body></html>', new Headers()),
       // A gateway's page that happens to say "model" is still not the API saying so.
       classifyHttp(404, 'no route for this model path', new Headers()),
+      // A compatible gateway's error object that names the model under another type IS: the path was right.
+      classifyHttp(404, body('invalid_request_error', "model 'claude-nope-9' not found"), new Headers()),
     ].map((failure) => [failure.code, failure.message.includes('check the base URL')])
     expect(verdicts).toEqual([
       ['UNKNOWN_MODEL', false],
       ['INVALID_REQUEST', true],
       ['INVALID_REQUEST', true],
       ['INVALID_REQUEST', true],
+      ['UNKNOWN_MODEL', false],
     ])
     // Only a 404 carries the note: another refused request is not a wrong path.
     expect(classifyHttp(400, body('invalid_request_error', 'messages: roles must alternate'), new Headers()).message).not.toContain('base URL')

@@ -305,6 +305,17 @@ class LocalSettings implements Settings {
     const steal = `${lock}.steal`
     if (!createExclusive(steal)) throw new SettingsError('SETTINGS_CONFLICT', `another writer is reclaiming ${lock}`)
     try {
+      // Looked at AGAIN, now under the mutex, as the session lease re-probes
+      // under its own: the age above was read before this reclaimer held it,
+      // and another one may have finished in between. Its lock is fresh, and
+      // removing it here would leave two writers each believing they hold it.
+      let fresh = false
+      try {
+        fresh = Date.now() - statSync(lock).mtimeMs < this.staleLockMs
+      } catch {
+        // Gone: nobody holds it.
+      }
+      if (fresh) throw new SettingsError('SETTINGS_CONFLICT', `another writer reclaimed ${lock} first`)
       rmSync(lock, { force: true })
       if (!createExclusive(lock)) throw new SettingsError('SETTINGS_CONFLICT', `another writer reclaimed ${lock} first`)
     } finally {

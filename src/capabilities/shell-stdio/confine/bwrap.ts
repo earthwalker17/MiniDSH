@@ -141,6 +141,11 @@ export function bwrapArgs(policy: SandboxExecutionPolicy, host: BwrapHost = {}):
     args.push('--tmpfs', '/tmp')
     for (const path of beneath('/tmp')) args.push('--ro-bind', path, path)
     for (const root of roots) args.push('--bind', root, root)
+    // A writable root that IS the runtime directory, or holds it (a session
+    // opened in `/run/user/<uid>`, or in `/run`), has just bound the host's
+    // directory back over the mask, sockets and all. Masked again, last: such
+    // a session works beside an empty runtime directory, as every other does.
+    if (host.runtimeDir !== undefined && roots.some((root) => within(root, host.runtimeDir!))) args.push('--tmpfs', host.runtimeDir)
   }
   return args
 }

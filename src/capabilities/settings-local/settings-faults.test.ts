@@ -21,6 +21,10 @@ const control = vi.hoisted(() => ({
   lockCreates: [] as string[],
   /** What the next renames answer, first to last; then the real filesystem answers. */
   renameErrors: [] as string[],
+  /** How many times the document's lock has been looked at (`statSync`). */
+  lockStats: 0,
+  /** Called before each look at the lock, with its count: a test changes the disk between two looks. */
+  beforeLockStat: undefined as ((count: number) => void) | undefined,
 }))
 
 const real = await vi.importActual<typeof Fs>('node:fs')
@@ -54,6 +58,10 @@ vi.mock('node:fs', async (importOriginal) => {
       control.log.push(`fsync ${basename(control.open.get(fd) ?? `fd ${fd}`)}`)
       actual.fsyncSync(fd)
     },
+    statSync: ((path: Fs.PathLike, options?: Fs.StatSyncOptions) => {
+      if (String(path).endsWith('settings.json.lock')) control.beforeLockStat?.(++control.lockStats)
+      return actual.statSync(path, options)
+    }) as typeof actual.statSync,
     renameSync: (from: Fs.PathLike, to: Fs.PathLike) => {
       const code = control.renameErrors.shift()
       control.log.push(`rename ${basename(String(from))} -> ${basename(String(to))}${code === undefined ? '' : ` (${code})`}`)
@@ -79,11 +87,14 @@ beforeEach(() => {
   control.lockCreateErrors = []
   control.lockCreates = []
   control.renameErrors = []
+  control.lockStats = 0
+  control.beforeLockStat = undefined
 })
 
 afterEach(async () => {
   control.lockCreateErrors = []
   control.renameErrors = []
+  control.beforeLockStat = undefined
   await root?.dispose()
   root = undefined
   if (dir) real.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
@@ -145,6 +156,35 @@ describe('the settings store: a filesystem that answers late or says no', () => 
       expect(real.existsSync(path)).toBe(false)
     }
     expect(real.readdirSync(dirname(path)).filter((name) => name !== 'settings.json'), 'nothing left beside the document').toEqual([])
+  })
+
+  /**
+   * Two reclaimers of one dead holder. Each reads the lock's age BEFORE it
+   * holds the reclaim mutex, so the second to get the mutex used to remove
+   * whatever was there: by then the first one's fresh lock. Two writers, both
+   * believing they held it. The disk is changed between this writer's two
+   * looks, which is exactly what the other reclaimer does.
+   */
+  it('looks at a stale lock again once it holds the reclaim mutex, and leaves a fresh one another reclaimer made', async () => {
+    const { settings, path } = await store()
+    const lock = `${path}.lock`
+    const longAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    real.writeFileSync(lock, '')
+    real.utimesSync(lock, longAgo, longAgo)
+    control.beforeLockStat = (count) => {
+      if (count !== 2) return
+      const now = new Date()
+      real.utimesSync(lock, now, now)
+    }
+    const error = thrownBy(() => settings.write('agent', { model: 'second' }, { expectedRevision: 0 }))
+    expect(error).toMatchObject({ code: 'SETTINGS_CONFLICT' })
+    expect({ looks: control.lockStats, lock: real.existsSync(lock), mutex: real.existsSync(`${lock}.steal`), document: real.existsSync(path) }).toEqual({ looks: 2, lock: true, mutex: false, document: false })
+    // The control: with nobody in between, the same dead holder's lock is reclaimed and the write lands.
+    control.beforeLockStat = undefined
+    real.utimesSync(lock, longAgo, longAgo)
+    settings.write('agent', { model: 'reclaimed' }, { expectedRevision: 0 })
+    expect(saved(path)).toEqual({ agent: { model: 'reclaimed' }, revisions: { agent: 1 } })
+    expect(real.existsSync(lock)).toBe(false)
   })
 
   it('reports a lock it cannot create in the filesystem\'s own words, never as another writer', async () => {

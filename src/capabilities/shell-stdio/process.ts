@@ -116,6 +116,17 @@ export const PWSH_CONTAINMENT =
   `if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(CONTAINMENT_BODY, 'utf8').toString('base64')}')))) } ` +
   "else { Write-Warning ('minidsh: what this command starts is not contained: this PowerShell runs in ' + $ExecutionContext.SessionState.LanguageMode) }; "
 
+/**
+ * A child's exit code as its program gave it. Windows hands Node the code as
+ * an unsigned 32-bit number, so a program that exited -4058 (npm's errno for
+ * a missing package.json) read 4294963238 from a one-shot or a job, while the
+ * persistent child, whose marker carries what PowerShell printed, said -4058.
+ * Folded back to signed there; a POSIX code is 0 to 255 and is left alone.
+ */
+function exitCodeOf(code: number | null): number | null {
+  return code === null || process.platform !== 'win32' ? code : code | 0
+}
+
 /** The containment line, where it applies: pwsh on Windows (a POSIX child leads its own process group instead). */
 function containment(dialect: ShellDialect): string {
   return dialect === 'pwsh' && process.platform === 'win32' ? PWSH_CONTAINMENT : ''
@@ -146,7 +157,15 @@ function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, co
     // approved command is a one-shot, so this is the code the model usually
     // reads. `$?` is taken FIRST: any statement of ours would replace it. An
     // `exit` or a terminating error in the command never reaches this line.
-    const exitCode = '\n$minidshOk = $?; if (-not $minidshOk) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }'
+    //
+    // The code is SET on the host, never `exit`ed with: `exit` ends the
+    // script before PowerShell has written what it was still formatting (any
+    // table: `Get-ChildItem | Select-Object ...`, a pscustomobject), so a
+    // listing followed by a failing program came back empty beside a correct
+    // exit code, exactly when the command failed. Measured on 16 shapes, pwsh
+    // 7.6: `exit` lost lines in 5 (202 of 202 in one), `SetShouldExit` in
+    // none, and both gave the same code in all 16.
+    const exitCode = '\n$minidshOk = $?; if (-not $minidshOk) { $Host.SetShouldExit($(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 })) }'
     return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8 + containment(dialect) + announce + command + exitCode] }
   }
   return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc', '-c', started === undefined ? command : `printf '%s\\n' '${started}'\n${command}`] }
@@ -842,7 +861,7 @@ export class ShellProcess implements ShellSession {
     const startedAt = Date.now()
     this.oneShotChildren.add(child)
     this.addGroup(child)
-    const ended = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)))
+    const ended = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(exitCodeOf(code))))
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
@@ -1006,8 +1025,9 @@ export class ShellProcess implements ShellSession {
           // it printed after (`StartLine`).
           if (started !== undefined) forward(started.rest())
           const failed = started !== undefined && code !== 0 && !started.seen && this.isRunnerFailure(opening.trim())
+          const exitCode = exitCodeOf(code)
           resolve({
-            ...(code === null ? {} : { exitCode: code }),
+            ...(exitCode === null ? {} : { exitCode }),
             ...(signal === null ? {} : { signal }),
             ...(failed ? { failure: `the confinement runner "${this.confinement.id}" failed: ${clip(opening.trim(), 200)}` } : {}),
             ...(disposedHere ? { disposed: true as const } : {}),

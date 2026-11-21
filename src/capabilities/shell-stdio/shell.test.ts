@@ -449,6 +449,43 @@ describe.skipIf(!available)('a one-shot grant, where nothing confines', () => {
     if (dialect === 'pwsh') expect((await proc.exec({ command: 'Get-Item ./no-such-entry', policy, oneShot: true, timeoutMs: 60_000 })).exitCode).toBe(1)
   }, SHELL_TEST_TIMEOUT_MS)
 
+  // The code is reported by SETTING it on the host. Reported with `exit`, the
+  // script ended before PowerShell had written what it was still formatting:
+  // a listing followed by a failing program came back empty beside the right
+  // code, and on Windows that is every approved command (the release review
+  // measured it: 202 of 202 lines gone).
+  it.skipIf(dialect !== 'pwsh')('keeps what a one-shot and a job printed before their last statement failed', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess(dialect, dir)
+    const policy = unconfined(dir)
+    const command = '1..40 | ForEach-Object { [pscustomobject]@{ n = $_; square = $_ * $_ } }; pwsh -NoLogo -NoProfile -NonInteractive -Command "exit 2"'
+    const rows = (text: string): number => text.split('\n').filter((line) => /^\s*\d+\s+\d+\s*$/.test(line)).length
+
+    const oneShot = await proc.exec({ command, policy, oneShot: true, timeoutMs: 60_000 })
+    expect({ code: oneShot.exitCode, rows: rows(oneShot.output), last: oneShot.output.includes('1600') }, oneShot.output).toEqual({ code: 2, rows: 40, last: true })
+
+    const chunks: string[] = []
+    const job = await proc.start({ command, policy, output: (chunk) => chunks.push(chunk) })
+    const exit = await job.exited
+    expect({ code: exit.exitCode, rows: rows(chunks.join('')), last: chunks.join('').includes('1600') }, chunks.join('')).toEqual({ code: 2, rows: 40, last: true })
+  }, SHELL_TEST_TIMEOUT_MS)
+
+  // Windows hands Node an exit code as an unsigned number. npm's -4058 (no
+  // package.json) read 4294963238 from a one-shot and -4058 from the
+  // persistent child beside it.
+  it.skipIf(process.platform !== 'win32')('reports a negative exit code as its program gave it, the same from a one-shot, a job and the persistent shell', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-shell-'))
+    proc = new ShellProcess(dialect, dir)
+    const policy = unconfined(dir)
+    const command = 'cmd /c exit -4058'
+    const job = await proc.start({ command, policy, output: () => {} })
+    expect({
+      oneShot: (await proc.exec({ command, policy, oneShot: true, timeoutMs: 60_000 })).exitCode,
+      job: (await job.exited).exitCode,
+      persistent: (await proc.exec({ command, policy, timeoutMs: 60_000 })).exitCode,
+    }).toEqual({ oneShot: -4058, job: -4058, persistent: -4058 })
+  }, SHELL_TEST_TIMEOUT_MS)
+
   it('is reaped by dispose, so nothing outlives the scope that ran it', async () => {
     const root = mkdtempSync(join(tmpdir(), 'minidsh-oneshot-'))
     dir = root

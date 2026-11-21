@@ -276,7 +276,9 @@ export async function collectInstructions(fs: Fs, cwd: string, config: Workspace
  * (`everEntered`): a pressure compaction at a step boundary would otherwise
  * leave the model without its house rules for the rest of the turn, which in a
  * one-prompt run is the rest of the run. A session that never had any is not
- * searched again at every step.
+ * searched again at every step. One whose instructions a compaction shadowed
+ * and whose files can no longer be read IS, at each later step of that turn,
+ * and warned about each time: a cost, not a wrong result (ARCHITECTURE §13).
  */
 export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = {
   name: PLUGIN,

@@ -343,7 +343,7 @@ Upstream facts and verdicts: `references/assumptions.md`.
 - Document skills check content, not appearance.
 - The compaction budget sizes only the kept tail: a `compaction` role with a smaller window is asked to read past it (`compaction-basic`).
 - The meter sees a prompt or tool-set change a step late and charges images on text-only routes.
-- Workspace instructions are read once per entry, not watched; an overflow compaction's retried request lacks them and the skill list (`core/loop/driver.ts`).
+- Workspace instructions are read once per entry, not watched; an overflow compaction's retried request lacks them and the skill list (`core/loop/driver.ts`); shadowed and no longer renderable, they are searched for again at each later step of that turn.
 - An unreadable user or bundled skill root freezes the skill list; no `/name` invokes a skill.
 - A notice the wake budget held waits for a human message.
 

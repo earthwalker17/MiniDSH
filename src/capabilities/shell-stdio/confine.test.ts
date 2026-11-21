@@ -28,7 +28,7 @@ import { SHELL } from '../../core/shell/index.ts'
 import { shellStdioPlugin } from './index.ts'
 import { bwrapArgs } from './confine/bwrap.ts'
 import { seatbeltArgs } from './confine/seatbelt.ts'
-import { exposing, NO_CONFINEMENT, selectConfinement, type Confinement, type ProbeRun } from './confine/index.ts'
+import { exposing, NO_CONFINEMENT, runtimeDirToMask, selectConfinement, type Confinement, type ProbeRun } from './confine/index.ts'
 import { ShellProcess } from './process.ts'
 
 // ---- the profiles, everywhere ---------------------------------------------
@@ -182,6 +182,19 @@ describe('the bwrap profile', () => {
     expect(writable.indexOf('--ro-bind')).toBeLessThan(writable.indexOf(runtimeDir))
   })
 
+  // The mask is laid at a spawn, and a persistent shell outlives that moment.
+  // A host started before its user had a login session finds no directory to
+  // mask; the one logind mounts later shows up inside the running sandbox
+  // (measured under WSL 2), unless its PARENT was masked instead.
+  it('masks the parent where the user\'s own runtime directory does not exist yet, and nothing where neither does', () => {
+    const having = (...paths: string[]) => (path: string): boolean => paths.includes(path)
+    expect(runtimeDirToMask(1000, having('/run/user', '/run/user/1000'))).toBe('/run/user/1000')
+    expect(runtimeDirToMask(1000, having('/run/user', '/run/user/999'))).toBe('/run/user')
+    expect(runtimeDirToMask(1000, having())).toBeUndefined()
+    // No uid (Windows): no runtime directory to speak of.
+    expect(runtimeDirToMask(undefined, having('/run/user'))).toBeUndefined()
+  })
+
   // The mask is over a directory people also WORK in (a GVFS mount, a portal's
   // document path) and an AppImage can be mounted in (TMPDIR set there). What
   // must stay readable comes back, read-only, and nothing else of the directory does.
@@ -199,6 +212,15 @@ describe('the bwrap profile', () => {
 
     // A session that works in the runtime directory ITSELF keeps the mask: showing it would be the sockets back.
     expect(bwrapArgs(policyFor('read-only', runtimeDir), { runtimeDir, expose: [runtimeDir] }).slice(-4)).toEqual(['--tmpfs', runtimeDir, '--remount-ro', runtimeDir])
+    // Writable too: its own bind, or an ancestor's, puts the host's directory
+    // back over the mask, so the mask is laid again after it, last.
+    for (const root of [runtimeDir, '/run/user', '/run']) {
+      const args = bwrapArgs(policyFor('workspace-write', root), { runtimeDir })
+      expect(args.slice(-5), root).toEqual(['--bind', root, root, '--tmpfs', runtimeDir])
+    }
+    // A workspace merely beside it, or beneath it, is not one that holds it.
+    expect(bwrapArgs(policyFor('workspace-write', '/run/media/disk'), { runtimeDir }).slice(-3)).toEqual(['--bind', '/run/media/disk', '/run/media/disk'])
+    expect(bwrapArgs(policyFor('workspace-write', workspace), { runtimeDir }).slice(-3)).toEqual(['--bind', workspace, workspace])
   })
 })
 

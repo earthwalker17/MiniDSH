@@ -443,9 +443,13 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   else if (status === 401 || status === 403) code = 'AUTH'
   else if (status === 402) code = 'QUOTA'
   // The API answers an id it does not serve (or this organization may not use)
-  // with `not_found_error` and a message that names the model ("model: <id>").
-  // Any other 404 is the PATH that was not found, which no other model fixes.
-  else if (status === 404) code = type === 'not_found_error' && /\bmodel\b/i.test(message) ? 'UNKNOWN_MODEL' : 'INVALID_REQUEST'
+  // with an error object whose message names the model ("model: <id>"). Any
+  // other 404 is the PATH that was not found, which no other model fixes. An
+  // error OBJECT of any type counts: a compatible gateway behind
+  // ANTHROPIC_BASE_URL can say "model 'x' not found" under another type, and
+  // reading that as a wrong base URL sends a person to fix the one thing that
+  // was right. A page that is no error object (a proxy's HTML) names nothing.
+  else if (status === 404) code = type !== undefined && /\bmodel\b/i.test(message) ? 'UNKNOWN_MODEL' : 'INVALID_REQUEST'
   else if (status === 429) code = detailCode === 'enforced_spend_limit_reached' ? 'QUOTA' : 'RATE_LIMIT'
   else if (status === 504) code = 'TIMEOUT'
   else if (status >= 500) code = 'SERVER'

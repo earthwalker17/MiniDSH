@@ -162,7 +162,10 @@ ${summary}`
  * the default cap has, and its adapter refuses that request before any I/O, on
  * every attempt, which ends automatic compaction for the session. So on the
  * session's own call the summary names no effort and the model's default
- * serves. A route that differs in provider, model or effort was given for this
+ * serves — except `off`, which is kept: it asks for LESS than any default, so
+ * the cap always holds it, and dropping it made the largest request of a
+ * session that had turned reasoning off think at the model's default, inside
+ * a cap the reasoning then shares. A route that differs in provider, model or effort was given for this
  * call (a `compaction` role), and its effort is kept: a role that names one
  * the cap cannot hold is a configuration the adapter's refusal names. The
  * resolved route does not say who chose it, so a role that restates exactly
@@ -170,7 +173,8 @@ ${summary}`
  */
 function summaryEffort(route: CallConfig, session: CallConfig): string | undefined {
   const sessionsOwn = route.provider === session.provider && route.model === session.model && route.reasoningEffort === session.reasoningEffort
-  return sessionsOwn ? undefined : route.reasoningEffort
+  if (!sessionsOwn) return route.reasoningEffort
+  return route.reasoningEffort === 'off' ? 'off' : undefined
 }
 
 /** The name of the recall tool this deployment mounted, if it mounted one. */

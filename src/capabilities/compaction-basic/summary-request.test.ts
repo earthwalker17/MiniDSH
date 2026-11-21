@@ -167,6 +167,11 @@ describe('the default summary request', () => {
     const session: AgentOptions = { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', reasoningEffort: 'max' }
     const own = await summaryRequestFor(test, session)
     expect([own.outcome, own.request?.model, own.request?.reasoningEffort, own.request?.maxTokens]).toEqual(['compacted', 'claude-haiku-4-5-20251001', undefined, 8192])
+    // `off` is the one effort the session's own call keeps: it asks for less
+    // than any default, and without it a session that had turned reasoning
+    // off summarized at the model's default, inside a cap the reasoning shares.
+    const off = await summaryRequestFor(test, { provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'off' })
+    expect([off.outcome, off.request?.reasoningEffort]).toEqual(['compacted', 'off'])
     test.root.on(
       AGENT_REQUEST,
       async (context, next) => {

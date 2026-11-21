@@ -174,6 +174,9 @@ export const skillsPlugin: Plugin<SkillsConfig> = {
         // still not scanned at every step: only a list a compaction just
         // shadowed comes back here, so the model keeps it for the rest of the
         // turn. A changed skill is found with the next prompt, as before.
+        // (Where a shadowed list CANNOT be put back, a scan that is not
+        // complete or a budget too small to render, each later step of the
+        // turn does scan again: a cost, bounded by the turn, ARCHITECTURE §13.)
         if (newestList(context.agent) !== undefined || !everListed(context.agent)) return decision
       }
       // A composition with no filesystem provider still boots; the list is then simply absent.

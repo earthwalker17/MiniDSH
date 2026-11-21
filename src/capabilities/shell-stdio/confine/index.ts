@@ -112,10 +112,9 @@ const DIALECTS: Readonly<Record<Exclude<ConfinementId, 'none'>, Dialect>> = {
  * process can outlive both.
  */
 function hostFacts(expose: readonly string[]): BwrapHost {
-  const uid = process.getuid?.()
-  const runtimeDir = uid === undefined ? undefined : `/run/user/${uid}`
+  const runtimeDir = runtimeDirToMask(process.getuid?.(), isDirectory)
   return {
-    ...(runtimeDir !== undefined && isDirectory(runtimeDir) ? { runtimeDir } : {}),
+    ...(runtimeDir === undefined ? {} : { runtimeDir }),
     // A path that is not there is left out: bwrap refuses a bind whose source
     // is missing, and one stale entry would fail every confined command as a
     // wrapper that could not start.
@@ -129,6 +128,26 @@ function isDirectory(path: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * What the profile masks for this user: their runtime directory where it
+ * exists, and otherwise its PARENT.
+ *
+ * The parent, because the mask is laid when a child is spawned and a
+ * persistent shell or a job outlives that moment. A host started with no
+ * login session for its user (a system service, cron) has no
+ * `/run/user/<uid>` yet; when the user logs in, logind mounts it, and a mount
+ * made on the host shows up inside a sandbox that is already running, session
+ * bus and all (measured under WSL 2: a directory mounted a second after the
+ * sandbox started was readable inside it, and was not with `/run/user`
+ * masked, because it then arrives beneath the mask). Where there is no
+ * `/run/user` at all there is nothing to arrive.
+ */
+export function runtimeDirToMask(uid: number | undefined, exists: (path: string) => boolean): string | undefined {
+  if (uid === undefined) return undefined
+  if (exists(`/run/user/${uid}`)) return `/run/user/${uid}`
+  return exists('/run/user') ? '/run/user' : undefined
 }
 
 /**
