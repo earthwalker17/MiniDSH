@@ -17,9 +17,10 @@
  *
  * The profile follows DeepSeek Harness's bwrap runner (`dsh-sandbox-local`,
  * https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/sandbox-local/README.md)
- * flag for flag, with two additions of MiniDSH's own; the writable set it
+ * flag for flag, with three additions of MiniDSH's own; the writable set it
  * grants is MiniDSH's own too (`writableRoots`).
  *
+ * - **`--new-session`**, since S11.5 (the profile notes below say why).
  * - **The user runtime directory is masked** (`BwrapHost.runtimeDir`, and
  *   `BWRAP_WITHHELD_ENV`). Upstream leaves `/run/user/<uid>` visible, and a
  *   read-only bind refuses a write to a file, not a `connect()` to a socket:
