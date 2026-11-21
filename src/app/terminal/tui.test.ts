@@ -231,6 +231,11 @@ describe('the full-screen terminal', () => {
     await term.see('the turn is still running')
     await term.press('\x1b')
     await term.see('Turn cancelled')
+    // "Turn cancelled" is drawn when the cancel is asked; the session is
+    // switchable only once the turn has ended. Without this wait a loaded
+    // host types the second /new into a turn still running, and it is
+    // refused again (CI, windows-latest, 2026-11-20).
+    await term.see('ready')
     await term.say('/new')
     await term.see('a fresh session starts with your next message')
     await term.see('Ask for anything')
