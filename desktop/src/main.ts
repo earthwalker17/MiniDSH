@@ -702,6 +702,18 @@ function createWindow(): void {
     exiting = true
     void live?.runtime.stop()
   })
+  // A destroyed window is no window. Every use of `win` and `overlay` in this
+  // file is guarded (`win?.`, `if (!win)`), and a guard holds only while a
+  // destroyed object is not still named: a callback that ran after the close
+  // (the shell page finishing its load, a late view change) called a method
+  // on it, which throws, and an uncaught exception in main is a modal box.
+  // The view's own contents outlive the window that showed them unless closed.
+  win.on('closed', () => {
+    const gone = overlay
+    win = undefined
+    overlay = undefined
+    if (gone && !gone.webContents.isDestroyed()) gone.webContents.close()
+  })
   void web.loadURL('about:blank')
 }
 
