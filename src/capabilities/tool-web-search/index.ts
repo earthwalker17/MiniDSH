@@ -32,13 +32,15 @@
  * them. Every request switches them off explicitly as well, so the cost and
  * the bytes are not spent on text this tool would discard.
  *
- * **No `effect/recorded` yet.** A record is written at an effect BOUNDARY by
- * the provider that owns the effect (`core/effects`), and no egress boundary
- * exists: a tool-local fetch is not one. Whether a shared egress world with a
- * record and a future fence replaces per-tool fetch is S20's question; until
- * then the `approval/asked`/`approval/decided` pair and the `tool/result` are
- * the record, and a dispatched search that crashed while waiting on consent
- * reads outcome-unknown like any other dispatched call.
+ * **No `effect/recorded`.** A record is written at an effect BOUNDARY by the
+ * provider that owns the effect (`core/effects`), and no egress boundary
+ * exists: a tool-local fetch is not one. The browser that came after did not
+ * make one either — `tool-browser` is fenced inside Chrome, neither consented
+ * nor recorded — so there is still no shared egress world, and a network tool
+ * is consented, never confined or recorded (ARCHITECTURE §13). The
+ * `approval/asked`/`approval/decided` pair and the `tool/result` are the
+ * record, and a dispatched search that crashed while waiting on consent reads
+ * outcome-unknown like any other dispatched call.
  *
  * The key is a declared credential: while this row is mounted, no shell child
  * inherits `TAVILY_API_KEY` (`core/process.ts`' `childEnvironment`). It is
@@ -68,6 +70,9 @@ export interface WebSearchConfig {
   readonly maxOutputChars?: number | undefined
 }
 
+/** The longest delay a Node timer keeps: past it `setTimeout` warns and fires after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1
+
 const configSchema = z
   .strictObject({
     apiKeyEnv: z.string().min(1).optional(),
@@ -78,7 +83,11 @@ const configSchema = z
     // in the URL would put a password into a durable, rendered consent subject.
     baseURL: z.string().url().refine(isPlainHttpBase, PLAIN_HTTP_BASE_RULE).optional(),
     maxResults: z.number().int().min(1).max(10).optional(),
-    timeoutMs: z.number().positive().optional(),
+    // What a timer takes, refused here so the row never mounts with less:
+    // `AbortSignal.timeout` throws on a fraction, and a delay past 2^31-1 is
+    // one Node shortens to 1 ms. Either would otherwise surface on the first
+    // search, AFTER a person had consented to it.
+    timeoutMs: z.number().int().positive().max(MAX_TIMER_MS).optional(),
     maxOutputChars: z.number().int().positive().optional(),
   })
   .optional()

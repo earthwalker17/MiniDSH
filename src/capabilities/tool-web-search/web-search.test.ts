@@ -505,6 +505,51 @@ describe('the row', () => {
     expect(parse({ baseURL: 'https://api.tavily.com', maxResults: 10 })).toEqual({ baseURL: 'https://api.tavily.com', maxResults: 10 })
   })
 
+  // The deadline is armed AFTER consent, so a value the timer rejects used to
+  // surface there: a person approved the query, and the result was Node's own
+  // uncoded RangeError (a fraction), or a search cut off after 1 ms (a delay
+  // past 2^31-1, which Node shortens to that).
+  it('refuses a deadline no timer can keep at the contract, so the row never mounts to ask consent for a search it could not run', async () => {
+    const parse = (config: unknown): unknown => toolWebSearchPlugin.config!.parse(config)
+    for (const timeoutMs of [2500.5, 2 ** 31, 5e9, 0, -1, Number.POSITIVE_INFINITY]) expect(() => parse({ timeoutMs }), `timeoutMs ${timeoutMs}`).toThrow()
+    expect(parse({ timeoutMs: 2 ** 31 - 1 })).toEqual({ timeoutMs: 2 ** 31 - 1 })
+
+    // Through a composition, the way a deployment meets it: the row fails at
+    // settle, so there is no web_search to call and nobody is ever asked.
+    harness = await coreHarness()
+    harness.root.plugin(credentialsLocalPlugin, { path: join(tempDir('minidsh-search-home-'), 'credentials.json') })
+    let asked = 0
+    harness.root.on(APPROVAL_REQUEST, async () => {
+      asked += 1
+      return 'allowed-once'
+    })
+    harness.root.plugin(toolWebSearchPlugin, { timeoutMs: 2500.5 })
+    const report = await harness.root.settle()
+    expect(report.failed.map((entry) => entry.name)).toEqual(['tool-web-search'])
+    expect(String(report.failed[0]?.error), 'the failure names the field').toContain('timeoutMs')
+    expect(harness.root.get(TOOLS).list().map((tool) => tool.name)).not.toContain('web_search')
+    expect(asked).toBe(0)
+  })
+
+  // A snippet's bound is counted in characters a person reads, so the cut can
+  // never land inside one. Half an emoji is a lone surrogate; the result
+  // message would repair it to U+FFFD (`core/llm/content.ts`), which is why
+  // the mark of a bad cut here is that replacement character, not an
+  // ill-formed string.
+  it('cuts a title and a snippet between characters, never through a surrogate pair', async () => {
+    const f = await setup({ key: KEY })
+    f.answer(allow)
+    // Nothing before the first pair, so every pair starts on an even UTF-16
+    // index and a cut at an odd length (199 and 499, the bounds less the
+    // mark) would fall inside one.
+    f.server.respond = results({ title: '😀'.repeat(300), url: 'https://example.com/emoji', content: '😀'.repeat(600) })
+    const outcome = await f.run('emoji')
+    expect(outcome.isError).toBe(false)
+    expect(outcome.text.includes('�'), 'a cut went through a character and left half of it').toBe(false)
+    expect(outcome.text).toContain(`1. ${'😀'.repeat(199)}…\n`)
+    expect(outcome.text).toContain(`   ${'😀'.repeat(499)}…`)
+  })
+
   /**
    * The scrub's list is what the mounted rows declared, so this row's key is
    * withheld from a shell child exactly while the row is mounted — and only
@@ -512,7 +557,11 @@ describe('the row', () => {
    * reaches the user's shell. Two boots of the shipped composition, as
    * `app.test.ts` pins the adapter rows.
    */
-  it.skipIf(!shellAvailable)('withholds its key from a shell child exactly while the row is mounted', async () => {
+  // Skipped only where a missing shell is allowed: under MINIDSH_EXPECT_SHELL=1
+  // (CI) it runs and fails here, so this claim about a secret never rests on
+  // another file's check having failed the run first.
+  it.skipIf(!shellAvailable && process.env.MINIDSH_EXPECT_SHELL !== '1')('withholds its key from a shell child exactly while the row is mounted', async () => {
+    expect(shellAvailable, `MINIDSH_EXPECT_SHELL=1 but the host shell does not run on ${process.platform}, so the key's withholding was not checked`).toBe(true)
     const { bootComposition } = await import('../../app/headless.ts')
     const { AGENTS } = await import('../../core/agent/index.ts')
     const { SHELL } = await import('../../core/shell/index.ts')
