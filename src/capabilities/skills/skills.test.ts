@@ -13,22 +13,25 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { AGENT_PRE_STEP, AGENTS, agentPlugin, type Agent, type PreStepDecision } from '../../core/agent/index.ts'
 import { agentInvariantPlugin } from '../../core/agent/invariant.ts'
 import { approvalPlugin } from '../../core/approval/index.ts'
+import { COMPACTION_APPLIED } from '../../core/compaction/index.ts'
 import { FS, FsError, type DirEntry, type Fs } from '../../core/fs/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { invariantsPlugin } from '../../core/invariants/index.ts'
-import { LLM, llmPlugin } from '../../core/llm/index.ts'
+import { LLM, llmPlugin, type Message } from '../../core/llm/index.ts'
 import { createUserMessage, messageText, restoreMessage } from '../../core/llm/message.ts'
 import { loopInvariantPlugin, loopPlugin } from '../../core/loop/index.ts'
 import { PROMPT, promptPlugin } from '../../core/prompt/index.ts'
 import { sandboxPlugin } from '../../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../../core/sandbox/invariant.ts'
 import { matches, sessionInvariantPlugin, sessionPlugin, USER_MESSAGE } from '../../core/session/index.ts'
-import { toolsPlugin } from '../../core/tools/index.ts'
-import { assistantText, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
+import { defineTool, TOOLS, toolsPlugin } from '../../core/tools/index.ts'
+import { assistantText, assistantToolCall, ScriptedAdapter, type ScriptedResponse } from '../../test-support/scripted-adapter.ts'
+import { compactionBasicPlugin, type CompactionBasicConfig } from '../compaction-basic/index.ts'
 import { fsLocalPlugin } from '../fs-local/index.ts'
 import {
   discoverSkills,
@@ -80,7 +83,8 @@ interface Mounted {
   create(cwd: string): Promise<Agent>
 }
 
-async function mount(config: SkillsConfig, options: { fs?: boolean } = {}): Promise<Mounted> {
+/** `compaction` mounts that row AFTER this one, as compose() does: registered later, it is the inner pre-step layer. */
+async function mount(config: SkillsConfig, options: { fs?: boolean; compaction?: CompactionBasicConfig } = {}): Promise<Mounted> {
   const warnings: string[] = []
   root = createRoot({ logger: { warn: (message) => void warnings.push(message), error: () => {} } })
   root.plugin(invariantsPlugin, {})
@@ -98,6 +102,7 @@ async function mount(config: SkillsConfig, options: { fs?: boolean } = {}): Prom
   root.plugin(loopPlugin)
   root.plugin(loopInvariantPlugin)
   root.plugin(skillsPlugin, config)
+  if (options.compaction !== undefined) root.plugin(compactionBasicPlugin, options.compaction)
   await root.settle()
   const adapter = new ScriptedAdapter()
   root.get(LLM).registerAdapter(root, adapter)
@@ -756,6 +761,12 @@ describe('entering the conversation', () => {
    * version of this test never reached `agent/pre-step` (review, S19: deleting
    * the guard left it green); the second call is the control that proves the
    * guard, not a missing skill, kept the first batch empty.
+   *
+   * Then the two empty batches a listener can meet, each in the state where
+   * only its own rule decides: a LATER step with no list ever entered, or with
+   * one still live, is an ordinary tool-loop step and is not filled (nor are
+   * the roots scanned for it); and once a compaction shadowed the list, the
+   * first step is still left alone while a later one gets it back.
    */
   it('never revives a turn that had nothing to say', async () => {
     const user = tempDir()
@@ -764,11 +775,82 @@ describe('entering the conversation', () => {
     const mounted = await mount({ maxBytes: 8_000, roots: [{ path: user, origin: 'user' }] })
     const agent = await mounted.create(workspace)
     const signal = new AbortController().signal
-    const empty = await root!.waterfall(AGENT_PRE_STEP, { agent, messages: [], turn: 1, step: 1, signal }, async () => ({ kind: 'enter', messages: [] }) as PreStepDecision)
-    expect(empty).toEqual({ kind: 'enter', messages: [] })
-    const hello = createUserMessage('hello')
-    const filled = await root!.waterfall(AGENT_PRE_STEP, { agent, messages: [hello], turn: 1, step: 1, signal }, async () => ({ kind: 'enter', messages: [hello] }) as PreStepDecision)
-    expect(filled.kind === 'enter' ? filled.messages.length : 0).toBe(2)
+    const ask = async (messages: Message[], step: number): Promise<string[]> => {
+      const decision = await root!.waterfall(AGENT_PRE_STEP, { agent, messages, turn: 1, step, signal }, async () => ({ kind: 'enter', messages }) as PreStepDecision)
+      return decision.kind === 'enter' ? decision.messages.map((message) => (message.source.kind === 'plugin' ? `plugin:${message.source.form}` : messageText(message))) : [decision.kind]
+    }
+    expect(await ask([], 1)).toEqual([])
+    expect(await ask([createUserMessage('hello')], 1)).toEqual(['hello', 'plugin:list'])
+    expect(await ask([], 2)).toEqual([])
+
+    // Entered for real. While it is live, a tool-loop step neither gets a
+    // second list nor pays for a scan: a skill that changed is found with the
+    // next prompt, which is what "re-read on every prompt" says.
+    await prompt(mounted, agent, 'go')
+    expect(lists(agent)).toHaveLength(1)
+    const fs = root!.get(FS)
+    const listDir = fs.listDir.bind(fs)
+    const scanned: string[] = []
+    fs.listDir = async (target) => {
+      scanned.push(target.path)
+      return listDir(target)
+    }
+    writeSkill(user, 'alpha', described('alpha', 'a wording that changed mid-turn'))
+    expect(await ask([], 2)).toEqual([])
+    expect(scanned).toEqual([])
+    writeSkill(user, 'alpha', described('alpha'))
+
+    // Shadowed, as a compaction leaves it.
+    const nodes = agent.session.surfaceSeqs()
+    agent.session.append(USER_MESSAGE, { message: createUserMessage('summary of the work so far') }, { surfaceOp: { op: 'replace', start: nodes[0]!, end: nodes.at(-1)! }, sourceEventSeqs: [...nodes] })
+    expect(await ask([], 1)).toEqual([])
+    expect(await ask([], 2)).toEqual(['plugin:list'])
+    fs.listDir = listDir
+  })
+
+  /**
+   * One prompt, a long tool loop, and a pressure compaction at a step boundary
+   * inside it, with no AGENTS.md beside it (when there is one, its re-entry
+   * makes the batch non-empty and this listener's own rule is never asked).
+   * Every step after a turn's first has an empty batch, and the listener used
+   * to leave EVERY empty batch alone, so the list was gone to the end of the turn.
+   */
+  it('re-enters the list at the step whose compaction shadowed it, inside one turn', async () => {
+    const user = tempDir()
+    const workspace = workspaceWithRoot()
+    writeSkill(user, 'alpha', described('alpha'))
+    const mounted = await mount({ maxBytes: 8_000, roots: [{ path: user, origin: 'user' }] }, { compaction: { budgetTokens: 3_000, retainRatio: 0.2, thresholdRatio: 0.5 } })
+    root!.get(TOOLS).register(
+      root!,
+      defineTool({ name: 'echo', description: 'Echo text back.', input: z.object({ text: z.string() }), output: z.object({ text: z.string() }), render: (_args, value) => [{ type: 'text', text: value.text }], execute: (args: { text: string }) => ({ text: args.text }) }),
+    )
+    const agent = await mounted.create(workspace)
+    // Ten tool steps and an answer. The reported prompt is the request's own
+    // size, so pressure rises with the loop and falls when a compaction lands.
+    let steps = 0
+    const respond: ScriptedResponse = (request) => {
+      if (request.purpose === 'compaction') return assistantText('## Primary Request\n- keep echoing')
+      steps += 1
+      const usage = { inputTokens: Math.ceil(JSON.stringify(request.messages).length / 4), outputTokens: 6 }
+      return steps <= 10 ? assistantToolCall(`c${steps}`, 'echo', { text: `${steps} ${'y'.repeat(600)}` }, usage) : assistantText('all echoed', usage)
+    }
+    mounted.adapter.script(...Array.from({ length: 30 }, () => respond))
+    agent.followup(createUserMessage('echo ten times'))
+    await agent.whenIdle()
+
+    const kinds = (type: string) => agent.session.events.filter((event) => event.type === type)
+    expect(kinds('turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)).toEqual(['completed'])
+    const applied = kinds(COMPACTION_APPLIED.type)
+    const stepStarts = kinds('step/start').map((event) => event.seq)
+    expect(applied.map((event) => (event.data as { trigger: string }).trigger).slice(0, 1)).toEqual(['pressure'])
+    expect([stepStarts[0]! < applied[0]!.seq, applied[0]!.seq < stepStarts.at(-1)!]).toEqual([true, true])
+    // How many skill lists each loop request showed the model.
+    const shown = mounted.adapter.calls
+      .filter((call) => call.purpose === undefined)
+      .map((call) => call.messages.filter((message) => message.source.kind === 'plugin' && message.source.plugin === 'skills' && message.source.form === 'list').length)
+    expect(shown).toEqual(Array.from({ length: 11 }, () => 1))
+    // Back INSIDE the turn: entered again in the log, with one prompt only.
+    expect(lists(agent).length, `skill lists in the log: ${lists(agent).length}`).toBeGreaterThanOrEqual(2)
   })
 
   it('degrades to no change when the filesystem refuses to name a path, and still answers the prompt', async () => {

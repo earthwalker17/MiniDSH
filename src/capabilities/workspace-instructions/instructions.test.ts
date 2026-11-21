@@ -4,26 +4,30 @@
  * the nearest file wins when the budget is tight, and a repository can tell the
  * model how it likes its code without telling the harness what it may do.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve as absolute } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
-import { AGENTS, agentPlugin, type Agent } from '../../core/agent/index.ts'
+import { AGENT_PRE_STEP, AGENTS, agentPlugin, type Agent, type PreStepDecision } from '../../core/agent/index.ts'
 import { agentInvariantPlugin } from '../../core/agent/invariant.ts'
 import { approvalPlugin } from '../../core/approval/index.ts'
-import { FS } from '../../core/fs/index.ts'
+import { COMPACTION_APPLIED } from '../../core/compaction/index.ts'
+import { FS, type Fs } from '../../core/fs/index.ts'
 import { invariantsPlugin } from '../../core/invariants/index.ts'
-import { LLM, llmPlugin } from '../../core/llm/index.ts'
+import { LLM, llmPlugin, type Message } from '../../core/llm/index.ts'
 import { createUserMessage, messageText, restoreMessage } from '../../core/llm/message.ts'
 import { loopInvariantPlugin, loopPlugin } from '../../core/loop/index.ts'
 import { PROMPT, promptPlugin } from '../../core/prompt/index.ts'
 import { sandboxPlugin } from '../../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../../core/sandbox/invariant.ts'
 import { matches, sessionInvariantPlugin, sessionPlugin, USER_MESSAGE } from '../../core/session/index.ts'
-import { toolsPlugin } from '../../core/tools/index.ts'
-import { assistantText, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
+import { defineTool, TOOLS, toolsPlugin } from '../../core/tools/index.ts'
+import { assistantText, assistantToolCall, ScriptedAdapter, type ScriptedResponse } from '../../test-support/scripted-adapter.ts'
+import { compactionBasicPlugin } from '../compaction-basic/index.ts'
 import { fsLocalPlugin } from '../fs-local/index.ts'
+import { skillsPlugin } from '../skills/index.ts'
 import { collectInstructions, renderInstructions, workspaceInstructionsPlugin, type WorkspaceInstructionsConfig } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -42,7 +46,12 @@ function tempDir(prefix = 'minidsh-instr-'): string {
   return dir
 }
 
-async function mount(config: WorkspaceInstructionsConfig): Promise<{ adapter: ScriptedAdapter; create(cwd: string): Promise<Agent> }> {
+/**
+ * `around` mounts rows on either side of this one, in compose()'s order: what
+ * it mounts is registered BEFORE the instructions row and so is the outer
+ * pre-step layer, and what its returned function mounts comes after and is inner.
+ */
+async function mount(config: WorkspaceInstructionsConfig, around?: (owner: Context) => () => void): Promise<{ adapter: ScriptedAdapter; create(cwd: string): Promise<Agent> }> {
   root = createRoot({ logger: silent })
   root.plugin(invariantsPlugin, {})
   root.plugin(sessionPlugin)
@@ -58,7 +67,9 @@ async function mount(config: WorkspaceInstructionsConfig): Promise<{ adapter: Sc
   root.plugin(agentInvariantPlugin)
   root.plugin(loopPlugin)
   root.plugin(loopInvariantPlugin)
+  const inner = around?.(root)
   root.plugin(workspaceInstructionsPlugin, config)
+  inner?.()
   await root.settle()
   const adapter = new ScriptedAdapter()
   root.get(LLM).registerAdapter(root, adapter)
@@ -182,6 +193,39 @@ describe('discovery', () => {
     expect((await collectInstructions(strangers, child, { maxBytes: 32_000 }, (message) => warned.push(message))).map((source) => source.text)).toEqual(['child rule'])
     expect(warned).toEqual([expect.stringContaining('is not this user\'s project marker')])
   })
+
+  // Windows reports no owner at all, so there this rule alone keeps a
+  // `C:\.git` beside a `C:\AGENTS.md`, which any local user may create, out of
+  // every session started below them. Staged, because no test may write to a
+  // real filesystem root.
+  it('trusts no marker in a filesystem root, and says so', async () => {
+    /** Directories and files that exist; nothing reports an owner, as on win32. */
+    const staged = (folders: readonly string[], files: Readonly<Record<string, string>>): Fs => ({
+      resolve: (path, cwd) => ({ path: absolute(cwd, path), displayPath: path }),
+      stat: async (target) => {
+        const text = files[target.path]
+        if (text !== undefined) return { type: 'file', version: '1', size: Buffer.byteLength(text, 'utf8') }
+        return folders.includes(target.path) ? { type: 'directory', version: '1', size: 0 } : undefined
+      },
+      readText: async (target) => ({ text: files[target.path]!, version: '1', complete: true }),
+      readBytes: async () => Promise.reject(new Error('not used')),
+      writeText: async () => Promise.reject(new Error('not used')),
+      listDir: async () => Promise.reject(new Error('not used')),
+    })
+    const top = absolute('/')
+    const cwd = join(top, 'work')
+    const planted = staged([top, cwd, join(top, '.git')], { [join(top, 'AGENTS.md')]: 'a stranger\'s rule', [join(cwd, 'AGENTS.md')]: 'child rule' })
+    const warned: string[] = []
+    expect((await collectInstructions(planted, cwd, { maxBytes: 32_000 }, (message) => warned.push(message))).map((source) => source.text)).toEqual(['child rule'])
+    expect(warned).toEqual([expect.stringContaining('filesystem root')])
+    // The control: the same layout one directory down is an ordinary project
+    // root, so it was the root, not the staging, that refused the one above.
+    const project = join(top, 'project')
+    const inner = join(project, 'work')
+    const ordinary = staged([top, project, inner, join(project, '.git')], { [join(project, 'AGENTS.md')]: 'project rule', [join(inner, 'AGENTS.md')]: 'child rule' })
+    expect((await collectInstructions(ordinary, inner, { maxBytes: 32_000 }, (message) => warned.push(message))).map((source) => source.text)).toEqual(['project rule', 'child rule'])
+    expect(warned).toHaveLength(1)
+  })
 })
 
 describe('the budget', () => {
@@ -198,6 +242,25 @@ describe('the budget', () => {
     const rendered = renderInstructions([near], 800)!
     expect(rendered).toContain('truncated to fit')
     expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(800)
+  })
+
+  // The cut is by bytes, and a byte cut inside a character decodes as U+FFFD:
+  // three bytes where one or two were counted, so the batch ended in a
+  // replacement character and could pass its own cap. ASCII never showed it.
+  it('truncates on a character, never inside one, at every budget and width of character', () => {
+    const over: string[] = []
+    for (const char of ['é', '中', '😀']) {
+      for (let maxBytes = 800; maxBytes < 808; maxBytes++) {
+        const rendered = renderInstructions([{ path: '/w/pkg/AGENTS.md', text: char.repeat(5000) }], maxBytes)!
+        const body = rendered.slice(rendered.indexOf('--- /w/pkg/AGENTS.md ---\n') + '--- /w/pkg/AGENTS.md ---\n'.length, rendered.indexOf('\n[truncated to fit'))
+        const bytes = Buffer.byteLength(rendered, 'utf8')
+        // Whole characters only, as many as fit: within the cap, and less than one more character short of it.
+        if (bytes > maxBytes || maxBytes - bytes >= Buffer.byteLength(char, 'utf8') || body !== char.repeat([...body].length) || body.length === 0) {
+          over.push(`${char} at ${maxBytes}: ${bytes} bytes, body ends ${JSON.stringify(body.slice(-4))}`)
+        }
+      }
+    }
+    expect(over).toEqual([])
   })
 
   it('renders nothing at all rather than a header with no content', () => {
@@ -336,17 +399,103 @@ describe('entering the conversation', () => {
     expect(String(failure?.cause ?? '')).toContain('maxBytes')
   })
 
+  /**
+   * One prompt, a long tool loop, and a pressure compaction at a step boundary
+   * inside it: compose()'s own row order, skills outermost, compaction
+   * innermost. Every step after a turn's first has an empty batch, and both
+   * listeners used to leave EVERY empty batch alone, so the house rules and
+   * the skill list were gone from that step to the end of the turn, which in a
+   * one-prompt headless run is the end of the run.
+   */
+  it('re-enters the instructions and the skill list at the step whose compaction shadowed them, inside one turn', async () => {
+    const workspace = workspaceWithRoot()
+    writeFileSync(join(workspace, 'AGENTS.md'), 'always end with DONE', 'utf8')
+    const skills = tempDir('minidsh-instr-skills-')
+    mkdirSync(join(skills, 'alpha'))
+    writeFileSync(join(skills, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: Use for alpha work.\n---\nDo the thing carefully.\n', 'utf8')
+    const mounted = await mount({ maxBytes: 32_000 }, (owner) => {
+      owner.plugin(skillsPlugin, { maxBytes: 8_000, roots: [{ path: realpathSync.native(skills), origin: 'user' }] })
+      return () => owner.plugin(compactionBasicPlugin, { budgetTokens: 3_000, retainRatio: 0.2, thresholdRatio: 0.5 })
+    })
+    root!.get(TOOLS).register(
+      root!,
+      defineTool({ name: 'echo', description: 'Echo text back.', input: z.object({ text: z.string() }), output: z.object({ text: z.string() }), render: (_args, value) => [{ type: 'text', text: value.text }], execute: (args: { text: string }) => ({ text: args.text }) }),
+    )
+    const agent = await mounted.create(workspace)
+    // Ten tool steps and an answer. The reported prompt is the request's own
+    // size, so pressure rises with the loop and falls when a compaction lands.
+    let steps = 0
+    const respond: ScriptedResponse = (request) => {
+      if (request.purpose === 'compaction') return assistantText('## Primary Request\n- keep echoing')
+      steps += 1
+      const usage = { inputTokens: Math.ceil(JSON.stringify(request.messages).length / 4), outputTokens: 6 }
+      return steps <= 10 ? assistantToolCall(`c${steps}`, 'echo', { text: `${steps} ${'y'.repeat(600)}` }, usage) : assistantText('all echoed', usage)
+    }
+    mounted.adapter.script(...Array.from({ length: 30 }, () => respond))
+    agent.followup(createUserMessage('echo ten times'))
+    await agent.whenIdle()
+
+    // One turn, completed, with at least one pressure compaction strictly inside it.
+    const kinds = (type: string) => agent.session.events.filter((event) => event.type === type)
+    expect(kinds('turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)).toEqual(['completed'])
+    const applied = kinds(COMPACTION_APPLIED.type)
+    const stepStarts = kinds('step/start').map((event) => event.seq)
+    expect(applied.map((event) => (event.data as { trigger: string }).trigger).slice(0, 1)).toEqual(['pressure'])
+    expect([stepStarts[0]! < applied[0]!.seq, applied[0]!.seq < stepStarts.at(-1)!]).toEqual([true, true])
+
+    // What each loop request showed the model: how many instruction messages, how many skill lists.
+    const shown = mounted.adapter.calls
+      .filter((call) => call.purpose === undefined)
+      .map((call) => {
+        const forms = call.messages.flatMap((message) => (message.source.kind === 'plugin' ? [`${message.source.plugin}/${message.source.form}`] : []))
+        return `${forms.filter((form) => form === 'workspace-instructions/workspace-instructions').length} instructions, ${forms.filter((form) => form === 'skills/list').length} list`
+      })
+    expect(shown).toHaveLength(11)
+    expect(shown).toEqual(shown.map(() => '1 instructions, 1 list'))
+    // And they came back INSIDE the turn: entered again in the log, with one prompt only.
+    expect(entered(agent).length, `instruction messages in the log: ${entered(agent).length}`).toBeGreaterThanOrEqual(2)
+    // After the tool results of the step before, in the order a prompt's batch has: AGENTS.md, then the list.
+    const reentry = agent.session.events.filter((event) => event.seq > applied[0]!.seq && matches(event, USER_MESSAGE) && event.surfaceOp?.op === 'append').slice(0, 2)
+    expect(reentry.map((event) => (matches(event, USER_MESSAGE) && event.data.message.source.kind === 'plugin' ? event.data.message.source.plugin : 'other'))).toEqual(['workspace-instructions', 'skills'])
+  })
+
+  /**
+   * Straight at the seam, as the skills twin is: the driver ends a turn as a
+   * natural stop when its FIRST step enters nothing, so that empty batch must
+   * stay empty. (The earlier version of this test sent a quiet message and
+   * cancelled: no turn ever started, the listener never ran, and the status it
+   * asserted had never been anything else.) The second call is the control
+   * that proves the guard, not a missing file, kept the first batch empty.
+   *
+   * Then the two empty batches a listener can meet, each in the state where
+   * only its own rule decides: a LATER step of a session that never had
+   * instructions is every tool-loop step of one and is not filled; and once
+   * instructions were entered and a compaction shadowed them, the first step
+   * is still left alone while a later one gets them back.
+   */
   it('never revives a turn that had nothing to say', async () => {
     const workspace = workspaceWithRoot()
     writeFileSync(join(workspace, 'AGENTS.md'), 'house style', 'utf8')
     const mounted = await mount({ maxBytes: 32_000 })
     const agent = await mounted.create(workspace)
-    // No prompt, so no batch: the driver must still close the turn as a natural
-    // stop rather than being handed a message it did not ask for.
-    agent.send(createUserMessage('quiet'), 'next-step', false)
-    agent.cancel({ kind: 'user' })
+    const signal = new AbortController().signal
+    const ask = async (messages: Message[], step: number): Promise<string[]> => {
+      const decision = await root!.waterfall(AGENT_PRE_STEP, { agent, messages, turn: 1, step, signal }, async () => ({ kind: 'enter', messages }) as PreStepDecision)
+      return decision.kind === 'enter' ? decision.messages.map((message) => (message.source.kind === 'plugin' ? `plugin:${message.source.form}` : messageText(message))) : [decision.kind]
+    }
+    expect(await ask([], 1)).toEqual([])
+    expect(await ask([createUserMessage('hello')], 1)).toEqual(['hello', 'plugin:workspace-instructions'])
+    expect(await ask([], 2)).toEqual([])
+
+    // Entered for real, then shadowed, as a compaction leaves them.
+    mounted.adapter.script(assistantText('one'))
+    agent.followup(createUserMessage('go'))
     await agent.whenIdle()
-    expect(agent.status).toBe('idle')
+    expect(entered(agent)).toHaveLength(1)
+    const nodes = agent.session.surfaceSeqs()
+    agent.session.append(USER_MESSAGE, { message: createUserMessage('summary of the work so far') }, { surfaceOp: { op: 'replace', start: nodes[0]!, end: nodes.at(-1)! }, sourceEventSeqs: [...nodes] })
+    expect(await ask([], 1)).toEqual([])
+    expect(await ask([], 2)).toEqual(['plugin:workspace-instructions'])
   })
 
   it('is a no-op with no filesystem provider, instead of failing the turn', async () => {

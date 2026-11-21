@@ -24,7 +24,7 @@ import { bootComposition } from '../../app/headless.ts'
 import type { Patch } from '../../app/compose.ts'
 import { auditLines, describeEvent } from '../../app/present.ts'
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
-import { AGENT_NARROWING, SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
+import { AGENT_CREATED, AGENT_NARROWING, SUBAGENT_END, SUBAGENT_START } from '../../core/agent/index.ts'
 import { toolSubagentPlugin } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
@@ -417,18 +417,20 @@ describe('delegation through the full composition', () => {
 
   it('a cancelled parent call cancels the child, and the child keeps its own balanced log', async () => {
     const w = await world()
-    const cwdFile = join((await world()).cwd, 'unused.txt')
-    writeFileSync(cwdFile, 'x', 'utf8')
     let cancel!: () => void
     const started = new Promise<void>((resolve) => {
       cancel = resolve
     })
+    let childSawTheCancel = false
     w.adapter.script(
       assistantToolCall('call-1', 'subagent', { description: 'slow work', prompt: 'Take your time.' }),
-      async () => {
-        // The child is mid-request when the parent turn is cancelled.
+      async (request) => {
+        // The child is mid-request when the parent turn is cancelled, and
+        // stays there until the cancel reaches its own request: a provider
+        // that answers only once it is told to stop.
         cancel()
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        await new Promise<void>((resolve) => request.signal?.addEventListener('abort', () => resolve(), { once: true }))
+        childSawTheCancel = request.signal?.aborted === true
         return assistantText('too late')
       },
     )
@@ -437,12 +439,15 @@ describe('delegation through the full composition', () => {
     await started
     handle.agent.cancel({ kind: 'user' })
     await handle.agent.whenIdle()
+    expect(childSawTheCancel, 'the parent\'s cancel never reached the child\'s request').toBe(true)
     const start = eventsOf(handle.agent.session, SUBAGENT_START.type)[0]!.data as { childId: string }
+    // The parent's record of the delegation says how it ended.
+    expect(eventsOf(handle.agent.session, SUBAGENT_END.type).map((event) => (event.data as { childId: string; reason: { kind: string } }))).toMatchObject([{ childId: start.childId, reason: { kind: 'cancelled' } }])
     const child = storedEvents(w.sessionsRoot, start.childId)
     const turnEnd = child.filter((event) => event.type === 'turn/end').at(-1)!.data as { reason: { kind: string } }
     expect(turnEnd.reason.kind).toBe('cancelled')
-    // Balanced: every step that opened, closed.
-    expect(child.filter((event) => event.type === 'step/start')).toHaveLength(child.filter((event) => event.type === 'step/end').length)
+    // Balanced, and not vacuously: the child's one step opened, and it closed.
+    expect([child.filter((event) => event.type === 'step/start').length, child.filter((event) => event.type === 'step/end').length]).toEqual([1, 1])
     await handle.dispose()
   })
 
@@ -457,10 +462,21 @@ describe('delegation through the full composition', () => {
 
     const resumed = await w.root.get(AGENTS).resume(w.root, asSessionId(start.childId))
     expect(resumed.agent.session.header).toMatchObject({ delegatedBy: handle.agent.id, delegationDepth: 1 })
+    expect(resumed.agent.session.header.delegationDepth).toBe(1)
+    // The loop's own bounds came back with the opening record too: the steps a
+    // child may take and the width it may run its calls at.
+    expect(resumed.agent.options).toMatchObject({ maxSteps: 12, maxParallelToolCalls: 1 })
     // The ceiling came back with the seed: the resumed child still cannot widen.
     expect(() => w.root.get(SANDBOX).setMode(resumed.agent.session, 'danger-full-access')).toThrowError(expect.objectContaining({ code: 'SANDBOX_CEILING' }))
-    // And its own delegation would count from depth 1, not from zero.
+    // And its own delegation counts from depth 1, not from zero: the child it
+    // starts is recorded at depth 2, which is the limit, so that one may not delegate.
     expect(w.root.get(TOOLS).get('subagent', resumed.agent)).toBeDefined()
+    w.adapter.script(assistantToolCall('call-2', 'subagent', { description: 'one level further', prompt: 'a sub-task' }), assistantText('a sub-answer'), assistantText('relayed'))
+    resumed.agent.followup(createUserMessage('delegate once more'))
+    await resumed.agent.whenIdle()
+    const further = eventsOf(resumed.agent.session, SUBAGENT_START.type).map((event) => event.data as { childId: string; depth: number })
+    expect(further.map((record) => record.depth)).toEqual([2])
+    expect(storedEvents(w.sessionsRoot, further[0]!.childId).filter((event) => event.type === 'request/header').map((event) => JSON.stringify(event.data).includes('"name":"subagent"'))).toEqual([false])
     await resumed.dispose()
   })
 })
@@ -698,27 +714,58 @@ describe('what the review found', () => {
     await whole.dispose()
   })
 
-  it('cancels a child whose parent call was already aborted, instead of running a paid turn for it', async () => {
+  /**
+   * The abort lands AFTER the registry's gate and after the factory's last
+   * check: at the child's publication, which is the last moment before the
+   * delegation body looks at the signal itself. No `abort` event will fire for
+   * a listener added to an already-aborted signal, and `cancel()` does nothing
+   * to an agent that has not started, so only refusing to start the child keeps
+   * a paid turn from running for a call its caller gave up on.
+   *
+   * (This test used to abort BEFORE calling the tool. The registry's gate
+   * answered on its first line, the delegation body never ran, and both of its
+   * assertions held without it: the first half below is that case, kept as the
+   * control that tells the two refusals apart.)
+   */
+  it('cancels a child whose parent call was aborted as the child was published, instead of running a paid turn for it', async () => {
     const w = await world()
-    const controller = new AbortController()
-    let childRan = false
+    const requests: string[] = []
     w.adapter.script(
-      assistantToolCall('call-1', 'subagent', { description: 'a task', prompt: 'work' }),
-      () => {
-        childRan = true
+      ...Array.from({ length: 3 }, () => (request: LlmRequest) => {
+        requests.push(`a request on behalf of ${String(request.sessionId)}`)
         return assistantText('never wanted')
-      },
-      assistantText('done'),
+      }),
     )
     const handle = await w.create()
     const { toolCall } = await import('../../core/tools/index.ts')
-    // The call arrives with a signal that is ALREADY aborted: no `abort` event
-    // will ever fire, and `cancel()` does nothing to an agent that has not
-    // started — so only refusing to start it keeps the turn from running.
-    controller.abort()
-    const result = await w.root.get(TOOLS).execute(toolCall('call-x', 'subagent', JSON.stringify({ description: 'a task', prompt: 'work' }), handle.agent, controller.signal))
-    expect(result.isError).toBe(true)
-    expect(childRan).toBe(false)
+    const call = (id: string, signal: AbortSignal) => w.root.get(TOOLS).execute(toolCall(id, 'subagent', JSON.stringify({ description: 'a task', prompt: 'work' }), handle.agent, signal))
+
+    // Already aborted on arrival: the gate answers, and nothing was created.
+    const early = new AbortController()
+    early.abort()
+    const gated = await call('call-gated', early.signal)
+    expect([gated.isError, gated.error?.info?.code, gated.error?.message]).toEqual([true, 'ABORTED_BEFORE_DISPATCH', 'tool call aborted before dispatch'])
+    expect(eventsOf(handle.agent.session, SUBAGENT_START.type)).toEqual([])
+
+    // Aborted when the child is published.
+    const controller = new AbortController()
+    const published: string[] = []
+    w.root.on(AGENT_CREATED, (agent) => {
+      if (agent.session.header.delegatedBy === undefined) return
+      published.push(agent.id)
+      controller.abort()
+    })
+    const result = await call('call-x', controller.signal)
+    expect(published).toHaveLength(1)
+    expect([result.isError, result.error?.info?.code]).toEqual([true, 'ABORTED_BEFORE_DISPATCH'])
+    expect(result.error?.message).toContain('the subagent was not started')
+    // No model was asked anything, by the child or for it.
+    expect(requests).toEqual([])
+    // The parent's log explains the child it published: one pair, ended cancelled.
+    expect(eventsOf(handle.agent.session, SUBAGENT_START.type).map((event) => event.data)).toMatchObject([{ callId: 'call-x', childId: published[0] }])
+    expect(eventsOf(handle.agent.session, SUBAGENT_END.type).map((event) => event.data)).toEqual([{ callId: 'call-x', childId: published[0], reason: { kind: 'cancelled' } }])
+    // And the child, which never took a prompt, left no session file behind.
+    expect(readdirSync(w.sessionsRoot).filter((name) => name.includes(encodeURIComponent(published[0]!)))).toEqual([])
     await handle.dispose()
   })
 })

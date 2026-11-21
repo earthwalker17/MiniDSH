@@ -38,9 +38,11 @@ export const AGENT_INBOX_CLAIMED = emitEvent<[agent: Agent, message: Message]>('
 export const AGENT_INBOX_DISCARDED = emitEvent<[agent: Agent, message: Message]>('agent/inbox/discarded')
 
 /**
- * A listener may ADD to a batch, never create one: the driver ends a turn when
- * its first step enters nothing, so filling an empty batch revives a turn that
- * should have closed (ARCHITECTURE §6).
+ * A listener never fills the FIRST step's empty batch: the driver ends a turn
+ * when its first step enters nothing, so a message added there revives a turn
+ * that should have closed. A later step runs whatever enters it, which is how
+ * the instruction and skill listeners put back what a compaction shadowed in
+ * the middle of a turn (ARCHITECTURE §6).
  */
 export const AGENT_PRE_STEP = waterfallEvent<[context: PreStepContext], Promise<PreStepDecision>>('agent/pre-step')
 export const AGENT_REQUEST = waterfallEvent<[context: RequestContext], Promise<RequestContext['config']>>('agent/request')

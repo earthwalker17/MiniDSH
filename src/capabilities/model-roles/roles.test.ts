@@ -54,8 +54,9 @@ describe('model roles', () => {
     // The summary request itself went down the role's route with the role's effort.
     const summary = h.adapter.calls.find((call) => call.purpose === 'compaction')!
     expect([summary.model, summary.reasoningEffort]).toEqual(['cheap-model', 'low'])
-    // Every loop step stayed on the base route, and the base never moved.
-    expect(h.adapter.calls.filter((call) => call.purpose === undefined).every((call) => call.model === 'scripted-model' && call.reasoningEffort === 'high')).toBe(true)
+    // Every loop step stayed on the base route, and the base never moved:
+    // three steps, one per turn, listed so a wrong one names itself.
+    expect(h.adapter.calls.filter((call) => call.purpose === undefined).map((call) => `${call.model} @ ${call.reasoningEffort}`)).toEqual(Array.from({ length: 3 }, () => 'scripted-model @ high'))
     expect(agent.session.foldRequestHeader()!.model).toBe('scripted-model')
     expect(agent.session.events.filter((event) => event.type === AGENT_OPTIONS.type)).toHaveLength(1)
   })

@@ -25,7 +25,7 @@ import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENT_PRE_STEP, type Agent, type PreStepDecision } from '../../core/agent/index.ts'
 import { FS, type Fs, type FsInfo } from '../../core/fs/index.ts'
 import { createPluginMessage } from '../../core/llm/message.ts'
-import { matches, USER_MESSAGE } from '../../core/session/index.ts'
+import { matches, USER_MESSAGE, type EventEnvelope } from '../../core/session/index.ts'
 import { printableText } from '../../core/text.ts'
 
 export interface WorkspaceInstructionsConfig {
@@ -84,6 +84,21 @@ function block(source: Source): string {
 }
 
 /**
+ * The longest prefix of `text` that fits `maxBytes` of UTF-8 and ends on a
+ * character. A cut inside a multi-byte character decodes as U+FFFD, which is
+ * three bytes where the one or two cut ones were counted: the batch would end
+ * in a replacement character and could pass its own cap by up to two bytes.
+ */
+function utf8Prefix(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, 'utf8')
+  if (bytes.length <= maxBytes) return text
+  let end = maxBytes
+  // A continuation byte (10xxxxxx) here means the character began earlier.
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1
+  return bytes.subarray(0, end).toString('utf8')
+}
+
+/**
  * Renders within the budget, most-specific-first when deciding what survives.
  * A source that cannot fit whole is dropped whole — except the most specific
  * one, which is truncated instead, because dropping it would leave the model
@@ -114,13 +129,19 @@ export function renderInstructions(sources: readonly Source[], maxBytes: number)
       const notice = '\n[truncated to fit the instruction budget]'
       const room = budget - byteLength(header) - byteLength(notice)
       if (room <= 0) return undefined
-      kept.unshift(header + Buffer.from(sources[i]!.text.trim(), 'utf8').subarray(0, room).toString('utf8') + notice)
+      kept.unshift(header + utf8Prefix(sources[i]!.text.trim(), room) + notice)
       budget = 0
     }
     // Anything broader than what already fits is dropped whole: specificity wins.
     break
   }
   return `${PREAMBLE}\n\n${kept.join('\n\n')}`
+}
+
+function isInstructions(event: EventEnvelope): boolean {
+  if (!matches(event, USER_MESSAGE)) return false
+  const source = event.data.message.source
+  return source.kind === 'plugin' && source.plugin === PLUGIN && source.form === FORM
 }
 
 /**
@@ -134,17 +155,27 @@ export function renderInstructions(sources: readonly Source[], maxBytes: number)
  * a guard that folded the log would keep suppressing instructions a compaction
  * had already removed from the model's view — the house rules would quietly
  * stop applying at exactly the moment the session got long enough to forget
- * them. Folding the surface re-enters them instead.
+ * them. Folding the surface re-enters them instead: with the next prompt, or
+ * at the very step whose compaction shadowed them when that happens inside a
+ * turn (the listener below).
  */
 function alreadyEntered(agent: Agent): boolean {
   const session = agent.session
   for (const seq of session.surfaceSeqs()) {
     const event = session.events[seq]
-    if (!event || !matches(event, USER_MESSAGE)) continue
-    const source = event.data.message.source
-    if (source.kind === 'plugin' && source.plugin === PLUGIN && source.form === FORM) return true
+    if (event && isInstructions(event)) return true
   }
   return false
+}
+
+/**
+ * Entered at some point in this session's log, live or not. Beside
+ * `alreadyEntered` it says WHY the surface holds none: entered once and gone
+ * means a compaction shadowed them, since nothing else takes a node off the
+ * surface; never entered means there was nothing to enter.
+ */
+function everEntered(agent: Agent): boolean {
+  return agent.session.facts.some(isInstructions)
 }
 
 /**
@@ -233,12 +264,20 @@ export async function collectInstructions(fs: Fs, cwd: string, config: Workspace
 }
 
 /**
- * Enters the instructions once per session, on the first step that has a real
- * batch to join.
+ * Enters the instructions wherever the live surface holds none: beside the
+ * first prompt of a session, beside the next prompt after a compaction shadowed
+ * them, and inside a turn at the step whose compaction did.
  *
- * The non-empty condition is load-bearing, not cosmetic: the driver ends a turn
- * as a natural stop when its first step enters zero messages, so a listener that
- * added one to an empty batch would revive turns that should have closed.
+ * Two empty batches, two rules. The FIRST step's is left alone, and that is
+ * load-bearing: the driver ends a turn as a natural stop when its first step
+ * enters nothing, so a message added there would revive a turn that should
+ * have closed. A LATER step's empty batch is every step of a tool loop, and
+ * that step runs whatever enters it, so adding to it revives nothing. There
+ * the instructions come back only when a compaction is what removed them
+ * (`everEntered`): a pressure compaction at a step boundary would otherwise
+ * leave the model without its house rules for the rest of the turn, which in a
+ * one-prompt run is the rest of the run. A session that never had any is not
+ * searched again at every step.
  */
 export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = {
   name: PLUGIN,
@@ -248,8 +287,11 @@ export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = 
       AGENT_PRE_STEP,
       async (context, next): Promise<PreStepDecision> => {
         const decision = await next()
-        if (decision.kind !== 'enter' || decision.messages.length === 0) return decision
+        if (decision.kind !== 'enter') return decision
+        const empty = decision.messages.length === 0
+        if (empty && context.step === 1) return decision
         if (alreadyEntered(context.agent)) return decision
+        if (empty && !everEntered(context.agent)) return decision
         // Not injected statically: a composition with no filesystem provider
         // still boots, and instruction loading is simply a no-op there.
         const fs = ctx.tryGet(FS)
@@ -270,8 +312,9 @@ export const workspaceInstructionsPlugin: Plugin<WorkspaceInstructionsConfig> = 
           return decision
         }
         if (!text) return decision
-        // After the claimed prompt: the direct request and the durable baseline
-        // enter step 1 together and reach the first request as one batch.
+        // After whatever the batch holds: beside a prompt, the direct request
+        // and the durable baseline enter together and reach the request as one
+        // batch; on a tool-loop step they enter alone, after the tool results.
         return { kind: 'enter', messages: [...decision.messages, createPluginMessage(PLUGIN, text, FORM)] }
       },
       { global: true },

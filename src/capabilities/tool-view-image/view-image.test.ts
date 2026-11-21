@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AgentHandle } from '../../core/agent/index.ts'
+import { AGENT_REQUEST, type AgentHandle } from '../../core/agent/index.ts'
 import { ATTACHMENTS } from '../../core/attachments/index.ts'
 import { FS } from '../../core/fs/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
@@ -117,12 +117,67 @@ describe('view_image', () => {
     const { harness, cwd, create } = await world({ vision: false })
     writeFileSync(join(cwd, 'quad.png'), quadPng(96))
     const handle = await create()
+    // "Before it reads anything" is the order `core/llm/admission.ts` calls the
+    // contract: the route is asked first, so the file is neither resolved,
+    // nor inspected, nor read. Every touch of the seam is kept, by path.
+    const fs = harness.root.get(FS)
+    const touched: string[] = []
+    const resolve = fs.resolve.bind(fs)
+    vi.spyOn(fs, 'resolve').mockImplementation((path, base) => {
+      touched.push(`resolve ${path}`)
+      return resolve(path, base)
+    })
+    const stat = fs.stat.bind(fs)
+    vi.spyOn(fs, 'stat').mockImplementation((target) => {
+      touched.push(`stat ${target.displayPath}`)
+      return stat(target)
+    })
+    const readBytes = fs.readBytes.bind(fs)
+    vi.spyOn(fs, 'readBytes').mockImplementation((target, actor, options) => {
+      touched.push(`readBytes ${target.displayPath}`)
+      return readBytes(target, actor, options)
+    })
     await runViewImage(handle, harness, 'quad.png')
+    vi.restoreAllMocks()
     const result = resultOf(handle)
     expect(result.error?.code).toBe('UNSUPPORTED_CONTENT')
     const text = result.content.map((block) => (block as { text?: string }).text ?? '').join('')
     expect(text).toContain('cannot accept images')
     expect(text).toContain('Delegate')
+    expect(touched.filter((touch) => touch.includes('quad.png'))).toEqual([])
+  })
+
+  /**
+   * Admission follows the route the STEP is on, which an `agent/request`
+   * listener may have moved, and never the agent's base route: the two are the
+   * same in every other test here, so reading `agent.options` would pass them
+   * all. Both directions, each with its own base.
+   */
+  it('admits by the step\'s route, not the base route a listener moved it from', async () => {
+    const outcomes: Record<string, string> = {}
+    for (const [label, visionModel] of [
+      ['base text-only, step moved to a vision model', 'step-model'],
+      ['base vision, step moved to a text-only model', 'scripted-model'],
+    ] as const) {
+      const { harness, cwd, create } = await world({ vision: false })
+      const resolve = harness.adapter.resolveModel.bind(harness.adapter)
+      harness.adapter.resolveModel = (model: string) => (model === visionModel ? { ...resolve(model), inputModalities: ['text', 'image'] as const } : resolve(model))
+      harness.root.on(AGENT_REQUEST, async (context, next) => {
+        const config = await next()
+        return context.purpose === undefined ? { ...config, model: 'step-model' } : config
+      })
+      writeFileSync(join(cwd, 'quad.png'), quadPng(96))
+      const handle = await create()
+      await runViewImage(handle, harness, 'quad.png')
+      // The premise: the base never moved, and the step ran on the other model.
+      expect([handle.agent.options.model, harness.adapter.calls[0]!.model], label).toEqual(['scripted-model', 'step-model'])
+      const result = resultOf(handle)
+      outcomes[label] = result.error?.code ?? result.content.map((block) => block.type).join(',')
+    }
+    expect(outcomes).toEqual({
+      'base text-only, step moved to a vision model': 'image',
+      'base vision, step moved to a text-only model': 'UNSUPPORTED_CONTENT',
+    })
   })
 
   it('refuses when the deployment stores no attachments', async () => {

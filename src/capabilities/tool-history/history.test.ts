@@ -245,6 +245,35 @@ describe('bounded recall of shadowed history', () => {
     expect(matches(second, TOOL_RESULT) ? second.data.error?.code : undefined).toBe('HISTORY_BUDGET')
   })
 
+  // The other half of the session budget: not "is anything left" but "does
+  // THIS call fit in what is left". The test above spends the whole budget in
+  // one call, so its second call never reaches the comparison; capped by the
+  // per-call limit alone, a session could overrun its budget by nearly a call.
+  it('refuses a call that fits the per-call limit but not what is left of the session budget', async () => {
+    // The span's BODY renders at 855 estimated tokens, measured (as above):
+    // one call fits this budget, and about a third of it is left afterwards.
+    const BUDGET = 1_300
+    const test = await harness(COMPACT, { maxSessionTokens: BUDGET })
+    const { agent } = await test.create()
+    await grow(agent, 6)
+    await test.root.get(COMPACTION).compactNow(agent)
+    const range = shadowedRange(agent)
+
+    const first = await callTool(test, agent, 'recall-a', 'history_read', range)
+    expect(matches(first, TOOL_RESULT) ? first.data.error : undefined, resultContent(first)).toBeUndefined()
+    const spent = foldRecall(agent.session).spent
+    const left = BUDGET - spent
+    // Something is left, so the budget is not simply spent, and it is less than the same read costs again.
+    expect([left > 0, left < 855], `budget ${BUDGET}, spent ${spent}, left ${left}`).toEqual([true, true])
+
+    const second = await callTool(test, agent, 'recall-b', 'history_read', range)
+    expect(matches(second, TOOL_RESULT) ? second.data.error?.code : undefined, resultContent(second)).toBe('HISTORY_TOO_LARGE')
+    // It names what THIS call may spend, which is what is left, not the per-call limit.
+    expect(resultContent(second)).toContain(`over the ${left} this call may spend`)
+    // Refused, not truncated, and not charged: the budget stands where it was.
+    expect(foldRecall(agent.session).spent).toBe(spent)
+  })
+
   it('never offers its own results back: a recall a later compaction shadowed is not recallable', async () => {
     const test = await harness(COMPACT)
     const { agent } = await test.create()

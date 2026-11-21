@@ -19,11 +19,11 @@ import { COMPACTION, foldCompactionFailures, COMPACTION_APPLIED } from '../../co
 import { invariantsPlugin } from '../../core/invariants/index.ts'
 import { LLM, llmPlugin, LLM_AUX_CALL, type AuxCallRecord } from '../../core/llm/index.ts'
 import { createUserMessage, messageText } from '../../core/llm/message.ts'
-import { loopInvariantPlugin, loopPlugin } from '../../core/loop/index.ts'
+import { loopInvariantPlugin, loopPlugin, type LoopConfig } from '../../core/loop/index.ts'
 import { PROMPT, promptPlugin } from '../../core/prompt/index.ts'
 import { sandboxPlugin } from '../../core/sandbox/index.ts'
 import { authorityInvariantPlugin } from '../../core/sandbox/invariant.ts'
-import { sessionInvariantPlugin, sessionPlugin } from '../../core/session/index.ts'
+import { sessionInvariantPlugin, sessionPlugin, USER_MESSAGE } from '../../core/session/index.ts'
 import { defineTool, TOOLS, toolsPlugin } from '../../core/tools/index.ts'
 import { installLlmReplay } from '../../test-support/llm-replay.ts'
 import { ScriptedAdapter, assistantText, type ScriptedResponse } from '../../test-support/scripted-adapter.ts'
@@ -43,7 +43,7 @@ afterEach(async () => {
   for (const mounted of open.splice(0)) await mounted.dispose()
 })
 
-async function harness(config: CompactionBasicConfig, withAdapter = true): Promise<Harness> {
+async function harness(config: CompactionBasicConfig, withAdapter = true, loop?: LoopConfig): Promise<Harness> {
   const root = createRoot({ logger: silent })
   root.plugin(invariantsPlugin, {})
   root.plugin(sessionPlugin)
@@ -56,7 +56,7 @@ async function harness(config: CompactionBasicConfig, withAdapter = true): Promi
   root.plugin(authorityInvariantPlugin)
   root.plugin(agentPlugin)
   root.plugin(agentInvariantPlugin)
-  root.plugin(loopPlugin)
+  root.plugin(loopPlugin, loop)
   root.plugin(loopInvariantPlugin)
   root.plugin(compactionBasicPlugin, config)
   await root.settle()
@@ -83,7 +83,17 @@ async function harness(config: CompactionBasicConfig, withAdapter = true): Promi
   return created
 }
 
-function responder(options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean; truncatedSummary?: boolean } = {}): ScriptedResponse {
+interface ResponderOptions {
+  /** The one loop call (counted from 1) the provider refuses as an overflow. */
+  overflowOnCall?: number
+  /** Every loop call from this one on is refused as an overflow: a provider no compaction satisfies. */
+  overflowFromCall?: number
+  failSummary?: boolean
+  bloatedSummary?: boolean
+  truncatedSummary?: boolean
+}
+
+function responder(options: ResponderOptions = {}): ScriptedResponse {
   let steps = 0
   let calls = 0
   return (request) => {
@@ -97,7 +107,7 @@ function responder(options: { overflowOnCall?: number; failSummary?: boolean; bl
       return assistantText('## Primary Request\n- keep going\n## Next Step\n- finish the job')
     }
     calls += 1
-    if (options.overflowOnCall === calls) {
+    if (options.overflowOnCall === calls || (options.overflowFromCall !== undefined && calls >= options.overflowFromCall)) {
       return [{ type: 'finish', reason: { kind: 'error', failure: { message: 'context size has been exceeded', code: 'CONTEXT_WINDOW_EXCEEDED' } } }]
     }
     steps += 1
@@ -106,7 +116,7 @@ function responder(options: { overflowOnCall?: number; failSummary?: boolean; bl
 }
 
 /** Enough scripted answers that no test runs out of script mid-turn. */
-function arm(test: Harness, options: { overflowOnCall?: number; failSummary?: boolean; bloatedSummary?: boolean; truncatedSummary?: boolean } = {}): void {
+function arm(test: Harness, options: ResponderOptions = {}): void {
   const shared = responder(options)
   test.adapter.script(...Array.from({ length: 40 }, () => shared))
 }
@@ -124,6 +134,43 @@ function surfaceTexts(agent: Agent): string[] {
 
 function appliedRecords(agent: Agent) {
   return agent.session.events.filter((event) => event.type === COMPACTION_APPLIED.type)
+}
+
+/** How each turn of the session ended, in order: its reason, and the failure's code when it failed. */
+function turnEnds(agent: Agent): string[] {
+  return agent.session.events
+    .filter((event) => event.type === 'turn/end')
+    .map((event) => (event.data as { reason: { kind: string; code?: string } }).reason)
+    .map((reason) => (reason.code === undefined ? reason.kind : `${reason.kind} ${reason.code}`))
+}
+
+/**
+ * Where a seq sits among the loop's own brackets: whether the nearest turn or
+ * step bracket before it left a step open, and the first bracket after it.
+ */
+function boundaryAround(agent: Agent, seq: number): string {
+  const loop = agent.session.events.filter((event) => ['turn/start', 'turn/end', 'step/start', 'step/end'].includes(event.type))
+  const before = loop.findLast((event) => event.seq < seq)?.type
+  const after = loop.find((event) => event.seq > seq)?.type
+  const state = before === 'turn/start' || before === 'step/end' ? 'no step open' : `after ${String(before)}`
+  return `${state}, then ${String(after)}`
+}
+
+/** The compaction brackets of a log, in order: S for a start, E and why for an end. */
+function brackets(agent: Agent): string[] {
+  return agent.session.events.flatMap((event) => {
+    if (event.type === 'compaction/start') return ['S']
+    if (event.type !== 'compaction/end') return []
+    const outcome = (event.data as { outcome: { kind: string; reason?: string } }).outcome
+    return [`E ${outcome.reason ?? outcome.kind}`]
+  })
+}
+
+/** A promise and the function that settles it, for a test to hold a scripted answer until it says. */
+function latch(): { readonly reached: Promise<void>; readonly open: () => void } {
+  let settle!: () => void
+  const reached = new Promise<void>((resolve) => (settle = resolve))
+  return { reached, open: settle }
 }
 
 describe('compaction through the real loop', () => {
@@ -180,8 +227,8 @@ describe('compaction through the real loop', () => {
     expect((await test.root.get(COMPACTION).compactNow(agent)).kind).toBe('compacted')
     const summary = test.adapter.calls.find((call) => call.purpose === 'compaction')!
     expect(summary.toolChoice).toBe('none')
-    // Loop steps leave the choice to the model.
-    expect(test.adapter.calls.filter((call) => call.purpose === undefined).every((call) => call.toolChoice === undefined)).toBe(true)
+    // Loop steps leave the choice to the model: six of them, one per turn.
+    expect(test.adapter.calls.filter((call) => call.purpose === undefined).map((call) => call.toolChoice)).toEqual(Array.from({ length: 6 }, () => undefined))
   })
 
   it('leaves history alone when the summary call fails, and still records the attempt', async () => {
@@ -346,14 +393,13 @@ describe('compaction through the real loop', () => {
     expect((applied[0]!.data as { trigger: string }).trigger).toBe('pressure')
     // The loop invariant is mounted, so every completed turn is proof that the
     // request equalled `deriveMessages()` at `llm/stream`.
-    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
-    expect(ends).toHaveLength(8)
-    expect(ends.every((event) => (event.data as { reason: { kind: string } }).reason.kind === 'completed')).toBe(true)
+    expect(turnEnds(agent)).toEqual(Array.from({ length: 8 }, () => 'completed'))
     // The steps after it carried the summary, not the shadowed history.
     expect(messageText(test.adapter.calls.at(-1)!.messages[0]!)).toContain('<system-reminder>')
-    // It landed inside a turn but before the step it protected.
-    const stepStarts = agent.session.events.filter((event) => event.type === 'step/start').map((event) => event.seq)
-    expect(stepStarts.some((seq) => seq > applied[0]!.seq)).toBe(true)
+    // It landed inside a turn, at a step boundary: after the turn opened (or
+    // the previous step closed) with no step open, and before the step it
+    // protected opened. Never between a step's start and its end.
+    expect(applied.map((event) => boundaryAround(agent, event.seq))).toEqual(applied.map(() => 'no step open, then step/start'))
   })
 
   it('answers a provider overflow by compacting and retrying the same step', async () => {
@@ -367,14 +413,151 @@ describe('compaction through the real loop', () => {
     const applied = appliedRecords(agent)
     expect(applied).toHaveLength(1)
     expect((applied[0]!.data as { trigger: string }).trigger).toBe('context-overflow')
-    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
-    expect(ends.every((event) => (event.data as { reason: { kind: string } }).reason.kind === 'completed')).toBe(true)
+    expect(turnEnds(agent)).toEqual(Array.from({ length: 5 }, () => 'completed'))
     // Two attempts of one step, and the retried one was smaller than the one
     // the provider refused.
     const attempts = agent.session.events.filter((event) => event.type === 'assistant/chunk').map((event) => (event.data as { attempt: number }).attempt)
     expect(attempts).toContain(2)
     const loopCalls = test.adapter.calls.filter((call) => call.purpose === undefined)
     expect(loopCalls[4]!.messages.length).toBeLessThan(loopCalls[3]!.messages.length)
+  })
+
+  // The bound on that recovery: a provider that refuses the retried request
+  // too gets no second compaction for the step. Without it each refusal bought
+  // another summary for as long as the surface still had something to shadow.
+  it('compacts once for an overflow and lets a second one on the same step end the turn', async () => {
+    // A long tail kept, so a second compaction would have had a plan to run.
+    const test = await harness({ budgetTokens: 1_000_000, retainRatio: 0.6, thresholdRatio: 0.99 })
+    const { agent } = await test.create()
+    arm(test, { overflowFromCall: 6 })
+    await grow(agent, 6)
+
+    expect(turnEnds(agent)).toEqual([...Array.from({ length: 5 }, () => 'completed'), 'error CONTEXT_WINDOW_EXCEEDED'])
+    expect(appliedRecords(agent).map((event) => (event.data as { trigger: string }).trigger)).toEqual(['context-overflow'])
+    expect(brackets(agent)).toEqual(['S', 'E applied'])
+    // The refused step was tried twice: as asked, and once more after the compaction.
+    const lastStep = agent.session.events.findLast((event) => event.type === 'step/start')!.seq
+    const attempts = agent.session.events.filter((event) => event.seq > lastStep && event.type === 'assistant/chunk').map((event) => (event.data as { attempt: number }).attempt)
+    expect([...new Set(attempts)]).toEqual([1, 2])
+    // And a later compaction was still possible: the bound, not an empty plan, is what stopped it.
+    expect((await test.root.get(COMPACTION).compactNow(agent)).kind).toBe('compacted')
+  })
+
+  // "One compaction per agent at a time": an idle /compact is waiting on its
+  // summary when a turn starts and a second request reaches that turn's first
+  // step boundary. Nothing else keeps the second from opening its own bracket
+  // inside the first and rewriting the surface the first one planned over.
+  it('starts no second compaction while one is waiting for its summary', async () => {
+    const test = await harness({ budgetTokens: 1_000_000, retainRatio: 0.2, thresholdRatio: 0.99 })
+    const { agent } = await test.create()
+    const compaction = test.root.get(COMPACTION)
+    const held = latch()
+    const release = latch()
+    const shared = responder() as Exclude<ScriptedResponse, unknown[]>
+    // The first attempt, once it exists; whether its summary is being held; and
+    // the compaction brackets the log held when the new turn's step asked the model.
+    const flight: { first?: Promise<unknown>; holding: boolean; bracketsWhenTheStepAsked?: string[] } = { holding: false }
+    test.adapter.script(
+      ...Array.from({ length: 40 }, () => async (request: Parameters<typeof shared>[0]) => {
+        if (request.purpose === 'compaction' && flight.first !== undefined && !flight.holding) {
+          flight.holding = true
+          held.open()
+          await release.reached
+        } else if (request.purpose === undefined && flight.holding && flight.bracketsWhenTheStepAsked === undefined) {
+          // The new turn's pre-step has run: its step is asking the model. What
+          // the log holds now is what that boundary did. Then the first summary
+          // is let go, and this step waits for the first attempt to end.
+          flight.bracketsWhenTheStepAsked = brackets(agent)
+          release.open()
+          await flight.first
+        }
+        return shared(request)
+      }),
+    )
+    await grow(agent, 6)
+    flight.first = compaction.compactNow(agent)
+    await held.reached
+    agent.followup(createUserMessage('a turn that starts during the summary'))
+    // A second request, on a running agent: deferred to the next step boundary.
+    expect((await compaction.compactNow(agent)).kind).toBe('scheduled')
+    expect(await flight.first).toMatchObject({ kind: 'nothing-to-do', reason: 'turn-started' })
+    await agent.whenIdle()
+
+    // At that boundary the first attempt was still the only one, and still open.
+    expect(flight.bracketsWhenTheStepAsked, 'the step boundary opened a bracket of its own inside the one in flight').toEqual(['S'])
+    // One at a time, start to end: the first declined for the turn that began,
+    // the deferred one honoured at that turn's end.
+    expect(brackets(agent)).toEqual(['S', 'E turn-started', 'S', 'E applied'])
+    expect(appliedRecords(agent).map((event) => (event.data as { trigger: string }).trigger)).toEqual(['explicit'])
+  })
+
+  // The plan is checked against the LIVE surface after the summary returns,
+  // with no await before the append. Without the check a plan whose head was
+  // rewritten meanwhile wrote `compaction/applied` and then threw from the
+  // replace the surface refused: an applied record with nothing applied.
+  it('declines a plan the surface moved under during the summary, and applies nothing', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false })
+    const { agent } = await test.create()
+    const held = latch()
+    const release = latch()
+    const shared = responder() as Exclude<ScriptedResponse, unknown[]>
+    test.adapter.script(
+      ...Array.from({ length: 40 }, () => async (request: Parameters<typeof shared>[0]) => {
+        if (request.purpose === 'compaction') {
+          held.open()
+          await release.reached
+        }
+        return shared(request)
+      }),
+    )
+    await grow(agent, 6)
+    const outcome = test.root.get(COMPACTION).compactNow(agent)
+    await held.reached
+    // Something else replaces the first two nodes of the planned head.
+    const head = agent.session.surfaceSeqs().slice(0, 2)
+    agent.session.append(USER_MESSAGE, { message: createUserMessage('an earlier summary, written meanwhile') }, { surfaceOp: { op: 'replace', start: head[0]!, end: head[1]! }, sourceEventSeqs: head })
+    const surface = [...agent.session.surfaceSeqs()]
+    release.open()
+
+    expect(await outcome).toEqual({ kind: 'nothing-to-do', reason: 'plan-stale' })
+    expect(brackets(agent)).toEqual(['S', 'E plan-stale'])
+    expect(appliedRecords(agent)).toEqual([])
+    expect(agent.session.surfaceSeqs()).toEqual(surface)
+    // Not a summariser failure: the call worked, and the next attempt plans over what is there now.
+    expect(foldCompactionFailures(agent.session.facts, agent.session.liveStart)).toBe(0)
+    expect((await test.root.get(COMPACTION).compactNow(agent)).kind).toBe('compacted')
+  })
+
+  // A disposal waits for a compaction the agent owns, but only up to a bound;
+  // past it the session is detached with the summary still out. When that
+  // summary returns there is no log left to write to, and the registry is the
+  // one thing that says so before any append is tried.
+  it('writes nothing into a session that was detached while its summary was out', async () => {
+    const test = await harness({ budgetTokens: 4000, retainRatio: 0.2, auto: false }, true, { ownedWorkBoundMs: 50 })
+    const handle = await test.create()
+    const { agent } = handle
+    const held = latch()
+    const release = latch()
+    const shared = responder() as Exclude<ScriptedResponse, unknown[]>
+    test.adapter.script(
+      ...Array.from({ length: 40 }, () => async (request: Parameters<typeof shared>[0]) => {
+        if (request.purpose === 'compaction') {
+          held.open()
+          // A provider that does not stop when told to: only the test lets it answer.
+          await release.reached
+        }
+        return shared(request)
+      }),
+    )
+    await grow(agent, 6)
+    const outcome = test.root.get(COMPACTION).compactNow(agent)
+    await held.reached
+    await handle.dispose()
+    expect(test.root.get(AGENTS).get(agent.id)).toBeUndefined()
+    const logged = agent.session.events.length
+    release.open()
+    expect(await outcome).toEqual({ kind: 'nothing-to-do', reason: 'agent-gone' })
+    expect(agent.session.events).toHaveLength(logged)
   })
 
   /**
@@ -390,11 +573,9 @@ describe('compaction through the real loop', () => {
 
     expect(appliedRecords(agent)).toHaveLength(0)
     const attempts = agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type)
-    expect(attempts).toHaveLength(2)
-    expect(attempts.every((event) => (event.data as AuxCallRecord).outcome.kind === 'error')).toBe(true)
+    expect(attempts.map((event) => (event.data as AuxCallRecord).outcome.kind)).toEqual(['error', 'error'])
     // Every turn still completed: a failing summariser must never fail the work.
-    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
-    expect(ends.every((event) => (event.data as { reason: { kind: string } }).reason.kind === 'completed')).toBe(true)
+    expect(turnEnds(agent)).toEqual(Array.from({ length: 8 }, () => 'completed'))
   })
 
   /**
@@ -419,12 +600,10 @@ describe('compaction through the real loop', () => {
     // The summary CALLS succeeded — this is not the failing-summariser path —
     // and the give-up counter still bounded them at `maxSummaryFailures`.
     const attempts = agent.session.events.filter((event) => event.type === LLM_AUX_CALL.type)
-    expect(attempts).toHaveLength(2)
-    expect(attempts.every((event) => (event.data as AuxCallRecord).outcome.kind === 'text')).toBe(true)
+    expect(attempts.map((event) => (event.data as AuxCallRecord).outcome.kind)).toEqual(['text', 'text'])
 
     // And the work itself never suffered for it.
-    const ends = agent.session.events.filter((event) => event.type === 'turn/end')
-    expect(ends.every((event) => (event.data as { reason: { kind: string } }).reason.kind === 'completed')).toBe(true)
+    expect(turnEnds(agent)).toEqual(Array.from({ length: 8 }, () => 'completed'))
   })
 
   /**

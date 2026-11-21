@@ -18,6 +18,15 @@
  * somehow arrived. So the child cannot buy authority its parent did not
  * have, and nothing in the composition can grant it.
  *
+ * The capture cuts the other way too, and that way is a limitation: a person
+ * who NARROWS the parent while a child is running (workspace-write to
+ * read-only, say) fences the parent's own later calls and nothing else. The
+ * child keeps the authority it opened under until its turn ends, nothing here
+ * listens for the parent's later switch, and the protocol host refuses to
+ * re-authorize a child its parent is running. Cancelling the parent's turn is
+ * what stops such a child (ARCHITECTURE §13). A parent's background jobs are
+ * different: an authority change ends them (`core/jobs`).
+ *
  * The tool is `concurrencySafe` (S21, ARCHITECTURE §6): several delegations in
  * one assistant message run at once, each child in its own session, and the
  * parent's step joins them, its results in model order. The child is still a

@@ -19,6 +19,9 @@
  * surface, as `workspace-instructions` does and for the same reason), and the
  * last skill's removal appends ONE retirement line that is then itself the
  * newest list. This is DSH's own re-check, without DSH's `skill` tool.
+ * An EMPTY batch is filled in one case only: a step after a turn's first,
+ * whose compaction just shadowed the list. A tool loop's steps all have empty
+ * batches, so without that the list stayed gone for the rest of the turn.
  *
  * **Deployment-global, one instance per root.** Two instances would each find
  * the other's list newest and append on every prompt, so a second instance on
@@ -33,6 +36,7 @@ import type { Context, Plugin } from '../../kernel/index.ts'
 import { AGENT_PRE_STEP, type Agent, type PreStepDecision } from '../../core/agent/index.ts'
 import { FS } from '../../core/fs/index.ts'
 import { createPluginMessage, messageText } from '../../core/llm/message.ts'
+import type { MessageSource } from '../../core/llm/types.ts'
 import { matches, USER_MESSAGE } from '../../core/session/index.ts'
 import { printableText } from '../../core/text.ts'
 import { discoverSkills, type SkillRoot } from './discover.ts'
@@ -107,12 +111,23 @@ function newestList(agent: Agent): string | undefined {
   let newest: string | undefined
   for (const seq of session.surfaceSeqs()) {
     const event = session.events[seq]
-    if (!event || !matches(event, USER_MESSAGE)) continue
-    const message = event.data.message
-    const source = message.source
-    if (source.kind === 'plugin' && source.plugin === PLUGIN && source.form === FORM) newest = messageText(message)
+    if (event && matches(event, USER_MESSAGE) && isList(event.data.message)) newest = messageText(event.data.message)
   }
   return newest
+}
+
+function isList(message: { readonly source: MessageSource }): boolean {
+  const source = message.source
+  return source.kind === 'plugin' && source.plugin === PLUGIN && source.form === FORM
+}
+
+/**
+ * A list entered at some point in this session's log, live or not. With no
+ * list on the live surface it says why: one entered and gone was shadowed by a
+ * compaction, since nothing else takes a node off the surface.
+ */
+function everListed(agent: Agent): boolean {
+  return agent.session.facts.some((event) => matches(event, USER_MESSAGE) && isList(event.data.message))
 }
 
 export const skillsPlugin: Plugin<SkillsConfig> = {
@@ -148,10 +163,19 @@ export const skillsPlugin: Plugin<SkillsConfig> = {
 
     ctx.on(AGENT_PRE_STEP, async (context, next): Promise<PreStepDecision> => {
       const decision = await next()
-      // Added to a real batch, never creating one: the driver ends a turn as a
-      // natural stop when its first step enters nothing, and a listener that
-      // filled an empty batch would revive turns that should have closed.
-      if (decision.kind !== 'enter' || decision.messages.length === 0) return decision
+      if (decision.kind !== 'enter') return decision
+      if (decision.messages.length === 0) {
+        // The FIRST step's empty batch is never filled: the driver ends a turn
+        // as a natural stop when its first step enters nothing, and a list
+        // added there would revive a turn that should have closed.
+        if (context.step === 1) return decision
+        // A later step's empty batch is every step of a tool loop; that step
+        // runs whatever enters, so adding to it revives nothing. The roots are
+        // still not scanned at every step: only a list a compaction just
+        // shadowed comes back here, so the model keeps it for the rest of the
+        // turn. A changed skill is found with the next prompt, as before.
+        if (newestList(context.agent) !== undefined || !everListed(context.agent)) return decision
+      }
       // A composition with no filesystem provider still boots; the list is then simply absent.
       const fs = ctx.tryGet(FS)
       if (!fs) return decision
@@ -168,7 +192,8 @@ export const skillsPlugin: Plugin<SkillsConfig> = {
         if (desired === undefined || desired === newest) return decision
         // LAST in the batch: this row is the outermost pre-step layer, so the
         // batch reads [prompt, AGENTS.md, skill list] and a list that changed
-        // mid-session follows the prompt that found the change.
+        // mid-session follows the prompt that found the change. On a tool-loop
+        // step there is no prompt, and the order is the same without it.
         return { kind: 'enter', messages: [...decision.messages, createPluginMessage(PLUGIN, desired, FORM)] }
       } catch {
         /**

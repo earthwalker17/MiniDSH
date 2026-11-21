@@ -152,6 +152,27 @@ Log seqs ${shadowed.from}–${shadowed.to} (${shadowed.count} messages) are what
 ${summary}`
 }
 
+/**
+ * The effort a summary names: its route's own, and none when the route is the
+ * session's base call unchanged.
+ *
+ * The session's effort is sized for a step, whose output cap the adapter fits
+ * to it. A summary carries its OWN explicit cap, and the two do not always go
+ * together: a budget-thinking model at its highest effort needs more room than
+ * the default cap has, and its adapter refuses that request before any I/O, on
+ * every attempt, which ends automatic compaction for the session. So on the
+ * session's own call the summary names no effort and the model's default
+ * serves. A route that differs in provider, model or effort was given for this
+ * call (a `compaction` role), and its effort is kept: a role that names one
+ * the cap cannot hold is a configuration the adapter's refusal names. The
+ * resolved route does not say who chose it, so a role that restates exactly
+ * the session's own provider, model and effort reads as no role at all.
+ */
+function summaryEffort(route: CallConfig, session: CallConfig): string | undefined {
+  const sessionsOwn = route.provider === session.provider && route.model === session.model && route.reasoningEffort === session.reasoningEffort
+  return sessionsOwn ? undefined : route.reasoningEffort
+}
+
 /** The name of the recall tool this deployment mounted, if it mounted one. */
 function recallToolName(ctx: Context): string | undefined {
   return ctx.tryGet(TOOLS)?.list().find((definition) => definition.tags?.includes(RECALL_TOOL))?.name
@@ -244,11 +265,19 @@ class BasicCompaction implements Compaction {
   }
 
   /**
-   * The budget a PLAN must fit: the smaller of what the conversation is
-   * measured against and what the summariser can actually read. A role may
-   * point `compaction` at a cheaper model with a much smaller window, and a
-   * span planned against the loop's window would overflow that model on every
-   * attempt — buying nothing and eventually disabling the automatic triggers.
+   * The budget the planner sizes the RETAINED tail against: the smaller of
+   * what the conversation is measured against and the summariser's own window.
+   *
+   * It does NOT make the plan fit a smaller summariser, whatever its name
+   * suggests. The planner uses its budget only to decide how much recent
+   * history stays, and shadows everything before that cut, so a smaller number
+   * keeps a shorter tail and hands the summariser MORE, never less. A
+   * `compaction` role on a model with a smaller window than the session's is
+   * therefore asked to read a span past that window: the provider refuses it,
+   * two refusals end the automatic triggers (`maxSummaryFailures`), and
+   * `/compact` asks for the same span again. Bounding the shadowed head is a
+   * planner change that has not been made; until it is, such a role needs this
+   * row's `budgetTokens` at or below its own window (ARCHITECTURE §13).
    */
   private planBudget(route: { provider: string; model: string }, budget: number): number {
     const summariser = this.windowOf(route.provider, route.model)
@@ -310,18 +339,19 @@ class BasicCompaction implements Compaction {
   private async compact(agent: Agent, trigger: CompactionTrigger, signal?: AbortSignal): Promise<CompactionOutcome> {
     const session = agent.session
     // Captured before ANY await. `compactNow` gates on an idle agent, but two
-    // awaits stand between that gate and here — the route resolution and the
-    // prompt assembly, which reads instruction files off disk — and a prompt
-    // submitted during them leaves the agent running with `statusBefore` already
-    // reading `running`, so the post-summary comparison sees no change and the
-    // replace lands mid-step: exactly what this module's header says must never
-    // happen.
+    // awaits follow before the summary is even asked for — the route
+    // resolution and the prompt assembly, both awaited waterfalls — and a
+    // prompt submitted during them leaves the agent running. Captured after
+    // them, `statusBefore` would already read `running`, the post-summary
+    // comparison would see no change, and the replace would land mid-step:
+    // exactly what this module's header says must never happen.
     const statusBefore = agent.status
     const budget = this.budgetFor(agent)
     if (budget <= 0) return { kind: 'nothing-to-do' }
     const projected = meterSession(session.facts, budget).projectedTokens
-    // The summary's route decides what the plan may hold, so it is resolved
-    // BEFORE the plan and passed to the call that uses it.
+    // Resolved BEFORE the plan, which sizes its retained tail against this
+    // route's window too (`planBudget`, and what that does not do), and passed
+    // to the call that uses it.
     const route = await resolveCallConfig(agent, { purpose: PURPOSE, ...(signal ? { signal } : {}) })
     // Assembled before the bracket opens, because it can throw — an unknown
     // prompt variable, two `complete` sections, a throwing `system-prompt/assemble`
@@ -450,14 +480,14 @@ class BasicCompaction implements Compaction {
     if (messages.length === 0) return { kind: 'no-messages' }
     messages.push(createPluginMessage(PLUGIN, INSTRUCTION, 'compaction-instruction'))
 
-    // The route was resolved by the caller — the same resolution a loop step
-    // takes, with a purpose instead of a position — because the plan had to
-    // fit the model that would read it. The record `runAuxCall` writes names
-    // whatever route was used.
+    // The route was resolved by the caller, before the plan: the same
+    // resolution a loop step takes, with a purpose instead of a position. The
+    // record `runAuxCall` writes names whatever route was used.
+    const effort = summaryEffort(route, agent.options)
     const request: LlmRequest & { purpose: string } = {
       provider: route.provider,
       model: route.model,
-      ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
+      ...(effort === undefined ? {} : { reasoningEffort: effort }),
       system: assembled.system,
       messages,
       tools: assembled.tools,
