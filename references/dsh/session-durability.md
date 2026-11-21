@@ -1,56 +1,60 @@
 # DSH reference: Session log and durable execution
 
-> Where to research DSH's session log, repair, format generations, forks and replay: pinned to `deepseek-ai/deepseek-harness@ce7073d5` (master, 2026-10-29, dsh-0.2.1-rc.5), checked 2026-10-31 in S21: its repair, catalog, descriptor, batch and replay sources are byte-identical to `22ddee37` (`llm-replay` but for badges; `session.md` gained surface APIs only) ([reading rules](../README.md)).
+> Where to research DSH's session log, repair, format generations, forks and replay ([reading rules](../README.md)). Pin: `deepseek-ai/deepseek-harness@2e39e704` (master, 2026-11-18, dsh-v0.2.2-rc.5); checked 2026-11-21 (S22.5).
 
 ## What exists (at the pin)
 
-Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; the standalone sdk-minimal tree mounts the registry and (since rc.2) the checkpoint policy, no cache or query.
+Default-mounted = a row in `packages/bundle/base/cordis.patch.yml`; sdk-minimal's own tree mounts the registry, the working directory and the checkpoint policy, no cache or query.
 
 | Component | Path | Status | Purpose |
 | --- | --- | --- | --- |
-| Session, SessionStore | `packages/core/session` | default-mounted | Append-only typed log, history a fold (`deriveMessages`); store-owned writes wait for `session/created` (rc.2) |
+| Session, SessionStore | `packages/core/session` | default-mounted | Append-only typed log, history a fold (`deriveMessages`); store-owned writes wait for `session/created` |
 | `openTurnClosers`, `ToolCallRecovery` | `packages/core/session/src/repair.ts` | default-mounted | ONE tail step, turn/step/tool events only, cause `interrupted` or `forked`; shared with live failed steps; never closes a job |
-| Persistence seam | `packages/session/session-persistence` | default-mounted | `create/open/stat/list`; handles `read/append/flush/close`; no delete or retention |
-| JSONL backend | `packages/session/session-persistence-jsonl` | default-mounted | The only backend: 200 ms write-behind batches, fsync per batch, checksummed zstd frames (raw under `compression: 'none'`) |
-| Write lease | `session-persistence-jsonl/src/{lease,win32}.ts` | default-mounted | A KERNEL lock (`flock` addon on POSIX, koffi named semaphore on Windows): dies with its holder, never probed |
+| Persistence seam | `packages/session/session-persistence` | default-mounted | `create/open/stat/list`; handles `read/append/flush/close`; a fork is `create(header, {source})` with its whole history (agent `parentSource {sessionId, endSeq}`, rc.3), no source in its header; no delete or retention |
+| JSONL backend | `packages/session/session-persistence-jsonl` | default-mounted | The only SHIPPED backend: 200 ms write-behind batches, fsync per batch, checksummed zstd frames (raw under `compression: 'none'`); a fork COPIES its history |
+| SQLite backend | `packages/session/session-persistence-sqlite` | opt-in, in no profile (2026-11-14) | One `<root>/.segments/sessions.sqlite` of predecessor-linked Segments: a fork SHARES the parent's persisted prefix; imports a JSONL history on first open; current format only |
+| Write lease | `packages/session/session-persistence-jsonl/src/{lease,win32}.ts` | default-mounted | A KERNEL lock (`flock` addon on POSIX, koffi named semaphore on Windows): dies with its holder, never probed, no expiry |
 | Checkpoint policy | `packages/session/session-checkpoint-policy` | default-mounted | Fail-closed flush before a model request, a top-level tool body and a step |
-| Format chain | `packages/session/session-format` (`-v0-to-v1` … `-v3-to-v4`, `-catalog`) | default-mounted | Immutable generations, frozen adjacent migrations; v4 writer, finalized and released; a V3→V4 parent restore reads its direct children's files (the parent-side catalog join, added late, cost a cross-file migration) |
-| Plugin records | `appendPluginRecord`, `packages/core/session/README.md` | experimental only | `plugin:<owner>/<record>`, `ignorable`, outside released schemas |
-| Projections | `packages/session/session-projection`, `-cache` | default-mounted | Pure folds; `register()` yields a `ProjectionHandle` (rc.2); fail-soft cache, no eviction |
-| Session query | `packages/session-query/session-query-sqlite` | default-mounted | Exact reads, traces, lineage; search off (`openAt: never`); model tools in `experimental/tool-session-query` |
-| Replay harness | `packages/test-support/llm-replay` | opt-in | Test-only model streams; tools really run; child scripts bound by first-call order, harvested by `createdAt` |
+| Format chain | `packages/session/session-format` (`-v0-to-v1` … `-v3-to-v4`, `-catalog`) | default-mounted | Immutable generations, frozen adjacent migrations; v4 writer, finalized and released; an unknown kind refused unless `ignorable`, as experimental plugin records are; a V3→V4 parent restore reads its direct children's files |
+| Working directory | `packages/session/working-directory` | default-mounted | A session's directory folds log-only `workspace-root/change` (Host moves only, 2026-11-13); the header keeps the original project |
+| Projections | `packages/session/session-projection`, `-cache` | default-mounted | Pure folds; `register()` yields a `ProjectionHandle`; fail-soft cache, no eviction |
+| Session query | `packages/session-query/session-query-sqlite` | default-mounted | Exact reads, traces, lineage; search off (`openAt: never`); model tools in `packages/experimental/tool-session-query` |
+| Replay harness | `packages/test-support/llm-replay` | opt-in | Test-only model streams; tools really run; child scripts bound by first-call order |
 
 ## Open for the route
 
-- **later, a child joined to its call.** Only the call's result text `started subagent <id>` names the child; a job carries `toolCall {callId, rootCallId}`, a workflow member `{runId, seq}`: delegation is the one multi-actor producer with no structured join. Repair is per Session: a parent dying with resident children records nothing about them. `packages/subagent/subagent/src/catalog.ts`, `packages/jobs/jobs/src/types.ts`
-- **S22, fork on the wire.** `session.fork {sessionId, atSeq?, allowMigration?}`: omitted = latest completed-turn prefix; an open cut gets `forked` closers (`core/session/src/fork.ts`; `session.md`'s "rejects" is stale). Since rc.3 an ordinary fork records no source; `parentSession` is a subagent's creator, `origin: 'subagent'` the classifier; older V4 readers may refuse such a fork. `packages/api/session-controller/src/types.ts`, `docs/upgrade-guide/v0.2.1-rc.3/independent-session-forks/guide.md`
-- **Unscheduled since S16.** A provider idempotency key off `exec.callId` (`packages/session/session-checkpoint-policy/README.md:114`); raw mode detects damage by a `turn/end` heuristic, not a checksum (`session-persistence-jsonl/src/format.ts`).
+- **A per-boot lease identity (BLUEPRINT §3).** Upstream needs none: the lease is a kernel object the OS releases on any process death, with deliberately no expiry. `packages/session/session-persistence-jsonl/src/lease.ts`
+- **Detached children (BLUEPRINT §3).** Repair is per Session and closes only a tail turn: a parent dying with resident children or open jobs records nothing about them; `subagent/catalog` v3 adds a child's name, still no call id. `packages/core/session/src/repair.ts`, `packages/subagent/subagent/src/catalog.ts`
+- **Workspace-lifetime grants (BLUEPRINT §3).** A store keyed by canonical root meets a root that moves: since rc.4 `workspace-write` follows the session's `workspace-root/change`, not the header's project. `docs/upgrade-guide/v0.2.2-rc.4/workspace-write-boundary-follows-root/guide.md`
+- **What projection a rename needs (BLUEPRINT §3).** `session/title` is log-only, folded by a `title` unit; the cache checkpoints each session at creation, every `turn/end` and disposal, and list rows read it with zero I/O. `packages/session/session-projection-cache/README.md`
+- **Unscheduled since S16.** A provider idempotency key off `exec.callId` (`packages/session/session-checkpoint-policy/README.md:114`); raw mode detects damage by a `turn/end` heuristic, not a checksum (`packages/session/session-persistence-jsonl/src/format.ts`).
 
 ## Sources
 
 | Path | What it establishes | Checked |
 | --- | --- | --- |
-| `docs/subsystems/session.md` | Envelope, `deriveMessages`, `turn/end` reasons, `session/end-seed`, fork API, plugin records | 2026-10-25 |
-| `docs/subsystems/persistence.md` | Handles; repair only under write ownership | 2026-10-25 |
-| `packages/core/session/src/{repair,types,fork}.ts` | Recovery codes and wording, closer order; header fields, no writer | 2026-10-25 |
-| `packages/session/session-persistence-jsonl/README.md`, `src/{format,storage,win32}.ts` | Frames, fsync, torn tail, lock, generations, no delete | 2026-10-25 |
-| `packages/session/session-checkpoint-policy/README.md` | Barriers; intent, not exactly-once | 2026-10-25 |
-| `packages/bundle/{base,sdk-minimal}/cordis.patch.yml` | Default rows; sdk-minimal's own tree | 2026-10-25 |
-| `docs/session-format-status.md`, `docs/persistence-changes/README.md` | Writer, finalized and released 4 (`dsh-v0.2.0-rc.2`); same-version rules | 2026-10-25 |
-| `docs/persistence-catalog.md` | What persists: THE authority; 62 kinds, as at `57190202` | 2026-10-31 |
-| `packages/deliverables/workspace-changes/README.md` | `workspace/changes {turn}` persisted, summary Host-only | 2026-10-25 |
-| `docs/subsystems/session-projection.md`, `packages/session/session-projection-cache/README.md` | Handles, cache checkpoints, no eviction | 2026-10-25 |
-| `packages/api/session-controller/src/archived-session-gate.ts` | Archive stops and gates work; nothing deletes | 2026-10-25 |
-| `docs/upgrade-guide/v0.2.1-rc.2/{session-store-writes,session-projection-handles,sdk-minimal-checkpoints}`, `v0.2.1-rc.3/independent-session-forks` | The four changes since the last pin | 2026-10-25 |
-| `packages/test-support/llm-replay/{README.md,src/index.ts}`, `snapshots/session/subagent-parallel` | First-call order; the one parallel scenario is ordered by barriers, its two child scripts identical | 2026-10-31 |
+| `docs/subsystems/{session,persistence}.md` | Envelope, `deriveMessages`, `turn/end` reasons, `session/end-seed`, fork API; repair only under write ownership | 2026-11-21 |
+| `packages/core/session/{README.md,src/{repair,types,fork}.ts}` | Recovery codes, closer order; header fields, no writer; plugin records | 2026-11-21 |
+| `packages/session/session-persistence-jsonl/{README.md,src/{format,storage,lease,win32}.ts}` | Frames, fsync, the 200 ms window, torn tail, the lock | 2026-11-21 |
+| `packages/session/{session-persistence,session-persistence-sqlite,session-checkpoint-policy}/README.md` | The seam, no delete; Segments, import, the shared prefix; barriers, intent not exactly-once | 2026-11-21 |
+| `packages/bundle/{base,sdk-minimal}/cordis.patch.yml` | Default rows; sdk-minimal's own tree | 2026-11-21 |
+| `docs/session-format-status.md`, `docs/persistence-changes/` | Writer, finalized and released 4 (`dsh-v0.2.0-rc.2`); records through 2026-11-13 | 2026-11-21 |
+| `docs/persistence-catalog.md` | What persists: THE authority; 64 kinds (`team/mode`, `workspace-root/change` new) | 2026-11-21 |
+| `packages/session/working-directory/README.md`, `docs/upgrade-guide/v0.2.2-rc.3/working-directory-tool-removed` | Who moves a session's directory; where a stored session resumes | 2026-11-21 |
+| `packages/deliverables/workspace-changes/README.md` | `workspace/changes {turn}` persisted, summary Host-only | 2026-11-21 |
+| `packages/session/{session-projection-cache,session-title}/README.md` | Checkpoints, list reads, titles | 2026-11-21 |
+| `packages/api/session-controller/src/{types,archived-session-gate}.ts`, `docs/upgrade-guide/v0.2.2-rc.3/session-fork-source` | `session.fork {sessionId, atSeq?, allowMigration?}` unchanged; the fork source; archive gates work, nothing deletes | 2026-11-21 |
+| `packages/test-support/llm-replay/{README.md,src/index.ts}` | First-call order; keying still deferred | 2026-11-21 |
+| `.agents/notes/implemented/{architecture/2026-10-23-independent-session-forks,process/2026-10-08-session-reader-compatibility-review}.md` | Why a fork records no source; reader behaviour decides a version bump | 2026-11-21 |
 
 ## Likely to go stale
 
-- `docs/persistence-changes` gains a record every few days; a same-version addition needs a recorded review (since 2026-10-08).
-- Fork lineage changed meaning on 2026-10-23: `parentSession` alone no longer marks a child.
-- `openAt: never` is an overridable default; the query tools moved to `experimental/` on 2026-10-06.
+- The SQLite backend is a week old; a profile adopting it turns a fork from a copy into a shared prefix.
+- `docs/persistence-changes` gains a record every few days (six since 2026-10-27).
+- `workspace-root/change` replaced `working-directory/change` in rc.3.
+- `docs/subsystems/session.md` still says the fork API "rejects" an open cut beside "closes any open tail".
 
 ## Not read
 
-- `.agents/notes/implemented/architecture/2026-10-23-independent-session-forks.md`, `.agents/notes/implemented/process/2026-10-08-session-reader-compatibility-review.md`.
-- `session-persistence-jsonl/src/{generation,catalog-migration,migration-verifier}.ts` and `scripts/migrate-sessions-to-v4.ts`: module heads only.
+- `packages/session/session-persistence-jsonl/src/{generation,catalog-migration}.ts`: doc comments only; `migration-verifier.ts`, `scripts/migrate-sessions-to-v4.ts`, `packages/session/session-persistence-sqlite/src/`: unread.
+- `docs/subsystems/session-projection.md` beyond a search; `docs/subsystems/working-directory.md`; the snapshot bodies under `snapshots/session/`.
