@@ -140,6 +140,26 @@ export function upgradeWasHandled(socket: Duplex): boolean {
   return (socket as unknown as Record<symbol, boolean>)[HANDLED] === true
 }
 
+const ignoreSocketError = (): void => {}
+
+/**
+ * Answers an upgrade this host will not take, and lets go of the socket.
+ *
+ * Node removes its own `error` listener from a socket before it emits
+ * `upgrade`, so from then on an error nobody listens for is an uncaught
+ * exception: one reset from a peer that was never authenticated ended the
+ * host, and every turn it was running. Hence the listener. And the socket is
+ * destroyed once the answer is flushed, because `end()` alone closes only this
+ * side: a peer that simply kept its half open held the socket, and the
+ * server's `close()`, for as long as it liked.
+ *
+ * Shared with the app, which answers the upgrades no carrier claimed.
+ */
+export function refuseUpgrade(socket: Duplex, status: number, reason: string): void {
+  socket.on('error', ignoreSocketError)
+  socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`, () => socket.destroy())
+}
+
 /** Decodes whole frames from a buffer, returning the undecoded remainder. */
 export function decodeFrames(buffer: Buffer, maxPayload: number): { frames: DecodedFrame[]; rest: Buffer; error?: number } {
   const frames: DecodedFrame[] = []
@@ -199,6 +219,11 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
   const peers = new Set<{ close: (code?: number, reason?: string) => void; beat: () => void }>()
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    // Before anything can refuse the socket or leave it to someone else: it
+    // arrives with no `error` listener at all (`refuseUpgrade` says why that
+    // matters), and a socket this carrier merely declined is as able to end
+    // the host as one it answered.
+    socket.on('error', ignoreSocketError)
     const requestPath = (request.url ?? '/').split('?', 1)[0]
     // Not ours: leave it for another carrier on this server. It is NOT closed
     // here — the app that owns the server closes what nobody claimed, because
@@ -207,14 +232,14 @@ export function serveWebSocket(options: WebSocketCarrierOptions): () => void {
     markHandled(socket)
     const key = request.headers['sec-websocket-key']
     if (request.headers.upgrade?.toLowerCase() !== 'websocket' || typeof key !== 'string') {
-      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
+      refuseUpgrade(socket, 400, 'Bad Request')
       return
     }
     const verdict = options.authorize?.(request) ?? true
     if (verdict !== true) {
       // Answered by hand rather than handed to the socket layer: a rejected
       // upgrade must never become a half-open WebSocket.
-      socket.end(`HTTP/1.1 ${verdict} ${verdict === 403 ? 'Forbidden' : 'Unauthorized'}\r\nConnection: close\r\n\r\n`)
+      refuseUpgrade(socket, verdict, verdict === 403 ? 'Forbidden' : 'Unauthorized')
       return
     }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`)

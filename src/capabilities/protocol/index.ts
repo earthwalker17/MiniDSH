@@ -32,7 +32,7 @@ import type { WorkspaceInfo } from './frames.ts'
 export { ClientConnection } from './connection.ts'
 export { ProtocolHost } from './host.ts'
 export { NdjsonTransport } from './transport-ndjson.ts'
-export { acceptKey, decodeFrames, encodeTextFrame, serveWebSocket, upgradeWasHandled } from './transport-ws.ts'
+export { acceptKey, decodeFrames, encodeTextFrame, refuseUpgrade, serveWebSocket, upgradeWasHandled } from './transport-ws.ts'
 
 /**
  * One way clients reach the host. A stream pair is one client; other carriers
@@ -98,6 +98,12 @@ export interface ProtocolConfig {
   readonly onContinued?: (agent: Agent, ctx: Context) => void
   /** Called once when the protocol is done (shutdown answered, or the client hung up). The app owns process exit. */
   readonly onClose?: () => void
+  /**
+   * Whether the app has begun stopping the host by itself (it owns process
+   * exit, and a signal asks no client). While true the host refuses a prompt,
+   * a resume and a fork as it does after `shutdown` (`ProtocolServerConfig.stopping`).
+   */
+  readonly stopping?: () => boolean
 }
 
 export const protocolPlugin: Plugin<ProtocolConfig> = {
@@ -138,6 +144,7 @@ export const protocolPlugin: Plugin<ProtocolConfig> = {
       ...(config.agentPreset === undefined ? {} : { agentPreset: config.agentPreset }),
       ...(config.onContinued === undefined ? {} : { onContinued: config.onContinued }),
       ...(config.onClose === undefined ? {} : { onClose: config.onClose }),
+      ...(config.stopping === undefined ? {} : { stopping: config.stopping }),
     })
     ctx.on(SESSION_EVENT, (session, event) => host.onSessionEvent(session, event))
     ctx.on(AGENT_STATUS, (agent, status) => host.onAgentStatus(agent, status))

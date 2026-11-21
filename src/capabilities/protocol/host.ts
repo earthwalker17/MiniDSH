@@ -114,7 +114,8 @@ import {
 /**
  * Stored sessions kept parsed for a reader paging backwards. A cold read is a
  * whole-file parse; backward paging asks for the same session repeatedly, and a
- * session that goes live is served from the live log instead.
+ * session that goes live is served from the live log instead. A parse is never
+ * the answer to a new cut (`sourceFor`): the store may have moved on under it.
  */
 const COLD_SOURCE_CACHE = 3
 
@@ -211,6 +212,16 @@ export interface ProtocolServerConfig {
   /** Called once, when the protocol is done (shutdown answered, or the input ended). */
   readonly onClose?: () => void
   /**
+   * Whether the APP has begun stopping this host by itself (a signal, a
+   * supervisor's stop: no client called `shutdown`). Asked at the door of
+   * every method that starts or feeds a turn, which then refuses exactly as it
+   * does once `shutdown` has been called: the clients stay connected until
+   * the surface unloads, and a prompt taken in that window was answered as
+   * accepted and then lost to the disposal (a steer to a disposing agent is
+   * recorded quiet and wakes nothing).
+   */
+  readonly stopping?: () => boolean
+  /**
    * End the host when its last client disconnects. True for a carrier whose
    * client IS the process's reason to run (stdio, the loopback pair); false for
    * a socket, where the host outlives every tab that opens it.
@@ -254,8 +265,16 @@ function continuationFailure(method: string, error: unknown): unknown {
  * missing, damaged, held by another process, composed under another preset,
  * or cut below a child's delegation opening. Plain `Error`s there, so matched
  * by their words; a new caller fault added there must be added here.
+ *
+ * "The lease … is changing hands; try again" is one of them: another process
+ * released the log while a third was taking it, which is "held by another
+ * process" a moment earlier or later, and the message already tells the
+ * caller what to do. What the store says of a listener that appended out of
+ * order ("event N … arrived where event M was expected") is deliberately NOT
+ * here: that is a defect in this host's own composition, and stays -32603.
  */
-const CALLER_FAULTS = /no stored session|stored log is damaged|is locked by|the session was composed under|delegation opening|delegated under|delegated, but the log records|pass agentOptions/
+const CALLER_FAULTS =
+  /no stored session|stored log is damaged|is locked by|lease on the stored log is changing hands|the session was composed under|delegation opening|delegated under|delegated, but the log records|pass agentOptions/
 
 /**
  * `session/prompt`'s creation-only fields, refused by name on a continuation
@@ -970,12 +989,6 @@ export class ProtocolHost {
   }
 
   /**
-   * A client may choose WHERE a session works, inside the host's policy — never
-   * the policy. The cwd becomes the immutable workspace root every fence
-   * derives from, so it must exist and lie under one of the host's roots; the
-   * canonical path (links followed) is what is checked and what is recorded.
-   */
-  /**
    * Where a new session works: a workspace id, or a path, or the host's own
    * default. Never both — given both, the host refuses rather than guessing
    * which one the client meant.
@@ -999,6 +1012,12 @@ export class ProtocolHost {
     return this.workspaceFor(path === undefined ? workspace.root : join(workspace.root, path))
   }
 
+  /**
+   * A client may choose WHERE a session works, inside the host's policy — never
+   * the policy. The cwd becomes the immutable workspace root every fence
+   * derives from, so it must exist and lie under one of the host's roots; the
+   * canonical path (links followed) is what is checked and what is recorded.
+   */
   private workspaceFor(raw: string): string {
     if (!isAbsolute(raw)) throw new RpcFailure(INVALID_PARAMS, 'session/prompt: "cwd" must be an absolute path')
     let canonical: string
@@ -1216,8 +1235,23 @@ export class ProtocolHost {
     }
   }
 
+  /**
+   * The door is closed to new work: this host's own `shutdown` has begun, or
+   * the app says its stop has (`ProtocolServerConfig.stopping`). One rule for
+   * both, so a prompt, a resume and a fork are refused the same way whoever is
+   * ending the host.
+   */
+  private get stopping(): boolean {
+    return this.shuttingDown || this.config.stopping?.() === true
+  }
+
+  /** The refusal every method that starts or feeds a turn gives once the door is closed. */
+  private refuseWhileStopping(): void {
+    if (this.stopping) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+  }
+
   private async prompt(params: Record<string, unknown>): Promise<PromptResult> {
-    if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+    this.refuseWhileStopping()
     const text = requireString(params, 'text', 'session/prompt')
     const mode = params.mode ?? 'followup'
     if (mode !== 'followup' && mode !== 'steer' && mode !== 'auto') {
@@ -1295,9 +1329,9 @@ export class ProtocolHost {
 
   /**
    * An existing session by id, for a method that drives it: a resume already
-   * in flight is joined, a live agent returned (options are the same durable
-   * switch `session/model` makes), a stored one resumed and owned. Shared by
-   * `session/prompt` and `session/resume`, so the two cannot drift.
+   * in flight is joined, a live agent returned (on both, options are the same
+   * durable switch `session/model` makes), a stored one resumed and owned.
+   * Shared by `session/prompt` and `session/resume`, so the two cannot drift.
    */
   private continueById(requested: string, partial: Partial<AgentOptions>, method: string): Promise<Agent> {
     // A resume of this id already in flight is joined FIRST: its agent is
@@ -1305,7 +1339,16 @@ export class ProtocolHost {
     // authority flags — has run, and a prompt delivered to it then would start
     // the turn the opening exists to precede.
     const pending = this.resuming.get(requested)
-    if (pending) return pending
+    if (pending) {
+      // The resume was opened with its FIRST caller's options. A joiner's are
+      // applied once it is live, as the switch a live session gets below:
+      // returning the bare promise answered success for a route nobody set.
+      if (Object.keys(partial).length === 0) return pending
+      return pending.then((agent) => {
+        agent.configure(partial)
+        return agent
+      })
+    }
     const live = this.ctx.get(AGENTS).get(asSessionId(requested))
     if (live) {
       this.assertDrivable(live, method)
@@ -1359,7 +1402,9 @@ export class ProtocolHost {
       const agent = await acquiring
       // A shutdown that raced this acquire: dispose the straggler (unless the
       // sweep already took it) instead of starting a turn after the answer.
-      if (this.shuttingDown) {
+      // The app's own stop is held to the same rule: it disposes everything
+      // anyway, and a turn started now would be one it is already ending.
+      if (this.stopping) {
         const handle = this.owned.get(agent.id)
         if (handle) {
           this.owned.delete(agent.id)
@@ -1382,7 +1427,7 @@ export class ProtocolHost {
    * a stored session uses, where `session/prompt` would have to invent one.
    */
   private async resumeSession(params: Record<string, unknown>): Promise<ContinueResult> {
-    if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+    this.refuseWhileStopping()
     const sessionId = requireString(params, 'sessionId', 'session/resume')
     refuseCreationFields(params, 'session/resume')
     const options = readAgentOptions(this.agentDefaults(), params.agentOptions, 'session/resume')
@@ -1396,7 +1441,7 @@ export class ProtocolHost {
    * wakes (the factory's rule), so the caller attaches and prompts it.
    */
   private async forkSession(params: Record<string, unknown>): Promise<ContinueResult> {
-    if (this.shuttingDown) throw new RpcFailure(INTERNAL_ERROR, 'the host is shutting down')
+    this.refuseWhileStopping()
     const method = 'session/fork'
     const sessionId = requireString(params, 'sessionId', method)
     const atSeq = optionalCount(params, 'atSeq', method)
@@ -1442,7 +1487,7 @@ export class ProtocolHost {
     if (params.omitTrace !== undefined && typeof params.omitTrace !== 'boolean') {
       throw new RpcFailure(INVALID_PARAMS, 'session/events: "omitTrace" must be a boolean')
     }
-    const source = this.sourceFor(sessionId)
+    const source = this.sourceFor(sessionId, 'cut')
     // `slice(fromSeq)` is a seq-indexed slice: the log is a dense zero-based
     // prefix (§4), live and stored alike, and the session invariant refuses a
     // discontinuity before it enters the log.
@@ -1465,7 +1510,7 @@ export class ProtocolHost {
   private attach(connection: ClientConnection, params: Record<string, unknown>): AttachResult {
     const sessionId = requireString(params, 'sessionId', 'session/attach')
     const limit = optionalCount(params, 'limit', 'session/attach')
-    const source = this.sourceFor(sessionId)
+    const source = this.sourceFor(sessionId, 'cut')
     // Subscribe BEFORE the page is cut. A connection that started watching
     // afterwards would silently miss whatever landed in between; the client
     // drops anything at or below the cursor, so an overlap is free and a gap
@@ -1588,11 +1633,17 @@ export class ProtocolHost {
    * opened a session to look at it would otherwise pay for a model, take its
    * write lease, and change what it was looking at.
    */
-  private sourceFor(sessionId: string): SessionSource {
+  private sourceFor(sessionId: string, read: 'cut' | 'beneath' = 'beneath'): SessionSource {
     const live = this.ctx.get(SESSIONS).get(asSessionId(sessionId))
     if (live) {
       return { header: live.header, events: live.events, facts: live.facts, cursor: live.seq - 1, agent: this.ctx.get(AGENTS).get(asSessionId(sessionId)) }
     }
+    // A `cut` (an attach, a whole-log read) is what the store holds NOW:
+    // another process may have continued this session since it was parsed (a
+    // CLI beside a running web host), and nothing here is told when it does.
+    // Only a read BENEATH a cut the client already holds may reuse the parse
+    // that cut was taken from, which is the reader the cache exists for.
+    if (read === 'cut') this.cold.delete(sessionId)
     const cached = this.cold.get(sessionId)
     if (cached) {
       // Refresh recency: a reader paging backwards touches one session repeatedly.

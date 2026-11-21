@@ -1,18 +1,21 @@
 /** The client protocol, exercised byte-level over an in-memory duplex pair. */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PassThrough } from 'node:stream'
 import { createInterface } from 'node:readline'
 import { z } from 'zod'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { serviceKey, type Context, type Logger } from '../../kernel/index.ts'
 import { AGENTS } from '../../core/agent/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { LLM, LlmError } from '../../core/llm/index.ts'
+import { createUserMessage } from '../../core/llm/message.ts'
+import { PERSISTENCE } from '../../core/persistence/index.ts'
 import { canonicalPath } from '../../core/sandbox/index.ts'
-import { APPROVAL, type Approval } from '../../core/approval/index.ts'
+import { SESSION_FLUSH } from '../../core/session/index.ts'
+import { APPROVAL, ApprovalError, type Approval } from '../../core/approval/index.ts'
 import { defineTool, TOOLS, TOOLS_PRE_EXECUTE, type PreToolDecision } from '../../core/tools/index.ts'
 import { assistantText, assistantTextPaused, assistantToolCall, ScriptedAdapter } from '../../test-support/scripted-adapter.ts'
 import { startProtocolHost, type ProtocolHostHandle } from '../../app/serve.ts'
@@ -40,6 +43,7 @@ let dirs: string[] = []
 let hosts: ProtocolHostHandle[] = []
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const host of hosts.toReversed()) await host.dispose()
   hosts = []
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
@@ -51,6 +55,27 @@ function tempDir(prefix: string): string {
   dirs.push(dir)
   return dir
 }
+
+/**
+ * A directory link by whatever kind this host will make: a junction needs no
+ * privilege on Windows, where a symlink does. The link tests skip only where
+ * neither works (as `core/sandbox/paths.test.ts` does).
+ */
+function makeLink(target: string, link: string): boolean {
+  for (const type of ['junction', 'dir'] as const) {
+    try {
+      symlinkSync(target, link, type)
+      return true
+    } catch {
+      continue
+    }
+  }
+  return false
+}
+
+const linkProbe = mkdtempSync(join(tmpdir(), 'minidsh-proto-linkprobe-'))
+const linksWork = makeLink(join(linkProbe, 'nothing-here'), join(linkProbe, 'probe-link'))
+rmSync(linkProbe, { recursive: true, force: true })
 
 interface RpcReply {
   result?: unknown
@@ -86,6 +111,22 @@ class TestClient {
     const reply = new Promise<RpcReply>((resolve) => this.pending.set(id, resolve))
     this.raw(JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }))
     return reply
+  }
+
+  /**
+   * Several requests in ONE write, so the host reads every one of them in a
+   * single pass: the later ones are dispatched while whatever the first began
+   * is still in flight, by construction instead of by timing.
+   */
+  burst(requests: readonly (readonly [method: string, params?: unknown])[]): Promise<RpcReply>[] {
+    const lines: string[] = []
+    const replies = requests.map(([method, params]) => {
+      const id = this.nextId++
+      lines.push(JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }))
+      return new Promise<RpcReply>((resolve) => this.pending.set(id, resolve))
+    })
+    this.raw(lines.join('\n'))
+    return replies
   }
 
   async result<T>(method: string, params?: unknown): Promise<T> {
@@ -279,6 +320,32 @@ describe('protocol: handshake and streaming', () => {
     const good = await client.result<{ serverInfo: { name: string } }>('initialize')
     expect(good.serverInfo.name).toBe('minidsh')
   })
+
+  /**
+   * U+2028 and U+2029 are ordinary text to JSON and line ends to a line
+   * reader. A paste carries them; a frame holding one used to arrive as two
+   * malformed halves, and the request in it was never answered. This client
+   * writes them raw and READS with `node:readline`, so it is both halves.
+   */
+  it('carries U+2028 and U+2029 inside a frame, in both directions', async () => {
+    const separators = `a${String.fromCharCode(0x2028)}b${String.fromCharCode(0x2029)}c`
+    const { client } = await startHost(new ScriptedAdapter().script(assistantText(`said ${separators}`)))
+    const textOf = (frame: { event: { data: Record<string, unknown> } } | undefined): string | undefined =>
+      (frame?.event.data.message as { content: { text?: string }[] } | undefined)?.content.map((part) => part.text ?? '').join('')
+    // Bounded, so a lost frame fails by name instead of by the suite's timeout.
+    let bound: ReturnType<typeof setTimeout> | undefined
+    const answered = await Promise.race([
+      client.call('session/prompt', { text: separators, agentOptions: SCRIPTED }),
+      new Promise<'unanswered'>((resolve) => (bound = setTimeout(() => resolve('unanswered'), 5_000))),
+    ])
+    clearTimeout(bound)
+    if (answered === 'unanswered') throw new Error('session/prompt was never answered: the frame carrying U+2028 was lost on the way in')
+    const sessionId = (answered.result as { sessionId: string }).sessionId
+    const said = await client.waitFor(() => client.frames('assistant/message', sessionId).at(0), 'the assistant/message carrying U+2028 on the way out')
+    expect(textOf(client.frames('user/message', sessionId).at(0))).toBe(separators)
+    expect(textOf(said)).toBe(`said ${separators}`)
+    await client.waitForIdle(sessionId)
+  })
 })
 
 describe('protocol: steering and cancel', () => {
@@ -379,11 +446,87 @@ describe('protocol: approvals are the durable frames', () => {
   })
 
   it('host disposal fails a pending approval closed instead of hanging', async () => {
+    let ran = 0
+    const counted = defineTool({
+      name: 'touchy',
+      description: 'needs approval',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      execute: () => {
+        ran += 1
+        return { ok: true }
+      },
+      render: (_args, value) => [{ type: 'text', text: String(value.ok) }],
+    })
     const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'touchy', {}))
-    const { host, client } = await startHost(adapter, { prepare: askForTouchy })
-    await client.result<{ sessionId: string }>('session/prompt', { text: 'use the tool', agentOptions: SCRIPTED })
-    await client.waitFor(() => client.frames('approval/asked').at(0), 'approval/asked frame')
+    const { host, client, sessionsRoot } = await startHost(adapter, {
+      prepare: (root) => {
+        root.get(TOOLS).register(root, counted)
+        root.on(TOOLS_PRE_EXECUTE, async (execution, next): Promise<PreToolDecision> => (execution.name === 'touchy' ? { kind: 'ask', reason: 'careful' } : next()))
+      },
+    })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'use the tool', agentOptions: SCRIPTED })
+    const asked = await client.waitFor(() => client.frames('approval/asked').at(0), 'approval/asked frame')
     await host.dispose() // must not deadlock on the unanswered prompt
+
+    // CLOSED is the other half of the name: read from what the disposal left
+    // on disk, the question was decided against, once, and what it gated
+    // never ran. Settled as allowed, this test used to pass.
+    const stored = readFileSync(join(sessionsRoot, `${encodeURIComponent(sessionId)}.jsonl`), 'utf8')
+      .trim()
+      .split('\n')
+      .slice(1)
+      .map((line) => JSON.parse(line) as { type: string; data: Record<string, unknown> })
+    const decided = stored.filter((event) => event.type === 'approval/decided').map((event) => event.data)
+    expect(decided, `the decisions the stored log holds: ${JSON.stringify(decided)}`).toHaveLength(1)
+    expect(decided[0]).toMatchObject({ id: asked.event.data.id, outcome: 'cancelled' })
+    expect(ran, 'times the gated tool body ran').toBe(0)
+    const result = stored.find((event) => event.type === 'tool/result')
+    expect(result?.data.error, `the tool result the log holds: ${JSON.stringify(result?.data)}`).toBeDefined()
+  })
+
+  // The host's own "fail pending approvals closed" (`ProtocolHost.close`). An
+  // agent the wire made is disposed before the host closes, and its abort
+  // settles its question first (the test above), so the line is reached only
+  // for an agent the wire does NOT own: one the composition made itself.
+  it('settles a question unavailable when the host closes under an agent it does not own', async () => {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'touchy', {}), assistantText('went on without it'))
+    const { host, client } = await startHost(adapter, { prepare: askForTouchy })
+    const handle = await host.root.get(AGENTS).create(host.root, { cwd: tempDir('minidsh-proto-own-'), agentOptions: SCRIPTED })
+    handle.agent.followup(createUserMessage('use the tool'))
+    // Parked on this client: it watches everything, so it could answer.
+    await client.waitFor(() => client.frames('approval/asked', handle.agent.id).at(0), 'the ask of the agent the wire does not own')
+    await client.result('shutdown')
+    await handle.agent.whenIdle()
+    const decided = handle.agent.session.facts.filter((event) => event.type === 'approval/decided').map((event) => event.data as { outcome: string })
+    expect(decided, `decisions: ${JSON.stringify(decided)}`).toHaveLength(1)
+    expect(decided[0]!.outcome).toBe('unavailable')
+    // The shutdown swept what the wire owned, which was nothing: this agent went on.
+    expect(handle.agent.session.facts.some((event) => event.type === 'turn/end')).toBe(true)
+    await handle.dispose()
+  })
+
+  // The fold decides what an ask may durably buy. A gate's plain ask names no
+  // effect to stand a consent on, so it offers none: taking `grant-session`
+  // on it is refused by the host's own re-run of that fold, in the wire's
+  // words, and the question is left as it was.
+  it('refuses a scope the fold did not offer on this question, and leaves the question open', async () => {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'touchy', {}), assistantText('did it'))
+    const { client } = await startHost(adapter, { prepare: askForTouchy })
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'use the tool', agentOptions: SCRIPTED })
+    const asked = await client.waitFor(() => client.frames('approval/asked').at(0), 'approval/asked frame')
+    const id = asked.event.data.id as string
+    const open = (await client.result<AttachResult>('session/attach', { sessionId })).view.pendingApprovals
+    expect(open.map((one) => [one.id, one.offers ?? []])).toEqual([[id, []]])
+
+    const taken = await client.call('approval/answer', { sessionId, id, outcome: 'allowed-once', offer: 'grant-session' })
+    expect(taken.error?.code, `answered ${JSON.stringify(taken.result)} to an offer nobody made`).toBe(-32602)
+    expect(taken.error?.message).toContain('"grant-session" is not offered on approval')
+    // Refused, not consumed: nothing was decided, and a plain yes still lands.
+    expect(client.frames('approval/decided', sessionId)).toHaveLength(0)
+    expect((await client.result<{ outcome: string }>('approval/answer', { sessionId, id, outcome: 'allowed-once' })).outcome).toBe('accepted')
+    await client.waitForIdle(sessionId)
+    expect(client.frames('approval/grant', sessionId)).toHaveLength(0)
   })
 })
 
@@ -428,6 +571,36 @@ describe('protocol: resume over the wire', () => {
     )
     const events = await second.client.result<{ events: { type: string }[] }>('session/events', { sessionId })
     expect(events.events.filter((event) => event.type === 'turn/start')).toHaveLength(3)
+  })
+
+  // The resume is opened with its FIRST caller's options. A caller that joined
+  // it used to be handed the bare promise: a success reply, and its own
+  // options neither applied nor refused.
+  it('applies the options of a prompt and of a resume that join a resume in flight, as a live session would', async () => {
+    const first = await startHost(new ScriptedAdapter().script(assistantText('one')))
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED })
+    await first.client.waitForIdle(sessionId)
+    await first.host.dispose()
+
+    const second = await startHost(new ScriptedAdapter().script(assistantText('two'), assistantText('three')), { sessionsRoot: first.sessionsRoot })
+    const replies = await Promise.all(
+      second.client.burst([
+        ['session/prompt', { sessionId, text: 'opens the resume' }],
+        ['session/prompt', { sessionId, text: 'joins it', agentOptions: { maxSteps: 7 } }],
+        ['session/resume', { sessionId, agentOptions: { maxTokens: 99 } }],
+      ]),
+    )
+    expect(
+      replies.map((reply) => reply.error?.message),
+      'each of the three was answered as a success',
+    ).toEqual([undefined, undefined, undefined])
+    await second.client.waitFor(() => (second.client.frames('turn/end', sessionId).length >= 2 ? true : undefined), 'both prompted turns to finish')
+    const switches = (await logOf(second.client, sessionId)).filter((event) => event.type === 'agent/options' && event.data.reason === 'change').map((event) => event.data.options as { maxSteps?: number; maxTokens?: number })
+    const said = `the option switches the log records: ${JSON.stringify(switches)}`
+    expect(switches.some((options) => options.maxSteps === 7), said).toBe(true)
+    expect(switches.some((options) => options.maxTokens === 99), said).toBe(true)
+    // And they stand: the live session's base is what both joiners asked for.
+    expect(second.host.root.get(AGENTS).get(asSessionId(sessionId))?.options).toMatchObject({ maxSteps: 7, maxTokens: 99 })
   })
 
   it('session/events serves a cold stored session without resuming it', async () => {
@@ -545,6 +718,45 @@ describe('protocol: session/resume and session/fork', () => {
     await refused('session/fork', { sessionId: running, salvage: true }, /live/)
     await refused('session/fork', { sessionId: running }, /turn/i)
     expect(host.root.get(AGENTS).list().map((agent) => agent.id)).toEqual([running])
+  })
+
+  // The store's failures are plain Errors, matched by their words (host.ts
+  // `CALLER_FAULTS`). A lease in motion between two other processes is the
+  // session being held elsewhere, a moment earlier or later: the caller's to
+  // retry, as its message says. A listener that appended out of order is a
+  // defect of this host's own composition, and must go on reading as one.
+  it("answers a lease that is changing hands as the caller's to retry, and a listener's ordering defect as the host's own", async () => {
+    const stored = await storedSession()
+    // What the store reports is thrown from the creation's flush; a listener
+    // beside the store's stands in for it, in the store's own words.
+    let failure: ((sessionId: string) => string) | undefined
+    const { host, client } = await startHost(new ScriptedAdapter(), {
+      sessionsRoot: stored.sessionsRoot,
+      prepare: (root) => {
+        root.on(SESSION_FLUSH, (session) => {
+          if (failure !== undefined) throw new Error(failure(session.id))
+        })
+      },
+    })
+    // The words are the coupling, so the test fails if the store rewords them.
+    const provider = readFileSync(fileURLToPath(new URL('../persistence-jsonl/index.ts', import.meta.url)), 'utf8')
+    expect(provider).toContain(': the lease on the stored log is changing hands (')
+    expect(provider).toContain(' was expected: a session/event listener appended synchronously')
+
+    failure = (id) => `session ${id}: the lease on the stored log is changing hands (/sessions/${id}.jsonl.lock); try again`
+    const moving = await client.call('session/resume', { sessionId: stored.sessionId })
+    expect(moving.error?.code, moving.error?.message).toBe(-32602)
+    expect(moving.error?.message).toMatch(/^session\/resume: .*changing hands.*try again/)
+
+    failure = () => 'event 5 (user/message) arrived where event 4 was expected: a session/event listener appended synchronously, so its event was delivered before the one that caused it; nothing from event 4 on was written'
+    const defect = await client.call('session/resume', { sessionId: stored.sessionId })
+    expect(defect.error?.code, defect.error?.message).toBe(-32603)
+    expect(defect.error?.message).toContain('arrived where event 4 was expected')
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+
+    // "Try again" is true: the same request, once the store has nothing to report.
+    failure = undefined
+    expect(await client.result('session/resume', { sessionId: stored.sessionId })).toEqual({ sessionId: stored.sessionId })
   })
 
   it('refuses a session composed under another preset, before anything is published', async () => {
@@ -932,9 +1144,69 @@ describe('protocol: the paged attach', () => {
     // No agent, and no write lease: the session is still exactly stored.
     expect(second.host.root.get(AGENTS).list()).toHaveLength(0)
     expect(readdirSync(sessionsRoot).filter((name) => name.endsWith('.lock'))).toHaveLength(0)
-    // And a second read is served from the same parse.
-    const again = await second.client.result<AttachResult>('session/attach', { sessionId })
-    expect(again.cursor).toBe(attached.cursor)
+  })
+
+  // What the cold-read cache is FOR, counted at the store: a whole-file parse
+  // per page would make backward paging quadratic, and a parse reused for a
+  // new cut would hide whatever was appended since (the next test).
+  it('parses a stored session once for a reader paging beneath one cut, and again for each new cut', async () => {
+    const first = await session(6)
+    const { sessionId, sessionsRoot } = first
+    await first.host.dispose()
+
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot })
+    const load = vi.spyOn(second.host.root.get(PERSISTENCE), 'load')
+    const attached = await second.client.result<AttachResult>('session/attach', { sessionId, limit: 2 })
+    expect(load.mock.calls.length, 'store loads for the first attach').toBe(1)
+    let before = attached.page.from
+    let hasMore = attached.page.hasMore
+    let pages = 0
+    while (hasMore) {
+      const older = await second.client.result<PageResult>('session/page', { sessionId, throughSeq: attached.cursor, beforeSeq: before, limit: 2 })
+      before = older.page.from
+      hasMore = older.page.hasMore
+      expect(++pages).toBeLessThan(30)
+    }
+    expect(pages, 'pages read beneath the cut').toBeGreaterThan(1)
+    expect(load.mock.calls.length, `store loads after ${pages} pages beneath one cut`).toBe(1)
+    // A new cut is the store as it now stands, never the parse an older one left.
+    await second.client.result<AttachResult>('session/attach', { sessionId })
+    expect(load.mock.calls.length, 'store loads after a second attach').toBe(2)
+    await second.client.result('session/events', { sessionId })
+    expect(load.mock.calls.length, 'store loads after a whole-log read').toBe(3)
+    // And what is read beneath that newer cut reuses its parse again.
+    await second.client.result<PageResult>('session/page', { sessionId, throughSeq: attached.cursor, limit: 2 })
+    expect(load.mock.calls.length, 'store loads after a page beneath the newest cut').toBe(3)
+  })
+
+  // Another PROCESS may continue a stored session while this host holds it
+  // parsed: the CLI beside a running web host. Nothing tells this host, and a
+  // cached parse answered the old cursor and the old transcript until three
+  // other sessions happened to evict it.
+  it('shows what another process appended since the last read, on the next attach and the next log read', async () => {
+    const first = await session(1)
+    const { sessionId, sessionsRoot } = first
+    await first.host.dispose()
+    const turnsIn = (log: { type: string }[]): number => log.filter((event) => event.type === 'turn/start').length
+
+    const reader = await startHost(new ScriptedAdapter(), { sessionsRoot })
+    const before = await reader.client.result<AttachResult>('session/attach', { sessionId })
+    expect(turnsIn(await logOf(reader.client, sessionId))).toBe(1)
+
+    // A second composition over the same store stands in for the other
+    // process: it resumes the session, appends a turn, and lets go of it.
+    const writer = await startHost(new ScriptedAdapter().script(assistantText('appended elsewhere')), { sessionsRoot })
+    await writer.client.result('session/prompt', { sessionId, text: 'more, from another process' })
+    await writer.client.waitForIdle(sessionId)
+    await writer.host.dispose()
+
+    const after = await reader.client.result<AttachResult>('session/attach', { sessionId })
+    expect(after.cursor, `the cursor was ${before.cursor} before the other process wrote and is ${after.cursor} after`).toBeGreaterThan(before.cursor)
+    const said = after.page.events.filter((event) => event.type === 'assistant/message').map((event) => JSON.stringify(event.data))
+    expect(said.some((message) => message.includes('appended elsewhere')), `assistant messages on the page: ${said.join(' | ')}`).toBe(true)
+    expect(turnsIn(await logOf(reader.client, sessionId))).toBe(2)
+    // Still only a reader: it resumed nothing to learn this.
+    expect(reader.host.root.get(AGENTS).list()).toHaveLength(0)
   })
 
   it('publishes the view again whenever a durable fact moves one of its folds', async () => {
@@ -1153,6 +1425,34 @@ describe('protocol: workspaces are addressing, never authority', () => {
     expect(escape.error?.message).toMatch(/workspace roots|not an existing directory/)
   })
 
+  // The cwd is canonicalized and THEN held to the roots, so a link out of a
+  // root is refused however it is spelled. Spelled through a directory that
+  // does not exist, the canonical path used to come back as the link's own
+  // name (nothing followed it), which lies inside the root: the session was
+  // created, and every fence it derives then stood on the link's target.
+  it.skipIf(!linksWork)('refuses a cwd that reaches a link out of the roots, spelled plainly or through a missing directory', async () => {
+    const { client, roots } = await withWorkspaces()
+    const root = roots[0]!
+    const outside = tempDir('minidsh-ws-outside-')
+    expect(makeLink(outside, join(root, 'link'))).toBe(true)
+    // Not `join`: it would fold `missing/..` away before the host ever saw it.
+    const throughMissing = [root, 'missing', '..', 'link'].join(sep)
+    for (const cwd of [join(root, 'link'), throughMissing]) {
+      const reply = await client.call('session/prompt', { text: 'hi', agentOptions: SCRIPTED, cwd })
+      expect(reply.error?.code, `${cwd} answered ${JSON.stringify(reply.result ?? reply.error)}`).toBe(-32602)
+      expect(reply.error?.message, cwd).toContain("must lie inside one of this host's workspace roots")
+    }
+    expect((await client.result<SessionsListResult>('sessions/list')).sessions, 'sessions created for a refused cwd').toEqual([])
+
+    // The spelling itself is not what is refused: the same shape reaching a
+    // link that STAYS inside is accepted, and recorded as where it leads.
+    mkdirSync(join(root, 'real'))
+    expect(makeLink(join(root, 'real'), join(root, 'inner'))).toBe(true)
+    const accepted = await client.result<{ sessionId: string }>('session/prompt', { text: 'hi', agentOptions: SCRIPTED, cwd: [root, 'missing', '..', 'inner'].join(sep) })
+    const attached = await client.result<AttachResult>('session/attach', { sessionId: accepted.sessionId })
+    expect(attached.header.cwd.toLowerCase()).toBe(canonicalPath(join(root, 'real')).toLowerCase())
+  })
+
   it('refuses a workspace it does not know, and refuses being told both ways at once', async () => {
     const { client, roots } = await withWorkspaces()
     const unknown = await client.call('session/prompt', { text: 'hi', agentOptions: SCRIPTED, workspaceId: 'nope' })
@@ -1323,7 +1623,7 @@ describe('protocol: more than one client', () => {
     expect(first.frames('approval/decided', sessionId)[0]!.event.data).toMatchObject({ outcome: 'allowed-once', decidedBy: 'user' })
   })
 
-  it('refuses a scope the fold did not offer, and takes the one it did', async () => {
+  it('refuses a scope outside the vocabulary, and takes the one the fold offered', async () => {
     const risky = defineTool({
       name: 'risky',
       description: 'asks for itself',
@@ -1355,10 +1655,12 @@ describe('protocol: more than one client', () => {
     const asked = await client.waitFor(() => client.frames('approval/asked', sessionId)[0], 'the ask')
     const id = asked.event.data.id as string
 
-    // A scope nobody offered is refused in the wire's words — the host re-runs
-    // the same fold that produced the offers, so a client cannot invent one.
+    // A scope the wire has no word for is refused before the question is even
+    // looked up (a scope the vocabulary has but THIS question's fold did not
+    // offer is the test "refuses a scope the fold did not offer on this question").
     const forged = await client.call('approval/answer', { sessionId, id, outcome: 'allowed-once', offer: 'grant-everything' })
     expect(forged.error?.code).toBe(-32602)
+    expect(forged.error?.message).toContain('"offer" must be "grant-session"')
     // And one only applies to a yes.
     const wrong = await client.call('approval/answer', { sessionId, id, outcome: 'rejected', offer: 'grant-session' })
     expect(wrong.error?.message).toMatch(/only applies to/)
@@ -1572,10 +1874,12 @@ describe('protocol: a delegated child is its parent, not a client', () => {
     // parent is running it. Reads are not.
     const writes = [
       ['session/prompt', { sessionId: childId, text: 'do something else instead' }],
+      ['session/resume', { sessionId: childId }],
       ['session/cancel', { sessionId: childId }],
       ['session/compact', { sessionId: childId }],
       ['session/model', { sessionId: childId, model: 'scripted-model' }],
       ['session/authority', { sessionId: childId, sandbox: 'read-only' }],
+      ['approval/revoke', { sessionId: childId, grantId: 'grant-0' }],
       ['job/cancel', { sessionId: childId, jobId: 'job-0000000000000000' }],
     ] as const
     for (const [method, params] of writes) {
@@ -1790,6 +2094,91 @@ describe('protocol: who can answer a parked approval', () => {
       await pause(20)
     }
     expect(decided.data.outcome).toBe('unavailable')
+  })
+
+  /**
+   * The log, once its turn has ended. Read through `session/events`, which
+   * moves no watch set: an attach or a detach would settle the very question
+   * these tests wait on, and the test would then be watching itself.
+   */
+  async function onceTheTurnEnded(client: TestClient, sessionId: string, what: string): Promise<{ type: string; data: Record<string, unknown> }[]> {
+    const deadline = Date.now() + 5000
+    for (;;) {
+      const log = await logOf(client, sessionId)
+      if (log.some((event) => event.type === 'turn/end')) return log
+      if (Date.now() > deadline) throw new Error(`${what}: the turn never ended, and the log holds ${JSON.stringify(log.map((event) => event.type))}`)
+      await pause(20)
+    }
+  }
+
+  // The rule at the moment of asking. Every other test here asks while an
+  // un-narrowed client is connected, so "nobody could answer" was only ever
+  // reached later, by someone leaving.
+  it('asks nobody when no connection could answer: the question is decided at once instead of parked', async () => {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const { clients } = await startHost(adapter, { ...withGate, extraClients: 1 })
+    // Both clients are connected and both say they watch nothing; neither subscribes.
+    for (const one of clients) await one.result('session/detach', {})
+    const { sessionId } = await clients[0]!.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    // From here nothing touches a watch set or a connection.
+    const log = await onceTheTurnEnded(clients[0]!, sessionId, 'a question asked while nobody could answer it')
+    const decided = log.filter((event) => event.type === 'approval/decided').map((event) => event.data)
+    expect(decided, `decisions: ${JSON.stringify(decided)}`).toHaveLength(1)
+    expect(decided[0]!.outcome).toBe('unavailable')
+    expect(log.filter((event) => event.type === 'approval/asked')).toHaveLength(1)
+  })
+
+  // `session/detach` by id settles what its caller was the last watcher of.
+  // The other detach tests leave a second watcher or a subscriber behind, so
+  // the settle they see is a disconnect's or an attach's.
+  it('settles a question when its last watcher detaches from that session by name', async () => {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const { client } = await startHost(adapter, withGate)
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    await client.waitFor(() => client.frames('approval/asked', sessionId)[0], 'the ask')
+    // Parked: this client is watching, so it could answer.
+    expect((await logOf(client, sessionId)).filter((event) => event.type === 'approval/decided')).toHaveLength(0)
+
+    await client.result('session/detach', { sessionId })
+    const log = await onceTheTurnEnded(client, sessionId, 'a question its only watcher detached from')
+    const decided = log.filter((event) => event.type === 'approval/decided').map((event) => event.data)
+    expect(decided, `decisions: ${JSON.stringify(decided)}`).toHaveLength(1)
+    expect(decided[0]!.outcome).toBe('unavailable')
+  })
+
+  // A process killed between `approval/asked` and `approval/decided` leaves a
+  // log that ends on a question nothing is waiting on. Read cold it is never
+  // resumed, so no repair has closed it: folded as it stands it was offered to
+  // a browser as a live Allow/Deny. The suite's other stored logs were all
+  // closed by a graceful dispose.
+  it('offers no question on a cold read of a log that ends on an undecided ask', async () => {
+    const adapter = new ScriptedAdapter().script(assistantToolCall('c1', 'gated', {}), assistantText('done'))
+    const first = await startHost(adapter, withGate)
+    const { sessionId } = await first.client.result<{ sessionId: string }>('session/prompt', { text: 'go', agentOptions: SCRIPTED })
+    const asked = await first.client.waitFor(() => first.client.frames('approval/asked', sessionId)[0], 'the ask')
+    const id = asked.event.data.id as string
+    await first.host.dispose()
+    // The kill, made by hand: the stored log cut right after the ask.
+    const file = join(first.sessionsRoot, `${encodeURIComponent(sessionId)}.jsonl`)
+    const lines = readFileSync(file, 'utf8').trim().split('\n')
+    const cut = lines.findIndex((line, index) => index > 0 && (JSON.parse(line) as { type: string }).type === 'approval/asked')
+    expect(cut, 'the stored log holds no approval/asked to cut after').toBeGreaterThan(0)
+    writeFileSync(file, `${lines.slice(0, cut + 1).join('\n')}\n`)
+
+    const second = await startHost(new ScriptedAdapter(), { sessionsRoot: first.sessionsRoot, extraClients: 1 })
+    const [reader, control] = second.clients as [TestClient, TestClient]
+    // The fixture is what it claims to be: the log's last fact is that ask.
+    const log = await logOf(reader, sessionId)
+    expect(log.at(-1)).toMatchObject({ type: 'approval/asked', data: { id } })
+    const cold = await reader.result<AttachResult>('session/attach', { sessionId })
+    expect(cold.damaged, 'a log cut on a line boundary is whole, only unfinished').toBeUndefined()
+    expect(cold.view.pendingApprovals, 'a crash artifact offered as a live question').toEqual([])
+    expect(cold.view.status).toBe('idle')
+    // The control plane counts live sessions only, and reading resumed nothing.
+    expect((await control.result<ControlSubscribeResult>('control/subscribe', {})).sessions).toEqual([])
+    expect(second.host.root.get(AGENTS).list()).toHaveLength(0)
+    // And an answer finds nothing parked.
+    expect(await reader.result('approval/answer', { sessionId, id, outcome: 'allowed-once' })).toEqual({ outcome: 'not-pending' })
   })
 })
 
@@ -2237,23 +2626,57 @@ describe('protocol: a new session opens under the authority its prompt names', (
     expect(attached.view.authority).toMatchObject({ sandbox: 'read-only', approval: 'never', accepts: 'none' })
   })
 
-  it('creates nothing when the set is refused: the id is freed, nothing is stored, and the prompt is never delivered', async () => {
+  it('creates nothing for a preset this host does not have: refused before anything exists, so nothing is ever announced', async () => {
     const adapter = new ScriptedAdapter().script(assistantText('must not run'), assistantText('the next one runs'))
     const { host, client, sessionsRoot } = await startHost(adapter)
     const refused = await client.call('session/prompt', { text: 'hello', agentOptions: SCRIPTED, authority: { preset: 'no-such-preset' } })
     expect(refused.error?.code).toBe(-32602)
     expect(refused.error?.message).toContain('no-such-preset')
+    // No agent, no listing, no file, and no model call.
+    expect(host.root.get(AGENTS).list()).toHaveLength(0)
+    expect((await client.result<SessionsListResult>('sessions/list')).sessions).toEqual([])
+    expect(readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))).toEqual([])
+    expect(adapter.calls).toHaveLength(0)
+    // Checked before the creation, not inside its opening: this un-narrowed
+    // client was never shown a session that was about to be taken back.
+    expect(
+      client.notifications.map((entry) => entry.method),
+      'frames sent for a session that was never created',
+    ).toEqual([])
+    // And the host is unharmed: the next prompt creates as ever.
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
+    await client.waitForIdle(sessionId)
+    expect(adapter.calls).toHaveLength(1)
+  })
+
+  // The other refusal: one that happens INSIDE the opening, after the session
+  // was published and its opening stamps were streamed. No wire request can
+  // make a top-level session's switch refuse there (a ceiling and a pin are a
+  // delegated child's, and an unknown preset is caught above), so the
+  // approval seam is made to refuse this one switch.
+  it('rolls the creation back when its opening is refused: the id it was announced under is freed', async () => {
+    const adapter = new ScriptedAdapter().script(assistantText('must not run'), assistantText('the next one runs'))
+    const { host, client, sessionsRoot } = await startHost(adapter)
+    vi.spyOn(host.root.get(APPROVAL), 'setPolicy').mockImplementationOnce((session) => {
+      throw new ApprovalError('APPROVAL_PINNED', `session ${session.id} refuses this switch, for the test`)
+    })
+    const refused = await client.call('session/prompt', { text: 'hello', agentOptions: SCRIPTED, authority: { approval: 'never' } })
+    expect(refused.error?.code, `answered ${JSON.stringify(refused.result ?? refused.error)}`).toBe(-32602)
+    expect(refused.error?.message).toContain('refuses this switch, for the test')
     // Rolled back: no agent, no listing, no file, and no model call.
     expect(host.root.get(AGENTS).list()).toHaveLength(0)
     expect((await client.result<SessionsListResult>('sessions/list')).sessions).toEqual([])
     expect(readdirSync(sessionsRoot).filter((name) => name.endsWith('.jsonl'))).toEqual([])
     expect(adapter.calls).toHaveLength(0)
-    // The id its opening stamps were streamed under names nothing now.
-    const announced = client.frames().map((frame) => frame.sessionId)
-    for (const id of new Set(announced)) expect((await client.call('session/attach', { sessionId: id })).error?.message).toContain('no session')
-    // And the host is unharmed: the next prompt creates as ever.
-    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED })
-    await client.waitForIdle(sessionId)
+    // It WAS announced, which is what makes the rollback matter: the id its
+    // opening stamps were streamed under must name nothing now.
+    const announced = [...new Set(client.frames().map((frame) => frame.sessionId))]
+    expect(announced, 'session ids this client was sent frames under').toHaveLength(1)
+    const attach = await client.call('session/attach', { sessionId: announced[0]! })
+    expect(attach.error?.message, `attaching the rolled-back id answered ${JSON.stringify(attach.result)}`).toContain('no session')
+    // And the host is unharmed: the same request, unrefused, creates as ever.
+    const { sessionId } = await client.result<{ sessionId: string }>('session/prompt', { text: 'hello', agentOptions: SCRIPTED, authority: { approval: 'never' } })
+    await client.waitFor(() => client.frames('turn/end', sessionId)[0], 'the next session to run its turn')
     expect(adapter.calls).toHaveLength(1)
   })
 
