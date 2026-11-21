@@ -1,0 +1,8 @@
+{
+  "installers": {
+    "win32-x64": "MiniDSH-Setup-x64.exe",
+    "linux-x64": "MiniDSH-x86_64.AppImage",
+    "darwin-arm64": "MiniDSH-mac-arm64.zip",
+    "darwin-x64": "MiniDSH-mac-x64.zip"
+  }
+}

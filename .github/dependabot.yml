@@ -21,6 +21,15 @@ updates:
       toolchain:
         patterns: ['*']
         exclude-patterns: ['zod']
+  # The desktop app's packaging toolchain (electron-builder) has its own
+  # manifest and lockfile, so it needs its own entry: until S22.5 nothing
+  # proposed an update there. Electron itself is the root's devDependency,
+  # pinned exactly, and arrives with the toolchain group above.
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
   - package-ecosystem: github-actions
     directory: /
     schedule:

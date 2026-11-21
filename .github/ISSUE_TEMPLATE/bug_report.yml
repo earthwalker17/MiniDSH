@@ -19,7 +19,7 @@ body:
     attributes:
       label: Platform
       description: Operating system and version; Node version; on Windows, whether `pwsh` is installed
-      placeholder: Ubuntu 24.04, Node 24.19.0
+      placeholder: Ubuntu 24.04, Node 24.22.3
     validations:
       required: true
   - type: dropdown

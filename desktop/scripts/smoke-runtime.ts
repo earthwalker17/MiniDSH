@@ -26,6 +26,15 @@ function fail(message: string): never {
   process.exit(1)
 }
 
+/**
+ * A failed check once the runtime is up. It THROWS, so the catch below kills
+ * the runtime before the process exits: an exit from inside the try would skip
+ * that and leave `minidsh web` running on a developer's machine (S22.5).
+ */
+function refuse(message: string): never {
+  throw new Error(message)
+}
+
 const node = process.platform === 'win32' ? join(resources, 'node', 'node.exe') : join(resources, 'node', 'bin', 'node')
 const bin = join(resources, 'runtime', 'node_modules', 'minidsh', 'bin', 'minidsh.js')
 for (const required of [node, bin]) if (!existsSync(required)) fail(`the package lacks ${required}`)
@@ -42,26 +51,29 @@ const stderr: Buffer[] = []
 try {
   const ready = await runtime.start({ node, bin, port, cwd: folder, folders: [folder], env, onStderr: (chunk) => stderr.push(chunk) })
   const version = (JSON.parse(readFileSync(join(resources, 'runtime', 'node_modules', 'minidsh', 'package.json'), 'utf8')) as { version: string }).version
-  if (ready.version !== version) fail(`the runtime reports ${ready.version}, its package ${version}`)
+  if (ready.version !== version) refuse(`the runtime reports ${ready.version}, its package ${version}`)
   const cookie = await signIn(ready.port, ready.token)
   // One-shot: the same token a second time is refused.
   const reused = await signIn(ready.port, ready.token).then(
     () => true,
     () => false,
   )
-  if (reused) fail('the launch token was accepted twice')
+  if (reused) refuse('the launch token was accepted twice')
   const origin = `http://127.0.0.1:${ready.port}`
 
   const index = await fetch(`${origin}/`, { headers: { cookie } })
-  if (index.status !== 200) fail(`GET / answered ${index.status}`)
+  if (index.status !== 200) refuse(`GET / answered ${index.status}`)
   const html = await index.text()
   const assets = readdirSync(join(resources, 'runtime', 'node_modules', 'minidsh', 'dist', 'app', 'web')).filter((name) => /\.(js|css|html)$/.test(name))
+  // The page loads about twenty files; a listing that came back empty would
+  // make the loop below prove nothing.
+  if (assets.length < 10) refuse(`only ${assets.length} browser assets in the package`)
   for (const asset of assets) {
     const answer = await fetch(`${origin}/${asset}`, { headers: { cookie } })
-    if (answer.status !== 200) fail(`GET /${asset} answered ${answer.status}`)
+    if (answer.status !== 200) refuse(`GET /${asset} answered ${answer.status}`)
     await answer.arrayBuffer()
   }
-  if (!html.includes('<title>MiniDSH</title>')) fail('the page is not the Web UI')
+  if (!html.includes('<title>MiniDSH</title>')) refuse('the page is not the Web UI')
 
   // initialize, then a prompt that creates a session (no key: its turn fails
   // at once, which is fine — the session exists and holds its lease).
@@ -86,17 +98,17 @@ try {
     })
     socket.addEventListener('error', () => reject(new Error('the WebSocket upgrade was refused')))
   })
-  if (initialized !== version) fail(`initialize reports ${initialized}`)
+  if (initialized !== version) refuse(`initialize reports ${initialized}`)
   const lease = join(home, 'sessions', `${encodeURIComponent(sessionId)}.jsonl.lock`)
   const leaseDeadline = Date.now() + 10_000
   while (!existsSync(lease) && Date.now() < leaseDeadline) await new Promise((wait) => setTimeout(wait, 100))
-  if (!existsSync(lease)) fail(`the prompted session ${sessionId} holds no lease at ${lease}: the stop below would prove nothing`)
+  if (!existsSync(lease)) refuse(`the prompted session ${sessionId} holds no lease at ${lease}: the stop below would prove nothing`)
 
   const stop = await runtime.stop({ deadlineMs: 30_000 })
-  if (!stop.graceful) fail(`the stop was not graceful: ${JSON.stringify(stop)}`)
+  if (!stop.graceful) refuse(`the stop was not graceful: ${JSON.stringify(stop)}`)
   const sessions = join(home, 'sessions')
   const locks = existsSync(sessions) ? readdirSync(sessions).filter((name) => name.endsWith('.lock')) : []
-  if (locks.length > 0) fail(`leases left behind: ${locks.join(', ')}`)
+  if (locks.length > 0) refuse(`leases left behind: ${locks.join(', ')}`)
   process.stdout.write(`desktop smoke: runtime ${version} on the bundled node ${process.platform}-${process.arch}: ready, one-shot handoff, ${assets.length} assets, initialize, a leased session, graceful stop releasing it\n`)
 } catch (error) {
   runtime.kill()

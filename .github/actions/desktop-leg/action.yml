@@ -1,0 +1,114 @@
+# One desktop leg: pack this runner's artifact, prove the runtime out of it,
+# and drive the app keyless. `check.yml` runs these steps on every push,
+# packing the checkout; `release.yml` runs the SAME steps on the gate's
+# tarball. So nothing a release's desktop legs do is done for the first time
+# on a tag, and the two workflows cannot drift apart: before S22.5 they were
+# two copies, and the release's copy had never run anywhere.
+#
+# The job that uses this has already checked out the repository and set up
+# pnpm and the runtime.
+name: desktop leg
+description: Package the desktop app for this runner, start the runtime out of the artifact, and drive the app keyless
+inputs:
+  tgz:
+    description: A packed minidsh tarball to build from (a release's own bytes); empty packs this checkout
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - run: pnpm install --frozen-lockfile
+      shell: bash
+    - run: pnpm --dir desktop install --frozen-lockfile
+      shell: bash
+
+    # The runtime inside the artifact is the tarball named here when a release
+    # names one: byte for byte what npm gets, one release identity.
+    - name: Package for this platform
+      shell: bash
+      env:
+        TGZ: ${{ inputs.tgz }}
+      run: |
+        set -euo pipefail
+        if [ -n "$TGZ" ]; then
+          node desktop/scripts/package.ts --tgz "$TGZ"
+        else
+          node desktop/scripts/package.ts
+        fi
+
+    # The artifact's NAME is a contract (desktop/release-assets.json): the
+    # README's download links and the release's asset check both read it, so a
+    # packer that wrote another name fails here, on every push.
+    #
+    # Then the runtime as the app starts it, out of the artifact that ships:
+    # the AppImage and the zip are unpacked first, so a file the packer dropped
+    # fails here, not on a person's machine.
+    - name: The packaged runtime, started as the app starts it
+      id: artifact
+      shell: bash
+      run: |
+        set -euo pipefail
+        ASSET="$(node -p "require('./desktop/release-assets.json').installers[process.platform + '-' + process.arch]")"
+        if [ ! -f "desktop/build/dist/$ASSET" ]; then
+          echo "the packer did not write desktop/build/dist/$ASSET"; ls -la desktop/build/dist; exit 1
+        fi
+        case "$RUNNER_OS" in
+          Windows)
+            RESOURCES="desktop/build/dist/win-unpacked/resources"
+            EXE="$(cygpath -w "$GITHUB_WORKSPACE/desktop/build/dist/win-unpacked/MiniDSH.exe")"
+            echo "MINIDSH_DESKTOP_INSTALLER=$(cygpath -w "$GITHUB_WORKSPACE/desktop/build/dist/$ASSET")" >> "$GITHUB_ENV" ;;
+          Linux)
+            mkdir -p "$RUNNER_TEMP/appimage" && cp "desktop/build/dist/$ASSET" "$RUNNER_TEMP/appimage/"
+            (cd "$RUNNER_TEMP/appimage" && chmod +x "$ASSET" && "./$ASSET" --appimage-extract > /dev/null)
+            RESOURCES="$RUNNER_TEMP/appimage/squashfs-root/resources"
+            EXE="$RUNNER_TEMP/appimage/squashfs-root/minidsh-desktop" ;;
+          macOS)
+            ditto -x -k "desktop/build/dist/$ASSET" "$RUNNER_TEMP/mac"
+            # A fuse flip breaks the signature unless it is redone: an app
+            # macOS refuses to launch fails here (package.ts).
+            codesign --verify --deep --strict "$RUNNER_TEMP/mac/MiniDSH.app"
+            # Reported, never required: an ad-hoc signature is not a Developer
+            # ID, so Gatekeeper's verdict on a DOWNLOADED copy is expected to be
+            # a refusal a person overrides (README). This line is the record.
+            spctl --assess --type execute -vv "$RUNNER_TEMP/mac/MiniDSH.app" || echo "spctl: not accepted, as expected of an ad-hoc signature"
+            RESOURCES="$RUNNER_TEMP/mac/MiniDSH.app/Contents/Resources"
+            EXE="$RUNNER_TEMP/mac/MiniDSH.app/Contents/MacOS/MiniDSH" ;;
+        esac
+        test -f "$EXE"
+        echo "MINIDSH_DESKTOP_EXE=$EXE" >> "$GITHUB_ENV"
+        echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+        node desktop/scripts/smoke-runtime.ts "$RESOURCES"
+
+    # The app itself, as a person uses it (desktop/e2e/app.e2e.test.ts): its
+    # lifecycle on what was just unpacked, and on Windows the installer too — a
+    # silent install into a path with a space and a non-ASCII letter, a refused
+    # reinstall while it runs, a silent uninstall. MINIDSH_EXPECT_DESKTOP turns
+    # the suite's self-skip into a failure.
+    #
+    # Linux drives the EXTRACTED app, not the AppImage's launcher: the launcher
+    # adds --no-sandbox by itself where user namespaces are unavailable, and a
+    # leg that passed that way would have proved the app without its sandbox.
+    # Started directly, Chromium has only the namespace sandbox to use (the
+    # extracted setuid helper is not root's), so it either runs confined or
+    # does not start. Ubuntu 24.04 gates those namespaces behind AppArmor; the
+    # sysctl is best-effort because the launch is what decides.
+    - name: The app itself, driven keyless
+      shell: bash
+      env:
+        MINIDSH_EXPECT_DESKTOP: '1'
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "apparmor userns knob absent; the launch decides"
+          command -v xvfb-run > /dev/null || { sudo apt-get update && sudo apt-get install -y xvfb; }
+          xvfb-run -a npx vitest run --config vitest.e2e.config.ts desktop/e2e/app.e2e.test.ts
+        else
+          npx vitest run --config vitest.e2e.config.ts desktop/e2e/app.e2e.test.ts
+        fi
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: desktop-${{ runner.os }}-${{ runner.arch }}
+        path: desktop/build/dist/${{ steps.artifact.outputs.asset }}
+        if-no-files-found: error
+        retention-days: 7

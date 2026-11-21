@@ -22,6 +22,14 @@
  *
  * The desktop's version is the root's, and its Electron is the root's pinned
  * devDependency: one release identity, asserted here.
+ *
+ * What comes out is named by `desktop/release-assets.json`, one file per
+ * platform and NO version in the name: GitHub serves
+ * `releases/latest/download/<name>` only for a name that stays the same from
+ * release to release, and that is the link the README gives a person. The
+ * version is in the release, in the installed app and in Apps & features. The
+ * release workflow, the CI legs and the documentation gate read the same
+ * list, so a renamed artifact fails here and not as a dead link.
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -34,7 +42,12 @@ const ROOT = resolve(DESKTOP, '..')
 const BUILD = join(DESKTOP, 'build')
 const APP_ID = 'io.github.earthwalker17.minidsh'
 
-/** The newest Node 24 security release at S22.2 (2026-11-10); the same Node Electron 45.3.4 embeds. */
+/**
+ * The newest Node 24 security release (2026-11-10; rechecked at S22.5), and the
+ * same Node Electron 45.4.1 embeds. `.nvmrc` and every workflow run this
+ * version too, so the gate tests the runtime on the Node the app ships
+ * (`scripts/release-pins.test.ts`).
+ */
 const NODE_VERSION = '24.22.3'
 const NODE_SHA256: Readonly<Record<string, string>> = {
   'win32-x64': 'e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f',
@@ -90,6 +103,10 @@ const tgzFlag = process.argv.indexOf('--tgz')
 const givenTgz = tgzFlag === -1 ? undefined : resolve(process.argv[tgzFlag + 1] ?? fail('--tgz takes the path of a packed minidsh tarball'))
 const platformKey = `${process.platform}-${process.arch}`
 const nodeSha = NODE_SHA256[platformKey] ?? fail(`no pinned Node build for ${platformKey}`)
+/** The one file this platform ships, by its release name (see the header). */
+const installers = readJson(join(DESKTOP, 'release-assets.json')).installers as Readonly<Record<string, string>>
+const artifactName = installers[platformKey] ?? fail(`desktop/release-assets.json names no installer for ${platformKey}`)
+for (const key of Object.keys(installers)) if (NODE_SHA256[key] === undefined) fail(`desktop/release-assets.json ships ${key}, which has no pinned Node build`)
 
 // ---------------------------------------------------------------- the runtime
 
@@ -251,7 +268,7 @@ async function bundle(): Promise<void> {
     win: {
       target: [{ target: dirOnly ? 'dir' : 'nsis', arch: ['x64'] }],
       icon: 'icon.png',
-      artifactName: 'MiniDSH-Setup-${version}.${ext}',
+      artifactName,
     },
     nsis: {
       oneClick: true,
@@ -269,7 +286,7 @@ async function bundle(): Promise<void> {
       icon: 'icon.png',
       category: 'Development',
       synopsis: 'A small, local-first coding-agent harness',
-      artifactName: 'MiniDSH-${version}-${arch}.${ext}',
+      artifactName,
       executableName: 'minidsh-desktop',
       // Without this electron-builder writes `--no-sandbox` into the AppImage's
       // desktop entry unconditionally; AppRun still adds it, itself, only where
@@ -280,7 +297,7 @@ async function bundle(): Promise<void> {
       target: [{ target: dirOnly ? 'dir' : 'zip', arch: [process.arch === 'arm64' ? 'arm64' : 'x64'] }],
       icon: 'icon.png',
       category: 'public.app-category.developer-tools',
-      artifactName: 'MiniDSH-${version}-mac-${arch}.${ext}',
+      artifactName,
       ...(signed || process.env.CSC_NAME ? {} : { identity: '-' }),
     },
     publish: null,
@@ -290,6 +307,8 @@ async function bundle(): Promise<void> {
   for (const artifact of artifacts) {
     if (existsSync(artifact) && statSync(artifact).isFile()) process.stdout.write(`desktop package: ${artifact} (${(statSync(artifact).size / 1024 / 1024).toFixed(1)} MiB)\n`)
   }
+  // The name is a contract other files read: say so here, where it is made.
+  if (!dirOnly && !existsSync(join(BUILD, 'dist', artifactName))) fail(`electron-builder did not write ${artifactName} into ${join(BUILD, 'dist')}`)
 }
 
 if (!existsSync(join(DESKTOP, 'node_modules', 'electron-builder'))) fail('run `pnpm --dir desktop install` first')

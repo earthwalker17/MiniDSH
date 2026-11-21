@@ -1,5 +1,6 @@
 # The release: a `v*` tag becomes `minidsh@<version>` on npm and a GitHub
-# release, from CI, with nobody typing a one-time code.
+# release holding the package and the desktop installers, from CI, with nobody
+# typing a one-time code.
 #
 # Trusted publishing (OIDC): no npm token exists anywhere in this repository
 # or its secrets. npm mints a short-lived credential for THIS workflow file in
@@ -10,41 +11,67 @@
 # access → GitHub Actions: `earthwalker17` / `MiniDSH` / `release.yml`, with
 # `npm publish` among its allowed actions — without it the exchange succeeds
 # and the publish answers 403). A tag pushed before that is configured fails
-# at the publish step with nothing published.
+# at the publish step with nothing published. The file's NAME is part of that
+# trust: renaming it, or moving the publish into a reusable workflow, breaks
+# the exchange.
 #
-# The desktop installers (Windows NSIS, Linux AppImage, macOS zip; unsigned
-# until a signing identity exists) are built by a THIRD job, read-only like the
-# gate, one leg per platform, from the same commit; the publish job attaches
-# them to the draft beside the tarball. A desktop leg that fails stops the
-# release before anything is published: the app and the package are one
-# release identity.
+# FOUR JOBS, each asking only for what it needs:
 #
-# The gate and the publish are separate jobs, because a credential exists
-# for every step of a job that may mint one: with `id-token: write` on the whole run, `pnpm check` and the install
-# smoke — repository and dependency code, lifecycle scripts included — could
-# each have minted a publish credential (S20.5 review). The `gate` job runs
-# all of that with read access alone and hands over the packed bytes; the
-# `publish` job installs no dependency, runs no repository code before the
-# publish, and holds the two write permissions.
+#   gate      read-only. The guards, the whole repository gate, the pack, and
+#             a smoke install of the packed bytes.
+#   desktop   read-only, one leg per platform. The installers, built from the
+#             gate's tarball by the same steps `check.yml` runs on every push
+#             (`.github/actions/desktop-leg`), each runtime smoked out of its
+#             artifact and each app driven; on Windows the installer that
+#             ships is installed and uninstalled. Unsigned until a signing
+#             identity exists.
+#   assemble  `contents: write`, no `id-token`. Exactly the six assets by
+#             name, one SHA256SUMS over them, a DRAFT release holding them,
+#             read back and verified.
+#   publish   `id-token: write`. Publishes the gate's tarball through OIDC,
+#             installs it from the public registry, verifies its attestation,
+#             smokes it, and makes the draft public. It installs no
+#             dependency and runs no repository code before the publish: a
+#             credential exists for every step of a job that may mint one
+#             (S20.5 review), so everything that runs repository or dependency
+#             code lives in the jobs above it.
+#
+# THE DRY RUN. `workflow_dispatch` runs gate → desktop → assemble on any
+# branch and stops there: the draft is named `dry-run-<run id>`, read back,
+# verified and deleted, and the publish job does not run (it runs for a tag
+# push alone, and says so again in its first step). Nothing reaches npm and
+# no release is left behind. That is how a change to this file, or to the
+# packaging, is rehearsed before a tag: until S22.5 the desktop job, the
+# artifact merge and the asset upload had never run anywhere. In a dry run the
+# tag guards are reported, not required; on a tag they are required, and that
+# is the default branch of each guard's script.
 #
 # The ORDER is what makes a failed run leave a state a person can read:
 # guards (the tag is on main, agrees with package.json, and its commit already
-# passed check.yml on all three platforms AND an unfiltered live.yml on both
-# legs) → the whole gate → pack → smoke-install the packed bytes → [desktop
-# job] the installers built from those bytes, each runtime smoked → [publish
-# job] a DRAFT release holding those bytes and the installers → publish those same bytes →
-# install from the public registry, verify the attestation, then smoke it →
-# the draft goes public. A failure before the draft leaves nothing; one
-# between the draft and the publish leaves a draft and no package; one after
-# it, a published package and a visible draft; never a package no release
-# names or a release no package backs. npm refuses to publish an existing
-# version, so a re-run after a successful publish skips that step and
-# finishes the rest.
+# passed check.yml on every platform AND an unfiltered live.yml on both legs)
+# → the whole gate → pack → smoke-install the packed bytes → [desktop] the
+# installers built from those bytes → [assemble] a DRAFT release holding those
+# bytes → [publish] those same bytes to npm → install from the public
+# registry, verify the attestation, then smoke it → the draft goes public.
+#
+#   fails before the draft     nothing exists; fix, re-run the failed jobs
+#   fails in assemble          a draft, no package; re-run the failed jobs
+#   fails in publish before    a draft, no package; re-run the failed jobs
+#     the npm publish
+#   fails after the publish    a published package and a visible draft; re-run
+#                              the failed jobs (the publish step skips itself)
+#
+# Two rules a person follows. RE-RUN ONLY THE FAILED JOBS: "re-run all jobs"
+# packs again, and assemble refuses a tarball that differs from one npm
+# already serves. ONCE NPM HOLDS A VERSION ITS TAG NEVER MOVES: a defect found
+# after that is fixed in the next patch release.
 name: release
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('release dry run ({0})', github.ref_name) || format('release {0}', github.ref_name) }}
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 # Each job asks for what it needs, and nothing is granted by default.
 permissions: {}
@@ -73,18 +100,23 @@ jobs:
       # `check.yml` runs on branches, never on a tag, so this is where a tag
       # proves it names a commit main already carries — a tag on a stray commit
       # publishes nothing — and that it agrees with the version the code says.
+      # A dry run has no tag to hold to that; anything else is held to it.
       - name: Refuse a tag that is not on main, or that disagrees with package.json
         id: version
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
           VERSION="$(node -p "require('./package.json').version")"
-          if [ "$TAG" != "v$VERSION" ]; then
-            echo "tag $TAG does not match package.json version $VERSION"; exit 1
-          fi
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "tag $TAG points at $GITHUB_SHA, which is not on main: nothing is published from a stray commit"; exit 1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "DRY RUN of $VERSION from $GITHUB_REF_NAME at $GITHUB_SHA: no tag is required, nothing reaches npm, no release is left behind"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$TAG" != "v$VERSION" ]; then
+              echo "$GITHUB_REF_TYPE $TAG does not match package.json version $VERSION"; exit 1
+            fi
+            git fetch --no-tags origin main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "tag $TAG points at $GITHUB_SHA, which is not on main: nothing is published from a stray commit"; exit 1
+            fi
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -94,18 +126,23 @@ jobs:
       # commit. Being on main proved neither: a main commit can carry a red
       # macOS leg, or a check.yml run cancelled by `cancel-in-progress` when the
       # next push landed. A conclusion of success means every job of that run
-      # passed. A live.yml run counts only UNFILTERED: its run name records the
-      # filter, and one re-run of a single arc proves nothing about the rest
-      # (S20.5 review). Each missing proof is named, with the way to supply it.
+      # passed. A live.yml run counts only UNFILTERED: its run name says "every
+      # arc" only when no filter was given, and a filtered run's name always
+      # starts with "filter", whatever was typed (S20.5 and S22.5 reviews). The
+      # lookup is by commit, not by branch: a run made on the release-candidate
+      # branch proves the commit main is then fast-forwarded to.
       - name: Refuse a commit that check.yml and an unfiltered live.yml have not both passed
         run: |
           set -euo pipefail
           check="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=1" --jq '.total_count')"
-          live="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/live.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=100" --jq '[.workflow_runs[] | select(.display_title == "live: all")] | length')"
+          live="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/live.yml/runs?head_sha=$GITHUB_SHA&status=success&per_page=100" --jq '[.workflow_runs[] | select(.display_title == "live: every arc")] | length')"
           echo "check.yml: $check successful run(s) for $GITHUB_SHA; live.yml: $live successful unfiltered run(s)"
           missing=0
-          if [ "$check" = "0" ]; then echo "no successful check.yml run for $GITHUB_SHA: push this commit to main (or dispatch check), then re-run this release"; missing=1; fi
+          if [ "$check" = "0" ]; then echo "no successful check.yml run for $GITHUB_SHA: push this commit to main or a release/ branch (or dispatch check), then re-run this release"; missing=1; fi
           if [ "$live" = "0" ]; then echo "no successful UNFILTERED live.yml run for $GITHUB_SHA: Actions → live → Run workflow with a blank filter, then re-run this release"; missing=1; fi
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "dry run: reported, not required"; exit 0
+          fi
           exit "$missing"
 
       # The same functional probe check.yml makes: this leg proves confinement,
@@ -123,7 +160,7 @@ jobs:
 
       - uses: pnpm/setup@v3
         with:
-          runtime: node@24.19.0
+          runtime: node@24.22.3
           cache: true
 
       # The gate on the commit being released, on this runner — its own step,
@@ -138,7 +175,8 @@ jobs:
           MINIDSH_EXPECT_BROWSER: '1'
 
       # The bytes: packed once, here (`prepack` builds dist/). Everything after
-      # this step — the smoke, the release asset, the publish — uses THIS file.
+      # this step — the smoke, the installers, the release asset, the publish —
+      # uses THIS file.
       - name: Pack
         run: |
           set -euo pipefail
@@ -170,18 +208,18 @@ jobs:
     permissions:
       contents: read
     strategy:
+      # Every platform reports: a release that failed on one leg should say
+      # what the other three did.
+      fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v7
 
       - uses: pnpm/setup@v3
         with:
-          runtime: node@24.19.0
+          runtime: node@24.22.3
           cache: true
-
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --dir desktop install --frozen-lockfile
 
       # The runtime inside every installer is the gate's tarball, byte for
       # byte the one npm gets: one release identity.
@@ -193,70 +231,168 @@ jobs:
       # Unsigned: no signing secret exists yet (S22.2). When one does, it goes
       # into THIS job's environment (WIN_CSC_LINK / CSC_LINK and a password),
       # which electron-builder reads; nothing else changes.
-      - name: Package for this platform
-        shell: bash
-        run: node desktop/scripts/package.ts --tgz "$RUNNER_TEMP/gate/minidsh-${{ needs.gate.outputs.version }}.tgz"
+      - uses: ./.github/actions/desktop-leg
+        with:
+          tgz: ${{ runner.temp }}/gate/minidsh-${{ needs.gate.outputs.version }}.tgz
 
-      # The runtime as the app starts it, out of the artifact that ships: the
-      # AppImage and the zip are unpacked first, so a file the packer dropped
-      # fails here, not on a person's machine. (Windows: the unpacked build
-      # only. These installer bytes are not installed by this run; check.yml
-      # installs and drives an installer built from the same commit.)
-      - name: The packaged runtime, started as the app starts it
-        shell: bash
+  assemble:
+    name: assemble ${{ github.ref_name }}
+    needs: [gate, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # the draft release, and nothing else: no id-token in this job
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      # The CHANGELOG and the asset list only; nothing from the checkout runs.
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tarball
+          path: ${{ runner.temp }}/assets
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+
+      # The set is asserted, not globbed: a leg that uploaded nothing, or a
+      # file under another name, stops the release here. The installers are
+      # unsigned, so the checksum a person can verify against is what there is.
+      - name: Exactly the release's assets, by name, and one SHA256SUMS over them
         run: |
           set -euo pipefail
-          case "$RUNNER_OS" in
-            Windows) RESOURCES="desktop/build/dist/win-unpacked/resources" ;;
-            Linux)
-              mkdir -p "$RUNNER_TEMP/appimage" && cp desktop/build/dist/MiniDSH-*.AppImage "$RUNNER_TEMP/appimage/"
-              (cd "$RUNNER_TEMP/appimage" && chmod +x MiniDSH-*.AppImage && ./MiniDSH-*.AppImage --appimage-extract > /dev/null)
-              RESOURCES="$RUNNER_TEMP/appimage/squashfs-root/resources" ;;
-            macOS)
-              ditto -x -k desktop/build/dist/MiniDSH-*-mac-*.zip "$RUNNER_TEMP/mac"
-              # A fuse flip breaks the signature unless it is redone: an app
-              # macOS refuses to launch fails here (package.ts).
-              codesign --verify --deep --strict "$RUNNER_TEMP/mac/MiniDSH.app"
-              RESOURCES="$RUNNER_TEMP/mac/MiniDSH.app/Contents/Resources" ;;
-          esac
-          node desktop/scripts/smoke-runtime.ts "$RESOURCES"
+          cd "$RUNNER_TEMP/assets"
+          ls -la
+          node - "$VERSION" "$GITHUB_WORKSPACE/desktop/release-assets.json" <<'JS'
+          const fs = require('fs')
+          const [version, list] = process.argv.slice(2)
+          const expected = [...Object.values(JSON.parse(fs.readFileSync(list, 'utf8')).installers), `minidsh-${version}.tgz`].sort()
+          const found = fs.readdirSync('.').sort()
+          if (JSON.stringify(found) !== JSON.stringify(expected)) {
+            console.error(`the release's assets are not the expected set\n  expected: ${expected.join(', ')}\n  found:    ${found.join(', ')}`)
+            process.exit(1)
+          }
+          for (const name of found) if (fs.statSync(name).size < 1024) { console.error(`${name} is ${fs.statSync(name).size} bytes`); process.exit(1) }
+          console.log(`${found.length} assets, as expected`)
+          JS
+          sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: desktop-${{ runner.os }}
-          path: |
-            desktop/build/dist/*.exe
-            desktop/build/dist/*.AppImage
-            desktop/build/dist/*.zip
-          if-no-files-found: error
-          retention-days: 7
+      # "Re-run all jobs" packs again. If npm already serves this version, the
+      # tarball in hand must be the one it serves, or the release's assets and
+      # the package would be two different things under one name.
+      - name: Refuse a tarball that differs from one npm already serves
+        run: |
+          set -euo pipefail
+          OURS="sha512-$(openssl dgst -sha512 -binary "$RUNNER_TEMP/assets/minidsh-$VERSION.tgz" | base64 -w0)"
+          PUBLISHED="$(npm view "minidsh@$VERSION" dist.integrity 2> /dev/null || true)"
+          echo "this run packed $OURS"
+          if [ -z "$PUBLISHED" ]; then
+            echo "minidsh@$VERSION is not on the registry yet"
+          elif [ "$PUBLISHED" = "$OURS" ]; then
+            echo "minidsh@$VERSION on the registry is these bytes"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "dry run: the registry serves other bytes for $VERSION ($PUBLISHED); reported, not required"
+          else
+            echo "npm already serves minidsh@$VERSION as $PUBLISHED, and this run packed other bytes: re-run only the FAILED jobs of the original run, never all of them"; exit 1
+          fi
+
+      # A DRAFT, holding the packed bytes, the installers and the CHANGELOG
+      # section, so a failure from here on leaves something a person can see
+      # and finish. A draft's assets are replaced whole on a re-run (the
+      # tarball too: they were checked against the registry above); a public
+      # release's are never replaced, only verified.
+      - name: Draft the GitHub release from the CHANGELOG
+        run: |
+          set -euo pipefail
+          node - "$VERSION" > "$RUNNER_TEMP/notes.md" <<'JS'
+          const fs = require('fs')
+          const version = process.argv[2]
+          const text = fs.readFileSync('CHANGELOG.md', 'utf8')
+          const start = text.indexOf(`## [${version}]`)
+          if (start < 0) { console.error(`CHANGELOG.md has no section for ${version}`); process.exit(1) }
+          const rest = text.slice(text.indexOf('\n', start) + 1)
+          const end = rest.search(/^(## \[|\[[^\]]+\]: )/m)
+          process.stdout.write((end < 0 ? rest : rest.slice(0, end)).trim() + '\n')
+          JS
+          test -s "$RUNNER_TEMP/notes.md"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            RELEASE="dry-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            TITLE="DRY RUN: minidsh $VERSION at $GITHUB_SHA (deleted when the run ends)"
+          else
+            RELEASE="v$VERSION"
+            TITLE="minidsh $VERSION"
+          fi
+          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          if gh release view "$RELEASE" > /dev/null 2>&1; then
+            echo "release $RELEASE already exists; keeping it"
+          else
+            gh release create "$RELEASE" --draft --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          if [ "$(gh release view "$RELEASE" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release upload "$RELEASE" --clobber "$RUNNER_TEMP"/assets/*
+          else
+            echo "release $RELEASE is already public: its assets are verified below, never replaced"
+          fi
+
+      # What the release holds, read back: the bytes a person will download
+      # are the bytes this run built, all of them, and nothing else.
+      - name: Read the release back and verify every asset
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/back"
+          gh release download "$RELEASE" --dir "$RUNNER_TEMP/back"
+          cd "$RUNNER_TEMP/back"
+          ls -la
+          cmp SHA256SUMS "$RUNNER_TEMP/assets/SHA256SUMS"
+          sha256sum -c SHA256SUMS
+          test "$(ls | wc -l)" = "$(( $(wc -l < SHA256SUMS) + 1 ))"
+          echo "the release holds $(ls | wc -l) assets and every checksum agrees"
+
+      - name: Delete the dry run's draft
+        if: always() && github.event_name == 'workflow_dispatch'
+        run: |
+          if [ -n "${RELEASE:-}" ]; then gh release delete "$RELEASE" --yes || echo "no draft named $RELEASE to delete"; fi
 
   publish:
     name: publish ${{ github.ref_name }}
-    needs: [gate, desktop]
+    needs: [gate, assemble]
+    # A tag push, and nothing else, reaches the registry: a dry run stops at
+    # assemble.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write # the GitHub release
+      contents: write # the draft goes public
       id-token: write # the OIDC exchange npm trusted publishing needs
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.gate.outputs.version }}
     steps:
-      # The CHANGELOG and the smoke script only: no dependency is installed in
-      # this job, and nothing from the checkout runs before the publish.
+      # Said twice on purpose: the job's `if` is an expression, this is the
+      # runner's own account of the event, and the credential this job can
+      # mint is worth both.
+      - name: Only a tag push for this version publishes
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "push" ] || [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "publish reached by $GITHUB_EVENT_NAME on $GITHUB_REF_TYPE $GITHUB_REF_NAME for version $VERSION: refusing"; exit 1
+          fi
+
+      # The smoke script only: no dependency is installed in this job, and
+      # nothing from the checkout runs before the publish.
       - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:
           name: tarball
           path: ${{ runner.temp }}/release
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: desktop-*
-          path: ${{ runner.temp }}/desktop
-          merge-multiple: true
 
       - name: The bytes the gate packed
         run: |
@@ -267,7 +403,7 @@ jobs:
 
       - uses: pnpm/setup@v3
         with:
-          runtime: node@24.19.0
+          runtime: node@24.22.3
 
       # Trusted publishing needs npm 11.5.1 or newer. The `npm` PATH resolves
       # first is the runner image's own (10.x from its Node), and `npm install
@@ -283,39 +419,6 @@ jobs:
           echo "node $(node --version) at $(command -v node); npm $("$NPM" --version) at $NPM (PATH's npm: $(npm --version))"
           "$NPM" --version | node -e "const [a,b,c]=require('fs').readFileSync(0,'utf8').trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm ' + [a,b,c].join('.') + ' cannot publish through trusted publishing'); process.exit(1) }"
           echo "NPM=$NPM" >> "$GITHUB_ENV"
-
-      # A DRAFT first, holding the packed bytes and the CHANGELOG section, so a
-      # failure from here on leaves something a person can see and finish.
-      - name: Draft the GitHub release from the CHANGELOG
-        run: |
-          set -euo pipefail
-          node - "$VERSION" > "$RUNNER_TEMP/notes.md" <<'JS'
-          const fs = require('fs')
-          const version = process.argv[2]
-          const text = fs.readFileSync('CHANGELOG.md', 'utf8')
-          const start = text.indexOf(`## [${version}]`)
-          if (start < 0) { console.error(`CHANGELOG.md has no section for ${version}`); process.exit(1) }
-          const rest = text.slice(text.indexOf('\n', start) + 1)
-          const end = rest.search(/^(## \[|\[[^\]]+\]: )/m)
-          process.stdout.write((end < 0 ? rest : rest.slice(0, end)).trim() + '\n')
-          JS
-          test -s "$RUNNER_TEMP/notes.md"
-          if gh release view "v$VERSION" > /dev/null 2>&1; then
-            echo "release v$VERSION already exists; keeping it"
-          else
-            gh release create "v$VERSION" --draft --title "minidsh $VERSION" --notes-file "$RUNNER_TEMP/notes.md" "$TARBALL"
-          fi
-          # The desktop installers beside the tarball, and one SHA256SUMS over
-          # every asset: they are unsigned, so the checksum a person can verify
-          # against is what there is. A re-run may replace a DRAFT's assets
-          # (--clobber); a published release's are never rebuilt under it.
-          ls -la "$RUNNER_TEMP/desktop"
-          (cd "$RUNNER_TEMP" && cp "$TARBALL" desktop/ && cd desktop && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS" && cat "$RUNNER_TEMP/SHA256SUMS")
-          if [ "$(gh release view "v$VERSION" --json isDraft --jq .isDraft)" = "true" ]; then
-            gh release upload "v$VERSION" --clobber "$RUNNER_TEMP"/desktop/MiniDSH* "$RUNNER_TEMP/SHA256SUMS"
-          else
-            echo "release v$VERSION is already published: its assets are not replaced"
-          fi
 
       # What npm's trusted-publishing exchange is shown, printed before the
       # publish so a mismatch with the trusted publisher configured on
@@ -343,14 +446,19 @@ jobs:
       # No token: the OIDC exchange is the credential, and provenance is
       # attached by npm itself. The TARBALL, not the checkout, so the published
       # bytes are the ones the smoke ran and the release holds; `--ignore-scripts`
-      # because the gate and the build already ran, once, on those bytes.
+      # because the gate and the build already ran, once, on those bytes. A
+      # version already there is skipped only when it IS these bytes.
       - name: Publish to npm through trusted publishing
         run: |
           set -euo pipefail
-          if "$NPM" view "minidsh@$VERSION" version > /dev/null 2>&1; then
-            echo "minidsh@$VERSION is already on the registry; not publishing again"
-          else
+          OURS="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | base64 -w0)"
+          PUBLISHED="$("$NPM" view "minidsh@$VERSION" dist.integrity 2> /dev/null || true)"
+          if [ -z "$PUBLISHED" ]; then
             "$NPM" publish "$TARBALL" --access public --ignore-scripts
+          elif [ "$PUBLISHED" = "$OURS" ]; then
+            echo "minidsh@$VERSION is already on the registry as these bytes; not publishing again"
+          else
+            echo "minidsh@$VERSION is already on the registry as $PUBLISHED, and this run holds $OURS: refusing"; exit 1
           fi
 
       # The artifact a stranger gets, from the public registry, with its
@@ -380,5 +488,14 @@ jobs:
           # Only then, every check the branch gate makes, on what a stranger now gets.
           bash "$GITHUB_WORKSPACE/scripts/smoke-installed.sh" "$PWD" "$VERSION"
 
+      # The release a person lands on from the README's download links: every
+      # asset there, by name, before it goes public and becomes "latest".
       - name: Publish the draft release
-        run: gh release edit "v$VERSION" --draft=false
+        run: |
+          set -euo pipefail
+          EXPECTED="$(node -e "const a=[...Object.values(require('$GITHUB_WORKSPACE/desktop/release-assets.json').installers),'minidsh-'+process.argv[1]+'.tgz','SHA256SUMS'].sort();process.stdout.write(a.join(','))" "$VERSION")"
+          FOUND="$(gh release view "v$VERSION" --json assets --jq '[.assets[].name] | sort | join(",")')"
+          if [ "$FOUND" != "$EXPECTED" ]; then
+            echo "release v$VERSION holds [$FOUND], not [$EXPECTED]: not making it public"; exit 1
+          fi
+          gh release edit "v$VERSION" --draft=false --latest

@@ -13,8 +13,11 @@
 # Both legs report (`fail-fast: false`); neither stands in for the other.
 name: live
 # The filter is in the run's name, so the release guard can tell an
-# unfiltered run (every arc) from one re-run arc (S20.5 review).
-run-name: "live: ${{ inputs.filter || 'all' }}"
+# unfiltered run (every arc) from one re-run arc (S20.5 review). A filtered
+# run's name always starts with "filter", whatever was typed: before S22.5 the
+# unfiltered name was "live: all", which a run filtered to the word "all" (it
+# matches no file, runs nothing and passes) could carry too.
+run-name: "live: ${{ inputs.filter == '' && 'every arc' || format('filter {0}', inputs.filter) }}"
 
 on:
   workflow_dispatch:
@@ -88,7 +91,7 @@ jobs:
       # pnpm 11 and newer only, which is what `packageManager` pins).
       - uses: pnpm/setup@v3
         with:
-          runtime: node@24.19.0
+          runtime: node@24.22.3
           cache: true
 
       # FILTER goes through the environment, never interpolated into the script:
