@@ -84,6 +84,24 @@ describe('the retention sweep', () => {
   })
 
   /**
+   * The period nobody configured: every other case here names its own, so the
+   * default could become a year, or a day, without one of them noticing. Thirty
+   * days is the retention table's promise for spill (ARCHITECTURE §9).
+   */
+  it('expires at thirty days when no period is configured', async () => {
+    const spillRoot = tempDir('minidsh-sweep-')
+    const dir = join(spillRoot, String(newSessionId()))
+    mkdirSync(dir)
+    const past = aged(join(dir, 'call-1-shell.txt'), 40)
+    const within = aged(join(dir, 'call-2-shell.txt'), 20)
+
+    await swept(spillRoot)
+
+    expect({ fortyDays: existsSync(past), twentyDays: existsSync(within) }).toEqual({ fortyDays: false, twentyDays: true })
+    expect(warnings).toEqual([])
+  })
+
+  /**
    * The boundary itself, which no "very old versus brand new" case can reach:
    * two clock reads are always milliseconds apart, so the cutoff is pinned to
    * the file's own recorded mtime instead. Only `Date` is faked — faking timers

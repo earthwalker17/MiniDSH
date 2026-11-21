@@ -184,6 +184,40 @@ describe('readImage', () => {
     await dispose()
   })
 
+  /**
+   * The bytes are right and the LOG is wrong about them. The digest check
+   * above cannot see that: it compares the object with its own id. The header
+   * is re-derived from the bytes and compared with every fact the reference
+   * carries, because those facts are what a request is built and priced from.
+   */
+  it('refuses a reference whose recorded facts disagree with the stored bytes, one fact at a time', async () => {
+    const { attachments, dispose } = await store()
+    const png = quadPng(48)
+    const ref = await attachments.saveImage({ data: png })
+    expect(ref).toMatchObject({ mediaType: 'image/png', bytes: png.length, width: 48, height: 48 })
+    const wrong: [string, Partial<AttachmentRef>][] = [
+      ['width', { width: 49 }],
+      ['height', { height: 47 }],
+      ['bytes', { bytes: png.length + 1 }],
+      ['mediaType', { mediaType: 'image/jpeg' }],
+    ]
+    for (const [fact, change] of wrong) {
+      const error = await attachments.readImage({ ...ref, ...change }).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      )
+      expect(error, `a wrong ${fact} was read back as if the log were right`).toBeInstanceOf(AttachmentError)
+      expect({ fact, code: (error as AttachmentError).code, message: (error as AttachmentError).message }).toEqual({
+        fact,
+        code: 'ATTACHMENT_CORRUPT',
+        message: `attachment ${ref.id} does not match the reference the log records`,
+      })
+    }
+    // The untouched reference still reads: the refusals above were about the facts, not the object.
+    expect(Buffer.from(await attachments.readImage(ref)).equals(png)).toBe(true)
+    await dispose()
+  })
+
   it('refuses an id this store never minted', async () => {
     const { attachments, dispose } = await store()
     const forged: AttachmentRef = { id: asAttachmentId('../../etc/passwd'), mediaType: 'image/png', bytes: 1, width: 1, height: 1 }
