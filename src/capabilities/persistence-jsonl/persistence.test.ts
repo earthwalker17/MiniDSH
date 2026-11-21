@@ -1,12 +1,24 @@
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
+import { createRoot, type Context, type Logger, type Plugin } from '../../kernel/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import { PERSISTENCE } from '../../core/persistence/index.ts'
-import { SESSIONS, SESSION_TITLE, TURN_END, TURN_START, USER_MESSAGE, foldSessionTitle, repairInterruptedTail, type Sessions } from '../../core/session/index.ts'
+import {
+  SESSIONS,
+  SESSION_EVENT,
+  SESSION_FORMAT_VERSION,
+  SESSION_TITLE,
+  TURN_END,
+  TURN_START,
+  USER_MESSAGE,
+  foldSessionTitle,
+  matches,
+  repairInterruptedTail,
+  type Sessions,
+} from '../../core/session/index.ts'
 import { sessionPlugin } from '../../core/session/index.ts'
 import { persistenceJsonlPlugin, unreadableHeader } from './index.ts'
 
@@ -138,7 +150,7 @@ describe('persistence-jsonl: resume attach', () => {
 
     const stored = root!.get(PERSISTENCE).load('torn')!
     expect(stored.damaged).toBeUndefined() // a torn final line is readable-prefix, not damage
-    sessions.create({
+    const resumed = sessions.create({
       cwd: stored.header.cwd,
       id: stored.header.id,
       createdAt: stored.header.createdAt,
@@ -150,6 +162,21 @@ describe('persistence-jsonl: resume attach', () => {
     expect(sidecar).toMatch(/^# torn .+ \(22 bytes\)\n/) // fragments stay individually recoverable
     const after = readFileSync(fileFor(base, 'torn'))
     expect(after.subarray(0, intact.length).equals(intact)).toBe(true)
+    // MOVED, not copied: the fragment is gone from the log, and what follows the
+    // intact prefix is exactly the resume's own delta on lines of its own. A
+    // fragment left in place would have that delta appended onto its line, and
+    // the next read would stop there as damage and refuse every later resume.
+    expect(after.toString('utf8')).not.toContain('{"type":"assistant/chu')
+    expect(after.subarray(intact.length).toString('utf8').trim().split('\n').map((line) => (JSON.parse(line) as { type: string }).type)).toEqual(['session/end-seed'])
+    // The whole point, read back the way the next resume reads it.
+    await sessions.detach(resumed)
+    const again = root!.get(PERSISTENCE).load('torn')!
+    expect({ damaged: again.damaged, tail: again.integrity?.tail, stop: again.integrity?.stop, events: again.events.length }).toEqual({
+      damaged: undefined,
+      tail: 'none',
+      stop: undefined,
+      events: stored.events.length + 1,
+    })
   })
 
   it('marks deeper corruption as damaged and refuses to attach, surfacing at flush', async () => {
@@ -409,8 +436,20 @@ ${JSON.stringify(event)}
 `)
     }
 
+    // And the payload ITSELF missing, which the envelope check lets through as
+    // far as the fold: `"data": null`, and a line with no `data` key at all.
+    for (const [id, payload] of [
+      ['broken-data-null', { data: null }],
+      ['broken-data-absent', {}],
+    ] as const) {
+      const header = { kind: 'session', version: 0, id, createdAt: 2000, cwd: '/w' }
+      const event = { type: 'user/message', seq: 0, time: 1, ...payload, surfaceOp: { op: 'append' } }
+      expect('data' in event, id).toBe(id === 'broken-data-null')
+      appendFileSync(join(base, `${id}.jsonl`), [JSON.stringify(header), JSON.stringify(event), ''].join('\n'))
+    }
+
     const listed = root!.get(PERSISTENCE).list()
-    expect(listed.map((one) => String(one.header.id)).toSorted()).toEqual(['broken-block', 'broken-null', 'broken-string', 'good'])
+    expect(listed.map((one) => String(one.header.id)).toSorted()).toEqual(['broken-block', 'broken-data-absent', 'broken-data-null', 'broken-null', 'broken-string', 'good'])
     for (const one of listed) if (String(one.header.id).startsWith('broken')) expect(one.title).toBeUndefined()
     expect(listed.find((one) => String(one.header.id) === 'good')?.title).toBe('prompt 1')
   })
@@ -428,5 +467,110 @@ ${JSON.stringify(event)}
     expect(summary!.title).toBeUndefined()
     // The whole log still reads, so `sessions show` names it where a listing cannot.
     expect(foldSessionTitle(root!.get(PERSISTENCE).load('huge')!.events)).toBe(`${'x'.repeat(79)}…`)
+  })
+})
+
+/**
+ * A session log holds every prompt, every file the agent read and every
+ * command's output, so on POSIX it is the owner's alone, like the spill and
+ * attachment stores beside it. Windows has no mode bits to ask about.
+ */
+describe.skipIf(process.platform === 'win32')('persistence-jsonl: who may read a stored log (POSIX)', () => {
+  const mode = (path: string): string => (statSync(path).mode & 0o777).toString(8)
+
+  async function mountAt(store: string): Promise<Sessions> {
+    root = createRoot({ logger: silent })
+    root.plugin(sessionPlugin)
+    root.plugin(persistenceJsonlPlugin, { root: store })
+    await root.settle()
+    return root.get(SESSIONS)
+  }
+
+  it('creates the store, a log, its lock and a torn sidecar owner-only', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-persist-'))
+    // A home that does not exist yet: this row is the first thing to make it.
+    const store = join(dir, 'home', 'sessions')
+    const sessions = await mountAt(store)
+    sessions.create({ cwd: '/w', id: asSessionId('private') })
+    appendTurn(sessions, 'private', 1)
+    const file = fileFor(store, 'private')
+    expect({ home: mode(join(dir, 'home')), store: mode(store), log: mode(file), lock: mode(`${file}.lock`) }).toEqual({ home: '700', store: '700', log: '600', lock: '600' })
+
+    await sessions.detach(sessions.get(asSessionId('private'))!)
+    appendFileSync(file, '{"type":"assistant/chu')
+    const stored = root!.get(PERSISTENCE).load('private')!
+    sessions.create({ cwd: stored.header.cwd, id: stored.header.id, createdAt: stored.header.createdAt, seed: stored.events, origin: 'resumed' })
+    expect({ sidecar: mode(`${file}.torn`), log: mode(file) }).toEqual({ sidecar: '600', log: '600' })
+  })
+
+  it('leaves a store and a log that already exist with the modes they have', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-persist-'))
+    const store = join(dir, 'sessions')
+    mkdirSync(store)
+    chmodSync(store, 0o755)
+    const file = fileFor(store, 'older')
+    const header = { kind: 'session', version: SESSION_FORMAT_VERSION, id: 'older', createdAt: 1000, cwd: '/w' }
+    const prompt = { type: 'user/message', seq: 0, time: 1, data: { message: createUserMessage('written before logs were private') }, surfaceOp: { op: 'append' } }
+    writeFileSync(file, [JSON.stringify(header), JSON.stringify(prompt), ''].join('\n'))
+    chmodSync(file, 0o644)
+
+    const sessions = await mountAt(store)
+    const stored = root!.get(PERSISTENCE).load('older')!
+    const resumed = sessions.create({ cwd: stored.header.cwd, id: stored.header.id, createdAt: stored.header.createdAt, seed: stored.events, origin: 'resumed' })
+    resumed.append(TURN_START, { turn: 1 })
+    await resumed.flush()
+    // Continued in place, not tightened: an upgrade changes no file it did not create.
+    expect({ store: mode(store), log: mode(file) }).toEqual({ store: '755', log: '644' })
+    expect(root!.get(PERSISTENCE).load('older')!.events.length).toBe(stored.events.length + 2)
+  })
+})
+
+describe('persistence-jsonl: a line never precedes its cause', () => {
+  /**
+   * A `session/event` listener may not append synchronously (ARCHITECTURE §4):
+   * its event is delivered to every later listener BEFORE the event that
+   * caused it. The writer is such a later listener, so written as it arrives
+   * the log would run seq 3, seq 2: damaged at the next read, and refused by
+   * every resume after. The rule is a convention for listeners; this is the
+   * writer refusing to turn a broken convention into a broken log.
+   */
+  it('never writes an event delivered ahead of the one that caused it, and fails every flush after', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-persist-'))
+    root = createRoot({ logger: silent })
+    root.plugin(sessionPlugin)
+    const appendsInsideDelivery: Plugin = {
+      name: 'appends-inside-delivery',
+      apply(ctx) {
+        ctx.on(SESSION_EVENT, (session, event) => {
+          if (matches(event, TURN_END)) session.append(SESSION_TITLE, { title: 'too early', messageSeqs: [1], source: { kind: 'fallback' } })
+        })
+      },
+    }
+    // Mounted BEFORE the writer, so the writer hears the nested event first.
+    root.plugin(appendsInsideDelivery)
+    root.plugin(persistenceJsonlPlugin, { root: dir })
+    await root.settle()
+    const sessions = root.get(SESSIONS)
+    const persistFailure = (error: unknown): boolean => /could not be persisted: event 3 \(session\/title\) arrived where event 2 was expected/.test(((error as AggregateError).errors?.[0] as Error | undefined)?.message ?? '')
+
+    const session = sessions.create({ cwd: '/w', id: asSessionId('nested') })
+    session.append(TURN_START, { turn: 1 })
+    session.append(USER_MESSAGE, { message: createUserMessage('go') }, { surfaceOp: { op: 'append' } })
+    await session.flush()
+    const before = readFileSync(fileFor(dir, 'nested'))
+
+    session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+    // In memory the cause comes first, which is why only the writer can see this.
+    expect(session.events.map((event) => `${event.seq} ${event.type}`)).toEqual(['0 turn/start', '1 user/message', '2 turn/end', '3 session/title'])
+    await expect(session.flush()).rejects.toSatisfy(persistFailure)
+    // Neither line reached the file: not the early one, and not its cause after it.
+    expect(readFileSync(fileFor(dir, 'nested')).equals(before)).toBe(true)
+
+    // Quarantined for good: a later event writes nothing, and every flush says why.
+    session.append(TURN_START, { turn: 2 })
+    await expect(session.flush()).rejects.toSatisfy(persistFailure)
+    expect(readFileSync(fileFor(dir, 'nested')).equals(before)).toBe(true)
+    const stored = root.get(PERSISTENCE).load('nested')!
+    expect({ damaged: stored.damaged, tail: stored.integrity?.tail, seqs: stored.events.map((event) => event.seq) }).toEqual({ damaged: undefined, tail: 'none', seqs: [0, 1] })
   })
 })

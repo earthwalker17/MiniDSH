@@ -33,7 +33,7 @@ export interface StoredLease {
   readonly pid: number
   readonly host: string
   readonly acquiredAt?: number
-  /** Probed on this host (`kill(pid, 0)`); `unknown` for another host, which cannot be probed. */
+  /** Probed on this host (`kill(pid, 0)`); `unknown` for another host or OS instance (WSL and its Windows host share a name), which cannot be probed. */
   readonly alive: boolean | 'unknown'
 }
 

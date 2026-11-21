@@ -23,9 +23,11 @@ import { SESSION_EVENT, SESSION_TITLE, matches, scanSessionTitle, USER_MESSAGE, 
  * style: a `session/event` listener may not append synchronously (ARCHITECTURE
  * §4). Delivery is where the JSONL writer emits its line and the relational
  * invariant commits its staged trace, so an append made inside it reaches the
- * file and the wire BEFORE the event that caused it — and a stored log whose
- * seqs run N+1, N is `damaged` at the next resume. A microtask still runs
- * before the caller resumes, so the title lands directly after its prompt.
+ * writer and the wire BEFORE the event that caused it. A stored log whose seqs
+ * run N+1, N would be `damaged` at the next resume, so the writer refuses an
+ * event that arrives ahead of its cause and the session is un-persisted from
+ * there on: every later flush fails. A microtask still runs before the caller
+ * resumes, so the title lands directly after its prompt.
  */
 function recordLater(session: Session, title: string, messageSeqs: readonly number[]): void {
   queueMicrotask(() => {

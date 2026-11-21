@@ -2,12 +2,18 @@
  * The writer, against a real session store: what it records, when it records
  * it, and — the part a fold cannot check — WHERE in the log it lands.
  */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { createPluginMessage, createUserMessage } from '../../core/llm/message.ts'
+import { PERSISTENCE } from '../../core/persistence/index.ts'
 import {
   SESSIONS,
+  SESSION_EVENT,
+  SESSION_FORMAT_VERSION,
   SESSION_TITLE,
   TURN_END,
   TURN_START,
@@ -17,14 +23,20 @@ import {
   type EventEnvelope,
   type Sessions,
 } from '../../core/session/index.ts'
+import { persistenceJsonlPlugin } from '../persistence-jsonl/index.ts'
 import { sessionTitlePlugin } from './index.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 let root: Context | undefined
+let dir: string | undefined
+/** The seq of every event, in the order a listener registered AFTER the writer was handed it. */
+let delivered: number[] = []
 
 afterEach(async () => {
   await root?.dispose()
   root = undefined
+  if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+  dir = undefined
 })
 
 async function mount(): Promise<Sessions> {
@@ -32,6 +44,12 @@ async function mount(): Promise<Sessions> {
   root.plugin(sessionPlugin)
   root.plugin(sessionTitlePlugin)
   await root.settle()
+  // Registered after the title row's own listener, which is where persistence
+  // and the protocol sit in a real composition: what THIS hears, in this
+  // order, is what reaches the file and the wire. The in-memory log cannot
+  // show an early append, because the cause is pushed before it is delivered.
+  delivered = []
+  root.on(SESSION_EVENT, (_session, event) => void delivered.push(event.seq))
   return root.get(SESSIONS)
 }
 
@@ -52,7 +70,9 @@ describe('the session-title writer', () => {
 
     // The ordering IS the contract. A listener that appended synchronously
     // would put this line ahead of the prompt that caused it on disk and on the
-    // wire, and the next resume would read the log as damaged.
+    // wire, and the next resume would read the log as damaged. That ordering
+    // is the DELIVERY's: the log below reads the same either way.
+    expect(delivered, 'the order later listeners were handed the events in').toEqual([0, 1, 2])
     expect(types(session.events)).toEqual(['turn/start', 'user/message', 'session/title'])
     expect(session.events.at(-1)!.data).toEqual({
       title: 'add a health check endpoint',
@@ -120,5 +140,42 @@ describe('the session-title writer', () => {
     // was typed the day it was picked up again.
     expect(foldSessionTitle(resumed.events)).toBe('the original question')
     expect(resumed.events.at(-1)!.type).toBe(SESSION_TITLE.type)
+  })
+
+  /**
+   * The same backfill with the real writer mounted AFTER this row, as the
+   * shipped composition mounts it, over a stored log that has a prompt and no
+   * title. This is where an early append does its damage: a resumed session's
+   * file is open from publication, so a title appended inside the prompt's
+   * delivery would reach the writer before the prompt did.
+   */
+  it('lands in the stored log after the prompt that caused it, and the log reads back whole', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-title-'))
+    const header = { kind: 'session', version: SESSION_FORMAT_VERSION, id: 'old', createdAt: 1000, cwd: '/w' }
+    const seed: EventEnvelope[] = [
+      { type: TURN_START.type, seq: 0, time: 1, data: { turn: 1 } },
+      { type: USER_MESSAGE.type, seq: 1, time: 2, data: { message: createUserMessage('the original question') }, surfaceOp: { op: 'append' } },
+      { type: TURN_END.type, seq: 2, time: 3, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+    writeFileSync(join(dir, 'old.jsonl'), [header, ...seed].map((line) => `${JSON.stringify(line)}\n`).join(''))
+    root = createRoot({ logger: silent })
+    root.plugin(sessionPlugin)
+    root.plugin(sessionTitlePlugin)
+    root.plugin(persistenceJsonlPlugin, { root: dir })
+    await root.settle()
+    const persistence = root.get(PERSISTENCE)
+    const stored = persistence.load('old')!
+    expect({ damaged: stored.damaged, events: stored.events.length }).toEqual({ damaged: undefined, events: 3 })
+
+    const resumed = root.get(SESSIONS).create({ cwd: stored.header.cwd, id: stored.header.id, createdAt: stored.header.createdAt, seed: stored.events, origin: 'resumed' })
+    resumed.append(USER_MESSAGE, { message: createUserMessage('a follow-up months later') }, { surfaceOp: { op: 'append' } })
+    await settled()
+    // The writer refuses an event that arrives ahead of its cause, and says so here.
+    await expect(resumed.flush()).resolves.toBeUndefined()
+
+    const after = persistence.load('old')!
+    expect({ damaged: after.damaged, tail: after.integrity?.tail, stop: after.integrity?.stop }).toEqual({ damaged: undefined, tail: 'none', stop: undefined })
+    expect(after.events.map((event) => `${event.seq} ${event.type}`)).toEqual(['0 turn/start', '1 user/message', '2 turn/end', '3 session/end-seed', '4 user/message', '5 session/title'])
+    expect(foldSessionTitle(after.events)).toBe('the original question')
   })
 })

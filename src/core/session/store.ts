@@ -54,8 +54,10 @@ export const SESSION_CREATED = emitEvent<[session: Session]>('session/created')
  *
  * A listener may not append SYNCHRONOUSLY: a nested append would reach
  * persistence, the protocol and the invariants before the event that caused
- * it, so seqs N+1, N land out of order and the log reads `damaged` at the next
- * resume. Queue the append on a microtask (ARCHITECTURE §4).
+ * it, as seqs N+1, N. The JSONL writer refuses the early one (nothing from N on
+ * is written and every later flush of that session fails,
+ * `persistence-jsonl`); the wire and the invariants still see it early. Queue
+ * the append on a microtask (ARCHITECTURE §4).
  */
 export const SESSION_EVENT = emitEvent<[session: Session, event: EventEnvelope]>('session/event')
 /** Awaited durability checkpoint. */

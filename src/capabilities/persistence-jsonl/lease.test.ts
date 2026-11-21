@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir, uptime } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
 import { asSessionId } from '../../core/ids.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
@@ -22,6 +22,7 @@ let dir: string | undefined
 let roots: Context[] = []
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const root of roots.toReversed()) await root.dispose()
   roots = []
   if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
@@ -160,6 +161,102 @@ describe('persistence-jsonl: the session write lease', () => {
 
     const refused = resumeStored(rootA, 'afar')
     await expect(refused.flush()).rejects.toSatisfy(flushError(/locked by pid \d+ on another-machine/))
+  })
+
+  /** A stored, closed session `id` whose lock file the case then writes by hand. */
+  async function storedAndReleased(id: string): Promise<{ root: Context; lock: string }> {
+    const root = await mountRoot()
+    root.get(SESSIONS).create({ cwd: '/w', id: asSessionId(id) })
+    appendTurn(root.get(SESSIONS), id, 1)
+    await root.get(SESSIONS).detach(root.get(SESSIONS).get(asSessionId(id))!)
+    return { root, lock: `${fileFor(id)}.lock` }
+  }
+
+  it('records which platform, and on Linux which boot, the holder runs in', async () => {
+    const rootA = await mountRoot()
+    rootA.get(SESSIONS).create({ cwd: '/w', id: asSessionId('fields') })
+    const holder = JSON.parse(readFileSync(`${fileFor('fields')}.lock`, 'utf8')) as { platform?: string; bootId?: string }
+    expect(holder.platform).toBe(process.platform)
+    if (process.platform === 'linux') expect(holder.bootId).toBe(readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim())
+    else expect(holder.bootId).toBeUndefined()
+  })
+
+  // Only ESRCH proves a pid dead. EPERM is the answer for a process that is
+  // there and not this user's to signal (another account's, an elevated one):
+  // alive, so refused. The pid is a dead one, so a probe that escaped the stub
+  // would answer ESRCH and reclaim.
+  it('reads a holder whose pid answers EPERM as alive, and refuses', async () => {
+    const { root, lock } = await storedAndReleased('other-user')
+    const pid = spawnSync(process.execPath, ['-e', '']).pid
+    const payload = JSON.stringify({ pid, host: hostname(), acquiredAt: 1 })
+    writeFileSync(lock, payload)
+    const probes: string[] = []
+    const kill = process.kill.bind(process)
+    vi.spyOn(process, 'kill').mockImplementation((target, signal) => {
+      if (target !== pid || signal !== 0) return kill(target, signal)
+      probes.push(`kill(${target}, ${signal})`)
+      throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' })
+    })
+
+    expect(root.get(PERSISTENCE).load('other-user')!.lease).toMatchObject({ pid, alive: true })
+    const refused = resumeStored(root, 'other-user')
+    await expect(refused.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${pid} on `)))
+    expect(probes.length, probes.join('; ')).toBeGreaterThan(0)
+    expect(readFileSync(lock, 'utf8')).toBe(payload)
+  })
+
+  // WSL 2 reports its Windows host's name, and the two have separate pid
+  // spaces and separate uptimes: by hostname alone each reads the other's LIVE
+  // holder as dead. A holder that recorded another platform is another
+  // machine as far as a probe goes, whatever its pid and uptime say here.
+  it('never reclaims from a holder on another platform that shares this hostname', async () => {
+    const { root, lock } = await storedAndReleased('other-os')
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid
+    const elsewhere = process.platform === 'win32' ? 'linux' : 'win32'
+    // Dead by BOTH of this host's rules: the pid answers ESRCH and the uptime is far ahead of ours.
+    const payload = JSON.stringify({ pid: deadPid, host: hostname(), acquiredAt: 1, uptime: uptime() + 86_400, platform: elsewhere })
+    writeFileSync(lock, payload)
+
+    expect(root.get(PERSISTENCE).load('other-os')!.lease).toMatchObject({ pid: deadPid, alive: 'unknown' })
+    const refused = resumeStored(root, 'other-os')
+    await expect(refused.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${deadPid} on .* \\(a ${elsewhere} process, which this ${process.platform} one cannot probe\\); if that process is gone, remove `)))
+    expect(readFileSync(lock, 'utf8')).toBe(payload)
+    await root.get(SESSIONS).detach(refused)
+
+    // The field is evidence only when it differs: the same dead holder on THIS platform is reclaimed.
+    writeFileSync(lock, JSON.stringify({ pid: deadPid, host: hostname(), acquiredAt: 1, platform: process.platform }))
+    const resumed = resumeStored(root, 'other-os')
+    await expect(resumed.flush()).resolves.toBeUndefined()
+    expect(JSON.parse(readFileSync(lock, 'utf8')).pid).toBe(process.pid)
+  })
+
+  // The uptime rule cannot see a reboot once the new boot has run longer than
+  // the old one had when the lock was taken. Linux's boot id can: two ids that
+  // differ are two boots, and two that match are one, whatever the uptimes say.
+  it('on Linux decides a reboot by the boot id, and elsewhere ignores one', async () => {
+    const { root, lock } = await storedAndReleased('boot')
+    const livePid = process.ppid
+    expect(() => process.kill(livePid, 0), `pid ${livePid} must be alive for this test to mean anything`).not.toThrow()
+    const held = (fields: Record<string, unknown>): void => writeFileSync(lock, JSON.stringify({ pid: livePid, host: hostname(), acquiredAt: 1, platform: process.platform, ...fields }))
+
+    // Another boot's id, a live pid, and an uptime that says "same boot": only the id can call this one dead.
+    held({ bootId: '00000000-0000-4000-8000-000000000000', uptime: Math.max(0, uptime() - 5) })
+    const other = resumeStored(root, 'boot')
+    if (process.platform === 'linux') {
+      await expect(other.flush()).resolves.toBeUndefined()
+      expect(JSON.parse(readFileSync(lock, 'utf8')).pid).toBe(process.pid)
+    } else {
+      // No boot id of our own to compare with: the uptime and pid rules, and the pid is alive.
+      await expect(other.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
+    }
+    await root.get(SESSIONS).detach(other)
+
+    if (process.platform === 'linux') {
+      // THIS boot's id with an uptime far ahead of ours: one boot, so the uptime rule is not asked and the live pid refuses.
+      held({ bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), uptime: uptime() + 3_600 })
+      const same = resumeStored(root, 'boot')
+      await expect(same.flush()).rejects.toSatisfy(flushError(new RegExp(`locked by pid ${livePid} on `)))
+    }
   })
 
   it('releases every lock it holds when the provider row is unloaded', async () => {

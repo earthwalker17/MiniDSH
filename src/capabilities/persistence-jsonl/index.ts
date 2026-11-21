@@ -73,6 +73,10 @@ interface LeaseHolder {
   readonly acquiredAt: number
   /** The machine's `os.uptime()` (seconds) when the lease was taken; absent in locks written before S22.2. */
   readonly uptime?: number
+  /** The holder's `process.platform`; absent in locks written before 2.0 (see `holderIsDead`). */
+  readonly platform?: string
+  /** The holder's kernel boot id, recorded on Linux only; absent everywhere else and in locks written before 2.0. */
+  readonly bootId?: string
 }
 
 export interface PersistenceConfig {
@@ -205,41 +209,121 @@ const REBOOT_MARGIN_S = 60
 const UPTIME_IS_MONOTONIC = process.platform === 'win32' || process.platform === 'linux'
 
 /**
- * Dead means provably dead, and only ever on THIS host (another cannot be
- * probed): the signal-0 probe reports ESRCH, OR the machine has rebooted since
- * the lease was taken.
+ * Linux's per-boot identity: `random/boot_id` is a fresh UUID at every kernel
+ * boot and the same for every process of that boot. `undefined` on every other
+ * platform, and where /proc cannot be read.
+ */
+function readBootId(): string | undefined {
+  if (process.platform !== 'linux') return undefined
+  try {
+    const id = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+    return id.length > 0 ? id : undefined
+  } catch {
+    return undefined
+  }
+}
+const BOOT_ID = readBootId()
+
+/**
+ * Whether this process can ask its own OS about the holder at all. A hostname
+ * alone does not say so: WSL 2 reports its Windows host's name, and the two
+ * have separate pid spaces and separate uptimes, so each would read the
+ * other's LIVE holder as dead (its pid answers ESRCH, or its uptime is the
+ * larger one) and give one log two writers. The lease therefore records the
+ * holder's `process.platform`, and a holder on another platform is treated as
+ * one on another host: never probed, never reclaimed. A lock with no recorded
+ * platform (written before 2.0, or by hand) is probed as it always was.
+ */
+function probeable(holder: LeaseHolder): boolean {
+  if (holder.host !== hostname()) return false
+  return typeof holder.platform !== 'string' || holder.platform === process.platform
+}
+
+/**
+ * Dead means provably dead, and only ever on THIS host and OS instance
+ * (`probeable`; another cannot be asked): the signal-0 probe reports ESRCH, OR
+ * the machine has rebooted since the lease was taken.
  *
  * The reboot rule exists because the pid rule alone strands logs. A runtime the
  * OS hard-kills — a Windows logoff, a crash, a supervisor's deadline kill —
  * leaves its lock behind, and after a reboot its pid is often reused by an
  * unrelated live process, which the probe reads as alive forever: every resume
- * of that log was refused with "remove …lock". The evidence is the machine's
- * UPTIME, recorded at acquisition: it only grows within one boot, so a smaller
- * uptime now means a reboot happened in between, and no process alive now can
- * be that holder. On Windows and Linux uptime is a monotonic tick
- * (GetTickCount64, /proc/uptime): no NTP step, VM resume or person moving the
- * wall clock can fake it (S22.2: a wall-clock form of this rule could steal a
- * LIVE lease after a forward step). On macOS libuv derives it FROM the wall
- * clock (now minus kern.boottime), so there the rule is off and the pid rule
- * alone applies, as it does after a Windows Fast Startup shutdown, which does
- * not reset uptime. A holder with no recorded uptime (an older writer, a
- * hand-written lock) keeps the pid rule.
+ * of that log was refused with "remove …lock".
  *
- * What it cannot see: a resume made LATER in the new boot than the lock was
- * taken in the old one (uptime now 3600 s, holder's 600 s) reads as the same
- * boot, and the pid rule decides, refusing if that pid is reused. A per-boot
- * identity would close it (Linux's `random/boot_id`; Windows offers none
- * without spawning a process), and it is not here yet (BLUEPRINT §3).
+ * On Linux the evidence is exact: the lease records the kernel's boot id, and
+ * two ids that are both present and differ mean the holder's boot is over,
+ * however long either boot has run. Two equal ids are one boot, and then only
+ * the pid rule applies.
+ *
+ * Where no boot id is recorded on both sides (Windows, macOS, a lock written
+ * before 2.0), the evidence is the machine's UPTIME, recorded at acquisition:
+ * it only grows within one boot, so a smaller uptime now means a reboot
+ * happened in between, and no process alive now can be that holder. On Windows
+ * and Linux uptime is a monotonic tick (GetTickCount64, /proc/uptime): no NTP
+ * step, VM resume or person moving the wall clock can fake it (a wall-clock
+ * form of this rule could steal a LIVE lease after a forward step). On macOS
+ * libuv derives it FROM the wall clock (now minus kern.boottime), so there the
+ * rule is off and the pid rule alone applies, as it does after a Windows Fast
+ * Startup shutdown, which does not reset uptime. A holder with no recorded
+ * uptime (an older writer, a hand-written lock) keeps the pid rule.
+ *
+ * What the uptime rule cannot see: a resume made LATER in the new boot than
+ * the lock was taken in the old one (uptime now 3600 s, holder's 600 s) reads
+ * as the same boot, and the pid rule decides, refusing if that pid is reused.
+ * The boot id answers that on Linux. Windows offers no per-boot identity
+ * without spawning a process, so there (and on macOS) it stays open.
+ *
+ * What neither rule can see: two Linux instances on ONE kernel that share a
+ * hostname and a store (two containers, two WSL distributions) have one boot
+ * id and separate pid spaces, so each reads the other's live holder as ESRCH.
  */
-
 function holderIsDead(holder: LeaseHolder): boolean {
-  if (holder.host !== hostname()) return false
-  if (UPTIME_IS_MONOTONIC && typeof holder.uptime === 'number' && Number.isFinite(holder.uptime) && uptime() + REBOOT_MARGIN_S < holder.uptime) return true
+  if (!probeable(holder)) return false
+  if (typeof holder.bootId === 'string' && BOOT_ID !== undefined) {
+    if (holder.bootId !== BOOT_ID) return true
+  } else if (UPTIME_IS_MONOTONIC && typeof holder.uptime === 'number' && Number.isFinite(holder.uptime) && uptime() + REBOOT_MARGIN_S < holder.uptime) {
+    return true
+  }
   try {
     process.kill(holder.pid, 0)
     return false
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ESRCH'
+  }
+}
+
+/** How long an exclusive create waits out a Windows delete-pending name, and how often it asks again. */
+const PENDING_WAIT_MS = 1_000
+const PENDING_RETRY_MS = 20
+/** How often one acquisition asks again for a lock that vanished under it, before it says the lease is changing hands. */
+const LEASE_ROUNDS = 3
+
+/**
+ * Exclusive create of a lock file holding `payload`, owner-only on POSIX:
+ * `false` when the name is taken.
+ *
+ * On Windows a name its holder just removed stays DELETE-PENDING while any
+ * process still has a handle on it (a cold reader's read of the lease, an
+ * antivirus scan), and creating it again answers EPERM (or EACCES, EBUSY),
+ * not EEXIST. That is busy, not broken: a resume made the moment another
+ * process released the log would otherwise fail for good on a lock nobody
+ * holds. So those three wait for a short bound, and at its end the real error
+ * is thrown. The measurement behind this rule is `credentials-local`'s, whose
+ * store lock met the same answer (6 of 100 writers in a four-process race).
+ */
+function createExclusive(path: string, payload: string): boolean {
+  const deadline = Date.now() + PENDING_WAIT_MS
+  for (;;) {
+    try {
+      writeFileSync(path, payload, { flag: 'wx', mode: 0o600 })
+      return true
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'EEXIST') return false
+      const pending = process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY')
+      if (!pending || Date.now() > deadline) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, PENDING_RETRY_MS)
+    }
   }
 }
 
@@ -280,7 +364,7 @@ export function unreadableHeader(root: string, id: string): string | undefined {
 function readLease(file: string): StoredLease | undefined {
   const holder = readLeaseHolder(`${file}.lock`)
   if (!holder) return undefined
-  const alive = holder.host !== hostname() ? 'unknown' : !holderIsDead(holder)
+  const alive = !probeable(holder) ? 'unknown' : !holderIsDead(holder)
   return { pid: holder.pid, host: holder.host, ...(typeof holder.acquiredAt === 'number' ? { acquiredAt: holder.acquiredAt } : {}), alive }
 }
 
@@ -432,6 +516,8 @@ interface OpenFile {
   syncing?: Promise<void> | undefined
   /** A file this process created, whose directory entry is not yet synced (POSIX only). */
   dirPending: boolean
+  /** The seq the file's next line must carry: one past the last event the snapshot, the attach or an append wrote. */
+  nextSeq: number
 }
 
 /** `fdatasync` as a promise: off the event loop, so a web host's other sessions keep running while one waits on its disk. */
@@ -489,7 +575,14 @@ class JsonlArchive implements Persistence {
   private readonly held = new Map<string, string>()
   constructor(root: string) {
     this.root = root
-    mkdirSync(root, { recursive: true })
+    // Owner-only on POSIX, like the spill and attachment stores beside it: a
+    // log holds every prompt, every file the agent read and every command's
+    // output. The mode binds only what this call CREATES (the home too, when
+    // this is the first thing to make it); a directory that already exists
+    // keeps the mode it has, and so does every log written before 2.0
+    // (ARCHITECTURE §13). Windows has no mode bits: the home's ACL is the
+    // user's own.
+    mkdirSync(root, { recursive: true, mode: 0o700 })
   }
 
   private fileFor(id: string): string {
@@ -533,8 +626,10 @@ class JsonlArchive implements Persistence {
    * (snapshot, attach), so it starts dirty.
    */
   private track(session: Session, file: string, created: boolean): void {
-    const fd = openSync(file, 'a')
-    this.open.set(session, { file, fd, gen: 1, synced: 0, dirPending: created && process.platform !== 'win32' })
+    const fd = openSync(file, 'a', 0o600)
+    // The snapshot and the attach both leave the file holding every event the
+    // session has now, so the next line is the next event appended.
+    this.open.set(session, { file, fd, gen: 1, synced: 0, dirPending: created && process.platform !== 'win32', nextSeq: session.events.length })
     this.tracked.add(session)
   }
 
@@ -564,10 +659,10 @@ class JsonlArchive implements Persistence {
    * The per-session write lease: exclusive-create of `<file>.lock`. A holder
    * is stale only when it is provably dead on THIS host (`holderIsDead`: its
    * pid answers `ESRCH`, or it took the lease before this boot; an `EPERM`
-   * probe means alive-but-inaccessible, and another host cannot be probed at
-   * all) — everything else refuses and names the holder, so pid reuse within
-   * a boot or a foreign host degrade to a manual `rm` of the lock file, never
-   * to two writers.
+   * probe means alive-but-inaccessible, and another host or OS instance
+   * cannot be probed at all) — everything else refuses and names the holder,
+   * so pid reuse within a boot or a foreign host degrade to a manual `rm` of
+   * the lock file, never to two writers.
    *
    * Reclaiming a stale lock is the one TWO-step in this protocol (remove, then
    * create), so it runs under its own exclusive-create mutex: without it two
@@ -576,59 +671,72 @@ class JsonlArchive implements Persistence {
    * steal leaves the mutex behind, which blocks further *reclaims* (never a
    * fresh acquisition) and is named in the refusal — the same manual-cleanup
    * edge the lease already documents.
+   *
+   * The refusal is composed from what is on disk WHEN it is composed, never
+   * from the read that started the attempt: between the two a holder may have
+   * released (so the lock is asked for again rather than reported as "an
+   * unreadable holder" of a file that is not there), and a faster reclaimer
+   * may have replaced a dead holder's lock with its own live one (so the
+   * message must not tell a person to remove THAT).
    */
   private acquireLease(session: Session, file: string): void {
     const lock = `${file}.lock`
-    const payload = JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: Date.now(), uptime: uptime() } satisfies LeaseHolder)
+    const steal = `${lock}.steal`
+    const payload = JSON.stringify({
+      pid: process.pid,
+      host: hostname(),
+      acquiredAt: Date.now(),
+      uptime: uptime(),
+      platform: process.platform,
+      ...(BOOT_ID === undefined ? {} : { bootId: BOOT_ID }),
+    } satisfies LeaseHolder)
     const tryCreate = (): boolean => {
-      try {
-        writeFileSync(lock, payload, { flag: 'wx' })
-        this.leases.set(session, lock)
-        this.held.set(lock, payload)
-        return true
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
-        throw error
-      }
+      if (!createExclusive(lock, payload)) return false
+      this.leases.set(session, lock)
+      this.held.set(lock, payload)
+      return true
     }
-    if (tryCreate()) return
-    const holder = readLeaseHolder(lock)
-    let stranded: string | undefined
-    if (holder && holderIsDead(holder)) {
-      const steal = `${lock}.steal`
-      let mutex = false
-      try {
-        writeFileSync(steal, payload, { flag: 'wx' })
-        mutex = true
-      } catch {
-        // Another reclaimer holds the steal mutex, or a dead one left it:
-        // fall through and refuse, naming it.
-        stranded = steal
-      }
-      if (mutex) {
-        try {
-          // Re-probe under the mutex: the winner of a previous race may have
-          // already replaced this lock with a live one.
-          const current = readLeaseHolder(lock)
-          if (!current || holderIsDead(current)) {
-            try {
-              unlinkSync(lock)
-            } catch {
-              // The holder released between the probe and here.
-            }
-            if (tryCreate()) return
-          }
-        } finally {
+    let blocked = false
+    for (let round = 0; round < LEASE_ROUNDS; round++) {
+      if (tryCreate()) return
+      const holder = readLeaseHolder(lock)
+      blocked = false
+      if (holder && holderIsDead(holder)) {
+        // `false`: another reclaimer holds the steal mutex, or a dead one left
+        // it. Fall through and refuse, naming it.
+        if (!createExclusive(steal, payload)) blocked = true
+        else {
           try {
-            unlinkSync(steal)
-          } catch {
-            // Nothing to clean up.
+            // Re-probe under the mutex: the winner of a previous race may have
+            // already replaced this lock with a live one.
+            const current = readLeaseHolder(lock)
+            if (!current || holderIsDead(current)) {
+              try {
+                unlinkSync(lock)
+              } catch {
+                // The holder released between the probe and here.
+              }
+              if (tryCreate()) return
+            }
+          } finally {
+            try {
+              unlinkSync(steal)
+            } catch {
+              // Nothing to clean up.
+            }
           }
         }
       }
+      // Still there: held, and the refusal below says by whom. Gone: released
+      // since the create was refused, so nobody holds it and it is asked for again.
+      if (existsSync(lock)) break
     }
-    const who = holder ? `pid ${holder.pid} on ${holder.host}` : 'an unreadable holder'
-    throw new Error(`session ${session.id}: the stored log is locked by ${who}; if that process is gone, remove ${lock}${stranded === undefined ? '' : ` and ${stranded}, a reclaim's mutex`}`)
+    if (!existsSync(lock)) throw new Error(`session ${session.id}: the lease on the stored log is changing hands (${lock}); try again`)
+    const holder = readLeaseHolder(lock)
+    const elsewhere = holder !== undefined && typeof holder.platform === 'string' && holder.platform !== process.platform ? ` (a ${holder.platform} process, which this ${process.platform} one cannot probe)` : ''
+    const who = holder ? `pid ${holder.pid} on ${holder.host}${elsewhere}` : 'an unreadable holder'
+    const stranded = blocked && existsSync(steal) ? ` and ${steal}, a reclaim's mutex` : ''
+    throw new Error(`session ${session.id}: the stored log is locked by ${who}; if that process is gone, remove ${lock}${stranded}`)
   }
 
   /** Removes only a lock this archive still owns — never one another process has since taken. */
@@ -669,7 +777,7 @@ class JsonlArchive implements Persistence {
     const header: HeaderLine = { kind: 'session', ...session.header }
     const lines = [JSON.stringify(header), ...session.events.map((event) => JSON.stringify(event))]
     try {
-      writeFileSync(file, `${lines.join('\n')}\n`, { encoding: 'utf8', flag: 'wx' })
+      writeFileSync(file, `${lines.join('\n')}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new Error(`session ${session.id}: a stored log with this id already exists; refusing to overwrite`, { cause: error })
@@ -730,7 +838,7 @@ class JsonlArchive implements Persistence {
       const torn = readFileSync(file).subarray(scan.validBytes)
       const sidecar = `${file}.torn`
       const created = !existsSync(sidecar)
-      const fd = openSync(sidecar, 'a')
+      const fd = openSync(sidecar, 'a', 0o600)
       try {
         const record = Buffer.concat([Buffer.from(`# torn ${new Date().toISOString()} (${torn.length} bytes)\n`), torn, Buffer.from('\n')])
         const written = writeSync(fd, record)
@@ -753,6 +861,17 @@ class JsonlArchive implements Persistence {
     const opened = this.open.get(session)
     if (opened) {
       try {
+        // The file never holds a line before its cause. A `session/event`
+        // listener that appends synchronously (ARCHITECTURE §4 forbids it)
+        // has its event delivered here BEFORE the one that caused it, and
+        // written as it arrives the log would run N+1, N: damaged at the next
+        // read and refused by every later resume. So an event that is not the
+        // next one is never written, and the session fails loudly instead.
+        if (event.seq !== opened.nextSeq) {
+          throw new Error(
+            `event ${event.seq} (${event.type}) arrived where event ${opened.nextSeq} was expected: a session/event listener appended synchronously, so its event was delivered before the one that caused it; nothing from event ${opened.nextSeq} on was written`,
+          )
+        }
         // The byte count is checked, not assumed. `writeSync` does not loop,
         // and a short write (a full disk, an interrupted call) would leave a
         // fragment the next event appends after — fabricating exactly the
@@ -762,6 +881,7 @@ class JsonlArchive implements Persistence {
         const written = writeSync(opened.fd, line)
         if (written !== line.length) throw new Error(`wrote ${written} of ${line.length} bytes for event ${event.seq}`)
         opened.gen += 1
+        opened.nextSeq += 1
       } catch (error) {
         if (!this.failures.has(session)) this.failures.set(session, error)
         // Quarantine the file: appending a LATER event after a dropped one would

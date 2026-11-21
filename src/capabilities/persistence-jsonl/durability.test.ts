@@ -26,6 +26,9 @@ const control = vi.hoisted(() => ({
   /** Descriptors opened on a `.torn` sidecar, and whether their writes come back short (a full disk). */
   sidecars: new Set<number>(),
   shortSidecar: false,
+  /** Descriptors opened on a session log itself, and how its NEXT append fails, once: ten bytes of it land, or none do. */
+  logs: new Set<number>(),
+  failAppend: undefined as 'short' | 'ENOSPC' | undefined,
 }))
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -54,11 +57,19 @@ vi.mock('node:fs', async (importOriginal) => {
     openSync: (path: realFs.PathLike, flags?: realFs.OpenMode, mode?: realFs.Mode) => {
       const fd = actual.openSync(path, flags ?? 'r', mode)
       if (String(path).endsWith('.torn')) control.sidecars.add(fd)
+      if (String(path).endsWith('.jsonl')) control.logs.add(fd)
       return fd
     },
     writeSync: (fd: number, buffer: NodeJS.ArrayBufferView, ...rest: unknown[]) => {
       // libuv returns the partial total, not an error, when ENOSPC hits mid-buffer.
       if (control.shortSidecar && control.sidecars.has(fd) && rest.length === 0) return actual.writeSync(fd, (buffer as Buffer).subarray(0, 40))
+      if (control.failAppend !== undefined && control.logs.has(fd) && rest.length === 0) {
+        const how = control.failAppend
+        control.failAppend = undefined
+        // …and throws when not one byte fits.
+        if (how === 'ENOSPC') throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' })
+        return actual.writeSync(fd, (buffer as Buffer).subarray(0, 10))
+      }
       return (actual.writeSync as (...args: unknown[]) => number)(fd, buffer, ...rest)
     },
     truncateSync: (path: realFs.PathLike, length?: number) => {
@@ -91,6 +102,8 @@ beforeEach(() => {
   control.log = []
   control.sidecars = new Set()
   control.shortSidecar = false
+  control.logs = new Set()
+  control.failAppend = undefined
 })
 
 afterEach(async () => {
@@ -223,6 +236,52 @@ describe('persistence-jsonl: a resolved flush is on stable storage', () => {
     expect(readFileSync(file).length).toBe(before)
     expect(control.calls).toBe(1)
   })
+
+  /**
+   * The other half of "a failed write or sync fails every later flush": the
+   * APPEND itself. `writeSync` does not loop, so a full disk either lands part
+   * of a line and reports the partial count, or throws with nothing written.
+   * Either way the next event must not follow it: a line after a fragment is a
+   * mid-file parse error, and a line after a dropped one is a seq gap, and both
+   * read as damage that refuses every later resume. A fragment at the very END
+   * is only a torn tail, which a resume sidecars.
+   */
+  for (const [how, landed, words] of [
+    ['short', 10, /could not be persisted: wrote 10 of \d+ bytes for event 2/],
+    ['ENOSPC', 0, /could not be persisted: ENOSPC/],
+  ] as const) {
+    it(`remembers a failed append (${how}), quarantines the file, and fails every later flush`, async () => {
+      const { session, file } = await materialized(`append-${how}`)
+      await session.flush()
+      const before = readFileSync(file)
+      control.failAppend = how
+      session.append(TURN_END, { turn: 1, reason: { kind: 'completed' } })
+      expect(control.failAppend, 'the append reached the log\'s own descriptor').toBeUndefined()
+      // Quarantined at the failure itself: the log's descriptor is closed, so
+      // nothing can reach the file through it again.
+      const [fd, ...others] = [...control.logs]
+      expect(others, 'one descriptor on the log').toEqual([])
+      expect(control.log.filter((entry) => entry === `closeSync:${fd}`), control.log.join(' ')).toHaveLength(1)
+      await expect(session.flush()).rejects.toSatisfy(persistFailure(words))
+      const failed = readFileSync(file)
+      expect(failed.length - before.length).toBe(landed)
+      expect(failed.subarray(0, before.length).equals(before)).toBe(true)
+
+      // A later event is dropped, never appended after the hole, and no flush recovers.
+      session.append(TURN_START, { turn: 2 })
+      await expect(session.flush()).rejects.toSatisfy(persistFailure(words))
+      expect(readFileSync(file).equals(failed)).toBe(true)
+      // The one sync is the clean flush before the failure: nothing was synced "over" it.
+      expect(control.log.filter((entry) => entry === 'fdatasync'), control.log.join(' ')).toHaveLength(1)
+
+      const stored = root!.get(PERSISTENCE).load(`append-${how}`)!
+      expect({ damaged: stored.damaged, tail: stored.integrity?.tail, seqs: stored.events.map((event) => event.seq) }).toEqual({
+        damaged: undefined,
+        tail: landed === 0 ? 'none' : 'torn',
+        seqs: [0, 1],
+      })
+    })
+  }
 
   it.skipIf(process.platform === 'win32')('syncs a new log\'s directory entry once, on POSIX', async () => {
     const { session } = await materialized()
