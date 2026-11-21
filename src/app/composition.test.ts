@@ -82,9 +82,19 @@ describe('the composition handle', () => {
     await ctx.settle()
     expect(toolNames(ctx)).toContain('str_replace_editor')
 
+    const editor = ctx.get(TOOLS).get('str_replace_editor')
     await composition.reconfigure('tool-editor', { maxOutputChars: 500 })
     await ctx.settle()
     expect(toolNames(ctx)).toContain('str_replace_editor')
+    // "Still registered" is true of a reconfigure that changed nothing, so:
+    // the row holds the new config, and the tool is a FRESH instance's.
+    expect(composition.rows().find((row) => row.id === 'tool-editor')?.config).toEqual({ maxOutputChars: 500 })
+    expect(ctx.get(TOOLS).get('str_replace_editor')).not.toBe(editor)
+    // And a config a service reports: the remounted instance runs on what it was given.
+    expect(ctx.get(APPROVAL).defaultPolicy).toBe('ask')
+    await composition.reconfigure('approval', { policy: 'never' })
+    await ctx.settle()
+    expect(ctx.get(APPROVAL).defaultPolicy).toBe('never')
 
     await expect(composition.insert(defineRow('tool-editor', toolEditorPlugin, {}))).rejects.toThrow(/already has a row/)
     await expect(composition.remove('no-such-row')).rejects.toThrow(/no composition row/)
@@ -95,8 +105,16 @@ describe('the composition handle', () => {
     const composition = ctx.get(COMPOSITION)
     handle = await ctx.get(AGENTS).create(ctx, { cwd: tempDir('minidsh-cwd-'), agentOptions: { provider: 'scripted', model: 'scripted-model' } })
     const id = handle.agent.id
-    await expect(composition.remove('loop')).rejects.toThrow(new RegExp(`spine row "loop".*${id}`))
-    await expect(composition.reconfigure('session', {})).rejects.toThrow(/spine row "session"/)
+    // Every row of the spine, both verbs. `persistence` is the one with a
+    // durability reason: its leases die with the instance while `flush` goes on
+    // reporting success, and it was the one this test did not try.
+    const spine = ['session', 'llm', 'tools', 'prompt', 'agent', 'loop', 'persistence']
+    for (const row of spine) {
+      await expect(composition.remove(row), `remove ${row}`).rejects.toThrow(new RegExp(`cannot remove spine row "${row}" while agents are live: .*${id}`))
+      await expect(composition.reconfigure(row, {}), `reconfigure ${row}`).rejects.toThrow(new RegExp(`cannot reconfigure spine row "${row}" while agents are live: .*${id}`))
+    }
+    // Nothing was touched: every one is still a row, and the agent still has its session.
+    expect(composition.rows().map((row) => row.id)).toEqual(expect.arrayContaining(spine))
     await handle.dispose()
     handle = undefined
     await expect(composition.remove('loop')).resolves.toBeUndefined()
@@ -186,8 +204,25 @@ describe('agent presets: a world visible to that agent alone', () => {
     const declared = ctx.get(CREDENTIALS).declaredRefs().map(String)
     expect(declared).toContain('CORP_LLM_CRED')
     expect(declared).toContain('ANTHROPIC_API_KEY')
-    // And the shell world withholds exactly those from a child it spawns.
-    expect(childEnvironment(declared, undefined).CORP_LLM_CRED).toBeUndefined()
+    // And the shell world withholds exactly those from a child it spawns. The
+    // variable has to BE in the environment for its absence from the child's
+    // to say anything; a control beside it shows the rest still passes.
+    const names = ['CORP_LLM_CRED', 'CORP_UNRELATED_SETTING'] as const
+    const previous = names.map((name) => process.env[name])
+    process.env.CORP_LLM_CRED = 'corp-secret'
+    process.env.CORP_UNRELATED_SETTING = 'kept'
+    try {
+      const child = childEnvironment(declared, undefined)
+      expect(child.CORP_LLM_CRED).toBeUndefined()
+      expect(child.CORP_UNRELATED_SETTING).toBe('kept')
+      // Withheld because the ROW declared it: with nothing declared it passes.
+      expect(childEnvironment([], undefined).CORP_LLM_CRED).toBe('corp-secret')
+    } finally {
+      for (const [index, name] of names.entries()) {
+        if (previous[index] === undefined) delete process.env[name]
+        else process.env[name] = previous[index]
+      }
+    }
   })
 
   it('a scoped approval answerer is consent-by-composition: real for its agent, invisible to others', async () => {

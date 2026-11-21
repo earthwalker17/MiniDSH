@@ -4,19 +4,20 @@
  * hash, the recorder's changed-only discipline, and the exit-criterion
  * regression — recorded authority beats a widened composition default.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { serviceKey, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS } from '../core/agent/index.ts'
+import { APPROVAL } from '../core/approval/index.ts'
 import { LLM } from '../core/llm/index.ts'
 import { SANDBOX } from '../core/sandbox/index.ts'
 import type { CompositionApplied } from '../capabilities/composition-record/index.ts'
 import { assistantText, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
-import { defineRow, type Row } from './compose.ts'
-import { applyLayers, describeComposition, loadCompositionFile, resolvePluginRef, toPatches } from './config.ts'
-import { bootComposition, resumeTask, runTask } from './headless.ts'
+import { COMPOSITION, defaultDialect, defineRow, type Row } from './compose.ts'
+import { applyLayers, describeComposition, loadCompositionFile, resolvePluginRef, toPatches, type NamedLayer } from './config.ts'
+import { bootComposition, resumeTask, runTask, type BootOptions } from './headless.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 
@@ -104,6 +105,30 @@ describe('the disk vocabulary', () => {
     const file = loadCompositionFile(path)!
     const patches = await toPatches(file, dir)
     expect(patches).toHaveLength(2)
+  })
+
+  // A home layer can narrow authority (a read-only default, a disabled shell):
+  // one that is THERE and cannot be opened must stop the boot, not vanish.
+  it('treats only a missing file as absent: one that exists and cannot be read throws, naming the path', () => {
+    const dir = tempDir('minidsh-config-')
+    // A directory at the path: it exists, and no read of it succeeds, on any host.
+    const occupied = join(dir, 'composition.json')
+    mkdirSync(occupied)
+    expect(() => loadCompositionFile(occupied)).toThrow(`composition file ${occupied} is unreadable: `)
+    // Nothing can be at a path beneath a regular file: that is absence.
+    const file = join(dir, 'a-file')
+    writeFileSync(file, 'x')
+    expect(loadCompositionFile(join(file, 'composition.json'))).toBeUndefined()
+  })
+
+  it('reads past one leading byte-order mark, which Notepad and Windows PowerShell write', () => {
+    const path = join(tempDir('minidsh-config-'), 'composition.json')
+    const BOM = String.fromCharCode(0xfeff)
+    writeFileSync(path, `${BOM}${JSON.stringify({ patches: [{ id: 'llm-retry', disabled: true }] })}`)
+    expect(loadCompositionFile(path)).toEqual({ patches: [{ id: 'llm-retry', disabled: true }] })
+    // One mark is an editor's habit; a second is content, and not JSON.
+    writeFileSync(path, `${BOM}${BOM}{}`)
+    expect(() => loadCompositionFile(path)).toThrow(/not valid JSON/)
   })
 
   it('resolves builtin names from the catalog and refuses unknown bare specifiers loudly', async () => {
@@ -225,5 +250,141 @@ describe('configuration cannot widen recorded authority', () => {
     } finally {
       await root.dispose()
     }
+  })
+})
+
+/**
+ * A patch replaces a row's WHOLE config, and three things the app says about a
+ * row used to travel in the base row's config, where a layer that touched the
+ * row for another key erased them without a word: an explicit authority flag,
+ * the user's global AGENTS.md, and the runtime's own install directories.
+ */
+describe('what the command line and the deployment say survives a layer on the same row', () => {
+  const home = (patches: readonly { id: string; config: unknown }[]): NamedLayer[] => [{ name: 'home', patches }]
+
+  /** A boot under `options`, with what it warned, read through `read` and disposed. */
+  async function booted<T>(options: Partial<BootOptions>, read: (root: Context) => T | Promise<T>): Promise<{ value: T; warnings: string[] }> {
+    const warnings: string[] = []
+    const root = await bootComposition({
+      sessionsRoot: tempDir('minidsh-sessions-'),
+      logger: { warn: (message) => void warnings.push(message), error: () => {} },
+      ...scripted(new ScriptedAdapter()),
+      ...options,
+    })
+    try {
+      return { value: await read(root), warnings }
+    } finally {
+      await root.dispose()
+    }
+  }
+
+  it('keeps --sandbox and --ask on rows a home layer patched for another key, and opens a session under them', async () => {
+    // The sessions `web`, `serve` and `chat` create get no durable switch: the
+    // row's default is all of the flag they ever see.
+    const { value, warnings } = await booted(
+      { sandbox: 'read-only', approvalPolicy: 'never', configLayers: home([{ id: 'sandbox', config: { accepts: 'none' } }, { id: 'approval', config: {} }]) },
+      async (root) => {
+        const handle = await root.get(AGENTS).create(root, { cwd: tempDir('minidsh-cwd-'), agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+        try {
+          const opened = (type: string): unknown => handle.agent.session.events.find((event) => event.type === type)?.data
+          return {
+            mode: root.get(SANDBOX).defaultMode,
+            accepts: root.get(SANDBOX).acceptsFor(undefined, 'read-only'),
+            policy: root.get(APPROVAL).defaultPolicy,
+            openedMode: opened('sandbox/mode'),
+            openedPolicy: opened('approval/policy'),
+          }
+        } finally {
+          await handle.dispose()
+        }
+      },
+    )
+    expect(value.mode).toBe('read-only')
+    expect(value.policy).toBe('never')
+    // The layer's own key on that row stands beside the flag's.
+    expect(value.accepts).toBe('none')
+    expect(value.openedMode).toMatchObject({ mode: 'read-only', reason: 'initial' })
+    expect(value.openedPolicy).toMatchObject({ policy: 'never', reason: 'initial' })
+    // Nothing was taken from the layer: it named other keys.
+    expect(warnings.filter((message) => message.includes('wins over'))).toEqual([])
+  })
+
+  it('lets a flag win over a layer that set the same key, and says which layer and which value it overrode', async () => {
+    const layers = home([{ id: 'sandbox', config: { mode: 'danger-full-access', accepts: 'none' } }, { id: 'approval', config: { policy: 'ask' } }])
+    const read = (root: Context) => ({ mode: root.get(SANDBOX).defaultMode, accepts: root.get(SANDBOX).acceptsFor(undefined, 'workspace-write'), policy: root.get(APPROVAL).defaultPolicy })
+    const flagged = await booted({ sandbox: 'workspace-write', accepts: 'full', approvalPolicy: 'never', configLayers: layers }, read)
+    expect(flagged.value).toEqual({ mode: 'workspace-write', accepts: 'full', policy: 'never' })
+    expect(flagged.warnings.filter((message) => message.includes('wins over'))).toEqual([
+      '--ask never wins over layer "home", which sets policy: "ask" on row "approval"',
+      '--sandbox workspace-write wins over layer "home", which sets mode: "danger-full-access" on row "sandbox"',
+      '--accept full wins over layer "home", which sets accepts: "none" on row "sandbox"',
+    ])
+    // With no flag the layer is the deployment's word, and nothing is said.
+    const unflagged = await booted({ configLayers: layers }, read)
+    expect(unflagged.value).toEqual({ mode: 'danger-full-access', accepts: 'none', policy: 'ask' })
+    expect(unflagged.warnings).toEqual([])
+  })
+
+  it('keeps --approve answering when a layer gives approval-headless an allow list, and leaves the row to the layers without it', async () => {
+    const ask = async (root: Context): Promise<string> => {
+      const handle = await root.get(AGENTS).create(root, { cwd: tempDir('minidsh-cwd-'), agentOptions: { provider: 'scripted', model: 'scripted-model' } })
+      try {
+        return await root.get(APPROVAL).request({ agent: handle.agent, toolName: 'probe' })
+      } finally {
+        await handle.dispose()
+      }
+    }
+    const allow = home([{ id: 'approval-headless', config: { allow: [] } }])
+    expect((await booted({ approve: true, configLayers: allow }, ask)).value).toBe('allowed-once')
+    // No flag (the CLI passes `false` for its absence): the layer's config is whole.
+    expect((await booted({ approve: false, configLayers: allow }, ask)).value).toBe('unavailable')
+    const layerApproves = home([{ id: 'approval-headless', config: { approve: true } }])
+    expect((await booted({ approve: false, configLayers: layerApproves }, ask)).value).toBe('allowed-once')
+    // And the flag over a layer that said no is said.
+    const overridden = await booted({ approve: true, configLayers: home([{ id: 'approval-headless', config: { approve: false } }]) }, ask)
+    expect(overridden.value).toBe('allowed-once')
+    expect(overridden.warnings).toEqual(['--approve wins over layer "home", which sets approve: false on row "approval-headless"'])
+  })
+
+  it('still reads the global AGENTS.md of the user when a layer patches workspace-instructions for its budget', async () => {
+    const userHome = tempDir('minidsh-home-')
+    const global = join(userHome, 'AGENTS.md')
+    writeFileSync(global, 'GLOBAL-RULE-7f3a: always say please')
+    const firstRequest = async (patch: unknown): Promise<string> => {
+      const adapter = new ScriptedAdapter().script(assistantText('ok'))
+      const result = await runTask({
+        task: 'go',
+        cwd: tempDir('minidsh-cwd-'),
+        model: 'scripted-model',
+        sessionsRoot: tempDir('minidsh-sessions-'),
+        logger: silent,
+        globalInstructionsPath: global,
+        ...(patch === undefined ? {} : { configLayers: home([{ id: 'workspace-instructions', config: patch }]) }),
+        ...scripted(adapter),
+      })
+      expect(result.exitCode).toBe(0)
+      return JSON.stringify(adapter.calls[0]!.messages)
+    }
+    // The control: with no layer it is read, so its absence below would mean something.
+    expect(await firstRequest(undefined)).toContain('GLOBAL-RULE-7f3a')
+    expect(await firstRequest({ maxBytes: 64_000 })).toContain('GLOBAL-RULE-7f3a')
+    // A path the layer names is the layer's choice, and is the one read.
+    const other = join(tempDir('minidsh-home-'), 'AGENTS.md')
+    writeFileSync(other, 'OTHER-RULE-22c1: never say please')
+    const chosen = await firstRequest({ maxBytes: 64_000, globalPath: other })
+    expect(chosen).toContain('OTHER-RULE-22c1')
+    expect(chosen).not.toContain('GLOBAL-RULE-7f3a')
+  })
+
+  it('hands the shell row the install directories of the runtime as `expose`, under a layer on that row too, and keeps a list the layer gives', async () => {
+    const install = [tempDir('minidsh-install-'), tempDir('minidsh-node-')]
+    const dialect = defaultDialect()
+    const shellConfig = async (options: Partial<BootOptions>): Promise<unknown> => (await booted(options, (root) => root.get(COMPOSITION).rows().find((row) => row.id === 'shell')?.config)).value
+    expect(await shellConfig({ installRoots: install })).toEqual({ dialect, expose: install })
+    // The patch a host with no backend writes: it used to drop every key the app had set.
+    expect(await shellConfig({ installRoots: install, configLayers: home([{ id: 'shell', config: { dialect, confinement: 'none' } }]) })).toEqual({ dialect, confinement: 'none', expose: install })
+    expect(await shellConfig({ installRoots: install, configLayers: home([{ id: 'shell', config: { dialect, expose: [] } }]) })).toEqual({ dialect, expose: [] })
+    // A hermetic boot names none, and the row is as `compose` wrote it.
+    expect(await shellConfig({})).toEqual({ dialect })
   })
 })

@@ -4,11 +4,16 @@
  * (`BootOptions.agentDefaults`). Settings are never authority (they cannot
  * touch sandbox/approval) and never composition (rows live in
  * composition.json); on a resumed session they sit in the DEFAULTS tier, so
- * the log's folded `request/header` always wins and a settings.json edit can
- * never silently rewrite what a session recorded. Precedence: flags (applied
- * at the call sites) → environment → settings.json → built-ins. Promotion to
- * a `core/settings` Definition is deferred to the first runtime consumer
- * (S6 model roles).
+ * the log's folded base route (`agent/options`; `request/header` for a log
+ * from before that record) always wins and a settings.json edit can never
+ * silently rewrite what a session recorded. Precedence: flags (applied at the
+ * call sites) → environment (`MINIDSH_MODEL`) → settings.json → built-ins.
+ *
+ * This is the BOOT-time read. The same file is a runtime service too
+ * (`core/settings`, provided by `settings-local`, which reads and writes it):
+ * the boot registers the `agent` namespace there with `agentSettingsSchema`
+ * (`headless.ts` `registerAgentSettings`), and a surface that changes a
+ * setting writes through that service, never through this module.
  */
 import { readFileSync } from 'node:fs'
 import { z } from 'zod'
@@ -76,14 +81,34 @@ export interface ResolveSettingsOptions {
   readonly path?: string
   /** Environment (default `process.env`); `MINIDSH_MODEL` overrides the file's model. */
   readonly env?: Record<string, string | undefined>
+  /** Hears the one thing this read tolerates and a person should still know: an empty file read as no settings. */
+  readonly warn?: (message: string) => void
 }
 
-/** A malformed file throws naming the path — broken config surfaces as broken, never hidden. */
-function readSettingsFile(path: string): SettingsFile {
+/**
+ * A missing file is absent; one that is there and cannot be read, or holds
+ * bytes that are not the settings document, throws naming the path — broken
+ * config surfaces as broken, never hidden. Two shapes are read rather than
+ * refused, in step with the runtime store that owns this file
+ * (`settings-local` `document()`), because this read gates every command:
+ * a leading byte-order mark, and an EMPTY file, which is what a power cut
+ * leaves of a document replaced without a sync (every version before 2.0
+ * wrote it that way). Refusing that stopped every command at boot until a
+ * person found the file and deleted it by hand.
+ */
+function readSettingsFile(path: string, warn: (message: string) => void): SettingsFile {
   let raw: string
   try {
     raw = readFileSync(path, 'utf8')
-  } catch {
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return {}
+    throw new Error(`settings file ${path} is unreadable: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  }
+  if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1)
+  if (raw.trim().length === 0) {
+    // The store's own words, so the two readers of one file say one thing.
+    warn(`settings file ${path} is empty; it is read as no settings, and the next change saved replaces it`)
     return {}
   }
   let parsed: unknown
@@ -103,7 +128,7 @@ function readSettingsFile(path: string): SettingsFile {
 const present = (value: string | undefined): string | undefined => (value !== undefined && value.length > 0 ? value : undefined)
 
 export function resolveSettings(options: ResolveSettingsOptions = {}): ResolvedSettings {
-  const file = options.path === undefined ? {} : readSettingsFile(options.path)
+  const file = options.path === undefined ? {} : readSettingsFile(options.path, options.warn ?? (() => {}))
   const env = options.env ?? process.env
   const builtins = defaultAgentOptions()
   const model = present(env.MINIDSH_MODEL)

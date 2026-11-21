@@ -23,7 +23,7 @@ import { renderSkillList, skillsPlugin, type SkillDiscovery } from '../capabilit
 import { assistantText, assistantToolCall, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
 import { main } from './cli.ts'
 import { builtinPlugins, compose, defaultDialect, fillSkillRoots, type Row } from './compose.ts'
-import { applyLayers, withSkillRoots } from './config.ts'
+import { applyLayers, withDeployment } from './config.ts'
 import { bootComposition, forkTask, resumeTask, runTask } from './headless.ts'
 import { homeLayout, skillRootsFor } from './home.ts'
 
@@ -137,7 +137,7 @@ describe('roots filled after layering', () => {
 
   it('keeps the deployment roots under a patch that only meant to exclude one skill', () => {
     const layered = applyLayers(base(), [{ name: 'home', patches: [{ id: 'skills', config: { maxBytes: 8_000, exclude: ['office'] } }] }], () => {})
-    const filled = withSkillRoots(layered, deployment)
+    const filled = withDeployment(layered, { skillRoots: deployment }, () => {})
     expect(skillsRow(filled.rows).config).toEqual({ maxBytes: 8_000, exclude: ['office'], roots: deployment })
     // Filling a default is not a layer's change.
     expect(filled.provenance.get('skills')).toBe('home')
@@ -148,16 +148,19 @@ describe('roots filled after layering', () => {
 
   it('keeps an explicit roots value, [] included, and leaves every other row alone', () => {
     const none = applyLayers(base(), [{ name: 'patch', patches: [{ id: 'skills', config: { maxBytes: 8_000, roots: [] } }] }], () => {})
-    expect(skillsRow(withSkillRoots(none, deployment).rows).config).toEqual({ maxBytes: 8_000, roots: [] })
+    expect(skillsRow(withDeployment(none, { skillRoots: deployment }, () => {}).rows).config).toEqual({ maxBytes: 8_000, roots: [] })
     const rows = base()
     const filled = fillSkillRoots(rows, deployment)
     for (const [i, row] of rows.entries()) if (row.id !== 'skills') expect(filled[i]).toBe(row)
     // Matched by capability: a layer may insert the plugin under its own id.
     const inserted = fillSkillRoots([{ id: 'my-skills', plugin: skillsPlugin, config: { maxBytes: 100 } }], deployment)
     expect(inserted[0]!.config).toEqual({ maxBytes: 100, roots: deployment })
-    // Omitted roots (a hermetic boot) leave the composition exactly as layered.
+    // A deployment that supplies nothing (a hermetic boot) leaves the
+    // composition exactly as layered: the same rows, and the same hash.
     const layered = applyLayers(base(), [], () => {})
-    expect(withSkillRoots(layered, undefined)).toBe(layered)
+    const untouched = withDeployment(layered, {}, () => {})
+    for (const [i, row] of layered.rows.entries()) expect(untouched.rows[i], row.id).toBe(row)
+    expect(untouched.descriptor.hash).toBe(layered.descriptor.hash)
   })
 })
 

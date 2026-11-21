@@ -1,7 +1,8 @@
 /**
  * Application assembly: the default composition as typed rows, one patch
- * algorithm shared by boot and `--dump-config`, and the mount step. This is the
- * only place the default provider/model surface is chosen.
+ * algorithm shared by boot and `minidsh config`, the fills that restate after
+ * layering what a whole-config patch would otherwise drop, and the mount step.
+ * This is the only place the default provider/model surface is chosen.
  */
 import { serviceKey, type Context, type Plugin, type PluginHandle } from '../kernel/index.ts'
 import { agentInvariantPlugin } from '../core/agent/invariant.ts'
@@ -55,9 +56,13 @@ export interface Row {
 
 /**
  * Every shipped plugin by its kernel name — what a disk row's `plugin` string
- * resolves against before falling back to a module import. The protocol plugin
- * is deliberately absent: its config carries live streams and callbacks no
- * disk file can construct (serve contributes its row as part of the base).
+ * resolves against before falling back to a module import. Two are
+ * deliberately absent, because no disk file can construct their config: the
+ * protocol plugin's carries live streams and callbacks (serve contributes its
+ * row as part of the base), and `composition-record`'s IS the descriptor of
+ * the layered rows, so the boot mounts it outside the layers
+ * (`bootComposition`), where no layer can remove the record of what the
+ * layers did.
  */
 export const builtinPlugins: ReadonlyMap<string, Plugin<unknown>> = new Map(
   (
@@ -301,6 +306,110 @@ export function fillSkillRoots(rows: readonly Row[], roots: readonly SkillRoot[]
     if (config === null || typeof config !== 'object' || Array.isArray(config)) return row
     if ((config as { roots?: unknown }).roots !== undefined) return row
     return { ...row, config: { ...config, roots: roots.map((root) => ({ path: root.path, origin: root.origin })) } }
+  })
+}
+
+/** A row's config as a plain object, or `undefined` for one the plugin's own schema will refuse at mount, in its own words. */
+function configObject(row: Row): Record<string, unknown> | undefined {
+  const config = row.config ?? {}
+  return config === null || typeof config !== 'object' || Array.isArray(config) ? undefined : (config as Record<string, unknown>)
+}
+
+/**
+ * What the deployment supplies to a row beside its own config, restated AFTER
+ * layering for the reason `fillSkillRoots` exists: a patch replaces a row's
+ * WHOLE config, so a value the app put in the base row vanishes under a patch
+ * that only meant to change another key. Each is filled into every enabled row
+ * of the capability whose effective config names none; a value the layer gave
+ * is the layer's choice and is kept. Matched by capability, never by row id.
+ */
+export interface DeploymentDefaults {
+  /**
+   * The user's global `AGENTS.md`, for `workspace-instructions`. A patch
+   * setting `maxBytes` used to stop it being read, with nothing said. To read
+   * none, remove the file: it is optional, and an absent one enters nothing.
+   */
+  readonly globalInstructionsPath?: string | undefined
+  /**
+   * The runtime's own install directories, for the shell row's `expose`: a
+   * confined command must still read the Node and the bundled skill scripts
+   * the model is told to run. `expose: []` in a layer names none.
+   */
+  readonly installRoots?: readonly string[] | undefined
+}
+
+export function fillDeploymentDefaults(rows: readonly Row[], defaults: DeploymentDefaults): Row[] {
+  const fills: readonly [plugin: string, key: string, value: unknown][] = [
+    [workspaceInstructionsPlugin.name, 'globalPath', defaults.globalInstructionsPath],
+    [shellStdioPlugin.name, 'expose', defaults.installRoots === undefined ? undefined : [...defaults.installRoots]],
+  ]
+  return rows.map((row) => {
+    for (const [plugin, key, value] of fills) {
+      if (value === undefined || row.plugin.name !== plugin) continue
+      const config = configObject(row)
+      if (config === undefined || config[key] !== undefined) continue
+      return { ...row, config: { ...config, [key]: value } }
+    }
+    return row
+  })
+}
+
+/**
+ * The authority an explicit flag named. Each travels in its base row's config
+ * (`compose`), which is how a session that `serve`, `web` and `chat` open over
+ * the wire comes to open under it — and which a layer patch on that row
+ * erases with the rest of the config.
+ */
+export interface ExplicitAuthority {
+  readonly sandbox?: SandboxMode | undefined
+  readonly accepts?: SandboxEnforcement | undefined
+  readonly approvalPolicy?: ApprovalPolicy | undefined
+  /** `--approve`. Only `true` is a flag: its absence leaves the row to the layers. */
+  readonly approve?: boolean | undefined
+}
+
+/** One key an explicit flag set over a different value a layer had given it. */
+export interface AuthorityOverride {
+  readonly row: Row
+  /** The flag as typed, with its value. */
+  readonly flag: string
+  readonly key: string
+  /** What the layers left there. */
+  readonly was: unknown
+}
+
+/**
+ * Restates the explicit authority flags AFTER layering: `--sandbox read-only`
+ * with a home layer that patched the sandbox row for `accepts` used to open
+ * every `web` session at workspace-write, and `--approve` stopped answering
+ * once a layer gave `approval-headless` an `allow` list. A flag is this
+ * command line's own word, so for the keys it names it wins over every layer;
+ * the row's other keys stay the layers'. `overrode` hears each key where a
+ * layer had said something different, so the person is told.
+ *
+ * Matched by CAPABILITY, as `fillSkillRoots` is: a layer may mount the plugin
+ * under any id. A disabled row is left alone.
+ */
+export function applyExplicitAuthority(rows: readonly Row[], flags: ExplicitAuthority, overrode: (override: AuthorityOverride) => void = () => {}): Row[] {
+  const named: Readonly<Record<string, readonly [key: string, value: unknown, flag: string][]>> = {
+    [sandboxPlugin.name]: [
+      ['mode', flags.sandbox, `--sandbox ${flags.sandbox}`],
+      ['accepts', flags.accepts, `--accept ${flags.accepts}`],
+    ],
+    [approvalPlugin.name]: [['policy', flags.approvalPolicy, `--ask ${flags.approvalPolicy}`]],
+    [approvalHeadlessPlugin.name]: [['approve', flags.approve === true ? true : undefined, '--approve']],
+  }
+  return rows.map((row) => {
+    const keys = (named[row.plugin.name] ?? []).filter(([, value]) => value !== undefined)
+    const config = configObject(row)
+    if (keys.length === 0 || row.disabled === true || config === undefined) return row
+    const next = { ...config }
+    for (const [key, value, flag] of keys) {
+      if (next[key] === value) continue
+      if (next[key] !== undefined) overrode({ row, flag, key, was: next[key] })
+      next[key] = value
+    }
+    return { ...row, config: next }
   })
 }
 

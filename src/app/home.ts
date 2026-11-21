@@ -1,5 +1,5 @@
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { canonicalPath } from '../core/sandbox/paths.ts'
 import type { SkillRoot } from '../capabilities/skills/index.ts'
@@ -110,6 +110,24 @@ export function skillRootsFor(home: string): SkillRoot[] {
   ]
 }
 
+/**
+ * Where the runtime itself is installed: the package root (two levels above
+ * this module, the same anchor `skillRootsFor` finds the bundled `skills/`
+ * from) and the directory of the Node running it. The shell row is handed
+ * them as its `expose`, because a confinement profile that hides part of the
+ * filesystem must still let a command read them: the Linux AppImage mounts
+ * both under `/tmp/.mount_*`, which bubblewrap's private `/tmp` hid, so every
+ * bundled skill script and the bundled `node` were "not found" there.
+ *
+ * Not paths under the home, yet resolved here: a path reaches a plugin
+ * absolute, as config, from this one module. Canonical, as the skill roots
+ * are, so the skill directory a model is told lies under one of these.
+ */
+export function installRoots(): string[] {
+  const roots = [fileURLToPath(new URL('../..', import.meta.url)), dirname(process.execPath)].map((path) => canonical(resolve(path)))
+  return [...new Set(roots)]
+}
+
 /** The host's own spelling where it will give one; a path it will not resolve keeps the absolute spelling. */
 function canonical(path: string): string {
   try {
@@ -133,8 +151,10 @@ export interface HomeLayout {
    * the app; nothing below `app` may resolve the home for itself.
    */
   readonly settingsStorePath: string
-  /** Filled into a `skills` row that names no roots of its own, after layering (`app/config.ts` `withSkillRoots`). */
+  /** Filled into a `skills` row that names no roots of its own, after layering (`app/config.ts` `withDeployment`). */
   readonly skillRoots: readonly SkillRoot[]
+  /** Filled into a shell row that names no `expose` of its own, after layering (`installRoots`). */
+  readonly installRoots: readonly string[]
 }
 
 export function homeLayout(): HomeLayout {
@@ -147,5 +167,6 @@ export function homeLayout(): HomeLayout {
     credentialsPath: credentialsPath(),
     settingsStorePath: settingsPath(),
     skillRoots: skillRootsFor(resolveHome()),
+    installRoots: installRoots(),
   }
 }

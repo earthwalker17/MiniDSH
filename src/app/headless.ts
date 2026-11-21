@@ -2,24 +2,25 @@
  * The headless runner: a direct core entry point. Compose → settle (fail loud
  * on pending/failed plugins) → create/resume/fork an agent → followup(task) →
  * wait idle → stop its background jobs → flush → read the final assistant text
- * and turn outcome from the log. It only touches `ctx.agents`/`ctx.sessions`
- * (and `ctx.jobs`, optional, to stop what a task left running) and renders
- * through `onEvent`.
+ * and turn outcome of THIS run's turn from the log. It only touches
+ * `ctx.agents`/`ctx.sessions` (and `ctx.jobs`, optional, to stop what a task
+ * left running) and renders through `onEvent`.
  */
 import { z } from 'zod'
 import { createRoot, type Context, type Logger } from '../kernel/index.ts'
 import { AGENTS, mergeAgentOptions, type Agent, type AgentHandle, type AgentOptions } from '../core/agent/index.ts'
-import { APPROVAL, type ApprovalPolicy } from '../core/approval/index.ts'
+import { APPROVAL, APPROVAL_DECIDED, type ApprovalPolicy } from '../core/approval/index.ts'
 import { JOBS } from '../core/jobs/index.ts'
 import { effectiveSandboxMode, SANDBOX, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
 import { asSessionId, type SessionId } from '../core/ids.ts'
 import { authoritySwitchRefusal, PRESETS } from '../core/presets/index.ts'
 import { SETTINGS } from '../core/settings/index.ts'
 import type { JsonValue } from '../core/json.ts'
-import { foldLastAssistantText, foldLastTurnEnd, SESSION_EVENT, type SessionEventFrame } from '../core/session/index.ts'
+import { foldLastAssistantText, foldLastTurnEnd, foldRequestContext, matches, SESSION_EVENT, type EventEnvelope, type SessionEventFrame } from '../core/session/index.ts'
+import { LLM } from '../core/llm/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { compose, COMPOSITION, defaultAgentOptions, defaultDialect, defineRow, mount, type Patch, type Row } from './compose.ts'
-import { applyLayers, withSkillRoots, type NamedLayer } from './config.ts'
+import { applyLayers, withDeployment, type NamedLayer } from './config.ts'
 import type { SkillRoot } from '../capabilities/skills/index.ts'
 import { agentSettingsSchema } from './settings.ts'
 import { compositionRecordPlugin } from '../capabilities/composition-record/index.ts'
@@ -63,6 +64,12 @@ export interface BootOptions {
    * recorded requests, and a replay without it moves every later cut.
    */
   readonly skillRoots?: readonly SkillRoot[]
+  /**
+   * Where the runtime itself is installed (`app/home.ts` `installRoots`),
+   * filled into a shell row that names no `expose`, after layering. Omitted,
+   * the row exposes nothing (hermetic tests).
+   */
+  readonly installRoots?: readonly string[]
   readonly dialect?: ShellDialect
   /** Which confinement mechanism wraps the shell; `none` pins a test to a host with no backend. */
   readonly confinement?: ConfinementChoice
@@ -129,10 +136,14 @@ export interface ContinueOptions extends BootOptions {
 export interface TaskResult {
   readonly exitCode: number
   readonly sessionId: SessionId
+  /** The last assistant text of the turn this run drove; empty when that turn said nothing. */
   readonly text: string
+  /** How the turn this run drove ended; `unknown` when it never did. */
   readonly reason: string
   /** Background jobs still running when the task went idle, stopped by the headless rule (`drive`). */
   readonly stoppedJobs: number
+  /** What a person can do about how the run went, one line each, for stderr (`runNotes`). */
+  readonly notes: readonly string[]
 }
 
 /** Streams `{sessionId, event}` — the same frame the wire carries (ARCHITECTURE §8). */
@@ -171,9 +182,19 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     ...(options.patches !== undefined && options.patches.length > 0 ? [{ name: 'app', patches: options.patches }] : []),
     ...(options.configLayers ?? []),
   ]
-  const effective = withSkillRoots(
-    applyLayers(base, layers, (message) => options.logger?.warn(message)),
-    options.skillRoots,
+  const warn = (message: string): void => options.logger?.warn(message)
+  // After the layers: the deployment's own paths where a patch's whole-config
+  // replace left none, then the explicit authority flags, which a layer on the
+  // same row would otherwise erase with the rest of the base row's config.
+  const effective = withDeployment(
+    applyLayers(base, layers, warn),
+    {
+      skillRoots: options.skillRoots,
+      globalInstructionsPath: options.globalInstructionsPath,
+      installRoots: options.installRoots,
+      flags: { sandbox: options.sandbox, accepts: options.accepts, approvalPolicy: options.approvalPolicy, approve: options.approve },
+    },
+    warn,
   )
   // The recorder sits OUTSIDE the layered composition: its config IS the
   // descriptor of the effective rows, and no layer can silently remove the
@@ -189,7 +210,14 @@ export async function bootComposition(options: BootOptions, onEvent?: EventListe
     throw new Error(`composition did not settle — pending: [${pending}] failed: [${failed}]`)
   }
   registerAgentSettings(root, options.agentSettingsBase ?? options.agentDefaults ?? defaultAgentOptions())
-  await options.prepare?.(root)
+  try {
+    await options.prepare?.(root)
+  } catch (error) {
+    // A refusal here (the CLI's route check) must not leave a mounted
+    // composition behind it: the caller never got the root to dispose.
+    await root.dispose()
+    throw error
+  }
   if (onEvent) root.on(SESSION_EVENT, (session, event) => onEvent({ sessionId: session.id, event }))
   return root
 }
@@ -219,11 +247,15 @@ function registerAgentSettings(root: Context, base: AgentOptions): void {
  * not just a composition default — so it also governs a resumed session.
  *
  * On a resume or a fork it is the continuation's `opening`
- * (`ResumeAgentOptions`): it runs inside the creation transaction, before
- * publication, so it lands before a restored prompt can wake a turn, and a
- * refusal rolls the continuation back with nothing published or claimed. Run
- * after publication, a refused flag used to dispose a turn that had already
- * claimed the restored prompt, and the claim lost it from the log (S21.1).
+ * (`ResumeAgentOptions`): the factory runs it inside the creation transaction,
+ * AFTER publication (the services' own opening stamps land first, and a
+ * switch note finds its agent registered) and BEFORE any restored prompt may
+ * wake a turn (`core/loop/factory.ts`). A refusal rolls the continuation
+ * back: nothing woke, so nothing was claimed, and the restored prompt stays
+ * owed. Applied once the resume had returned instead, a refused flag disposed
+ * a turn that had already claimed that prompt, and the claim lost it from the
+ * log. Moving it BEFORE publication is the other wrong change: the switch
+ * then reaches the log and not the model.
  */
 export function applyAuthority(root: Context, agent: Agent, options: BootOptions & { readonly preset?: string }): void {
   // All or nothing: a delegated child's pin refused the approval only after
@@ -265,7 +297,15 @@ function applyPreset(root: Context, agent: Agent, name: string | undefined): voi
 async function drive(root: Context, handle: AgentHandle, task: string | undefined): Promise<TaskResult> {
   try {
     await handle.agent.whenIdle()
+    const session = handle.agent.session
+    // Where THIS run's turn begins. The answer and the outcome are folded from
+    // here on: over the whole log, a resumed or forked run whose own turn
+    // failed before it said anything printed the previous turn's answer (for
+    // a fork, its parent's) as if it were the reply to this task. With no
+    // task there is no turn of this run's own, and the log's last one stands.
+    let from = 0
     if (task !== undefined && task.length > 0) {
+      from = session.facts.length
       handle.agent.followup(createUserMessage(task))
       await handle.agent.whenIdle()
     }
@@ -279,8 +319,8 @@ async function drive(root: Context, handle: AgentHandle, task: string | undefine
     // What the stop ENDED, read from the recorded ends: a job whose own exit
     // was still draining its pipes when the task went idle ended by itself.
     const stoppedJobs = (jobs?.list(handle.agent) ?? []).filter((job) => running.has(job.jobId) && job.end?.cause === 'cancelled' && job.end.by === 'disposal').length
-    await handle.agent.session.flush()
-    const events = handle.agent.session.facts
+    await session.flush()
+    const events = session.facts.slice(from)
     const reason = foldLastTurnEnd(events)?.kind ?? 'unknown'
     return {
       exitCode: reason === 'completed' ? 0 : 1,
@@ -288,10 +328,45 @@ async function drive(root: Context, handle: AgentHandle, task: string | undefine
       text: foldLastAssistantText(events),
       reason,
       stoppedJobs,
+      notes: runNotes(root, handle.agent, events),
     }
   } finally {
     await handle.dispose()
   }
+}
+
+/**
+ * What a person can do about how this run went, one line each, for stderr.
+ * Read from the run's own events and from the mounted services, while both
+ * are still there.
+ *
+ * A headless run has nobody to ask, so a call that needed an approval is
+ * refused — and the only word the stream had for it was `unavailable`, with
+ * the turn going on to complete and the run exiting 0. The exit code is the
+ * turn's and stays so (a refused call is a result the model answered, not a
+ * failed run); this says which flag would have let the call through. And a
+ * model id the provider refused is answered with the ids it does list.
+ */
+function runNotes(root: Context, agent: Agent, events: readonly EventEnvelope[]): string[] {
+  const notes: string[] = []
+  if (events.some((event) => matches(event, APPROVAL_DECIDED) && event.data.outcome === 'unavailable')) {
+    const sandbox = root.tryGet(SANDBOX)
+    const mode = sandbox === undefined ? undefined : (effectiveSandboxMode(agent.session.facts) ?? sandbox.defaultMode)
+    // The escalation a host with no confinement backend charges per command
+    // is the commonest reason to be here, and it has a flag of its own.
+    const unconfined = sandbox !== undefined && mode !== undefined && mode !== 'danger-full-access' && sandbox.enforcementFor(mode) !== 'full' && sandbox.acceptsFor(agent.session, mode) === 'full'
+    notes.push(
+      'an approval was needed and nobody could answer it (a headless run asks no one), so the call was refused. To allow it, rerun with --approve (answers every request yes)' +
+        (unconfined ? '; this host cannot confine the shell, and --accept none runs shell commands unconfined without asking while the file tools stay fenced' : ''),
+    )
+  }
+  const end = foldLastTurnEnd(events)
+  if (end?.kind === 'error' && end.code === 'UNKNOWN_MODEL') {
+    const route = foldRequestContext(events) ?? agent.options
+    const listed = root.tryGet(LLM)?.providers().find((entry) => entry.id === route.provider)?.models.map((model) => model.id) ?? []
+    if (listed.length > 0) notes.push(`${route.provider} refused the model "${route.model}"; the models it lists are: ${listed.join(', ')}`)
+  }
+  return notes
 }
 
 export async function runTask(options: TaskOptions, onEvent?: EventListener): Promise<TaskResult> {
