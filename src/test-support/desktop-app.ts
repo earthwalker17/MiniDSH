@@ -160,11 +160,31 @@ export class DesktopApp {
   async waitForExit(timeoutMs: number): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      return await Promise.race([this.exited, new Promise<never>((_resolve, reject) => (timer = setTimeout(() => reject(new Error(`the app did not exit within ${timeoutMs} ms\nmain.log:\n${this.mainLog()}`)), timeoutMs)))])
+      return await Promise.race([
+        this.exited,
+        new Promise<never>((_resolve, reject) => (timer = setTimeout(() => reject(new Error(`the app did not exit within ${timeoutMs} ms\nmain.log:\n${this.mainLog()}${parkedAt(this.pid)}`)), timeoutMs))),
+      ])
     } finally {
       clearTimeout(timer)
     }
   }
+}
+
+/**
+ * macOS only: where a process that would not exit is parked. A stalled wait
+ * must say what it was waiting on, and "did not exit" alone cannot tell a
+ * quit the app dropped from a system dialog nobody can answer on a runner
+ * (which parks the main thread in a modal loop). `sample` reads another
+ * process of the same user without any permission; the main thread's stack is
+ * the first call graph it prints.
+ */
+function parkedAt(pid: number): string {
+  if (process.platform !== 'darwin') return ''
+  const sampled = spawnSync('sample', [String(pid), '1', '-mayDie'], { encoding: 'utf8', timeout: 30_000 })
+  const out = String(sampled.stdout ?? '')
+  const start = out.indexOf('Call graph:')
+  if (start === -1) return `\nsample: no call graph (${String(sampled.stderr ?? '').trim().slice(0, 200) || `status ${sampled.status}`})`
+  return `\nmain thread (sample):\n${out.slice(start).split('\n').slice(0, 45).join('\n')}`
 }
 
 /** Whether a process is alive (signal 0). */

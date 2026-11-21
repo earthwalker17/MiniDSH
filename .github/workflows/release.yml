@@ -216,11 +216,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: pnpm/setup@v3
-        with:
-          runtime: node@24.22.3
-          cache: true
-
       # The runtime inside every installer is the gate's tarball, byte for
       # byte the one npm gets: one release identity.
       - uses: actions/download-artifact@v8

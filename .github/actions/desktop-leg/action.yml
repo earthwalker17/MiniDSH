@@ -5,8 +5,8 @@
 # on a tag, and the two workflows cannot drift apart: before S22.5 they were
 # two copies, and the release's copy had never run anywhere.
 #
-# The job that uses this has already checked out the repository and set up
-# pnpm and the runtime.
+# The job that uses this has checked out the repository; the runtime and pnpm
+# are set up here, because one platform needs them set up differently.
 name: desktop leg
 description: Package the desktop app for this runner, start the runtime out of the artifact, and drive the app keyless
 inputs:
@@ -17,6 +17,29 @@ inputs:
 runs:
   using: composite
   steps:
+    # pnpm 11 publishes no standalone binary for Intel macOS, and that binary
+    # is what pnpm/setup installs (its first run there said so, S22.5). On
+    # that one platform Node comes from setup-node at the version .nvmrc names
+    # and pnpm from Corepack: the same pnpm package, run by that Node, at the
+    # version `packageManager` pins.
+    - if: runner.os == 'macOS' && runner.arch == 'X64'
+      uses: actions/setup-node@v7
+      with:
+        node-version-file: .nvmrc
+    - if: runner.os == 'macOS' && runner.arch == 'X64'
+      shell: bash
+      env:
+        COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      run: |
+        set -euo pipefail
+        corepack enable pnpm
+        echo "node $(node --version), pnpm $(pnpm --version) through Corepack"
+    - if: ${{ !(runner.os == 'macOS' && runner.arch == 'X64') }}
+      uses: pnpm/setup@v3
+      with:
+        runtime: node@24.22.3
+        cache: true
+
     - run: pnpm install --frozen-lockfile
       shell: bash
     - run: pnpm --dir desktop install --frozen-lockfile

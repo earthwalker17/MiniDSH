@@ -16,12 +16,16 @@ const workflows = readdirSync(join(ROOT, '.github', 'workflows')).filter((name) 
 describe('release pins', () => {
   const nvmrc = read('.nvmrc').trim()
 
-  it('every workflow sets up the Node .nvmrc names', () => {
+  it('every workflow, and the action they share, sets up the Node .nvmrc names', () => {
     expect(nvmrc).toMatch(/^\d+\.\d+\.\d+$/)
-    const pins = workflows.flatMap((name) => [...read(`.github/workflows/${name}`).matchAll(/runtime:\s*node@(\S+)/g)].map((match) => ({ name, version: match[1] })))
-    // Every workflow sets a runtime up at least once, or this would compare nothing.
-    expect(new Set(pins.map((pin) => pin.name)).size, `workflows with a runtime pin: ${pins.map((pin) => pin.name).join(', ')}`).toBe(workflows.length)
+    const actions = readdirSync(join(ROOT, '.github', 'actions')).map((name) => `.github/actions/${name}/action.yml`)
+    const files = [...workflows.map((name) => `.github/workflows/${name}`), ...actions]
+    const pins = files.flatMap((file) => [...read(file).matchAll(/runtime:\s*node@(\S+)/g)].map((match) => ({ file, version: match[1] })))
+    // Every one of them sets a runtime up at least once, or this would compare nothing.
+    expect(new Set(pins.map((pin) => pin.file)).size, `files with a runtime pin: ${pins.map((pin) => pin.file).join(', ')}`).toBe(files.length)
     expect(pins.filter((pin) => pin.version !== nvmrc)).toEqual([])
+    // setup-node, where it is used, reads the file itself: never a second literal.
+    for (const file of files) expect(read(file), file).not.toMatch(/node-version:\s*['"]?\d/)
   })
 
   it('the gate runs on the Node the desktop app bundles, and the live desktop test expects that one', () => {
