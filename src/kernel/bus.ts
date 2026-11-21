@@ -1,3 +1,12 @@
+/**
+ * The event bus of one root: listener storage, the scope admission rule
+ * (`select`) and the pre-delivery observers (ARCHITECTURE §2), plus the small
+ * types a registration returns or is told through (`Disposer`,
+ * `EffectCleanup`, `Logger`).
+ *
+ * It delivers nothing itself: the four dispatch modes are `Context`'s, and who
+ * owns a listener, and when it is removed, is that owner's effect list.
+ */
 import type { DispatchMode } from './tokens.ts'
 
 /** The handle returned by every registration: single-shot, awaits the cleanup. */

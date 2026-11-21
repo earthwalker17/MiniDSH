@@ -370,6 +370,260 @@ describe('kernel: temporal composability', () => {
   })
 })
 
+/**
+ * A plugin owns registrations only while a load is in flight or it is live.
+ * The contexts below are CAPTURED from `apply` and used later, which is how
+ * any plugin that keeps `ctx` in a closure (a registry handing it to a late
+ * caller, a timer) reaches the kernel after its plugin has gone.
+ */
+describe('kernel: who may still register', () => {
+  const PING = emitEvent<[]>('test/late-ping')
+  const LATE = serviceKey<number>('test-late')
+
+  /** Every kind of registration through `ctx`, each named with what became of it. */
+  function attempts(ctx: Context, counters: { heard: number; cleaned: number; applied: number }): string[] {
+    const tries: [name: string, register: () => unknown][] = [
+      ['on', () => ctx.on(PING, () => void counters.heard++, { global: true })],
+      ['effect', () => ctx.effect(() => () => void counters.cleaned++, 'late-effect')],
+      ['provide', () => ctx.provide(LATE, 1)],
+      ['observe', () => ctx.observe(() => {})],
+      ['child', () => ctx.child({ label: 'late-scope' })],
+      ['plugin', () => ctx.plugin({ name: 'late-plugin', apply: () => void counters.applied++ })],
+    ]
+    return tries.map(([name, register]) => {
+      try {
+        register()
+        return `${name}: admitted`
+      } catch (error) {
+        return `${name}: ${error instanceof KernelError ? error.code : String(error)}`
+      }
+    })
+  }
+  const REFUSED = ['on', 'effect', 'provide', 'observe', 'child', 'plugin'].map((name) => `${name}: INACTIVE_OWNER`)
+
+  it('refuses every registration through the context of a FAILED plugin, and leaves nothing behind', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const counters = { heard: 0, cleaned: 0, applied: 0 }
+    let captured: Context | undefined
+    const handle = root.plugin({
+      name: 'fails',
+      apply(ctx) {
+        captured = ctx
+        throw new Error('boom')
+      },
+    })
+    await root.settle()
+    expect(handle.state).toBe('failed')
+    expect(attempts(captured!, counters)).toEqual(REFUSED)
+    root.emit(PING)
+    await root.settle()
+    expect({ ...counters, listeners: root.listenerCount(PING), service: root.tryGet(LATE), effects: captured!.effects() }).toEqual({
+      heard: 0,
+      cleaned: 0,
+      applied: 0,
+      listeners: 0,
+      service: undefined,
+      effects: [],
+    })
+    await root.dispose()
+  })
+
+  it('refuses them through a plugin unloaded to PENDING when its dependency left, and through a disposed one', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const counters = { heard: 0, cleaned: 0, applied: 0 }
+    let captured: Context | undefined
+    const provider = root.plugin(counterProvider(1))
+    const dependent = root.plugin({ name: 'dependent', inject: [COUNTER], apply: (ctx) => void (captured = ctx) })
+    await root.settle()
+    // The control: while it is live, the same context is admitted, and its unload takes the registration away.
+    expect(dependent.state).toBe('active')
+    captured!.on(PING, () => void counters.heard++, { global: true })
+    expect(root.listenerCount(PING)).toBe(1)
+
+    await provider.dispose()
+    await root.settle()
+    expect(dependent.state).toBe('pending')
+    expect(root.listenerCount(PING)).toBe(0)
+    expect(attempts(captured!, counters)).toEqual(REFUSED)
+
+    await dependent.dispose()
+    expect(dependent.state).toBe('disposed')
+    expect(attempts(captured!, counters)).toEqual(REFUSED)
+    root.emit(PING)
+    expect({ ...counters, listeners: root.listenerCount(PING), effects: captured!.effects() }).toEqual({ heard: 0, cleaned: 0, applied: 0, listeners: 0, effects: [] })
+    await root.dispose()
+  })
+
+  // A failed load unwinds its partial effects, and a cleanup may be awaited:
+  // the plugin is no longer loading while that runs, so nothing registered in
+  // that window lands on a list the load is already done with.
+  it('refuses a registration made while a failed load is still unwinding its partial effects', async () => {
+    const root = createRoot({ logger: testLogger() })
+    const counters = { heard: 0, cleaned: 0, applied: 0 }
+    const unwinding = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let captured: Context | undefined
+    const handle = root.plugin({
+      name: 'fails-slowly',
+      apply(ctx) {
+        captured = ctx
+        ctx.effect(() => async () => {
+          unwinding.resolve()
+          await release.promise
+        }, 'slow-cleanup')
+        throw new Error('boom')
+      },
+    })
+    await unwinding.promise
+    const during = attempts(captured!, counters)
+    release.resolve()
+    await root.settle()
+    expect(handle.state).toBe('failed')
+    expect(during).toEqual(REFUSED)
+    expect({ listeners: root.listenerCount(PING), effects: captured!.effects() }).toEqual({ listeners: 0, effects: [] })
+    await root.dispose()
+  })
+
+  /**
+   * The floor under `admit`: disposal is the last owner a registration has, so
+   * it unwinds what the plugin still lists in ANY state. No public path can
+   * list an effect on a failed or pending plugin any more, so the record is
+   * put on the list directly, the way a future gap in `admit` would put it.
+   */
+  it('unwinds whatever a failed or a pending plugin still lists when it, or the root, is disposed', async () => {
+    const list = (handle: unknown) => (handle as { effects: { add(record: { dispose: () => void; label: string }): unknown } }).effects
+    const cleaned: string[] = []
+    const stranded = (label: string) => ({ dispose: () => void cleaned.push(label), label })
+
+    const root = createRoot({ logger: testLogger() })
+    const failed = root.plugin({
+      name: 'fails',
+      apply() {
+        throw new Error('boom')
+      },
+    })
+    const pending = root.plugin({ name: 'waits', inject: [GREETER], apply: () => {} })
+    const failedToo = root.plugin({
+      name: 'fails-too',
+      apply() {
+        throw new Error('boom')
+      },
+    })
+    await root.settle()
+    expect([failed.state, pending.state, failedToo.state]).toEqual(['failed', 'pending', 'failed'])
+    list(failed).add(stranded('on a failed plugin'))
+    list(pending).add(stranded('on a pending plugin'))
+    list(failedToo).add(stranded('on a failed plugin, at root disposal'))
+
+    await failed.dispose()
+    expect(cleaned).toEqual(['on a failed plugin'])
+    await pending.dispose()
+    expect(cleaned).toEqual(['on a failed plugin', 'on a pending plugin'])
+    await root.dispose()
+    expect(cleaned).toEqual(['on a failed plugin', 'on a pending plugin', 'on a failed plugin, at root disposal'])
+    expect([failed.state, pending.state, failedToo.state]).toEqual(['disposed', 'disposed', 'disposed'])
+  })
+})
+
+/**
+ * The activation branches `refresh` takes when a dependency's identity changes
+ * WITHOUT an inactive gap. A provider disposed and remounted goes through
+ * "gone, then back" (above); here a scope shadows a key its plugin was reading
+ * from the root, so the epoch moves from one live provider straight to another.
+ */
+describe('kernel: a dependency replaced with no gap', () => {
+  it('unloads then reloads an active dependent, its old effects unwound exactly once and before the reload', async () => {
+    const root = createRoot({ logger: testLogger() })
+    root.plugin(counterProvider(1))
+    const scope = root.child({ scope: 'agent' })
+    const log: string[] = []
+    const dependent = scope.plugin({
+      name: 'dependent',
+      inject: [COUNTER],
+      apply(ctx) {
+        const value = ctx.get(COUNTER).value
+        log.push(`load:${value}`)
+        ctx.effect(() => () => void log.push(`unload:${value}`))
+      },
+    })
+    await root.settle()
+    expect(log).toEqual(['load:1'])
+
+    scope.provide(COUNTER, { value: 2 })
+    await root.settle()
+    expect(dependent.state).toBe('active')
+    expect(log).toEqual(['load:1', 'unload:1', 'load:2'])
+    await dependent.dispose()
+    expect(log).toEqual(['load:1', 'unload:1', 'load:2', 'unload:2'])
+    await root.dispose()
+  })
+
+  it('retries a FAILED dependent under the provider that replaced the one it failed under', async () => {
+    const logger = testLogger()
+    const root = createRoot({ logger })
+    root.plugin(counterProvider(1))
+    const scope = root.child({ scope: 'agent' })
+    const seen: number[] = []
+    const dependent = scope.plugin({
+      name: 'picky',
+      inject: [COUNTER],
+      apply(ctx) {
+        const value = ctx.get(COUNTER).value
+        seen.push(value)
+        if (value === 1) throw new Error('cannot work with 1')
+      },
+    })
+    expect((await root.settle()).failed.map((entry) => entry.name)).toEqual(['picky'])
+    expect(dependent.state).toBe('failed')
+    // Never on its own: nothing changed, so nothing is retried.
+    await root.settle()
+    expect(seen).toEqual([1])
+
+    scope.provide(COUNTER, { value: 2 })
+    const report = await root.settle()
+    expect({ state: dependent.state, error: dependent.error, seen, failed: report.failed }).toEqual({ state: 'active', error: undefined, seen: [1, 2], failed: [] })
+    await root.dispose()
+  })
+})
+
+describe('kernel: a plugin disposed while its apply is still running', () => {
+  it('unwinds what the apply registered, never goes live, and never activates a dependent of what it provided', async () => {
+    const logger = testLogger()
+    const root = createRoot({ logger })
+    const gate = Promise.withResolvers<void>()
+    const reached = Promise.withResolvers<void>()
+    const log: string[] = []
+    const slow = root.plugin({
+      name: 'slow-provider',
+      async apply(ctx) {
+        ctx.provide(COUNTER, { value: 1 })
+        ctx.effect(() => () => void log.push('unwound'), 'before-the-gate')
+        reached.resolve()
+        await gate.promise
+        log.push('apply returned')
+      },
+    })
+    const dependent = root.plugin({ name: 'dependent', inject: [COUNTER], apply: (ctx) => void log.push(`dependent loaded:${ctx.get(COUNTER).value}`) })
+    await reached.promise
+    expect(slow.state).toBe('loading')
+
+    const disposed = slow.dispose()
+    gate.resolve()
+    await disposed
+    const report = await root.settle()
+    expect(log).toEqual(['apply returned', 'unwound'])
+    expect({ slow: slow.state, dependent: dependent.state, counter: root.tryGet(COUNTER), pending: report.pending, failed: report.failed, errors: logger.errors }).toEqual({
+      slow: 'disposed',
+      dependent: 'pending',
+      counter: undefined,
+      pending: [{ name: 'dependent', missing: ['counter'] }],
+      failed: [],
+      errors: [],
+    })
+    await root.dispose()
+  })
+})
+
 describe('kernel: events', () => {
   const PING = emitEvent<[value: number]>('test/ping')
   const TRANSFORM = waterfallEvent<[input: string], string>('test/transform')

@@ -1,3 +1,12 @@
+/**
+ * The composition context: services in realms, plugin instances and scopes as
+ * the owners of effects, epoch-gated activation, and dispatch over the root's
+ * one bus (ARCHITECTURE §2). Every registration is an effect of its owner and
+ * is unwound with it; an owner that is not live admits none.
+ *
+ * It must not know any service, event or plugin by name: tokens come from
+ * `tokens.ts`, listener storage and the scope admission rule from `bus.ts`.
+ */
 import { EventBus, type Disposer, type DispatchInfo, type EffectCleanup, type Logger, type Observer } from './bus.ts'
 import { KernelError } from './errors.ts'
 import type { AnyEventKey, EventKey, Listener, ServiceKey } from './tokens.ts'
@@ -222,9 +231,16 @@ class PluginInstance implements EffectOwner, PluginHandle {
     return this.state === 'loading' || this.state === 'active'
   }
 
+  /**
+   * Only a load in flight or a live plugin takes registrations. A FAILED
+   * plugin (its `apply` threw) and a PENDING one (unloaded when a dependency
+   * left) have been unwound and own nothing: a registration through a context
+   * captured from an earlier load would belong to no load, so no unwind would
+   * ever take it away, and a listener would outlive its plugin and the root.
+   */
   admit(label: string): void {
-    if (!this.mounted || this.state === 'unloading' || this.state === 'disposed') {
-      throw new KernelError('INACTIVE_OWNER', `cannot register "${label}" on ${this.label}: ${this.state}`)
+    if (!this.mounted || !this.active) {
+      throw new KernelError('INACTIVE_OWNER', `cannot register "${label}" on ${this.label}: ${this.mounted ? this.state : 'disposed'}`)
     }
   }
 
@@ -326,6 +342,10 @@ class PluginInstance implements EffectOwner, PluginHandle {
     } catch (error) {
       this.error = error
       this.root.logger.error(`${this.label} failed to load`, error)
+      // Not `loading` while its partial effects unwind: a cleanup is awaited,
+      // and a registration admitted during it would land on a list this load
+      // is done with (`admit`).
+      this.state = 'unloading'
       await this.effects.unwindAll(this.root.logger, this.label)
       this.state = 'failed'
       this.root.notify()
@@ -349,10 +369,11 @@ class PluginInstance implements EffectOwner, PluginHandle {
     this.mounted = false
     this.root.instances.delete(this)
     this.schedule(async () => {
-      if (this.state === 'active' || this.state === 'loading') {
-        this.state = 'unloading'
-        await this.effects.unwindAll(this.root.logger, this.label)
-      }
+      if (this.state === 'active' || this.state === 'loading') this.state = 'unloading'
+      // Whatever the state. `admit` keeps a failed or pending plugin's list
+      // empty, and this is the floor under it: disposal is the last owner a
+      // registration has, so nothing still listed may be left to outlive it.
+      await this.effects.unwindAll(this.root.logger, this.label)
       this.state = 'disposed'
       this.root.notify()
     })
