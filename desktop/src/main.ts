@@ -71,7 +71,10 @@ if (app.isPackaged && app.commandLine.hasSwitch('remote-debugging-port')) app.ex
 // (the lock is per userData). MINIDSH_* never reaches an agent's shell.
 if (process.env.MINIDSH_DESKTOP_DATA) app.setPath('userData', process.env.MINIDSH_DESKTOP_DATA)
 if (process.platform === 'win32') app.setAppUserModelId(APP_ID)
-app.setAppLogsPath()
+// A separate profile keeps its own logs on every platform: macOS's default is
+// ~/Library/Logs/<name> whatever userData says, which would mix a side-by-side
+// instance's log into the installed app's (and leave a test reading nothing).
+app.setAppLogsPath(process.env.MINIDSH_DESKTOP_DATA ? join(process.env.MINIDSH_DESKTOP_DATA, 'logs') : undefined)
 if (!app.requestSingleInstanceLock()) app.exit(0)
 
 // ---------------------------------------------------------------- state
