@@ -8,8 +8,8 @@ License, Copyright DeepSeek). It is not an official DeepSeek project and is
 not affiliated with or endorsed by DeepSeek.
 
 The code is implemented independently. Where a contract, profile or wording
-is adapted from DeepSeek Harness -- for example the bubblewrap confinement
-profile and the shape of the JSON-RPC client protocol -- the source is
+is adapted from DeepSeek Harness (for example the bubblewrap confinement
+profile and the shape of the JSON-RPC client protocol), the source is
 credited in the adjacent comment. The Cordis paper
 (https://github.com/cordiverse/paper) is the source of the two composability
 properties the kernel is built around.
@@ -19,8 +19,9 @@ web client, at commit 2e39e70496aa02986ca6a820c5d497e816b69d7e: the line
 icon artwork in icons.js (from packages/client/ui-primitives/src/icons/
 artwork.ts, converted to element data and renamed), and the values of its
 design tokens in style.css (the neutral ramp, hairlines, elevation, radii,
-type scale and diff and syntax colours, from packages/client/ui-theme).
-MiniDSH's mark and accent colour are its own; no DeepSeek brand artwork is
+type scale and diff and syntax colours, from packages/client/ui-theme). The
+desktop app's own pages (desktop/shell/shell.css) reuse those token values.
+MiniDSH's mark and accent colour are its own. No DeepSeek brand artwork is
 used. That material is used under DeepSeek Harness's licence:
 
   MIT License
@@ -46,4 +47,50 @@ used. That material is used under DeepSeek Harness's licence:
   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
   USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-The runtime dependency `zod` is MIT licensed by its authors.
+The npm package
+---------------
+
+The npm package contains MiniDSH's own files, the adapted material above
+among them, and no other project's code. It names one runtime dependency,
+zod, which npm installs beside it. zod is under the MIT License,
+Copyright (c) 2025 Colin McDonnell.
+
+The desktop installers
+----------------------
+
+The four desktop installers (Windows x64, Linux x64 AppImage, macOS arm64,
+macOS x64) contain that same npm package and zod, and they also
+redistribute binaries built by other projects. MiniDSH 2.0.0 ships:
+
+- Node.js 24.22.3, the official build from nodejs.org, checked against a
+  pinned SHA-256 when an installer is made (the pin is in
+  desktop/scripts/package.ts and .nvmrc). Only the node executable and its
+  LICENSE file are taken from that build. Node.js is under the MIT License.
+  Its LICENSE file also carries the licences of the libraries built into it,
+  among them V8, OpenSSL, ICU, libuv and zlib.
+
+- Electron 45.4.1 (the pin is the electron entry in package.json), under the
+  MIT License, Copyright (c) Electron contributors and Copyright (c)
+  2013-2020 GitHub Inc. Electron contains Chromium and the components
+  Chromium is built from, each under its own licence. Chromium's credits
+  file lists them with their licence texts. One of them, FFmpeg, is under
+  the GNU Lesser General Public License, version 2.1 or later.
+
+The Windows installer is an NSIS installer made by electron-builder. Its
+NSIS target also places resources\elevate.exe in the installed app. No
+licence text for that helper ships in the app, and this file states none.
+
+Where the licence texts are in an installed app:
+
+  Windows (%LOCALAPPDATA%\Programs\minidsh) and Linux (inside the AppImage;
+  run it with --appimage-extract to see the files):
+    LICENSE.electron.txt                              Electron
+    LICENSES.chromium.html                            Chromium's components
+    resources/node/LICENSE                            Node.js
+    resources/runtime/node_modules/minidsh/LICENSE    MiniDSH
+    resources/runtime/node_modules/minidsh/NOTICE     this file
+    resources/runtime/node_modules/zod/LICENSE        zod
+
+  macOS: the same six files, all under MiniDSH.app/Contents/Resources/
+  (LICENSE.electron.txt and LICENSES.chromium.html directly in it, the rest
+  under node/ and runtime/ as above).
