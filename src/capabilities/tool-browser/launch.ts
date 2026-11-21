@@ -32,6 +32,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { childEnvironment, killAndWait, spawnChild, spawnRefusal, transientSpawnText, type Spawner } from '../../core/process.ts'
+import { clip, clipEnd, printableText } from '../../core/text.ts'
 import { CdpConnection } from './cdp.ts'
 import { BrowserError } from './errors.ts'
 import { bypassList, CANARY_HOST, CANARY_TLS_HOST, Fence, hostResolverRules } from './fence.ts'
@@ -220,7 +221,7 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
   errors.on('data', (chunk: Buffer) => {
     lastOutputMs = since()
     firstOutputMs ??= lastOutputMs
-    stderr = (stderr + chunk.toString('utf8')).slice(-16_384)
+    stderr = clipEnd(stderr + chunk.toString('utf8'), 16_384)
   })
   const cdp = new CdpConnection(toBrowser, fromBrowser)
   let exited = false
@@ -299,49 +300,84 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
  * and the fence is not in force.
  *
  * Judged by evidence, because only a fact about the host may be remembered
- * (`index.ts`). A canary whose navigation FINISHED without the fence seeing it
- * went somewhere else: the host's, remembered, and said at once rather than
- * after the bound. One still unfinished at the bound proves nothing either
- * way (a busy host; windows-latest once took over 10 s mid-suite): refused,
- * as any unproved fence is, but tried again next call. The fence records a
- * host before it answers, so a finished navigation never outruns its record.
+ * (`index.ts`). A canary that WENT SOMEWHERE ELSE is the host's: remembered,
+ * and said at once rather than after the bound. Two ways to know it did,
+ * without the fence having seen it: a document came back (something answered
+ * that is not this process), or the navigation failed the way another road
+ * fails (`WENT_ELSEWHERE`).
+ *
+ * Anything else proves nothing either way, and is refused as any unproved
+ * fence is but tried again next call: a canary still unfinished at the bound
+ * (a busy host; windows-latest once took over 10 s mid-suite), and one that
+ * ended early for a reason of the moment — net::ERR_NETWORK_CHANGED while an
+ * adapter or a VPN comes up, ERR_ABORTED, ERR_INSUFFICIENT_RESOURCES. Those
+ * went nowhere; remembering one switched the browser off for the life of a
+ * long-running host, with a proxy policy named as the reason. An outcome that
+ * could be either is a moment: a moment remembered costs the browser until a
+ * restart, a host fact retried costs one refused launch per call.
+ *
+ * The fence records a host before it answers, so a finished navigation never
+ * outruns its record. Exported for the test that stages the answers.
  */
-async function proveFence(cdp: CdpConnection, fence: Fence, timeoutMs: number): Promise<void> {
+export async function proveFence(cdp: CdpConnection, fence: Fence, timeoutMs: number): Promise<void> {
   const canaries = [
     { host: CANARY_HOST, url: `http://${CANARY_HOST}/` },
     { host: CANARY_TLS_HOST, url: `https://${CANARY_TLS_HOST}/` },
   ]
   const outcomes = await Promise.all(
-    canaries.map(async ({ host, url }) => {
+    canaries.map(async ({ host, url }): Promise<{ readonly kind: 'proved' | 'elsewhere' | 'unfinished' | 'interrupted'; readonly why?: string }> => {
       const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' })
       try {
         const { sessionId } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true })
+        let failure: unknown
         try {
-          await cdp.send('Page.navigate', { url }, { sessionId, timeoutMs })
+          failure = (await cdp.send<{ errorText?: unknown }>('Page.navigate', { url }, { sessionId, timeoutMs })).errorText
         } catch (error) {
           if (!(error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT')) throw error
-          return fence.saw(host) ? 'proved' : 'unfinished'
+          return { kind: fence.saw(host) ? 'proved' : 'unfinished' }
         }
-        return fence.saw(host) ? 'proved' : 'elsewhere'
+        if (fence.saw(host)) return { kind: 'proved' }
+        if (typeof failure !== 'string' || failure === '' || WENT_ELSEWHERE.test(failure)) return { kind: 'elsewhere' }
+        return { kind: 'interrupted', why: failure }
       } finally {
         await cdp.send('Target.closeTarget', { targetId }).catch(() => undefined)
       }
     }),
   )
-  if (outcomes.includes('elsewhere')) {
+  if (outcomes.some((outcome) => outcome.kind === 'elsewhere')) {
     throw new BrowserError(
       'BROWSER_FENCE_UNAVAILABLE',
       `this browser's traffic does not go through MiniDSH's network fence (a proxy policy on this machine may override it), so it is not used`,
       { hostFault: true },
     )
   }
-  if (outcomes.includes('unfinished')) {
+  const interrupted = outcomes.find((outcome) => outcome.kind === 'interrupted')
+  if (interrupted !== undefined) {
+    throw new BrowserError(
+      'BROWSER_FENCE_UNAVAILABLE',
+      `the check that this browser's traffic goes through MiniDSH's network fence ended early (${clip(printableText(interrupted.why ?? ''), 80)}) and showed nothing either way, so the browser is not used; the next call tries again`,
+    )
+  }
+  if (outcomes.some((outcome) => outcome.kind === 'unfinished')) {
     throw new BrowserError(
       'BROWSER_FENCE_UNAVAILABLE',
       `this browser had not shown its traffic going through MiniDSH's network fence within ${Math.round(timeoutMs / 1000)} s, so it is not used; the next call tries again`,
     )
   }
 }
+
+/**
+ * How a canary's navigation fails when the browser took a road that is not
+ * this process's fence. It asked a resolver itself: the names are `.invalid`,
+ * and with no proxy in the way the resolver rules answer exactly this
+ * (measured: a canary host on the allow list goes direct and ends
+ * net::ERR_NAME_NOT_RESOLVED). Or a proxy ANSWERED that is not ours: it
+ * refused the tunnel, wanted credentials, or showed a certificate — this
+ * process's listener does none of that unseen. A proxy that could not be
+ * REACHED (ERR_PROXY_CONNECTION_FAILED) is not here: that is ours on a host
+ * out of sockets as much as another's that is down.
+ */
+const WENT_ELSEWHERE = /^net::ERR_(NAME_NOT_RESOLVED|TUNNEL_CONNECTION_FAILED|PROXY_AUTH_|PROXY_CERTIFICATE_INVALID|MANDATORY_PROXY_CONFIGURATION_FAILED)/
 
 /** What a failed start's stderr says, turned into the remedy a person can act on, and whether it is the host's. */
 export function remedy(stderr: string): { readonly text: string; readonly hostFault: boolean } {
@@ -352,7 +388,8 @@ export function remedy(stderr: string): { readonly text: string; readonly hostFa
   }
   if (/running as root without --no-sandbox/i.test(stderr)) return { text: '. Chrome refuses to run as root with its sandbox on; run MiniDSH as an ordinary user', hostFault: true }
   const lines = stderr.split(/\r?\n/).filter((line) => line.trim() !== '')
-  return { text: lines.length === 0 ? '' : `. Its last words: ${lines.slice(-3).join(' | ').slice(0, 600)}`, hostFault: false }
+  // `clip`, not `slice`: this text is a tool result, and half an emoji is a lone surrogate no provider accepts.
+  return { text: lines.length === 0 ? '' : `. Its last words: ${clip(lines.slice(-3).join(' | '), 600)}`, hostFault: false }
 }
 
 /** A spawn refused because the executable is not there or not runnable: the host's, every time. */

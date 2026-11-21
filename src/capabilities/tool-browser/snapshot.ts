@@ -57,6 +57,19 @@ export interface RefEntry {
 /** Past this many live refs the least recently rendered goes; resolving it then says "snapshot again", which is true. */
 const MAX_REFS = 20_000
 
+/**
+ * True for a number a ref can carry: one the agent's counter can hold AND
+ * count past. Beyond `Number.MAX_SAFE_INTEGER` a number no longer advances by
+ * one, so a counter that got there would hand every node the same ref. The
+ * mint (`refFor`) and the scan of an agent's history for the refs it already
+ * shows (`index.ts`) read this ONE rule, and that is what keeps "no two refs
+ * share a name" true against a number someone planted in the history: the
+ * scan ignores exactly the numbers no browser can have minted.
+ */
+export function mintable(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0
+}
+
 /** The page's refs. A node seen again in the same document keeps its ref, so two snapshots of a quiet page agree. */
 export class RefTable {
   readonly generation: number
@@ -81,6 +94,15 @@ export class RefTable {
       this.byRef.delete(entry.ref)
       this.byRef.set(entry.ref, entry)
       return entry.ref
+    }
+    // Refused, never repeated. Counting cannot get here (it would take 2^53
+    // refs); a history that already shows the last number can, and a ref that
+    // might name two elements is worse than no ref.
+    if (!mintable(this.counter.next)) {
+      throw new BrowserError(
+        'BROWSER_PROTOCOL',
+        `no new element ref can be made: this session's history already shows the last number a ref can carry (e${Number.MAX_SAFE_INTEGER}); start a new session to read a page with refs`,
+      )
     }
     const ref = `e${this.counter.next++}`
     this.byRef.set(ref, { ref, generation: this.generation, frameId, loaderId, backendNodeId, role, name })

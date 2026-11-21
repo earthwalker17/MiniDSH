@@ -22,12 +22,27 @@
  * image loads alike, and a refused frame commits `chrome-error://chromewebdata/`
  * with none of the file's content.
  *
+ * WHAT A POPUP LOADS BEFORE ITS CLOSE LANDS IS NOT THIS PAGE'S. The pause is
+ * on this page's session, and a popup is a target of its own, closed by a
+ * command sent when the browser announces it. Until that lands its requests
+ * are neither paused nor read here. Measured on Chrome 157 (Windows,
+ * 2026-11-21): a popup's document request left every time (12 of 12 reached
+ * the server), and a `file:` popup's script, loading a file outside the
+ * workspace and posting it to its opener, never ran in time (0 of 20). So the
+ * file fence is every `file:` request OF THIS PAGE; the network fence is the
+ * browser's and holds for a popup as for any page. Two closures were tried
+ * and do not work: `--block-new-web-contents` is ignored (the target is still
+ * created), and attaching new targets paused (`Target.setAutoAttach` with
+ * `waitForDebuggerOnStart`) holds the OPENER inside `window.open`, so the
+ * click that opened the window never returns.
+ *
  * EVERY WAIT RACES THE CALL'S BUDGET: the signal rejects with its reason, the
  * deadline ends a wait (`BROWSER_TIMEOUT` where the wait was the point, an
  * early return where it was only settling), and every command carries the
  * time left as its timeout. Nothing here waits unbounded.
  */
 import { snapshotJson, type JsonValue } from '../../core/json.ts'
+import { clip as clipText } from '../../core/text.ts'
 import { DESCRIBE, performAction, quadsOf, bounds } from './act.ts'
 import type { CdpConnection, CdpEvent } from './cdp.ts'
 import { BrowserError } from './errors.ts'
@@ -58,6 +73,8 @@ const REQUEST_MEMORY = 1_000
 const QUIET_MS = 500
 const SETTLE_CAP_MS = 5_000
 const LOAD_CAP_MS = 30_000
+/** How long a server may take to START answering a navigation — a response, or a refusal — before the attempt is given up (`requestNavigation`). */
+const ANSWER_CAP_MS = 30_000
 /** After an action: how long a navigation it caused may take to load, and how soon it must have started. */
 const ACTION_LOAD_CAP_MS = 10_000
 const ACTION_GRACE_MS = 150
@@ -229,7 +246,7 @@ class Page implements BrowserPage, PageSession {
   // -------------------------------------------------------------------------
   // BrowserPage
 
-  async navigate(url: string, options: CallBudget & { readonly waitMs: number }): Promise<{ readonly loaded: boolean }> {
+  async navigate(url: string, options: CallBudget & { readonly waitMs: number; readonly answerMs?: number }): Promise<{ readonly loaded: boolean }> {
     // The one operation a crashed page takes: it starts the renderer again.
     if (this.closedReason !== undefined) throw this.closedError()
     const started = Date.now()
@@ -243,7 +260,7 @@ class Page implements BrowserPage, PageSession {
     let loaderId: string | undefined
     for (let attempt = 1; ; attempt++) {
       const downloadsBefore = this.downloadsSeen
-      const answer = await this.send<{ loaderId?: unknown; errorText?: unknown; isDownload?: unknown }>('Page.navigate', { url }, options)
+      const answer = await this.requestNavigation(url, options)
       loaderId = text(answer.loaderId)
       const errorText = text(answer.errorText)
       if (errorText === undefined || errorText === '') break
@@ -276,6 +293,44 @@ class Page implements BrowserPage, PageSession {
     }
     await this.settle(options)
     return { loaded }
+  }
+
+  /**
+   * `Page.navigate`, which answers only once the navigation commits or fails.
+   * A server that takes the request and then says nothing therefore leaves it
+   * pending for as long as it is allowed (measured on Chrome 157 and Edge 158:
+   * the document request is announced at once, and then nothing follows). So
+   * it is allowed `answerMs`, never the call's whole budget, and what the wait
+   * ran out ON decides what is said:
+   *
+   *   - the navigation's document request is out and no response has come:
+   *     the SERVER's silence. The load is stopped — `Page.stopLoading`,
+   *     measured to end the pending navigation with net::ERR_ABORTED within
+   *     milliseconds and to leave the page showing what it showed — so it
+   *     cannot commit under a later call, and the failure is a navigation's;
+   *   - anything else (no request went out, or a response came and the page
+   *     could not take it): the PAGE did not answer, which is `send`'s case
+   *     and gets `send`'s recovery.
+   */
+  private async requestNavigation(url: string, options: CallBudget & { readonly answerMs?: number }): Promise<{ loaderId?: unknown; errorText?: unknown; isDownload?: unknown }> {
+    if (this.closedReason !== undefined) throw this.closedError()
+    if (options.signal.aborted) throw options.signal.reason
+    const remaining = options.deadline - Date.now()
+    if (remaining <= 0) throw new BrowserError('BROWSER_TIMEOUT', "the call's deadline passed before Page.navigate could be sent")
+    const allowed = Math.min(remaining, options.answerMs ?? ANSWER_CAP_MS)
+    const requestsBefore = this.documentRequests
+    try {
+      return await this.cdp.send('Page.navigate', { url }, { sessionId: this.sessionId, timeoutMs: allowed, signal: options.signal })
+    } catch (error) {
+      if (!(error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT')) throw error
+      const waited = allowed >= 1_000 ? `${Math.round(allowed / 1_000)} s` : `${allowed} ms`
+      const pending = this.documentRequests === requestsBefore ? undefined : this.latestDocument
+      if (pending === undefined || !this.inflight.has(pending) || this.statusByDocument.has(pending)) {
+        throw await this.unanswered(`the page had not taken the navigation to ${url} after ${waited}`)
+      }
+      await this.cdp.send('Page.stopLoading', {}, { sessionId: this.sessionId, timeoutMs: PLAIN_TIMEOUT_MS }).catch(() => undefined)
+      throw new BrowserError('BROWSER_NAVIGATION_FAILED', `${url} did not load: its server had sent no response after ${waited} (it may still be starting, or be stuck), so the load was stopped`)
+    }
   }
 
   async snapshot(options: CallBudget & { readonly ref?: string; readonly waitForText?: string; readonly waitUntil?: number }): Promise<string> {
@@ -425,7 +480,13 @@ class Page implements BrowserPage, PageSession {
   }
 
   async setViewport(viewport: Viewport): Promise<void> {
-    this.usable()
+    // Taken by a crashed page too, like the `navigate` it precedes: refusing
+    // here made "navigate to load it again" fail for as long as the call
+    // carried a viewport. The override is the browser's to keep — measured on
+    // Chrome 157 and Edge 158, it answers in 2–3 ms with the renderer dead,
+    // and the document the next navigation loads has the new size from its
+    // first script.
+    if (this.closedReason !== undefined) throw this.closedError()
     await this.cdp.send(
       'Emulation.setDeviceMetricsOverride',
       { width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: false },
@@ -525,12 +586,15 @@ class Page implements BrowserPage, PageSession {
     try {
       return await this.cdp.send<T>(method, params, { sessionId: this.sessionId, timeoutMs: remaining, signal: budget.signal })
     } catch (error) {
-      if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') {
-        await this.cdp.send('Runtime.terminateExecution', {}, { sessionId: this.sessionId, timeoutMs: TERMINATE_TIMEOUT_MS }).catch(() => undefined)
-        throw new BrowserError('BROWSER_TIMEOUT', `the call's deadline passed while the page was answering ${method}; any script still running on the page was stopped`, { unanswered: true })
-      }
+      if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') throw await this.unanswered(`the call's deadline passed while the page was answering ${method}`)
       throw error
     }
+  }
+
+  /** The recovery `send` describes, for a command the page left unanswered: stop what runs in the page, and mark the failure so the next call probes it. */
+  private async unanswered(what: string): Promise<BrowserError> {
+    await this.cdp.send('Runtime.terminateExecution', {}, { sessionId: this.sessionId, timeoutMs: TERMINATE_TIMEOUT_MS }).catch(() => undefined)
+    return new BrowserError('BROWSER_TIMEOUT', `${what}; any script still running on the page was stopped`, { unanswered: true })
   }
 
   async sleep(ms: number, budget: CallBudget): Promise<void> {
@@ -982,15 +1046,16 @@ function remember(set: Set<string>, value: string | undefined, limit: number): v
   if (set.size > limit) set.delete(set.values().next().value!)
 }
 
+/** Cut with `core/text.ts`'s `clip`, never `slice`: these strings end up in a tool result, and half a surrogate pair is a lone surrogate no provider accepts. */
 function clamp(value: string): string {
-  return value.length > TEXT_LIMIT ? `${value.slice(0, TEXT_LIMIT)}…` : value
+  return value.length > TEXT_LIMIT ? `${clipText(value, TEXT_LIMIT)}…` : value
 }
 
 /** A remote object as an article, its kind and its first line: `a function: () => 1`, `a Map: Map(1)`, `a Symbol: Symbol(s)`, `an Error: Error: no`. */
 function described(result: Record<string, unknown>): string {
   const kind = result.type === 'function' ? 'function' : result.type === 'symbol' ? 'Symbol' : result.subtype === 'node' ? 'DOM node' : (text(result.className) ?? text(result.subtype) ?? String(result.type))
   const line = (text(result.description) ?? '').split('\n')[0]!.trim()
-  const shown = line.length > 120 ? `${line.slice(0, 120)}…` : line
+  const shown = line.length > 120 ? `${clipText(line, 120)}…` : line
   return `${/^[aeiou]/i.test(kind) ? 'an' : 'a'} ${kind}${shown === '' || shown === kind ? '' : `: ${shown}`}`
 }
 

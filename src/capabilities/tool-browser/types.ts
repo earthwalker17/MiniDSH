@@ -104,10 +104,13 @@ export interface BrowserPage {
   /**
    * Navigate the main frame and wait for it to load, then settle. A loopback
    * URL answering connection-refused is retried until `waitMs` has passed — a
-   * dev server still starting. Resolves with whether `load` fired in time; a
-   * navigation error (`net::ERR_*`) rejects with it.
+   * dev server still starting. A server that takes the request and then sends
+   * no response is given `answerMs` (default 30 s; a test shortens it), never
+   * the call's whole budget, and the load is then stopped. Resolves with
+   * whether `load` fired in time; a navigation error (`net::ERR_*`, or that
+   * silence) rejects with it.
    */
-  navigate(url: string, options: CallBudget & { readonly waitMs: number }): Promise<{ readonly loaded: boolean }>
+  navigate(url: string, options: CallBudget & { readonly waitMs: number; readonly answerMs?: number }): Promise<{ readonly loaded: boolean }>
   /**
    * The accessibility tree as text, Playwright AI-snapshot style, every
    * non-ignored element carrying a ref (text lines carry none, as there):
@@ -130,6 +133,7 @@ export interface BrowserPage {
    * `unreturnable`, describing what it was. Neither is a rejection.
    */
   evaluate(expression: string, options: CallBudget): Promise<{ readonly value?: JsonValue; readonly exception?: string; readonly unreturnable?: string }>
+  /** Taken by a crashed page too: the size is the browser's to keep, and the navigation that recovers the page loads at it. */
   setViewport(viewport: Viewport): Promise<void>
   /** Drains what happened since the previous report. */
   report(): Promise<PageReport>
@@ -151,6 +155,8 @@ export interface BrowserPage {
 /**
  * Ref numbers are per AGENT, never per browser: the counter survives a
  * relaunch, so a ref minted before a crash can never name a node after it.
+ * `next` is the number the next ref takes; past the last one a number can
+ * count from (`snapshot.ts` `mintable`), no ref is minted.
  */
 export interface RefCounter {
   next: number

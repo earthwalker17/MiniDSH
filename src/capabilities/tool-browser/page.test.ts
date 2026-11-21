@@ -8,7 +8,7 @@
  * `MINIDSH_EXPECT_BROWSER=1` that is a failure (`expectBrowserSuite`).
  */
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:net'
+import { connect, createServer, type Socket } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -126,13 +126,37 @@ const ROUTES: Record<string, Route> = {
     <button>Save</button></form><table><thead><tr><th>Item</th><th>Qty</th><th></th></tr></thead><tbody>${ROWS}</tbody></table></main>`,
 }
 
+/**
+ * A loopback port nothing answers on: bound, released, and then PROVED to
+ * refuse a connection. Releasing it is not enough on Windows, where a
+ * `127.0.0.1` listener can share its port with another socket's listener on
+ * the wildcard address, and that one takes the loopback connections the
+ * moment ours closes (both measured). A browser sent there gets whatever
+ * that listener speaks. That is the likeliest reading, not a captured one, of
+ * two full-file runs on a host other suites were sharing, in which the first
+ * navigation test failed net::ERR_INVALID_HTTP_RESPONSE before its own server
+ * existed; a port proved to refuse cannot fail that way.
+ */
 async function freePort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
-  const address = server.address()
-  const port = typeof address === 'object' && address !== null ? address.port : 0
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
+  const tried: number[] = []
+  for (let attempt = 1; attempt <= 20; attempt++) {
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    const refused = await new Promise<boolean>((resolve) => {
+      const probe = connect(port, '127.0.0.1')
+      probe.once('connect', () => {
+        probe.destroy()
+        resolve(false)
+      })
+      probe.once('error', () => resolve(true))
+    })
+    if (refused) return port
+    tried.push(port)
+  }
+  throw new Error(`no loopback port refused a connection after its listener closed; something else answers on each of ${tried.join(', ')}`)
 }
 
 async function until(test: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
@@ -603,6 +627,52 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
       expect((error as Error).message).toContain(`http://127.0.0.1:${port}/x`)
     })
 
+    /**
+     * A server that takes the connection and then says nothing: a dev server
+     * wedged, or still compiling. `Page.navigate` answers only at a commit or
+     * a failure, so it used to wait out the call's whole budget (minutes) and
+     * then report a page script stopped, though no script was involved. The
+     * wait is `answerMs` (30 s unless a test says less), the failure names the
+     * server, and the page is left as it was: not marked for a probe, and the
+     * abandoned load cannot land under a later call.
+     */
+    it('gives a server that never answers a bounded wait, blames the server and not the page, and leaves the page as it was', LONG, async () => {
+      const held: Socket[] = []
+      const silent = createServer((socket) => {
+        held.push(socket)
+        socket.on('error', () => {})
+      })
+      await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', () => resolve()))
+      const address = silent.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      try {
+        await go('/counter')
+        const started = Date.now()
+        // A minute of budget, two seconds for the server to start answering.
+        const error = await page.navigate(`http://127.0.0.1:${port}/`, { ...budget(60_000), waitMs: 0, answerMs: 2_000 }).catch((caught: unknown) => caught)
+        const took = Date.now() - started
+        expect(held.length, 'the browser never connected, so this is not the silent server it is about').toBeGreaterThan(0)
+        expect(error).toMatchObject({ code: 'BROWSER_NAVIGATION_FAILED', unanswered: false, message: expect.stringContaining('its server had sent no response after 2 s') })
+        expect((error as Error).message).toContain(`http://127.0.0.1:${port}/`)
+        expect((error as Error).message, 'a silent server was blamed on the page').not.toContain('script')
+        // The answer bound, not the minute: with room for a loaded runner to
+        // notice the timer and stop the load (a command of its own).
+        expect(took, `the call took ${took} ms of a 60 s budget for a 2 s answer bound`).toBeLessThan(20_000)
+        expect(took, `the call ended after ${took} ms, before the server's 2 s had passed`).toBeGreaterThanOrEqual(1_900)
+        // The page was not the one at fault and is not treated as one: it
+        // answers, shows what it showed, and reports nothing of the attempt.
+        expect(await page.responsive(3_000)).toBe(true)
+        expect(await page.snapshot(budget())).toContain('button "Add one"')
+        // The stopped load is over: if the server answers now, nothing lands.
+        for (const socket of held) socket.end('HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 19\r\nconnection: close\r\n\r\n<title>LATE</title>')
+        expect(await until(async () => (await page.evaluate('document.title', budget())).value === 'LATE', 1_500), 'the abandoned navigation committed after the call had failed').toBe(false)
+        expect(await page.report()).toMatchObject({ url: `${fixture.origin}/counter`, failedRequests: [], navigated: false })
+      } finally {
+        for (const socket of held) socket.destroy()
+        await new Promise<void>((resolve) => silent.close(() => resolve()))
+      }
+    })
+
     it('fences file: loads to the workspace — a frame outside shows nothing and is named, a frame inside renders', LONG, async () => {
       const secret = join(outside, 'secret.html')
       writeFileSync(secret, '<p>TOP SECRET OUTSIDE</p>')
@@ -635,9 +705,15 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
         for (const renderer of renderers) process.kill(renderer.id, 'SIGKILL')
         expect(await until(async () => (await crashing.report()).crashed, 15_000)).toBe(true)
         await expect(crashing.snapshot(budget())).rejects.toMatchObject({ code: 'BROWSER_CLOSED', message: expect.stringContaining('crashed') })
+        // The recovery as browser_navigate makes it when the call carries a
+        // viewport: the size first, then the load. A crashed page that refused
+        // the size made "navigate to load it again" fail for as long as the
+        // model kept the argument.
+        await crashing.setViewport({ width: 390, height: 844 })
         expect(await crashing.navigate(`${fixture.origin}/counter`, { ...budget(), waitMs: 0 })).toEqual({ loaded: true })
         expect((await crashing.report()).crashed).toBe(false)
         expect(await crashing.snapshot(budget())).toContain('button "Add one"')
+        expect((await crashing.evaluate('[innerWidth, innerHeight]', budget())).value, 'the page that came back is not the size that was asked').toEqual([390, 844])
       } finally {
         await crashing.close()
         await own.close()
@@ -724,9 +800,45 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
       for (const expression of ['new Promise(() => {})', 'while (true) {}']) {
         const started = Date.now()
         await expect(page.evaluate(expression, budget(1_000))).rejects.toMatchObject({ code: 'BROWSER_TIMEOUT' })
-        expect(Date.now() - started, expression).toBeLessThan(2_500)
+        const took = Date.now() - started
+        // The claim is that the call's OWN deadline (1 s) ended it: not
+        // something sooner (a refusal before it ran: V8's timer is set 100 ms
+        // short of the deadline, so 0.9 s is the earliest honest end), and not
+        // the next bound out, which is the 10 s a plain command gets. The end
+        // may trail the deadline by the termination's own second (`send`),
+        // and a starved runner adds its scheduling on top — 3.3 s was
+        // measured against the 2.5 s this once asked — so the line is drawn
+        // under that next bound, not next to the deadline.
+        expect(took, `${expression} ended after ${took} ms, before its deadline`).toBeGreaterThanOrEqual(800)
+        expect(took, `${expression} ended after ${took} ms: later than its own deadline explains`).toBeLessThan(8_000)
         expect(await page.evaluate('1 + 1', budget(5_000))).toEqual({ value: 2 })
       }
+    })
+
+    /**
+     * Three places page text is cut by UTF-16 length before it becomes a tool
+     * result: a console line (2,000), what an unreturnable value was (120),
+     * and the first words of an element (40, in the page). Each fixture puts
+     * a surrogate pair across its bound; a cut through it leaves half a
+     * character, which is not text.
+     */
+    it('cuts page text between characters: a console line, a described value and an element’s words', LONG, async () => {
+      await go('/format')
+      // 'x' then pairs: every pair starts on an odd index, and each bound is even, so the last unit kept would be a first half.
+      await page.evaluate("console.error('x' + '😀'.repeat(1500)); 1", budget())
+      const [line] = (await page.report()).console
+      expect(line?.text.length, 'the console line was not cut, so its cut was not tested').toBeLessThan(2_100)
+      expect(line?.text.isWellFormed(), `the console line ends in ${JSON.stringify(line?.text.slice(-3))}`).toBe(true)
+      expect(line?.text.endsWith('😀…')).toBe(true)
+
+      const symbol = await page.evaluate("Symbol('😀'.repeat(100))", budget())
+      expect(symbol.unreturnable?.endsWith('…'), `the description was not cut: ${symbol.unreturnable}`).toBe(true)
+      expect(symbol.unreturnable?.isWellFormed(), `the description ends in ${JSON.stringify(symbol.unreturnable?.slice(-3))}`).toBe(true)
+
+      const node = await page.evaluate("Object.assign(document.createElement('p'), { textContent: 'x' + '😀'.repeat(40) })", budget())
+      expect(node.unreturnable, 'the element was not described with its words').toMatch(/^a DOM node: <p> "x/)
+      expect(node.unreturnable?.isWellFormed(), `the words end in ${JSON.stringify(node.unreturnable?.slice(-3))}`).toBe(true)
+      expect(node.unreturnable).toBe(`a DOM node: <p> "x${'😀'.repeat(19)}"`)
     })
   })
 })

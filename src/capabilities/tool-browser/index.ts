@@ -50,6 +50,7 @@ import { ALLOW_HOST_PATTERN, fileInsideWorkspace, reachable } from './fence.ts'
 import { launchBrowser, type LaunchedBrowser } from './launch.ts'
 import { locateBrowser, type LocatedBrowser } from './locate.ts'
 import { openPage } from './page.ts'
+import { mintable } from './snapshot.ts'
 import type { Action, BrowserPage, CallBudget, PageReport, RefCounter, Viewport } from './types.ts'
 
 export interface ToolBrowserConfig {
@@ -249,7 +250,17 @@ class AgentBrowser {
   }
 }
 
-/** The highest `[ref=eN]` any tool result in this agent's history shows, 0 for none. */
+/**
+ * The highest `[ref=eN]` any tool result in this agent's history shows, 0 for
+ * none. ANY tool result: a file, a shell's output, a search snippet and a
+ * page's own text can all spell one, so the number is untrusted. Only a
+ * number a browser could have minted counts (`mintable`, the range in which
+ * the counter still counts): a longer one would park the counter where
+ * `next++` no longer advances, and every element after it would get the same
+ * ref (reproduced with sixteen digits). Ignoring it is sound, not just safe:
+ * no browser mints past that range (`RefTable.refFor` refuses), so a number
+ * beyond it can never name an element here.
+ */
 function highestRef(agent: Agent): number {
   let highest = 0
   for (const event of agent.session.facts) {
@@ -258,7 +269,10 @@ function highestRef(agent: Agent): number {
       if (block.type !== 'tool-result') continue
       for (const part of block.content) {
         if (part.type !== 'text') continue
-        for (const found of part.text.matchAll(/\[ref=e(\d+)\]/g)) highest = Math.max(highest, Number(found[1]))
+        for (const found of part.text.matchAll(/\[ref=e(\d+)\]/g)) {
+          const seen = Number(found[1])
+          if (mintable(seen)) highest = Math.max(highest, seen)
+        }
       }
     }
   }
@@ -335,7 +349,7 @@ export const toolBrowserPlugin: Plugin<ToolBrowserConfig> = {
 // ---- the tools --------------------------------------------------------------
 
 const REACH = (allowHosts: readonly string[]): string =>
-  `It reaches loopback (localhost, 127.x.x.x, [::1]) and file: pages inside the workspace${allowHosts.length === 0 ? '' : `, plus ${allowHosts.join(', ')}`}; every other request is refused inside the browser.`
+  `It reaches loopback (localhost, 127.0.0.1, [::1]) and file: pages inside the workspace${allowHosts.length === 0 ? '' : `, plus ${allowHosts.join(', ')}`}; every other request is refused inside the browser.`
 
 const HEADER_NOTE = 'Every result opens with what happened on the page since the previous browser result: console errors and warnings, uncaught exceptions, failed requests, dialogs.'
 

@@ -24,6 +24,7 @@ import { assistantText, assistantToolCall } from '../../test-support/scripted-ad
 import { attachmentsLocalPlugin } from '../attachments-local/index.ts'
 import { fsLocalPlugin } from '../fs-local/index.ts'
 import { changesSince, header, toolBrowserPlugin } from './index.ts'
+import { mintable, RefTable } from './snapshot.ts'
 
 expectBrowserSuite('tool-browser tools')
 
@@ -189,12 +190,44 @@ describe('the header and the change report', () => {
     expect(text).toMatch(/…and \d+ more event\(s\) not shown/)
   })
 
+  it('cuts a page’s strings between characters, never through a surrogate pair', () => {
+    // Nothing before the first pair, so a cut at an odd UTF-16 length (119 and 299, the bounds less the mark) would fall inside one.
+    const text = header(
+      { url: 'http://localhost:1/', title: '😀'.repeat(200), console: [{ level: 'error', text: '😀'.repeat(400) }], exceptions: [], failedRequests: [], dialogs: [], downloads: [], blockedFiles: [], popups: [], omitted: 0, navigated: false, crashed: false },
+      undefined,
+    )
+    expect(text.isWellFormed(), 'a cut left half a character in the header').toBe(true)
+    expect(text).toContain(`Page: "${'😀'.repeat(119)}…" at http://localhost:1/`)
+    expect(text).toContain(`  - console error: ${'😀'.repeat(299)}…`)
+  })
+
   it('reports an action as the lines that changed, or the page when that is shorter', () => {
     const before = '- heading "Counter" [ref=e1]\n- button "Add one" [ref=e2]\n- paragraph [ref=e3]: 0'
     const after = '- heading "Counter" [ref=e1]\n- button "Add one" [ref=e2]\n- paragraph [ref=e3]: 1'
     expect(changesSince(before, after)).toBe('Snapshot changes (- gone, + new):\n- - paragraph [ref=e3]: 0\n+ - paragraph [ref=e3]: 1')
     expect(changesSince(before, before)).toBe('The page snapshot did not change.')
     expect(changesSince(undefined, after)).toContain('The page now reads:')
+  })
+})
+
+describe('ref numbers', () => {
+  it('are minted only while a number still counts: at the last one the table refuses rather than name two elements alike', () => {
+    const table = new RefTable({ next: Number.MAX_SAFE_INTEGER - 1 }, 1)
+    const first = table.refFor('frame', 'document', 1, 'button', 'a')
+    const last = table.refFor('frame', 'document', 2, 'button', 'b')
+    expect([first, last]).toEqual([`e${Number.MAX_SAFE_INTEGER - 1}`, `e${Number.MAX_SAFE_INTEGER}`])
+    // Past it `next++` no longer advances, so the next two nodes would both have been e9007199254740992.
+    expect(() => table.refFor('frame', 'document', 3, 'button', 'c')).toThrow(/no new element ref can be made/)
+    expect(() => table.refFor('frame', 'document', 4, 'button', 'd')).toThrow(/no new element ref can be made/)
+    // A node already named keeps its name.
+    expect(table.refFor('frame', 'document', 1, 'button', 'a')).toBe(first)
+  })
+
+  it('counts from a history’s number only if a browser could have minted it: the scan and the mint read one rule', () => {
+    expect([1, 41, Number.MAX_SAFE_INTEGER].filter((value) => !mintable(value)), 'numbers a browser can mint, refused').toEqual([])
+    // As a history spells them: the sixteen digits past 2^53, and a run of digits no number holds.
+    const never = [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number('9007199254740993'), Number('9'.repeat(400)), Number.NaN]
+    expect(never.filter(mintable), 'numbers no browser can mint, counted from').toEqual([])
   })
 })
 
@@ -480,17 +513,30 @@ describe.runIf(testBrowser !== undefined)('the browser tools in a real compositi
     const w = await world({ vision: false })
     // A history that already shows a ref (as a resumed or forked session's
     // would): a tool result carrying one, before this agent's first browser call.
+    // And a number nobody minted, as any tool result can spell one (a file, a
+    // page's own text): past 2^53, where a counter set to it stops counting
+    // and every element after gets the same ref.
     w.harness.root.get(TOOLS).register(
       w.harness.root,
-      defineTool({ name: 'old_snapshot', description: 'test', input: z.object({}), output: z.object({ text: z.string() }), render: (_args, value) => [{ type: 'text', text: value.text }], execute: () => ({ text: '- button "Old" [ref=e41]' }) }),
+      defineTool({
+        name: 'old_snapshot',
+        description: 'test',
+        input: z.object({}),
+        output: z.object({ text: z.string() }),
+        render: (_args, value) => [{ type: 'text', text: value.text }],
+        execute: () => ({ text: '- button "Old" [ref=e41]\n- text: a page that wrote [ref=e9007199254740993] itself' }),
+      }),
     )
     const handle = await w.create()
     const out = await turn(w, handle, assistantToolCall('c1', 'old_snapshot', {}), assistantToolCall('c2', 'browser_navigate', { url: `${site.origin}/counter` }))
     const navigated = out.at(-1)!
     expect(navigated.text).toContain("earlier browser was not carried over")
-    const refs = Array.from(navigated.text.matchAll(/\[ref=e(\d+)\]/g), (match) => Number(match[1]))
-    expect(refs.length).toBeGreaterThan(0)
-    expect(Math.min(...refs), 'a new ref reused a number the history already shows').toBeGreaterThan(41)
+    const refs = Array.from(navigated.text.matchAll(/\[ref=e(\d+)\]/g), (match) => match[1]!)
+    expect(refs.length, `the page's heading, button and paragraph each carry a ref: ${navigated.text}`).toBeGreaterThanOrEqual(3)
+    expect(new Set(refs).size, `two elements share a ref: ${refs.join(', ')}`).toBe(refs.length)
+    expect(Math.min(...refs.map(Number)), `a new ref reused a number the history already shows: ${refs.join(', ')}`).toBeGreaterThan(41)
+    // Counted from the highest ref a browser could have minted, not from the planted one.
+    expect(Math.max(...refs.map(Number)), `the planted number was counted from: ${refs.join(', ')}`).toBeLessThan(100)
   })
 })
 

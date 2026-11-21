@@ -284,7 +284,11 @@ export const DESCRIBE = `function () {
   const classes = Array.from(element.classList).slice(0, 3).join(' ')
   if (classes) out += ' class="' + classes + '"'
   out += '>'
-  const words = (element.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 40)
+  const text = (element.textContent || '').replace(/\\s+/g, ' ').trim()
+  // Forty UTF-16 units, or thirty-nine where the fortieth is the first half of
+  // a pair: half an emoji is a lone surrogate, and this lands in a tool result.
+  const last = text.charCodeAt(39)
+  const words = text.slice(0, last >= 0xd800 && last <= 0xdbff ? 39 : 40)
   return words ? out + ' "' + words + '"' : out
 }`
 

@@ -5,9 +5,9 @@
  * "that did not happen".
  */
 export type BrowserErrorCode =
-  /** No usable browser on this host, or it would not start; memoized for the process. */
+  /** No usable browser on this host, or it would not start. Remembered for the process only when it is a fact about the host (`hostFault`); a start that died or ran out of time is tried again. */
   | 'BROWSER_UNAVAILABLE'
-  /** The launch-time fence proof failed (a policy proxy, or traffic going direct); memoized. */
+  /** The launch-time fence proof failed. Remembered only when the canary went somewhere else (a policy proxy, traffic going direct); one that was unfinished or cut short is tried again. */
   | 'BROWSER_FENCE_UNAVAILABLE'
   /** The browser or its page went away under a call (a crash, or someone else's kill). */
   | 'BROWSER_CLOSED'

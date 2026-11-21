@@ -4,9 +4,10 @@
  * A LOOKUP, never a launch: it runs at mount, and every boot pays for it, so it
  * only answers "is there an executable at a known place". Whether that
  * executable can actually start under this host's sandbox and policies is
- * learnt at the first launch, and a failure there is memoized for the process
- * (`BROWSER_UNAVAILABLE`) — the same answer a functional probe would give, paid
- * only by a session that browses.
+ * learnt at the first launch, and a failure there that is the host's (its
+ * sandbox, a missing executable, a proxy policy) is remembered for the process
+ * — the same answer a functional probe would give, paid only by a session
+ * that browses. A start that only died or ran out of time is tried again.
  *
  * Chrome first, then Edge, then a Chromium build; the order Playwright's
  * channels and the pdf skill's probe use. Never a snap Chromium: its launcher

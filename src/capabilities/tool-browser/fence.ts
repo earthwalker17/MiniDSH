@@ -16,8 +16,11 @@
  *     a cloud's metadata endpoint) as well as loopback — and then names
  *     loopback explicitly, then the operator's `allowHosts`. Measured on
  *     Chrome 155 and Edge 155 (Windows) and Chrome 155 (Linux), 2026-10-18:
- *     public, link-local and private addresses reach this listener; `127/8`,
- *     `*.localhost` and `[::1]` reach their servers.
+ *     public, link-local and private addresses reach this listener;
+ *     `localhost`, `*.localhost`, `127.0.0.1` and `[::1]` reach their servers.
+ *     LOOPBACK HERE IS THOSE FOUR SPELLINGS, not `127/8`: the rest of that
+ *     range cannot be kept without exempting names (`hostResolverRules`), so
+ *     `127.0.0.2` meets this listener like any other address.
  *   - WebRTC's UDP does not use the proxy, so the profile is seeded with
  *     `webrtc.ip_handling_policy = disable_non_proxied_udp` (`launch.ts`).
  *     Measured: no ICE candidate with it, host and srflx candidates without it;
@@ -57,9 +60,15 @@ export const CANARY_TLS_HOST = 'minidsh-fence-canary-tls.invalid'
  */
 export const ALLOW_HOST_PATTERN = /^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*$/
 
-/** The `--proxy-bypass-list` value: implicit rules removed, loopback restated, then the operator's hosts. */
+/**
+ * The `--proxy-bypass-list` value: implicit rules removed, loopback restated,
+ * then the operator's hosts. `127.0.0.1` exactly, never `127.0.0.1/8`: an
+ * address that bypasses the proxy must also resolve (`hostResolverRules`), and
+ * only that one does, so any other `127.x` address would fail as a name that
+ * does not resolve instead of meeting the fence.
+ */
 export function bypassList(allowHosts: readonly string[]): string {
-  return ['<-loopback>', 'localhost', '*.localhost', '127.0.0.1/8', '[::1]', ...allowHosts].join(';')
+  return ['<-loopback>', 'localhost', '*.localhost', '127.0.0.1', '[::1]', ...allowHosts].join(';')
 }
 
 /**
@@ -76,17 +85,33 @@ export function bypassList(allowHosts: readonly string[]): string {
  * without these rules the TURN host reached a DNS transaction; with them,
  * none did, while every loopback spelling, the proxy, the canaries and an
  * allowed host still behaved as before (`launch.test.ts` pins both halves).
+ *
+ * EVERY LOOPBACK EXCLUSION IS AN EXACT STRING OR ENDS IN `.localhost`. A
+ * pattern is a glob over the host as TEXT, so it cannot tell an address from a
+ * name: `EXCLUDE 127.*`, which this list carried to keep the rest of `127/8`,
+ * also exempted `127.<anything>.example.com`, and that name reached a DNS
+ * transaction as a TURN host (measured on Chrome 157 and Edge 158, Windows,
+ * 2026-11-21). No glob matches only addresses, so the rest of the range is
+ * given up: with `127.0.0.1` alone the same name reaches no resolver,
+ * `127.0.0.2` answers ERR_NAME_NOT_RESOLVED when it bypasses the proxy (hence
+ * `bypassList`), and without it the proxy itself is unreachable. A name under
+ * `.localhost` stays exempt because Chrome answers those itself (RFC 6761):
+ * as a TURN host one appeared in no resolver event in the same measurement.
  */
 export function hostResolverRules(allowHosts: readonly string[]): string {
-  return ['MAP * ~NOTFOUND', 'EXCLUDE localhost', 'EXCLUDE *.localhost', 'EXCLUDE 127.0.0.1', 'EXCLUDE 127.*', 'EXCLUDE ::1', 'EXCLUDE [::1]', ...allowHosts.map((host) => `EXCLUDE ${host}`)].join(', ')
+  return ['MAP * ~NOTFOUND', 'EXCLUDE localhost', 'EXCLUDE *.localhost', 'EXCLUDE 127.0.0.1', 'EXCLUDE ::1', 'EXCLUDE [::1]', ...allowHosts.map((host) => `EXCLUDE ${host}`)].join(', ')
 }
 
-/** True for a loopback host as a URL spells it (`URL.hostname`, lower-cased, IPv6 in brackets). */
+/**
+ * True for a loopback host as a URL spells it (`URL.hostname`, lower-cased,
+ * IPv6 in brackets): exactly what the bypass list and the resolver rules let
+ * through. `URL` writes every spelling of the address (`127.1`, `2130706433`,
+ * `0x7f.1`) as `127.0.0.1`, so the one string covers them.
+ */
 export function isLoopbackHost(hostname: string): boolean {
   const host = hostname.toLowerCase()
   if (host === 'localhost' || host.endsWith('.localhost')) return true
-  if (host === '[::1]') return true
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  return host === '127.0.0.1' || host === '[::1]'
 }
 
 /** True for a host an `allowHosts` entry names. */
