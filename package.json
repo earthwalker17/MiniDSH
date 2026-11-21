@@ -62,10 +62,10 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
-    "@vitest/coverage-v8": "^5.0.5",
-    "electron": "45.3.4",
-    "oxlint": "^1.88.0",
+    "@vitest/coverage-v8": "^5.1.1",
+    "electron": "45.4.1",
+    "oxlint": "^1.94.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.1"
   }
 }
