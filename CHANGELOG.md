@@ -2,72 +2,75 @@
 
 All notable changes to MiniDSH are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The session-by-session engineering record, with what each session measured, lives in [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
-## [2.0.0] — 2026-11-21
+## [2.0.0] — 2026-11-22
+
+Three surfaces over the one runtime became things a person can use every day: a full-screen terminal, a redesigned web UI and a desktop app. Then the whole system was audited as a release candidate, and what the audit found was fixed or written down before this was tagged.
+
+It is a major version because some behaviour a 1.x user or script relies on changed: see **Changed**. The session log format did not. 2.0 reads, continues and forks what 1.x wrote, tested against a store the published 1.2.0 left behind. Going back is not supported: a 1.x build may refuse a session 2.0 has continued.
+
+### Downloads
+
+```sh
+npm install -g minidsh@2.0.0
+```
+
+The desktop app, for a machine without Node:
+
+- Windows x64: [MiniDSH-Setup-x64.exe](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-Setup-x64.exe)
+- Linux x64: [MiniDSH-x86_64.AppImage](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-x86_64.AppImage)
+- macOS: [Apple silicon](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-mac-arm64.zip), [Intel](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-mac-x64.zip)
+
+No build is signed by a publisher, so Windows and macOS object at first run: the [guide](https://github.com/earthwalker17/MiniDSH/blob/main/docs/GUIDE.md#desktop-app) has the steps for each system and how to check a download against [SHA256SUMS](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/SHA256SUMS). Only the Windows build was installed and used on a real machine. The others were started and driven on CI runners.
 
 ### Added
 
-- **A desktop app** for Windows, Linux (AppImage) and macOS on Apple silicon: the same runtime and web UI in a window of its own, installed per user with no npm and no Node required (it carries its own):
-  - **Folders:** File › Open Folder chooses where it works, and several folders can be remembered.
-  - **Provider keys:** the welcome view (and File › Provider Keys…) saves a key without editing a file.
-  - **Closing:** closing asks first only when a turn, a job or an approval would be interrupted, then stops gracefully: every session is kept and resumes.
-  - **Failures:** a runtime that dies is shown with its last output and a Restart button; a second launch brings the open window forward.
-  - **Updates and signing:** Help › Check for Updates opens the release page; the installers are unsigned for now.
-- **`minidsh web --json`**, a process contract for a supervisor:
-  - one JSON `ready` record (host, port, one-shot token, version, home, workspaces), or one `error` record with a code for any exit before it;
-  - a graceful stop on Ctrl+C, SIGTERM or (with `--json`) the end of a piped stdin: every running turn is cancelled and saved, then the host shuts down, each step bounded.
-- **`minidsh web --workspace <dir>`** (repeatable): several folders a session may start in, refused if one holds or lies inside MiniDSH's home.
-- **`minidsh credentials list | set NAME | unset NAME`**:
-  - `list` says where each provider key comes from (the environment, the store, or nowhere), never the value;
-  - `set` reads the value from stdin (hidden on a terminal) into `~/.minidsh/credentials.json`, atomically and one writer at a time.
-- **A full-screen terminal.** `minidsh chat`, `resume` and `fork` now own the terminal on a real TTY:
-  - the conversation drawn like the web UI: your message, the reply as markdown with highlighted code and tables, each tool call as a card (a command with the tail of its output, an edit as a diff), a finished turn's work folded to one line (Ctrl+O opens it), approvals and permission changes always in view;
-  - parallel subagents shown live, each card following what its child is doing;
-  - a composer with a real line editor: multi-line drafts (Ctrl+J; Ctrl+Enter on Windows; `\` then Enter anywhere), word movement and deletion, history (↑ at the top of a draft, Ctrl+P/Ctrl+N), pastes kept intact;
-  - a command palette on `/`, with `/help`, `/resume` (a picker), `/new`, `/fork` and `/copy` beside the existing commands;
-  - an approval band that takes the composer's place, answered by `y`, `n` or `a` and only once the whole question has been on screen (a long one scrolls) and the keyboard has been quiet for a moment, so a key typed for the composer never answers it;
-  - Ctrl+O shows a tool's output as the model read it, including text a terminal code or a carriage return would hide, and the folded view says when it hid something; `/copy` puts the cleaned text on the clipboard;
-  - `/model` and the permission commands before the first message choose what the session starts on;
-  - two status rows (permissions and what the session is doing; model, effort and context);
-  - keyboard scrolling and the wheel (on an empty draft); the terminal's own colours, with `NO_COLOR`, 256 and 16 colours and an ASCII glyph set (`MINIDSH_ASCII=1`) respected.
-
-  A pipe, a script, a screen reader or `--plain` keeps the line view.
-- **`session/resume` and `session/fork`** on the protocol: continue a stored session without a prompt, or branch one at an event; the terminal's own resume and fork now use them.
-- **A redesigned web UI.** `minidsh web` is now a full application:
-  - a session list (a rail on a narrow window, a drawer on a phone), marking the sessions that wait on you;
-  - replies rendered as markdown, with highlighted code and tables;
-  - each tool call drawn as a card: a command with its output and exit status, an edit as a diff, a file read, a search, a subagent with a link to its session, a background job, an image you can enlarge;
-  - a finished turn's work folded to one line you can open, while what the session decided (approvals, permission and model changes) stays in view;
-  - an approval card that takes the composer's place and names exactly what would run;
-  - a permission chip and a model and reasoning-effort picker, for a new session before its first message too;
-  - a session panel listing the authority, its standing grants (each revocable), background jobs (each stoppable) and subagents;
-  - light, dark and system themes;
-  - a strict content-security policy.
-
-  It is tested in a real browser, light and dark, at four widths.
-- **For protocol clients:**
-  - `initialize` lists each tool's presentation (`display`), the authority presets and each model's reasoning efforts;
-  - `session/attach` returns the tools a live session can call, and says when a subagent session is read-only;
-  - `sessions/list` carries each session's last change (`updatedAt`);
-  - a `session/prompt` that creates a session may carry its `authority`;
-  - `attachment/read` returns an image the session's own log names.
-- **Claude Fable 5.2** in the Anthropic catalog (`--provider anthropic --model claude-fable-5-2`): 1M window, 128K output, adaptive thinking, efforts low to max. Before, it got the conservative fallback for an unknown model.
+- **A desktop app** for Windows, Linux (AppImage) and macOS: the web UI in a window of its own, with its own Node, installed per user. Folders and provider keys are chosen from its menus. Closing asks first only when work would be interrupted. It does not update itself: Help › Check for Updates opens the release page.
+- **A full-screen terminal.** `minidsh chat`, `resume` and `fork` own the terminal on a real TTY: replies as markdown, each tool call as a card, parallel subagents shown live, a multi-line composer with history, a command palette on `/`, and an approval band that no key typed ahead can answer. A pipe, `TERM=dumb` or `--plain` keeps the line view.
+- **A redesigned web UI.** A session list, markdown replies, a card per tool call (a diff, a command's output, an image), an approval card that names exactly what would run, permission and model pickers, a session panel with grants and jobs, light and dark themes, and a strict content-security policy.
+- **`minidsh credentials list | set NAME | unset NAME`**: provider keys in `~/.minidsh/credentials.json` without editing a file. `list` says where each key comes from, never its value.
+- **`minidsh web --json`**, a process contract for a supervisor, and **`--workspace <dir>`** for several folders.
+- **For protocol clients:** `session/resume`, `session/fork` and `attachment/read`; `initialize` lists each tool's presentation, the authority presets and each model's reasoning efforts.
+- **Claude Fable 5.2** in the Anthropic catalog.
+- `sessions inspect` lists the points a fork may start from, and a headless run that met an approval nobody could answer says which flag would have allowed it.
 
 ### Changed
 
-- **`minidsh web` stops gracefully** on Ctrl+C or SIGTERM: running turns end as cancelled in their logs and every lease is released, where before the next process had to repair and reclaim them.
-- **A session lock taken before a reboot is reclaimed** on Windows and Linux even when its process id now belongs to another program, when the resume comes earlier in the new boot than the lock was taken in the old one; later, the process id decides as before.
-- **A resumed or forked delegated child keeps what its delegation narrowed:** its tool filter, the tools hidden from every child (network tools, and delegation at the depth cap, a preset's own included) and its persona. A child's log records them once, and every continuation re-applies them; before, only its authority came back. A child delegated by an earlier version continues as it did.
-- **On Windows, what a shell starts ends with it.** Every PowerShell the harness starts — a background job, an approved command, the session's shell — holds its descendants in a Job of its own, so a program it `Start-Process`'d no longer outlives the job's end, its stop, an approved command's end, or a MiniDSH process that is killed. Where Constrained Language Mode forbids that, one warning says so and the command runs as before.
-- **A `/compact` run while the agent is idle is stopped by quitting**, recorded as cancelled, instead of running on and paying for a summary nobody would see.
+- **An explicit `--sandbox`, `--ask`, `--accept` or `--approve` wins over `composition.json`** for the setting it names. A layer that patched the same row used to erase the flag without a word.
+- **A `composition.json` or `settings.json` that exists and cannot be read stops the command** (exit 2). It used to be read as absent.
+- **`--provider` without `--model` is refused** when the model in use is another provider's, and so is a provider nothing mounts. Both used to fail at the first paid step, after a session had been stored.
+- **An unknown command says so on stderr**, where it printed the usage on stdout. `--host` with no value and a `--port` outside 0 to 65535 are usage errors.
+- **On Windows an approved command reports the program's own exit code.** PowerShell reported 1 for any failure.
+- **The editor refuses a file that is not UTF-8** instead of rewriting its bytes, and keeps a CRLF file's line endings.
+- **The browser tools' loopback is `localhost`, `*.localhost`, `127.0.0.1` and `[::1]`.** Any other `127.x` address now meets the fence.
+- **`tools.defaultTimeoutMs` and `web_search`'s `timeoutMs` must be whole milliseconds** within a timer's range. `0` no longer means no deadline.
+- **On Windows, what a shell starts ends with it**: each PowerShell holds its descendants in a Job of its own.
+- **`minidsh web` stops gracefully** on Ctrl+C or SIGTERM: running turns end as cancelled and every lease is released.
+- **A resumed or forked subagent keeps what its delegation narrowed**: its tool filter, its hidden tools and its persona.
+- **New session logs are created for their owner only** on Linux and macOS. Files from an earlier version keep their mode: `chmod -R go-rwx ~/.minidsh`.
+
+### Security
+
+Each of these was reproduced before it was fixed or written down. [SECURITY.md](https://github.com/earthwalker17/MiniDSH/blob/main/SECURITY.md) has the full account.
+
+- **Fixed.** On Linux a confined command could ask the user's own systemd, over the session bus, to write anywhere. The bubblewrap profile now hides the user runtime directory.
+- **Fixed.** A new session's folder spelled through `..` after a missing directory could resolve to an unfollowed symbolic link, and the session then worked outside the host's workspace roots.
+- **Fixed.** A peer that was never signed in could end `minidsh web` by resetting a WebSocket upgrade it had been refused.
+- **Fixed.** A name beginning `127.` was exempt from the browser's resolver rules and reached DNS.
+- **Fixed.** The full-screen terminal could draw a command shorter than it was (text before a carriage return, or inside an escape sequence, was dropped), and an approval whose subject was cut did not show the rest.
+- **Fixed.** One lone surrogate in a message or in a tool call's arguments made every later request of that session fail.
+- **Documented, not fixed.** The web host's cookie is scoped to a host name, not a port, so another server on the same loopback name receives it and can replay it. Use a browser profile kept for MiniDSH, or the desktop app, which is not affected. A redesign follows this release.
+- **Documented.** Confinement does not cover a service a command can reach (the system bus, a Docker socket, anything on localhost); the browser tools reach every loopback service unasked; the installers carry no publisher signature.
 
 ### Fixed
 
-- A plain-text result line now names the call it answers (`✓ bash`, `✗ bash DENIED`): parallel calls finish in any order, so a bare mark no longer said which. This covers the line view, `minidsh run`'s progress and `sessions show`.
-- A shutdown racing a resume could answer while the resumed session was still being disposed; it now waits for it.
-- A session's view now follows its status: a client attached to it no longer shows a turn as running after it ended, or a subagent session as read-only after its delegation ended.
-- A `resume` (CLI, terminal or wire) whose authority flags the session refuses no longer loses the prompt the session had queued; the flags now land before that prompt can start a turn, and the model is told of them in its first request.
-- A prompt sent to a session that is shutting down is refused instead of being accepted and dropped.
-- The line view (`--plain` or a pipe) no longer exits before running what was piped into it; it runs each line and waits for the turn, and its streamed text drops invisible characters such as bidi overrides, as every other line it prints does.
+- **Sessions and stores.** A log never holds a line before its cause. A lease is not reclaimed from another OS instance sharing the store (WSL beside Windows). Settings are synced before they replace the file, and an empty `settings.json` or one with a byte-order mark is read.
+- **Loop and providers.** A response cut in the middle of an event is retried. A cancel during the last allowed step ends the turn cancelled. `AGENTS.md` and the skill list come back after a mid-turn compaction. Compaction no longer fails on Claude Sonnet 4.5 and Haiku 4.5 at effort `max`.
+- **Shell.** Output is bounded while a command runs. A workspace folder that no longer exists is named as the cause. A command that printed a wrapper's name is no longer taken for a wrapper that never started.
+- **Protocol and web host.** A message holding U+2028 no longer hangs `serve` or the terminal. `web --host` works with an IPv6 address, a name typed with capitals and port 80. A signed-in browser can reopen the printed link. A message sent while the host is stopping is refused, not accepted and lost.
+- **Command line.** `run … | head` no longer ends a paid turn half way with status 0. A headless resume prints its own turn's answer, never the previous one's. A result line names the call it answers.
+- **Terminal and browser.** A double click on Send no longer stops the turn. A question asked during a reconnect is kept. Opening a session never shows the previous transcript under its name. The line view runs what is piped into it, has its own `/help`, and names its session when it ends.
+- **Desktop.** A quit during a start no longer flashes a sign-in failure or stalls. A settings file it cannot read is kept, not replaced. The Windows installer's running-app check can neither stop a runtime nor refuse for ever.
+- **Bundled skills.** The document readers are bounded on hostile input, and their examples run in PowerShell and in bash.
 
 ## [1.2.0] — 2026-10-26
 
