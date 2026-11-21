@@ -130,25 +130,65 @@ export class DesktopApp {
     return cookies
   }
 
-  /** The runtime child (the bundled node running `minidsh web --json`), by parentage. */
+  /**
+   * The runtime child (the bundled node running `minidsh web --json`), by
+   * parentage. `undefined` means one thing: the query RAN and this app has no
+   * such child. A query that could not run, or answered something that is no
+   * pid, throws — "not found" from a broken lookup read as "the runtime is
+   * gone" and as "a different runtime" in the tests that compare pids.
+   */
   runtimePid(): number | undefined {
-    if (process.platform === 'win32') {
-      const found = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${this.pid} AND Name='node.exe'" | Select-Object -First 1).ProcessId`], { encoding: 'utf8' })
-      const pid = Number(found.stdout.trim())
-      return Number.isInteger(pid) && pid > 0 ? pid : undefined
+    const pidOf = (text: string, how: string): number | undefined => {
+      const first = text.trim().split(/\s+/)[0] ?? ''
+      if (first === '') return undefined
+      const pid = Number(first)
+      if (!Number.isInteger(pid) || pid <= 0) throw new Error(`runtimePid: ${how} answered ${JSON.stringify(text.slice(0, 200))}, which is no pid`)
+      return pid
     }
-    const found = spawnSync('pgrep', ['-P', String(this.pid), '-f', 'minidsh.js web'], { encoding: 'utf8' })
-    const pid = Number(found.stdout.trim().split('\n')[0])
-    return Number.isInteger(pid) && pid > 0 ? pid : undefined
+    if (process.platform === 'win32') {
+      // `Stop`, so a failing CIM call is a non-zero exit and not an empty answer.
+      const query = `$ErrorActionPreference = 'Stop'; (Get-CimInstance Win32_Process -Filter "ParentProcessId=${this.pid} AND Name='node.exe'" | Select-Object -First 1).ProcessId`
+      const found = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', query], { encoding: 'utf8', timeout: LOOKUP_MS })
+      if (found.error !== undefined || found.status !== 0) throw new Error(`runtimePid: the process query could not answer (${whyNot(found)})`)
+      return pidOf(found.stdout, 'the process query')
+    }
+    const found = spawnSync('pgrep', ['-P', String(this.pid), '-f', 'minidsh.js web'], { encoding: 'utf8', timeout: LOOKUP_MS })
+    // pgrep exits 1 when nothing matched: the one failure that is an answer.
+    if (found.error === undefined && found.status === 1) return undefined
+    if (found.error !== undefined || found.status !== 0) throw new Error(`runtimePid: pgrep could not answer (${whyNot(found)})`)
+    return pidOf(found.stdout, 'pgrep')
   }
 
-  /** Close the window as a person does (WM_CLOSE on Windows; SIGTERM elsewhere, which Electron turns into a quit). */
-  closeWindow(): void {
-    if (process.platform === 'win32') {
-      spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `$null = (Get-Process -Id ${this.pid}).CloseMainWindow()`])
-    } else {
-      this.child.kill('SIGTERM')
+  /**
+   * Close the window as a person does (WM_CLOSE on Windows; SIGTERM elsewhere,
+   * which Electron turns into a quit).
+   *
+   * On Windows the close is CONFIRMED sent. `CloseMainWindow()` answers false
+   * when the process has no main window yet, and the app shows its window only
+   * once the shell page has loaded: a close issued a moment earlier went
+   * nowhere, in silence, and the test that sent it then timed out on an app
+   * nobody had asked to quit. So it is asked until the window takes it, to a
+   * bound, and a window that never took it is this call's error.
+   */
+  closeWindow(timeoutMs = 20_000): void {
+    if (process.platform !== 'win32') {
+      if (!this.child.kill('SIGTERM')) throw new Error(`closeWindow: SIGTERM could not be sent to the app (pid ${this.pid}): it has already exited`)
+      return
     }
+    // A fresh Process object each time: it caches its main window handle.
+    const script = `
+$ErrorActionPreference = 'Stop'
+$deadline = (Get-Date).AddMilliseconds(${timeoutMs})
+while ((Get-Date) -lt $deadline) {
+  if ((Get-Process -Id ${this.pid}).CloseMainWindow()) { exit 0 }
+  Start-Sleep -Milliseconds 100
+}
+exit 3
+`
+    const sent = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: timeoutMs + LOOKUP_MS })
+    if (sent.error === undefined && sent.status === 0) return
+    const why = sent.error === undefined && sent.status === 3 ? `the app showed no main window to close within ${timeoutMs} ms` : whyNot(sent)
+    throw new Error(`closeWindow: the close was not sent to pid ${this.pid}: ${why}\nmain.log:\n${this.mainLog()}`)
   }
 
   /** The app's own log, `main.log` (never holds a token or a cookie). */
@@ -204,14 +244,93 @@ function parkedAt(pid: number): string {
   return `\nmain thread (sample, innermost frames last):\n${shown.join('\n')}`
 }
 
-/** Whether a process is alive (signal 0). */
+/** How long a process lookup may take before it is a failure: a stuck query blocks this thread, where a test's own timeout cannot fire. */
+const LOOKUP_MS = 60_000
+
+/** Why a `spawnSync` did not answer: the spawn error (a missing tool, the timeout), or its status and what it said. */
+function whyNot(result: { error?: Error; status: number | null; signal: NodeJS.Signals | null; stderr?: string | Buffer | null }): string {
+  if (result.error !== undefined) return result.error.message
+  return `status ${String(result.status)}${result.signal === null ? '' : `, signal ${result.signal}`}: ${String(result.stderr ?? '').trim().slice(0, 400) || 'nothing on stderr'}`
+}
+
+/**
+ * Whether a process is alive (signal 0).
+ *
+ * `false` means exactly "no such process" (ESRCH). A pid that is not one — an
+ * `undefined` a failed lookup handed on — is the caller's error and throws: it
+ * used to make `process.kill` throw a TypeError that was read here as "dead",
+ * so `waitUntil(() => !alive(pid))` passed at once on a pid nobody had found.
+ * A process this user may not signal (EPERM) exists, and is alive.
+ */
 export function alive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) throw new TypeError(`alive: ${String(pid)} is not a pid (a lookup that found nothing was passed on as one)`)
   try {
     process.kill(pid, 0)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return false
+    if (code === 'EPERM') return true
+    throw error
   }
+}
+
+/** A MiniDSH install registered for a Windows user: its display name and its uninstaller's command line. */
+export interface RegisteredInstall {
+  readonly name: string
+  readonly uninstaller: string
+}
+
+/**
+ * The MiniDSH registration in the text `reg query <Uninstall key> /s` prints,
+ * or `undefined` when no block of it is MiniDSH's. The installer writes
+ * `DisplayName` "MiniDSH <version>" (package.ts, `uninstallDisplayName`), so
+ * the name is the test — the key's own name is a GUID derived from the app id.
+ */
+export function miniDshRegistration(regQueryOutput: string): RegisteredInstall | undefined {
+  // One block per registration: the key's own line, then its indented values.
+  for (const block of regQueryOutput.split(/\r?\n(?=HKEY_)/)) {
+    const name = /^\s+DisplayName\s+REG_SZ\s+(MiniDSH(?:\s.*?)?)\s*$/m.exec(block)?.[1]
+    if (name === undefined) continue
+    return { name, uninstaller: /^\s+UninstallString\s+REG_SZ\s+(.*?)\s*$/m.exec(block)?.[1] ?? '(no uninstaller recorded)' }
+  }
+  return undefined
+}
+
+/**
+ * The MiniDSH install THIS Windows user has, from the per-user uninstall
+ * registrations, or `undefined` when there is none (and on any other
+ * platform, which has no such registration). A query that could not run
+ * throws: "no install" from a failed lookup is how the refusal below would
+ * let the installer test through to someone's real one.
+ */
+export function registeredInstall(): RegisteredInstall | undefined {
+  if (process.platform !== 'win32') return undefined
+  const query = spawnSync('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall', '/s'], { encoding: 'utf8', timeout: LOOKUP_MS, maxBuffer: 64 * 1024 * 1024 })
+  if (query.error !== undefined) throw new Error(`registeredInstall: the registry query could not run: ${query.error.message}`)
+  // Status 1 with nothing printed is reg's "no such key": a user with no per-user install of anything.
+  if (query.status !== 0 && !(query.status === 1 && query.stdout.trim() === '')) throw new Error(`registeredInstall: the registry query could not answer (${whyNot(query)})`)
+  return miniDshRegistration(query.stdout)
+}
+
+/**
+ * Why the installer test may not run on this machine, or `undefined` when it
+ * may. The scratch `userData` and `MINIDSH_HOME` make every LAUNCH hermetic
+ * (the header above), and the installer is not a launch: it is a real
+ * per-user install under the product's one app id. It first runs the
+ * uninstaller of whatever is registered, then registers its own temporary
+ * folder, and the test's uninstall removes that registration and the
+ * shortcuts — on a machine whose user has MiniDSH installed, the test would
+ * take that install away. So it refuses there, and says why.
+ */
+export function installedBesideUs(): string | undefined {
+  const existing = registeredInstall()
+  if (existing === undefined) return undefined
+  return (
+    `this Windows user already has "${existing.name}" installed (its uninstaller: ${existing.uninstaller}). ` +
+    'The installer test is a real per-user install under the same app id: it would run that uninstaller, register a temporary folder in its place, and then remove the registration and the shortcuts. ' +
+    'Refusing rather than touch it. Run this test where MiniDSH is not installed (CI, another account) or uninstall it first; if the path above is a temporary folder, an earlier run of this test was interrupted and left it.'
+  )
 }
 
 /**

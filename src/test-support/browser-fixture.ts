@@ -50,23 +50,48 @@ export function expectBrowserSuite(name: string): void {
 }
 
 /**
- * The pids of every browser process whose command line names `dir` — a
- * launch's profile is on every one of them (`--user-data-dir=`) — for the
+ * The pids of every process whose command line names `dir` — a launch's
+ * profile is on every one of its browser's (`--user-data-dir=`) — for the
  * checks that a closed or refused browser really left nothing running.
+ *
+ * `[]` is what those checks read as success, so it is returned for exactly
+ * one thing: the query ran and matched nothing. A query that could not run (no
+ * pwsh, no pgrep, a failing CIM call, a hang) throws, because answering `[]`
+ * for it made "nothing is running" true on any host where the helper was
+ * broken. Its positive control is `browser-fixture.test.ts`.
+ *
+ * The query is asked up to three times before that error. A query tool that
+ * dies by itself has answered nothing either way, and one does: pwsh 7.6 was
+ * seen ending this very CIM query with "Internal CLR error (0x80131506)" on a
+ * loaded Windows host, which the old catch reported as an empty process list.
  */
 export function browsersUsing(dir: string): number[] {
-  try {
-    if (process.platform === 'win32') {
-      const needle = dir.replaceAll("'", "''")
-      // Not this query's own process, whose command line names the directory too.
-      const out = execFileSync('pwsh', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*${needle}*' } | ForEach-Object { $_.ProcessId }`], { encoding: 'utf8' })
-      return out.split(/\s+/).filter((pid) => pid !== '').map(Number)
+  const failures: string[] = []
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return queryProcesses(dir)
+    } catch (error) {
+      failures.push(`attempt ${attempt}: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 300)}`)
     }
-    const out = execFileSync('pgrep', ['-f', dir], { encoding: 'utf8' })
-    return out.split(/\s+/).filter((pid) => pid !== '').map(Number).filter((pid) => pid !== process.pid)
-  } catch {
-    // pgrep exits 1 when nothing matches.
-    return []
+  }
+  throw new Error(`browsersUsing: the process query for ${JSON.stringify(dir)} could not answer, so nothing is known about what is running\n${failures.join('\n')}`)
+}
+
+function queryProcesses(dir: string): number[] {
+  const pids = (out: string): number[] => out.split(/\s+/).filter((pid) => pid !== '').map(Number)
+  if (process.platform === 'win32') {
+    const needle = dir.replaceAll("'", "''")
+    // Not this query's own process, whose command line names the directory too.
+    // `Stop`, so a failing CIM call is a non-zero exit and not an empty answer.
+    const query = `$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*${needle}*' } | ForEach-Object { $_.ProcessId }`
+    return pids(execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', query], { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] }))
+  }
+  try {
+    return pids(execFileSync('pgrep', ['-f', dir], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] })).filter((pid) => pid !== process.pid)
+  } catch (error) {
+    // pgrep's own "nothing matched", and the one failure that is an answer.
+    if ((error as { status?: number | null }).status === 1) return []
+    throw error
   }
 }
 

@@ -351,9 +351,13 @@ describe.runIf(testBrowser !== undefined)('a launched browser', () => {
     expect(existsSync(join(browser.profileDir, 'DevToolsActivePort'))).toBe(false)
     expect(existsSync(join(browser.profileDir, 'owner.json'))).toBe(true)
     const pid = browser.pid!
+    // The control for "leaving nothing running" below: the query those two
+    // tests trust to answer [] SEES this browser, by its profile, while it runs.
+    expect(browsersUsing(browser.profileDir), `the process query did not find the running browser ${pid} by its profile ${browser.profileDir}`).toContain(pid)
     await browser.close()
     expect(await until(() => browser.exited, 10_000), 'close returned with the browser still running').toBe(true)
     expect(await until(() => !alive(pid), 10_000), `browser ${pid} outlived its close`).toBe(true)
+    expect(await until(() => browsersUsing(browser.profileDir).length === 0, 10_000), `a closed browser left ${browsersUsing(browser.profileDir).join(', ')} running`).toBe(true)
     expect(existsSync(browser.profileDir)).toBe(false)
     // Idempotent, and quiet after the fact.
     await browser.close()

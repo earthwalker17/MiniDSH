@@ -150,8 +150,18 @@ describe('minidsh web --json: the ready record and the stdin stop', () => {
   it('is not stopped by a stdin that is the null device, as a service manager gives', { timeout: 60_000 }, async () => {
     const home = tempDir('minidsh-webjson-home-')
     const host = new WebHostProcess(tempDir('minidsh-webjson-ws-'), home, { json: true, stdin: 'ignore' })
-    await host.ready()
-    await new Promise((resolve) => setTimeout(resolve, 2_000))
+    const ready = await host.ready()
+    // A null device reads as ended at once, so a host that took that for its
+    // supervisor leaving has begun to stop before it answers anything. What is
+    // asserted is that it SERVES — a sign-in, then a request over the socket —
+    // and has then neither announced a stop nor left. (It was a 2 s sleep and
+    // "has not exited", which a stop still running, bounded at 5 s + 20 s, passes.)
+    const response = await fetch(`http://127.0.0.1:${ready.port}/?token=${ready.token}`, { redirect: 'manual' })
+    expect(response.status).toBe(303)
+    const client = await WebClient.open(`ws://127.0.0.1:${ready.port}/ws`, response.headers.getSetCookie()[0]!.split(';', 1)[0]!)
+    expect((await client.request<{ serverInfo: { name: string } }>('initialize')).serverInfo.name).toBe('minidsh')
+    client.close()
+    expect(host.stderr, 'the host announced a stop').not.toContain('stopping')
     expect(endOf(host.child), `stderr: ${host.stderr}`).toBeUndefined()
     host.kill()
     await host.waitForExit(10_000)

@@ -170,6 +170,19 @@ describe('release pins', () => {
     const fused = leg.indexOf('run: node desktop/scripts/check-fuses.ts "$MINIDSH_DESKTOP_EXE"')
     expect({ smoked: smoked >= 0, fused: fused > smoked }, 'the leg smokes the runtime, then reads the fuses').toEqual({ smoked: true, fused: true })
   })
+
+  // Two facts about the Windows installer that the installed-app E2E depends
+  // on and cannot itself observe. Its home and userData are scratch folders
+  // the uninstaller is never told of, so "an uninstall leaves a person's data"
+  // is decided by this one setting, about the DEFAULT userData no hermetic
+  // test may touch. And the test refuses to run beside a real install, which
+  // it finds by the display name the installer registers.
+  it('the Windows uninstaller leaves a person’s data, and registers under the name the installed-app test looks for', () => {
+    const packer = read('desktop/scripts/package.ts')
+    expect([...packer.matchAll(/deleteAppDataOnUninstall: (\w+)/g)].map((match) => match[1])).toEqual(['false'])
+    expect(packer).toMatch(/uninstallDisplayName: 'MiniDSH \$\{version\}'/)
+    expect(read('src/test-support/desktop-app.ts'), 'the refusal no longer looks for a registration by that name').toContain('DisplayName\\s+REG_SZ\\s+(MiniDSH')
+  })
 })
 
 /** One job of a workflow: from its key to the next job's. */

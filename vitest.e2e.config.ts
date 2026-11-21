@@ -12,13 +12,20 @@ import { defineConfig } from 'vitest/config'
  *   a browser          the browser arc (Chrome, Edge or Chromium where MiniDSH looks)
  *   a confining host   the authority arc takes its UNCONFINED branch, silently
  *   MINIDSH_SKILLS_NEUTRAL / _BASELINE  the skills arc's two reported legs
+ *   MINIDSH_DESKTOP_EXE  the packaged desktop suite (desktop/e2e, which this
+ *                      config includes); on Windows MINIDSH_DESKTOP_INSTALLER
+ *                      adds its installed half, and the live desktop arc also
+ *                      needs DEEPSEEK_API_KEY and Windows
  *
- * Five flags turn a skip into a failure: MINIDSH_EXPECT_KEYS (a comma list of
- * the key names above, checked by expect-keys.e2e.test.ts),
- * MINIDSH_EXPECT_CONFINEMENT, MINIDSH_EXPECT_BROWSER, and — for the bundled
- * skills' Python reader and the shell suites under `pnpm check` —
- * MINIDSH_EXPECT_PYTHON and MINIDSH_EXPECT_SHELL. live.yml sets the ones its
- * hosts must meet; a local run that is meant to count sets them too.
+ * Six flags turn a skip into a failure: MINIDSH_EXPECT_KEYS (a comma list of
+ * the key names above, held by every live file itself through
+ * `test-support/expect-keys.ts`, so a run filtered to one file is held to it
+ * too), MINIDSH_EXPECT_CONFINEMENT, MINIDSH_EXPECT_BROWSER,
+ * MINIDSH_EXPECT_DESKTOP (the desktop suite, in each of its two files), and —
+ * for the bundled skills' Python reader and the shell suites under
+ * `pnpm check` — MINIDSH_EXPECT_PYTHON and MINIDSH_EXPECT_SHELL. live.yml and
+ * the desktop leg set the ones their hosts must meet; a local run that is
+ * meant to count sets them too.
  */
 export default defineConfig({
   test: {

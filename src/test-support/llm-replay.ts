@@ -2,9 +2,14 @@
  * Replay-from-the-log adapter. The model script is DERIVED from a recorded
  * session's `assistant/chunk` events (grouped by turn/step), so recording is
  * free: run the real agent once, harvest its JSONL, replay it keylessly.
- * `assertConsumed()` fails if any recorded step was not replayed. A log that
- * holds a REPAIRED interruption is not an oracle: replay runs the interrupted
- * call to completion, which the recording never did.
+ * `assertConsumed()` is TWO-SIDED: it fails if any recorded answer was not
+ * replayed, and if the replay asked for an answer the recording does not hold.
+ * The second half cannot be left to the throw: the seam turns an adapter's
+ * throw into a failed step (or a declined summary), which a turn survives with
+ * both cursors still equal to their totals. A recording with no model call at
+ * all is refused when it is installed, because every run of it is 0 of 0. A
+ * log that holds a REPAIRED interruption is not an oracle: replay runs the
+ * interrupted call to completion, which the recording never did.
  *
  * There are TWO scripts, because there are two kinds of call. Loop steps come
  * from `assistant/chunk`; out-of-loop calls (a compaction summary) come from
@@ -19,8 +24,16 @@
  * `request/context` records — so a replay meters exactly what the recording
  * metered without a key for either provider.
  *
- * **Effects.** By default (`run`) tool bodies run for real, so a replay
- * reproduces the WORLD as well as the decisions, and the arcs assert it. With
+ * **Effects.** By default (`run`) tool bodies run for real, and that is all a
+ * `run` replay does to the world: the adapter never reads the request, and no
+ * replayed tool result is compared with the recorded one. What it proves is
+ * that today's loop, driven by the prompts its caller sends, asked for exactly
+ * the recorded model answers per session (children bound by their delegation)
+ * and each recorded out-of-loop call under its purpose, and that no binding
+ * failed. It reproduces DECISIONS, not the workspace (ARCHITECTURE §13): a
+ * replayed call may fail where the recorded one succeeded — an absolute path
+ * that misses a fresh root — and the oracle still passes. An arc that claims
+ * the world asserts it itself, on the replayed log or on the disk. With
  * `recorded` a `tools/execute` around-middleware answers every call that
  * reaches a body with the result the recording logged for the same
  * (turn, step, callId), never calling `next()` — so nothing touches the disk,
@@ -385,6 +398,17 @@ interface AuxGroup {
   readonly chunks: StreamChunk[]
 }
 
+/** Where one recorded log's replay stands: what a failed oracle prints, and what a dump of it holds. */
+export interface ReplayCursors {
+  readonly log: string
+  /** `next` is the (turn:step) the recording made its next unreplayed step at. */
+  readonly steps: { readonly replayed: number; readonly recorded: number; readonly next?: string }
+  readonly outOfLoop: { readonly replayed: number; readonly recorded: number; readonly purposes: readonly string[] }
+  /** Every request made past the end of the script. */
+  readonly overAsked: readonly string[]
+  readonly noticesOwed: readonly string[]
+}
+
 /** One recorded log's script: log order is the cursor, whatever route a call took. */
 class ReplayScript {
   private readonly script: StreamChunk[][]
@@ -403,6 +427,16 @@ class ReplayScript {
   readonly notices: RecordedNotice[]
   /** Hands a notice to the replayed session bound to this script. */
   deliver: (sessionId: string, notice: RecordedNotice) => void = () => {}
+  /**
+   * What this script was asked for past its end, in order. Each ask is answered
+   * with a throw, and the throw alone is forgotten: the seam turns it into a
+   * failed step, and a summary's caller into a declined compaction, so the turn
+   * goes on with both cursors still equal to their totals. Kept so that
+   * `assertConsumed` can fail on a replay that asked for too MUCH.
+   */
+  readonly overAsked: string[] = []
+  /** Keeps a refusal that is not an over-ask (a purpose that disagrees) for `assertConsumed`, as a binding failure is kept. */
+  left: (why: string) => void = () => {}
   constructor(
     id: string | undefined,
     keyed: { script: StreamChunk[][]; keys: string[] },
@@ -447,19 +481,21 @@ class ReplayScript {
     // `purpose` is the whole discriminator: the loop never sets one.
     if (request.purpose !== undefined) {
       const group = this.auxScript[this.auxCursor]
-      if (!group) throw new Error(`llm-replay: no recorded "${request.purpose}" call ${this.auxCursor} to replay`)
+      if (!group) throw this.past(`a "${request.purpose}" call, and all ${this.auxScript.length} recorded out-of-loop call(s) were already replayed`)
       // Log order is the cursor, but the purpose must agree: once a session
       // records more than one kind of out-of-loop call, a drift in ordering
       // would otherwise hand a compaction summary to a verifier's request.
       if (group.purpose !== request.purpose) {
-        throw new Error(`llm-replay: out-of-loop call ${this.auxCursor} was recorded as "${group.purpose}" but the request asks for "${request.purpose}"`)
+        const why = `out-of-loop call ${this.auxCursor} was recorded as "${group.purpose}" but the request asks for "${request.purpose}"`
+        this.left(why)
+        throw new Error(`llm-replay: ${why}`)
       }
       this.auxCursor += 1
       for (const chunk of group.chunks) yield chunk
       return
     }
     const group = this.script[this.cursor]
-    if (!group) throw new Error(`llm-replay: no recorded step ${this.cursor} to replay`)
+    if (!group) throw this.past(`a loop step, and all ${this.script.length} recorded step(s) were already replayed`)
     const index = this.cursor
     this.cursor += 1
     for (const chunk of group) yield chunk
@@ -467,6 +503,23 @@ class ReplayScript {
     // input with no await after its last tool result, so a notice delivered
     // any later than the end of this call would miss the claim the recording made.
     for (const notice of this.dueAfterStep(index)) this.deliver(request.sessionId ?? '', notice)
+  }
+
+  /** The error for a request past the end of the script, counted before it is thrown. */
+  private past(what: string): Error {
+    this.overAsked.push(what)
+    return new Error(`llm-replay: ${this.label} was asked for ${what}`)
+  }
+
+  /** Where each cursor stands, for a failure to say and a dump to hold. */
+  cursors(): ReplayCursors {
+    return {
+      log: this.label,
+      steps: { replayed: this.cursor, recorded: this.script.length, ...(this.keys[this.cursor] === undefined ? {} : { next: this.keys[this.cursor]! }) },
+      outOfLoop: { replayed: this.auxCursor, recorded: this.auxScript.length, purposes: this.auxScript.map((group) => group.purpose) },
+      overAsked: [...this.overAsked],
+      noticesOwed: this.notices.map((notice) => `${notice.message.id} at ${notice.turn}:${notice.step}`),
+    }
   }
 
   consumed(): number {
@@ -532,6 +585,7 @@ class ReplayDispatch {
     this.children = children
     this.live = live
     this.delegated = new Set([root, ...children.values()].flatMap((script) => [...script.delegations.values()].flat()))
+    for (const script of [root, ...children.values()]) script.left = (why) => void (this.mismatch ??= why)
   }
 
   for(request: LlmRequest): ReplayScript {
@@ -608,6 +662,13 @@ class ReplayDispatch {
 
   effects: ReplayEffects = 'run'
 
+  cursors(): ReplayState {
+    return {
+      ...(this.mismatch === undefined ? {} : { mismatch: this.mismatch }),
+      logs: [this.root, ...this.children.values()].map((source) => ({ ...source.cursors(), ...(this.holders.has(source) ? { answers: this.holders.get(source)! } : {}) })),
+    }
+  }
+
   assertConsumed(): void {
     if (this.mismatch !== undefined) throw new Error(`llm-replay: the replay left its recording: ${this.mismatch}`)
     for (const source of [this.root, ...this.children.values()]) {
@@ -618,6 +679,13 @@ class ReplayDispatch {
       if (source !== this.root && !this.holders.has(source) && (source.total() > 0 || source.auxTotal() > 0)) {
         const why = this.delegated.has(source.id!) ? 'the recording delegated to it, and no replayed child was delegated by that call' : 'no installed log records a subagent/start for it'
         throw new Error(`llm-replay: ${source.label} was never bound to a session — ${why} — and holds ${source.total()} recorded step(s)`)
+      }
+      // Too MANY first: an over-ask is the replay doing what the recording never
+      // did, and it can only happen to a cursor that already reached its total.
+      if (source.overAsked.length > 0) {
+        throw new Error(
+          `llm-replay: the replay asked for ${source.overAsked.length} model answer(s) the recording does not hold${which}; ${source.label} was asked for ${source.overAsked.join('; then for ')}`,
+        )
       }
       if (source.consumed() !== source.total()) {
         throw new Error(`llm-replay: replayed ${source.consumed()} of ${source.total()} recorded steps${which}`)
@@ -722,9 +790,18 @@ async function answerFromRecording(shared: ReplayDispatch, execution: ToolExecut
   return answer.result
 }
 
+/** Every installed log's cursors, the live session each answers, and the first refusal: the oracle's whole state. */
+export interface ReplayState {
+  readonly mismatch?: string
+  readonly logs: readonly (ReplayCursors & { readonly answers?: string })[]
+}
+
 export interface ReplayHandle {
   dispose: Disposer
+  /** Throws unless the replay asked for exactly what was recorded: no answer left over, none asked for past the end, no refusal. */
   assertConsumed(): void
+  /** Where the replay stands now; what a failing arc writes beside its recording. */
+  cursors(): ReplayState
   readonly steps: number
   /** Recorded out-of-loop calls (compaction summaries) available to replay. */
   readonly auxCalls: number
@@ -755,6 +832,13 @@ export function installLlmReplay(
     attempts?: ReplayAttempts
     /** `run` (default): bodies run for real. `recorded`: the recording answers every call; nothing touches the world. */
     effects?: ReplayEffects
+    /**
+     * Install a root log that recorded no model call at all. Refused otherwise:
+     * such a recording is an oracle nothing can fail (0 of 0 whatever ran), and
+     * the usual way to hold one is to have read the wrong file. Only a caller
+     * that wants the adapter for its route facts alone has a reason to set it.
+     */
+    allowEmpty?: boolean
   },
 ): ReplayHandle {
   const effects = options.effects ?? 'run'
@@ -781,6 +865,11 @@ export function installLlmReplay(
       effects === 'recorded' ? recordedNotices(events) : [],
     )
   const root = scriptOf(undefined, options.events)
+  if (root.total() === 0 && root.auxTotal() === 0 && options.allowEmpty !== true) {
+    throw new Error(
+      `llm-replay: the root log recorded no model call (${options.events.length} event(s), no finished assistant/chunk group and no llm/aux-call), so replaying it can fail nothing; pass allowEmpty if that is what was recorded`,
+    )
+  }
   const byId = new Map<string, ReplayScript>()
   for (const child of children) {
     if (byId.has(child.id)) throw new Error(`llm-replay: two child logs were installed under the session id "${child.id}"`)
@@ -836,5 +925,6 @@ export function installLlmReplay(
     auxCalls: sources.reduce((count, one) => count + one.auxTotal(), 0),
     providers,
     assertConsumed: () => shared.assertConsumed(),
+    cursors: () => shared.cursors(),
   }
 }

@@ -70,10 +70,18 @@ export class WebHostProcess {
   readonly child: ChildProcess
   stdout = ''
   stderr = ''
-  /** Under `json`: every record stdout carried, in order (a line that is not JSON fails `ready()`). */
+  /** Under `json`: every record stdout carried, in order. */
   readonly records: Record<string, unknown>[] = []
+  /**
+   * Under `json`: every stdout line that was NOT a record. Before `ready` one
+   * fails `ready()`; after it there is no promise left to reject, so the line
+   * is kept here and fails the wait for the exit — `--json` promises a
+   * supervisor that stdout carries records and nothing else, to the last byte.
+   */
+  readonly garbage: string[] = []
   /** Settles when the child exits, however it does. */
   readonly exited: Promise<WebHostExit>
+  private readonly stdoutEnded: Promise<void>
   private urlPromise: Promise<string>
   private readyPromise: Promise<WebReadyRecord>
   private session: Promise<{ origin: string; cookie: string }> | undefined
@@ -87,11 +95,28 @@ export class WebHostProcess {
     this.child = spawn(process.execPath, argv, { env: childEnv(home), stdio: [options.stdin ?? 'pipe', 'pipe', 'pipe'] })
     spawned.push(this.child)
     this.exited = new Promise((resolve) => this.child.on('exit', (code, signal) => resolve({ code, signal })))
+    // `close` as well as `end`: a test may destroy this end of the pipe itself.
+    this.stdoutEnded = new Promise((resolve) => {
+      this.child.stdout!.once('end', resolve)
+      this.child.stdout!.once('close', resolve)
+    })
     this.child.stderr!.on('data', (chunk: Buffer) => {
       this.stderr += String(chunk)
     })
     this.readyPromise = new Promise((resolve, reject) => {
       let pending = ''
+      const take = (line: string): void => {
+        let record: Record<string, unknown>
+        try {
+          record = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          this.garbage.push(line)
+          reject(new Error(`web --json wrote a line that is not JSON: ${JSON.stringify(line)}`))
+          return
+        }
+        this.records.push(record)
+        if (record.type === 'ready') resolve(record as unknown as WebReadyRecord)
+      }
       this.child.stdout!.on('data', (chunk: Buffer) => {
         this.stdout += String(chunk)
         if (!options.json) return
@@ -99,16 +124,13 @@ export class WebHostProcess {
         for (let nl = pending.indexOf('\n'); nl >= 0; nl = pending.indexOf('\n')) {
           const line = pending.slice(0, nl)
           pending = pending.slice(nl + 1)
-          let record: Record<string, unknown>
-          try {
-            record = JSON.parse(line) as Record<string, unknown>
-          } catch {
-            reject(new Error(`web --json wrote a line that is not JSON: ${JSON.stringify(line)}`))
-            continue
-          }
-          this.records.push(record)
-          if (record.type === 'ready') resolve(record as unknown as WebReadyRecord)
+          take(line)
         }
+      })
+      // Whatever the host wrote last without ending the line is a line too.
+      this.child.stdout!.once('end', () => {
+        if (options.json && pending.length > 0) take(pending)
+        pending = ''
       })
       this.child.on('exit', () => reject(new Error(`the web host exited before its ready record\nrecords: ${JSON.stringify(this.records)}\nstderr: ${this.stderr}`)))
     })
@@ -135,17 +157,33 @@ export class WebHostProcess {
     return this.readyPromise
   }
 
-  /** Waits for the exit, bounded: a host that does not stop is a failure that says so. */
+  /**
+   * Waits for the exit, bounded: a host that does not stop is a failure that
+   * says so, and so is one that wrote to stdout anything but a record.
+   */
   async waitForExit(timeoutMs: number): Promise<WebHostExit> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error(`the web host did not exit within ${timeoutMs} ms\nstderr: ${this.stderr}`)), timeoutMs)
     })
+    let exit: WebHostExit
     try {
-      return await Promise.race([this.exited, deadline])
+      exit = await Promise.race([this.exited, deadline])
     } finally {
       clearTimeout(timer)
     }
+    // `exit` can fire with the host's last stdout lines still unread: wait for
+    // the stream's end before judging what it carried, bounded because a
+    // grandchild that inherited the pipe keeps it open after the host is gone.
+    let grace: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([this.stdoutEnded, new Promise<void>((late) => (grace = setTimeout(late, 2_000)))])
+    clearTimeout(grace)
+    if (this.garbage.length > 0) {
+      throw new Error(
+        `web --json wrote ${this.garbage.length} stdout line(s) that are not JSON records: ${this.garbage.slice(0, 5).map((line) => JSON.stringify(line.slice(0, 200))).join(', ')}\nrecords: ${JSON.stringify(this.records.map((record) => record.type))}\nstderr: ${this.stderr}`,
+      )
+    }
+    return exit
   }
 
   /** The supervisor's stop under `--json`: end stdin, then wait (bounded) for the exit. */
@@ -230,6 +268,12 @@ export class WebClient {
   readonly frames: { sessionId: string; event: EventEnvelope }[] = []
   readonly views: { sessionId: string; view: Record<string, unknown> }[] = []
   readonly statuses: { sessionId: string; status: string }[] = []
+  /**
+   * Every `approval/answer` the host refused. A refused answer leaves its ask
+   * open and its turn parked, so the next wait fails with the refusal instead
+   * of running out with nothing to say why.
+   */
+  readonly refusedAnswers: string[] = []
   private nextId = 1
   private readonly pending = new Map<number, (frame: Record<string, unknown>) => void>()
 
@@ -305,6 +349,9 @@ export class WebClient {
   async waitFor<T>(pick: () => T | undefined, what: string, timeoutMs = 240_000): Promise<T> {
     const start = Date.now()
     for (;;) {
+      if (this.refusedAnswers.length > 0) {
+        throw new Error(`the host refused ${this.refusedAnswers.length} approval answer(s): ${this.refusedAnswers.join('; ')}\nwhile waiting for ${what}\n${this.describeStall()}`)
+      }
       const value = pick()
       if (value !== undefined) return value
       if (this.socket.readyState === WebSocket.CLOSED) throw new Error(`the socket closed while waiting for ${what}\n${this.describeStall()}`)
@@ -317,8 +364,12 @@ export class WebClient {
     return this.waitFor(() => this.events('turn/end', sessionId).find((event) => (event.data as { turn: number }).turn === turn), `turn ${turn} to end`)
   }
 
-  /** Answers every approval frame as it arrives, as a person at the page would. */
-  answerApprovals(outcome: 'allowed-once' | 'rejected'): () => void {
+  /**
+   * Answers every approval frame as it arrives, as a person at the page would.
+   * With `offer` it also takes the scope the host offered on that approval, as
+   * `ServeProcess.answerApprovals` does; the host refuses one it did not make.
+   */
+  answerApprovals(outcome: 'allowed-once' | 'rejected', offer?: 'grant-session'): () => void {
     const answered = new Set<string>()
     const timer = setInterval(() => {
       for (const frame of this.frames) {
@@ -326,7 +377,13 @@ export class WebClient {
         const id = (frame.event.data as { id: string }).id
         if (answered.has(`${frame.sessionId}:${id}`)) continue
         answered.add(`${frame.sessionId}:${id}`)
-        void this.request('approval/answer', { sessionId: frame.sessionId, id, outcome }).catch(() => undefined)
+        this.request('approval/answer', { sessionId: frame.sessionId, id, outcome, ...(offer === undefined ? {} : { offer }) }).catch((error: unknown) => {
+          // A socket that closed answers nothing, and the wait that meets it
+          // says so; what is kept here is an answer the host REFUSED.
+          if (this.socket.readyState === WebSocket.OPEN) {
+            this.refusedAnswers.push(`${id} (${outcome}${offer === undefined ? '' : ` + ${offer}`}): ${error instanceof Error ? error.message.split('\n', 1)[0] : String(error)}`)
+          }
+        })
       }
     }, 50)
     return () => clearInterval(timer)

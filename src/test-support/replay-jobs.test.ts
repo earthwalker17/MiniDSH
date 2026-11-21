@@ -4,12 +4,11 @@
  * turn claimed at its next step, one that woke a turn of its own — while no
  * process runs at all.
  */
-import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { shellStdioPlugin, type ShellDialect } from '../capabilities/shell-stdio/index.ts'
+import { shellStdioPlugin } from '../capabilities/shell-stdio/index.ts'
 import { toolJobsPlugin } from '../capabilities/tool-jobs/index.ts'
 import { AGENTS, type Agent } from '../core/agent/index.ts'
 import { asMessageId } from '../core/ids.ts'
@@ -19,22 +18,27 @@ import { matches, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/ses
 import { coreHarness, type CoreHarness } from './harness.ts'
 import { installLlmReplay, recordedNotices } from './llm-replay.ts'
 import { assistantText, assistantToolCall } from './scripted-adapter.ts'
+import { expectShellSuite, shellAvailable as available, shellDialect as dialect } from './shell-fixture.ts'
 
-const dialect: ShellDialect = process.platform === 'win32' ? 'pwsh' : 'bash'
-const available = spawnSync(dialect, ['--version'], { stdio: 'ignore' }).status === 0
+// Both cases below run a real shell job and skip without one: held to MINIDSH_EXPECT_SHELL like the shell's own suite.
+expectShellSuite('replay of a jobs log')
 const QUICK = dialect === 'pwsh' ? 'Start-Sleep -Milliseconds 300; Write-Output a' : 'sleep 0.3; echo a'
-// Ends only after the file the recording's last turn-1 step writes, plus a
-// margin for that turn to close: so its notice wakes turn 2 on any host load.
-const SLOW =
-  dialect === 'pwsh'
-    ? 'while (-not (Test-Path go)) { Start-Sleep -Milliseconds 100 }; Start-Sleep -Milliseconds 1500; Write-Output b'
-    : 'while [ ! -f go ]; do sleep 0.1; done; sleep 1.5; echo b'
+// Ends only once the file `go` exists, and the test writes that file after the
+// LOG shows turn 1 closed and the agent idle: so its notice wakes turn 2 on any
+// host load. (It used to be written by turn 1's last step, with a 1.5 s sleep
+// in the job as the margin for that turn to close — a starved host missed it,
+// and the notice landed in turn 1.)
+const SLOW = dialect === 'pwsh' ? 'while (-not (Test-Path go)) { Start-Sleep -Milliseconds 100 }; Write-Output b' : 'while [ ! -f go ]; do sleep 0.1; done; echo b'
 
 const harnesses: CoreHarness[] = []
 const dirs: string[] = []
 afterEach(async () => {
-  for (const h of harnesses.splice(0)) await h.dispose()
+  // Everything is disposed and removed before a failure is reported: a harness
+  // whose dispose throws (its tripwire) must not leave the next one running.
+  const failures: unknown[] = []
+  for (const h of harnesses.splice(0)) await h.dispose().catch((error: unknown) => void failures.push(error))
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  if (failures.length > 0) throw failures[0]
 })
 
 /** `provider`: the replay answers under its own name, beside the harness's scripted adapter. */
@@ -79,14 +83,16 @@ describe.runIf(available)('replaying a log with background jobs', () => {
         }
         return assistantText('waiting')
       },
-      () => {
-        writeFileSync(join(recording.agent.session.header.cwd, 'go'), '')
-        return assistantText('saw a')
-      },
+      assistantText('saw a'),
       // The slow job ends with the agent idle: its notice wakes turn 2.
       assistantText('saw b'),
     )
     recording.agent.followup(createUserMessage('start two jobs'))
+    // Released by the log: turn 1 has ended and the agent is idle, so the slow
+    // job's end can only wake a turn of its own.
+    await turnsEnded(recording.agent, 1)
+    expect(recording.agent.session.events.filter((event) => matches(event, JOB_END)), 'the slow job ended before it was released').toHaveLength(1)
+    writeFileSync(join(recording.agent.session.header.cwd, 'go'), '')
     await turnsEnded(recording.agent, 2)
     const recorded = recording.agent.session.events
     const notices = recordedNotices(recorded)

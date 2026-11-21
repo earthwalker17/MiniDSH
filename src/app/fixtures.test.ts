@@ -22,9 +22,9 @@
  * the replay wrote no `tool/dispatch` and no `effect/recorded` — no body ran.
  */
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createRoot, type Context } from '../kernel/index.ts'
 import { persistenceJsonlPlugin } from '../capabilities/persistence-jsonl/index.ts'
@@ -35,7 +35,7 @@ import { PERSISTENCE, type StoredSession } from '../core/persistence/index.ts'
 import { matches, TOOL_CALL, TOOL_RESULT, TURN_END, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 import { createUserMessage, messageText, restoreMessage } from '../core/llm/message.ts'
 import { coreHarness, type CoreHarness } from '../test-support/harness.ts'
-import { installLlmReplay, recordedAnswers, type ReplayHandle } from '../test-support/llm-replay.ts'
+import { installLlmReplay, recordedAnswers, recordedRoute, type ReplayHandle } from '../test-support/llm-replay.ts'
 import { assistantText } from '../test-support/scripted-adapter.ts'
 import { runTask } from './headless.ts'
 import { inspectStored, verifyStored } from './inspect.ts'
@@ -60,7 +60,20 @@ const FIXTURE_LIST: readonly Fixture[] = [
 
 /** The log of the child the 1.2.0 fixture delegated to: a second file of the same run, held to the checks a child's log can meet. */
 const CHILD_OF_1_2_0: Fixture = { name: 'minidsh-1.2.0-child.jsonl', synced: true, writer: 'minidsh 1.2.0', sha256: 'dcf8ba6486616741c1a441241304c0b3f36aa80fe4b9866d5646e57eaaec2cb4' }
-const EVERY_FIXTURE: readonly Fixture[] = [...FIXTURE_LIST, CHILD_OF_1_2_0]
+/**
+ * The one fixture recorded on WINDOWS (a 1.2.0 web session, read by the Web
+ * UI's and the terminal's own tests): held here to the checks every recorded
+ * file owes, which it was outside of — and it is the one most likely to carry
+ * a `C:\Users\…` path.
+ */
+const WEB_SESSION: Fixture = { name: 'minidsh-s22-web.jsonl', synced: true, writer: 'minidsh 1.2.0', sha256: 'ceba6bc9a58f7eda474e613c1eab04607681584f8821006a7d88150d20f7e5cc' }
+const EVERY_FIXTURE: readonly Fixture[] = [...FIXTURE_LIST, CHILD_OF_1_2_0, WEB_SESSION]
+/** The recorded files that are not session logs: bytes pinned and searched like the rest, never loaded as a store. */
+const OTHER_RECORDED: readonly { readonly path: string; readonly sha256: string }[] = [
+  { path: join('pdf', 'edge-print.pdf'), sha256: '40dc6198dbf691a56344421883550f741d48eaca1e63ef9290e2397a114ffcd9' },
+  { path: join('pdf', 'word-save.pdf'), sha256: 'ccd14640d7f3b44ba270336acbd134f528786ac8ff432c045e73b0e20db15b49' },
+]
+const RECORDED_ROOT = join(FIXTURES, '..')
 
 let dirs: string[] = []
 let roots: Context[] = []
@@ -177,7 +190,10 @@ describe.each(FIXTURE_LIST)('the stored log $name', (fixture) => {
     const result = await runTask({
       task,
       cwd: tempDir('minidsh-fixture-ws-'),
-      model: 'deepseek-v4-flash',
+      // The route each fixture RECORDED, never one literal for all three: the
+      // 1.2.0 log ran on `deepseek-flash`, and replayed under another name its
+      // route facts fell back to a text-only, 1,000,000-token default.
+      ...recordedRoute(recorded),
       reasoningEffort: 'off',
       sessionsRoot,
       // The recording's tool names are the recording host's: a `bash` call on
@@ -221,15 +237,25 @@ describe('the fixtures themselves', () => {
     for (const leak of ['/home/a/x', '/mnt/c/Users', 'C:\\Users\\A\\x', JSON.stringify({ cwd: 'C:\\Users\\A\\x' }), 'C:/Users/A/x', 'by earthwalker17']) {
       expect(leak, 'the pattern itself misses a form it must catch').toMatch(RECORDER)
     }
-    for (const { name } of EVERY_FIXTURE) {
-      const text = readFileSync(join(FIXTURES, name), 'utf8')
-      expect(text).not.toMatch(RECORDER)
+    // EVERY recorded file, found on disk and not from a list: a file added
+    // beside the others is searched whether or not anyone remembered it here.
+    // latin1, so a PDF's bytes are searched as they are.
+    const recorded = readdirSync(RECORDED_ROOT, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && /\.(jsonl|pdf)$/.test(entry.name))
+    expect(recorded.map((entry) => entry.name).toSorted(), 'a recorded file is on disk and in neither list above (or listed and gone)').toEqual(
+      [...EVERY_FIXTURE.map((fixture) => fixture.name), ...OTHER_RECORDED.map((file) => basename(file.path))].toSorted(),
+    )
+    for (const entry of recorded) {
+      const text = readFileSync(join(entry.parentPath, entry.name), 'latin1')
+      expect(RECORDER.exec(text)?.[0], `${entry.name} names the machine that recorded it`).toBeUndefined()
     }
   })
 
   it('are left exactly as recorded: a fixture is evidence, never edited', () => {
     for (const fixture of EVERY_FIXTURE) {
       expect(createHash('sha256').update(readFileSync(join(FIXTURES, fixture.name))).digest('hex'), fixture.name).toBe(fixture.sha256)
+    }
+    for (const file of OTHER_RECORDED) {
+      expect(createHash('sha256').update(readFileSync(join(RECORDED_ROOT, file.path))).digest('hex'), file.path).toBe(file.sha256)
     }
   })
 

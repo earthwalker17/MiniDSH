@@ -13,8 +13,14 @@ import { installLlmReplay } from './llm-replay.ts'
 
 let harnesses: CoreHarness[] = []
 afterEach(async () => {
-  for (const harness of harnesses.toReversed()) await harness.dispose()
+  // The list is emptied first and every harness disposed before a failure is
+  // reported: a harness whose dispose throws (its tripwire) must not leave the
+  // others for the NEXT test's hook to dispose and be blamed for.
+  const owned = harnesses.toReversed()
   harnesses = []
+  const failures: unknown[] = []
+  for (const harness of owned) await harness.dispose().catch((error: unknown) => void failures.push(error))
+  if (failures.length > 0) throw failures[0]
 })
 
 const echo = defineTool({
@@ -129,6 +135,97 @@ describe('llm-replay', () => {
   })
 })
 
+/**
+ * The oracle's own verdict, each way it can be "no". Every other suite calls
+ * `assertConsumed()` expecting it to pass, so without these a regression that
+ * stopped comparing a cursor would leave every replay leg green.
+ */
+describe('llm-replay: assertConsumed is two-sided', () => {
+  /** The recording's own composition over a fresh harness, driven by the recording's prompt. */
+  async function replayOf(events: Recorded, options: { maxSteps?: number; effects?: 'recorded' } = {}) {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const replay = installLlmReplay(harness.root, { events, provider: 'replay', ...(options.effects === undefined ? {} : { effects: options.effects }) })
+    harness.root.get(TOOLS).register(harness.root, echo)
+    const handle = await harness.root.get(AGENTS).create(harness.root, {
+      cwd: process.cwd(),
+      agentOptions: { provider: 'replay', model: 'replay', ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }) },
+    })
+    handle.agent.followup(createUserMessage('run it'))
+    await handle.agent.whenIdle()
+    return { harness, replay, agent: handle.agent }
+  }
+
+  const endings = (agent: Agent): string[] => agent.session.facts.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)
+
+  it('fails on a recorded step the replay never asked for', async () => {
+    const recorded = await record()
+    // One step allowed: the turn closes after the tool call, and the recorded answer stays in the script.
+    const { replay } = await replayOf(recorded.events, { maxSteps: 1 })
+    expect(replay.cursors().logs[0]!.steps).toEqual({ replayed: 1, recorded: 2, next: '1:2' })
+    expect(() => replay.assertConsumed()).toThrowError(/replayed 1 of 2 recorded steps/)
+  })
+
+  it('fails on a recorded out-of-loop call the replay never asked for', async () => {
+    const recorded = await record()
+    // A summary the recording made and this composition, which mounts no compaction, never will.
+    const summary = { type: 'llm/aux-call', seq: recorded.events.length, time: 1, data: { purpose: 'compaction', provider: 'replay', model: 'replay', outcome: { kind: 'text', text: 'a summary' } } }
+    const { replay } = await replayOf([...recorded.events, summary] as unknown as Recorded)
+    expect(replay.cursors().logs[0]!.steps).toMatchObject({ replayed: 2, recorded: 2 })
+    expect(() => replay.assertConsumed()).toThrowError(/replayed 0 of 1 recorded out-of-loop calls/)
+  })
+
+  it('fails on a recorded job notice whose step the replay never reached', async () => {
+    const recorded = await record()
+    const n = recorded.events.length
+    // A notice the recording's model was shown at turn 3: this replay drives one turn, so nothing ever owes it.
+    const notice = { id: 'msg-job-j1', role: 'user', content: [{ type: 'text', text: 'Background job j1 exited' }], source: { kind: 'plugin', plugin: 'core-jobs' } }
+    const later = [
+      { type: 'step/start', seq: n, time: 1, data: { turn: 3, step: 1 } },
+      { type: 'user/message', seq: n + 1, time: 1, data: { turn: 3, message: notice } },
+    ]
+    const { replay } = await replayOf([...recorded.events, ...later] as unknown as Recorded, { effects: 'recorded' })
+    expect(() => replay.assertConsumed()).toThrowError(/1 recorded job notice\(s\) were never re-delivered: msg-job-j1 at 3:1/)
+  })
+
+  it('fails on a step asked for past the end of the recording, which the seam alone would turn into a failed turn and forget', async () => {
+    const recorded = await record()
+    const { replay, agent } = await replayOf(recorded.events)
+    replay.assertConsumed()
+    // A second prompt the recording never had. The adapter throws, the seam
+    // answers an error finish, the turn ends `error` — and both cursors still
+    // equal their totals, which is all the one-sided check compared.
+    agent.followup(createUserMessage('again'))
+    await agent.whenIdle()
+    expect(endings(agent), 'the over-ask itself only failed a turn').toEqual(['completed', 'error'])
+    expect(replay.cursors().logs[0]).toMatchObject({ steps: { replayed: 2, recorded: 2 }, overAsked: [expect.stringMatching(/^a loop step/) as string] })
+    expect(() => replay.assertConsumed()).toThrowError(/asked for 1 model answer\(s\) the recording does not hold; the root log was asked for a loop step, and all 2 recorded step\(s\) were already replayed/)
+  })
+
+  it('fails on an out-of-loop call asked for past the end of the recording', async () => {
+    const recorded = await record()
+    const { harness, replay, agent } = await replayOf(recorded.events)
+    replay.assertConsumed()
+    // What an extra compaction is: the replayed session's own `purpose` request, with no record left for it.
+    const chunks: StreamChunk[] = []
+    for await (const chunk of harness.root.get(LLM).stream({ provider: 'replay', model: 'replay', messages: [], purpose: 'compaction', sessionId: agent.id })) chunks.push(chunk)
+    expect(chunks.map((chunk) => chunk.type), 'the seam turned the refusal into a finish').toEqual(['finish'])
+    expect(() => replay.assertConsumed()).toThrowError(/asked for 1 model answer\(s\) the recording does not hold; the root log was asked for a "compaction" call, and all 0 recorded out-of-loop call\(s\) were already replayed/)
+  })
+
+  it('refuses to install a recording that holds no model call, unless the caller says an empty one is expected', async () => {
+    const harness = await coreHarness()
+    harnesses.push(harness)
+    const opening = (await record()).events.filter((event) => event.type !== 'assistant/chunk')
+    expect(opening.length, 'a real log, with its model answers removed').toBeGreaterThan(5)
+    for (const events of [[], opening]) {
+      expect(() => installLlmReplay(harness.root, { events, provider: 'replay' })).toThrowError(/the root log recorded no model call \(\d+ event\(s\)/)
+    }
+    const expected = installLlmReplay(harness.root, { events: [], provider: 'replay', allowEmpty: true })
+    expected.assertConsumed()
+  })
+})
+
 describe('llm-replay: out-of-loop calls', () => {
   it('refuses to serve a call recorded for one purpose to a request made for another', async () => {
     const harness = await coreHarness()
@@ -141,7 +238,7 @@ describe('llm-replay: out-of-loop calls', () => {
         data: { purpose: 'compaction', provider: 'replay', model: 'replay', outcome: { kind: 'text', text: 'a summary' } },
       },
     ]
-    installLlmReplay(harness.root, { events: recorded, provider: 'replay' })
+    const replay = installLlmReplay(harness.root, { events: recorded, provider: 'replay' })
     const llm = harness.root.get(LLM)
     const consume = async (purpose: string): Promise<import('../core/llm/index.ts').StreamChunk[]> => {
       const out: import('../core/llm/index.ts').StreamChunk[] = []
@@ -154,6 +251,9 @@ describe('llm-replay: out-of-loop calls', () => {
     expect(refused[0]).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { message: expect.stringMatching(/recorded as "compaction" but the request asks for "verification"/) as string } } })
     // The record is still there for the request it was made for.
     expect((await consume('compaction')).map((chunk) => chunk.type)).toContain('text-delta')
+    // And the refusal is kept: the cursor now equals its total, so the count alone would pass.
+    expect(replay.cursors().logs[0]!.outOfLoop).toEqual({ replayed: 1, recorded: 1, purposes: ['compaction'] })
+    expect(() => replay.assertConsumed()).toThrowError(/left its recording: out-of-loop call 0 was recorded as "compaction" but the request asks for "verification"/)
   })
 })
 
@@ -427,6 +527,13 @@ describe('replay answers a recorded route from the log', () => {
     expect(windowsIn(events).get('deepseek/deepseek-v4-flash-vision-exp')).toBe(1_000_000)
     expect(modalitiesIn(events).get('deepseek/deepseek-v4-flash')).toEqual(['text'])
     expect(modalitiesIn(events).get('deepseek/deepseek-v4-flash-vision-exp')).toEqual(['text', 'image'])
+    // The same route written again with later facts: a segment resumed under a
+    // newer catalog. The LATER record is the one every step replays with, and
+    // the other route is left as it was.
+    const resumed = [...events, context('deepseek', 'deepseek-v4-flash', { contextWindow: 1_048_576, inputModalities: ['text', 'image'] })]
+    expect(windowsIn(resumed).get('deepseek/deepseek-v4-flash')).toBe(1_048_576)
+    expect(modalitiesIn(resumed).get('deepseek/deepseek-v4-flash')).toEqual(['text', 'image'])
+    expect(windowsIn(resumed).get('deepseek/deepseek-v4-flash-vision-exp')).toBe(1_000_000)
   })
 
   /**
@@ -442,7 +549,8 @@ describe('replay answers a recorded route from the log', () => {
     const harness = await coreHarness()
     harnesses.push(harness)
     const log = [context('recorded', 'vision-model', { contextWindow: 60_000, inputModalities: ['text', 'image'] })]
-    const replay = installLlmReplay(harness.root, { events: log, provider: 'renamed' })
+    // Route facts only: this log asks for no model answer, and says so.
+    const replay = installLlmReplay(harness.root, { events: log, provider: 'renamed', allowEmpty: true })
     const resolved = harness.root.get(LLM).resolveModel('renamed', 'vision-model')
     expect(resolved.inputModalities).toEqual(['text', 'image'])
     expect(resolved.contextWindow).toBe(60_000)
@@ -461,7 +569,7 @@ describe('replay answers a recorded route from the log', () => {
     const childLog = [context('recorded', 'vision-model', { contextWindow: 60_000, inputModalities: ['text', 'image'] })]
     // Registered under the provider the LOG names, which is what `providersIn`
     // does for every real caller: the route key is provider/model on both sides.
-    const replay = installLlmReplay(harness.root, { events: parentLog, children: [{ id: 'child', events: childLog }] })
+    const replay = installLlmReplay(harness.root, { events: parentLog, children: [{ id: 'child', events: childLog }], allowEmpty: true })
     const llm = harness.root.get(LLM)
     expect(replay.providers).toEqual(['recorded'])
     expect(llm.resolveModel('recorded', 'text-model').inputModalities).toEqual(['text'])
