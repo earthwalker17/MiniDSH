@@ -156,6 +156,19 @@ function readInput(path, what) {
 const extOf = (path) => extname(path).slice(1).toLowerCase()
 
 /**
+ * What the file system refused at the output path, as the refused exit and
+ * one line a person can act on. The likely case is Windows: the file is open
+ * in Word, which holds it against deletion, and `--force` then fails with
+ * EBUSY or EPERM. Reported as an internal error with a stack trace, it told
+ * a model nothing it could pass on. Only an error the operating system
+ * returned (it names a system call) is one of these.
+ */
+function outputRefusal(out, error) {
+  if (typeof error?.syscall !== 'string') return error
+  return fail(EXIT.refused, `${out} cannot be written (${error.code}): it may be open in another program, read-only, or in a place that does not take a file; close it or name another path`)
+}
+
+/**
  * Creates the output, never opening an existing path: --force removes the old
  * file first, and 'wx' then refuses anything that appeared in between, a link
  * included, instead of following it.
@@ -170,7 +183,7 @@ function write(abs, out, bytes, force) {
     writeFileSync(abs, bytes, { flag: 'wx' })
   } catch (error) {
     if (error?.code === 'EEXIST') throw fail(EXIT.refused, `${out} already exists; pass --force to overwrite it`)
-    throw error
+    throw outputRefusal(out, error)
   }
 }
 
@@ -294,7 +307,11 @@ function unpack(file, dir, raw) {
     }
   }
   const abs = guardOutput(dir, { force: false, directory: true })
-  mkdirSync(abs, { recursive: true })
+  try {
+    mkdirSync(abs, { recursive: true })
+  } catch (error) {
+    throw outputRefusal(dir, error)
+  }
   const warnings = []
   const account = nodeAccount()
   for (const [name, bytes] of members) {
@@ -311,8 +328,12 @@ function unpack(file, dir, raw) {
         warnings.push(`${error.message} (written unchanged)`)
       }
     }
-    mkdirSync(dirname(target), { recursive: true })
-    writeFileSync(target, data, { flag: 'wx' })
+    try {
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, data, { flag: 'wx' })
+    } catch (error) {
+      throw outputRefusal(join(dir, name), error)
+    }
   }
   const { main: mainPart } = checkPackage(members, undefined)
   print({ unpacked: abs, parts: members.size, main: mainPart ?? null, indented: !raw, warnings, next: `edit the parts, then: ${SELF} pack "${dir}" <new file>` })

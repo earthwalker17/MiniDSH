@@ -198,6 +198,11 @@ class XmlError extends Error {
 
 const NAME = /[A-Za-z_:\u{C0}-\u{FFFF}][-A-Za-z0-9_:.\u{B7}\u{C0}-\u{FFFF}]*/uy
 const isSpace = (code) => code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d
+/** Nothing but XML white space. */
+function isBlank(text) {
+  for (let k = 0; k < text.length; k++) if (!isSpace(text.charCodeAt(k))) return false
+  return true
+}
 
 export function locate(text, index) {
   let line = 1
@@ -241,7 +246,9 @@ const MAX_DEPTH = 256
  * Measured at the cap: 2M empty elements read in 2.4 s within a 256 MB heap,
  * 1M one-attribute elements (the costliest unit: a Map each) in 3.2 s within
  * 384 MB. Estimated, not measured: a document of some 5,000 pages, or a
- * sheet of some 300,000 cells, reaches it.
+ * sheet of some 300,000 cells, reaches it. Indentation is not counted (the
+ * white space straight after a tag, at most one run per tag), so a part
+ * costs the same before `unpack` and after it.
  */
 export const MAX_PACKAGE_NODES = 2_000_000
 
@@ -322,6 +329,8 @@ function parse(text, account) {
   }
   let root
   let i = 0
+  // True from an element's start or end tag until the next text: the one place a white-space run is free (see below).
+  let afterTag = false
   const err = (message, at = i) => {
     throw new XmlError(message, at)
   }
@@ -344,7 +353,13 @@ function parse(text, account) {
       } else {
         const bad = raw.indexOf(']]>')
         if (bad >= 0) err("']]>' is not allowed in text", i + bad)
-        spend(i)
+        // White space straight after a tag is what `unpack` indents a part
+        // with, and it is not charged: charged, a part cost up to twice as
+        // much after `unpack` as before it, and `pack` refused a 30,000-row
+        // workbook that `unpack` had just written. There is at most one such
+        // run per tag, so what is charged still bounds what is built.
+        if (!(afterTag && isBlank(raw))) spend(i)
+        afterTag = false
         adopt(stack.at(-1).el, decodeEntities(raw, i))
       }
       i = textEnd
@@ -363,6 +378,7 @@ function parse(text, account) {
       const end = text.indexOf(']]>', i + 9)
       if (end < 0) err('unterminated CDATA section')
       spend(i)
+      afterTag = false
       adopt(stack.at(-1).el, text.slice(i + 9, end))
       i = end + 3
       continue
@@ -389,6 +405,7 @@ function parse(text, account) {
       if (!open) err(`end tag </${m[0]}> has no open element`)
       if (open.el.name !== m[0]) err(`end tag </${m[0]}> does not match <${open.el.name}> opened at line ${locate(text, open.index).line}`)
       unbind(open.declared)
+      afterTag = true
       i = j + 1
       continue
     }
@@ -461,6 +478,7 @@ function parse(text, account) {
     else root = el
     if (selfClosing) unbind(declared)
     else stack.push({ el, index: i, declared })
+    afterTag = true
     i = j
   }
   if (stack.length > 0) err(`<${stack.at(-1).el.name}> is never closed`, stack.at(-1).index)

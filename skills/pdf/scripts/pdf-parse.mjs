@@ -67,21 +67,35 @@ export class Stream {
 
 const isWhite = (c) => c === 0 || c === 9 || c === 10 || c === 12 || c === 13 || c === 32
 const isDelimiter = (c) => c === 40 || c === 41 || c === 60 || c === 62 || c === 91 || c === 93 || c === 123 || c === 125 || c === 47 || c === 37
-const NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)$/
+/**
+ * Every bare word the lexer meets is tested, whatever its length, so the
+ * pattern must fail in one pass: the digits before the point belong to ONE
+ * quantifier. As `\d+\.?\d*` a run of N digits ending in a letter could be
+ * split between the two at every position before `$` failed, N^2/2 steps:
+ * 80,000 digits took 19 s, from `info` as well as `read`.
+ */
+const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/
 
 class Lexer {
-  constructor(s, pos = 0) {
+  /**
+   * `end` is where the text stops for this lexer, the end of `s` unless a
+   * caller knows better: no token reads past it, an unclosed string included
+   * (`PdfDoc.readObjectAt` says why an object needs one).
+   */
+  constructor(s, pos = 0, end = s.length) {
     this.s = s
     this.pos = pos
+    this.end = end
   }
 
   skip() {
     const s = this.s
-    for (;;) {
+    const end = this.end
+    while (this.pos < end) {
       const c = s.charCodeAt(this.pos)
       if (isWhite(c)) this.pos++
       else if (c === 37) {
-        while (this.pos < s.length && s[this.pos] !== '\n' && s[this.pos] !== '\r') this.pos++
+        while (this.pos < end && s[this.pos] !== '\n' && s[this.pos] !== '\r') this.pos++
       } else return
     }
   }
@@ -90,8 +104,9 @@ class Lexer {
   next() {
     this.skip()
     const s = this.s
+    const end = this.end
     const start = this.pos
-    if (start >= s.length) return { t: 'eof' }
+    if (start >= end) return { t: 'eof' }
     const c = s[start]
     if (c === '[' || c === ']' || c === '{' || c === '}') {
       this.pos++
@@ -102,8 +117,9 @@ class Lexer {
         this.pos += 2
         return { t: '<<' }
       }
-      const end = s.indexOf('>', start)
-      const stop = end < 0 ? s.length : end
+      // Stepped to, not `indexOf`: a search would not stop at this lexer's end.
+      let stop = start + 1
+      while (stop < end && s.charCodeAt(stop) !== 62) stop++
       let hex = s.slice(start + 1, stop).replace(/[^0-9A-Fa-f]/g, '')
       if (hex.length % 2) hex += '0'
       this.pos = stop + 1
@@ -116,7 +132,7 @@ class Lexer {
     if (c === '(') return { t: 'str', v: this.literal() }
     if (c === '/') {
       let j = start + 1
-      while (j < s.length && !isWhite(s.charCodeAt(j)) && !isDelimiter(s.charCodeAt(j))) j++
+      while (j < end && !isWhite(s.charCodeAt(j)) && !isDelimiter(s.charCodeAt(j))) j++
       this.pos = j
       return { t: 'name', v: s.slice(start + 1, j).replace(/#([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(Number.parseInt(h, 16))) }
     }
@@ -125,7 +141,7 @@ class Lexer {
       return { t: 'op', v: ')' }
     }
     let j = start
-    while (j < s.length && !isWhite(s.charCodeAt(j)) && !isDelimiter(s.charCodeAt(j))) j++
+    while (j < end && !isWhite(s.charCodeAt(j)) && !isDelimiter(s.charCodeAt(j))) j++
     if (j === start) j++
     this.pos = j
     const word = s.slice(start, j)
@@ -133,50 +149,71 @@ class Lexer {
     return { t: 'op', v: word }
   }
 
+  /**
+   * A literal string, `(...)`. Two passes, and no value built a character at
+   * a time: appended so, a string was a rope node per byte, and one show
+   * operator of 60 MiB took some 37 s before a glyph was drawn. The first
+   * pass finds the closing parenthesis; a string with no escape and no line
+   * end, which is nearly every one, is then a slice of the text, and any
+   * other is decoded into bytes.
+   */
   literal() {
     const s = this.s
-    let i = this.pos + 1
+    const end = this.end
+    const start = this.pos + 1
+    let i = start
     let depth = 1
-    let out = ''
-    while (i < s.length) {
-      const ch = s[i]
-      if (ch === '\\') {
-        const n = s[i + 1]
+    let plain = true
+    while (i < end) {
+      const c = s.charCodeAt(i)
+      if (c === 92) {
+        // What an escape consumes past its second character (octal digits, the \n of \r\n) is no parenthesis.
+        plain = false
         i += 2
-        if (n === 'n') out += '\n'
-        else if (n === 'r') out += '\r'
-        else if (n === 't') out += '\t'
-        else if (n === 'b') out += '\b'
-        else if (n === 'f') out += '\f'
-        else if (n === '\r') {
-          if (s[i] === '\n') i++
-        } else if (n === '\n') {
-          // a backslash at the end of a line continues the string
-        } else if (n >= '0' && n <= '7') {
-          let digits = n
-          while (digits.length < 3 && s[i] >= '0' && s[i] <= '7') digits += s[i++]
-          out += String.fromCharCode(Number.parseInt(digits, 8) & 0xff)
-        } else if (n !== undefined) out += n
         continue
       }
-      if (ch === '(') depth++
-      else if (ch === ')') {
-        depth--
-        if (depth === 0) {
-          i++
-          break
-        }
-      } else if (ch === '\r') {
-        // An end of line inside a string reads as \n, whatever the file used.
-        out += '\n'
-        i += s[i + 1] === '\n' ? 2 : 1
-        continue
-      }
-      out += ch
+      if (c === 40) depth++
+      else if (c === 41 && --depth === 0) break
+      else if (c === 13) plain = false
       i++
     }
-    this.pos = i
-    return out
+    // Unclosed, the string is everything up to the lexer's end.
+    const stop = Math.min(i, end)
+    this.pos = depth === 0 ? i + 1 : i
+    if (plain) return s.slice(start, stop)
+    const out = Buffer.allocUnsafe(stop - start)
+    let length = 0
+    for (let k = start; k < stop; ) {
+      const c = s.charCodeAt(k)
+      if (c === 92) {
+        const n = s.charCodeAt(k + 1)
+        k += 2
+        if (n === 110) out[length++] = 10
+        else if (n === 114) out[length++] = 13
+        else if (n === 116) out[length++] = 9
+        else if (n === 98) out[length++] = 8
+        else if (n === 102) out[length++] = 12
+        else if (n === 13) {
+          if (s.charCodeAt(k) === 10) k++
+        } else if (n === 10) {
+          // a backslash at the end of a line continues the string
+        } else if (n >= 48 && n <= 55) {
+          let value = n - 48
+          for (let digits = 1; digits < 3 && s.charCodeAt(k) >= 48 && s.charCodeAt(k) <= 55; digits++) value = value * 8 + s.charCodeAt(k++) - 48
+          out[length++] = value & 0xff
+        } else if (!Number.isNaN(n)) out[length++] = n
+        continue
+      }
+      if (c === 13) {
+        // An end of line inside a string reads as \n, whatever the file used.
+        out[length++] = 10
+        k += s.charCodeAt(k + 1) === 10 ? 2 : 1
+        continue
+      }
+      out[length++] = c
+      k++
+    }
+    return out.latin1Slice(0, length)
   }
 }
 
@@ -464,6 +501,34 @@ function runLength(data, limit) {
 const MAX_OBJECTS = 8_388_607
 /** An xref stream field wider than this names no offset a file can have (2^64), and each byte is a loop step. */
 const MAX_XREF_FIELD_BYTES = 8
+/**
+ * An object's header, `N G obj`, wherever it stands in the file. Bounded
+ * counts: an object number has at most 7 digits (MAX_OBJECTS) and a
+ * generation 5, so ten and five are generous. Unbounded, `(\d+)` tried every
+ * length of a digit run at every start inside it — quadratic, 15 s for an
+ * 80,000-digit run (review, S20.5); bounded, each start costs at most ten
+ * steps. A pattern per search: a global pattern keeps its place in itself.
+ */
+const objectHeader = () => /(\d{1,10})\s+(\d{1,5})\s+obj\b/g
+/**
+ * How many times over the document's object text may be lexed, every read
+ * taken together. The index says where an object starts and nothing says
+ * where it ends, so a file can send the reader over the same bytes once per
+ * object: 2,500 page dictionaries that are never closed, behind a sound xref
+ * table, took 22 s, and 10,000 outran the shell's deadline. Sound work lexes
+ * an object once, again when the index is rebuilt by scanning, and a third
+ * time when no catalog is found; a document past this is refused as damaged.
+ */
+const MAX_OBJECT_PASSES = 8
+/**
+ * How deep reading one object may go into reading others: a stream needs its
+ * /Length, a packed object the stream that holds it. A sound file goes two or
+ * three deep; 5,000 streams whose /Length each named the next overflowed the
+ * stack into an internal error. Past this depth an object reads as missing
+ * where it was asked for, which a /Length survives: the `endstream` keyword
+ * is the truth.
+ */
+const MAX_FETCH_DEPTH = 32
 
 export class PdfDoc {
   constructor(buffer) {
@@ -478,10 +543,14 @@ export class PdfDoc {
     this.endstreams = undefined
     this.xrefKind = 'none'
     this.repaired = false
+    /** Characters of object text this document may still have lexed; see MAX_OBJECT_PASSES. */
+    this.lexable = MAX_OBJECT_PASSES * this.s.length
+    /** How many objects are being read inside one another right now; see MAX_FETCH_DEPTH. */
+    this.fetching = 0
     /** Decoded bytes this document may still produce; see MAX_DOCUMENT_BYTES. */
     this.budget = MAX_DOCUMENT_BYTES
     /** What drawing has cost across every page so far; see MAX_DOCUMENT_OPERATORS. */
-    this.drawn = { operators: 0, forms: 0, bytes: 0 }
+    this.drawn = { operators: 0, glyphs: 0, forms: 0, bytes: 0 }
     /** What was skipped and why, in order; `pageText` reports the ones its page raised. */
     this.notes = []
     const header = /%PDF-(\d\.\d)/.exec(this.s.slice(0, 1024))
@@ -599,12 +668,7 @@ export class PdfDoc {
   scan() {
     if (this.scanned) return this.scanned
     const table = new Map()
-    // Bounded counts: an object number has at most 7 digits (MAX_OBJECTS) and
-    // a generation 5, so ten and five are generous. Unbounded, `(\d+)` tried
-    // every length of a digit run at every start inside it — quadratic, 15 s
-    // for an 80,000-digit run (review, S20.5); bounded, each start costs at
-    // most ten steps.
-    const re = /(\d{1,10})\s+(\d{1,5})\s+obj\b/g
+    const re = objectHeader()
     for (let m = re.exec(this.s); m; m = re.exec(this.s)) if (table.size < MAX_OBJECTS || table.has(Number(m[1]))) table.set(Number(m[1]), { type: 1, offset: m.index })
     this.scanned = table
     // A copy: object streams found below add entries to the table being walked.
@@ -625,11 +689,15 @@ export class PdfDoc {
     for (const [num, entry] of table) this.entries.set(num, entry)
     this.cache.clear()
     if (this.resolve(this.trailer.get('Root')) instanceof Map) return
+    // Each trailer is read as far as the next one. Read to the end of the
+    // file, a dictionary that is never closed cost a pass over the file per
+    // trailer: 10,000 of them took 16 s.
     let at = this.s.indexOf('trailer')
     while (at >= 0) {
-      const value = parseValue(new Lexer(this.s, at + 7))
+      const next = this.s.indexOf('trailer', at + 7)
+      const value = parseValue(new Lexer(this.s, at + 7, next < 0 ? this.s.length : next))
       if (value instanceof Map) for (const [k, v] of value) this.trailer.set(k, v)
-      at = this.s.indexOf('trailer', at + 7)
+      at = next
     }
     if (this.resolve(this.trailer.get('Root')) instanceof Map) return
     for (const num of table.keys()) {
@@ -641,40 +709,73 @@ export class PdfDoc {
     }
   }
 
+  /** Where the next `N G obj` at or after `from` starts; the end of the file when there is none. */
+  nextHeader(from) {
+    const re = objectHeader()
+    re.lastIndex = from
+    const m = re.exec(this.s)
+    return m ? m.index : this.s.length
+  }
+
+  /** Charges lexing to the document's account, and refuses the document once that is overdrawn; see MAX_OBJECT_PASSES. */
+  lexed(characters) {
+    // Only a real count is charged: a position a broken index made NaN would turn the account into NaN, which nothing overdraws.
+    if (characters > 0) this.lexable -= characters
+    if (this.lexable < 0) throw fail(EXIT.invalid, `this PDF is too damaged to read: its objects are never closed, or its index sends the reader over the same bytes again and again (more than ${MAX_OBJECT_PASSES} passes over the file)`)
+  }
+
+  /**
+   * The object whose header stands at `offset`; undefined when none does.
+   *
+   * Nothing ends an object but its own closing token, so a dictionary, array
+   * or string that is never closed reads on through the objects after it,
+   * taking their keys for its own, and a damaged file of M such objects cost
+   * M passes over it: 10,000 took 72 s, and as unclosed strings they
+   * exhausted the heap. Once the file has been scanned every header is known
+   * to be findable, so an object is read inside its own span, up to the next
+   * one. Before that the index is trusted, and a string that happens to say
+   * "1 0 obj" stays whole: there the document's account alone bounds the work.
+   */
   readObjectAt(offset, expected) {
+    this.lexed(0)
     const lx = new Lexer(this.s, offset)
-    const n = lx.next()
-    const g = lx.next()
-    const kw = lx.next()
-    if (n.t !== 'num' || g.t !== 'num' || kw.t !== 'op' || kw.v !== 'obj') return undefined
-    if (expected !== undefined && n.v !== expected) return undefined
-    let value
     try {
-      value = parseValue(lx)
-    } catch (error) {
-      if (error instanceof CliError) return undefined
-      throw error
+      const n = lx.next()
+      const g = lx.next()
+      const kw = lx.next()
+      if (n.t !== 'num' || g.t !== 'num' || kw.t !== 'op' || kw.v !== 'obj') return undefined
+      if (expected !== undefined && n.v !== expected) return undefined
+      if (this.scanned) lx.end = this.nextHeader(lx.pos)
+      let value
+      try {
+        value = parseValue(lx)
+      } catch (error) {
+        if (error instanceof CliError) return undefined
+        throw error
+      }
+      if (!(value instanceof Map)) return value
+      const save = lx.pos
+      const tok = lx.next()
+      if (tok.t !== 'op' || tok.v !== 'stream') {
+        lx.pos = save
+        return value
+      }
+      let start = lx.pos
+      if (this.s[start] === '\r') start++
+      if (this.s[start] === '\n') start++
+      const declared = this.resolve(value.get('Length'))
+      let end = typeof declared === 'number' ? start + declared : -1
+      if (end < start || end > this.s.length || !/^\s*endstream/.test(this.s.slice(end, end + 30))) {
+        // A wrong /Length is common; the keyword is the truth.
+        const found = this.endstreamFrom(start)
+        end = found < 0 ? this.s.length : found
+        if (this.s[end - 1] === '\n') end--
+        if (this.s[end - 1] === '\r') end--
+      }
+      return new Stream(value, this.buf.subarray(start, end))
+    } finally {
+      this.lexed(lx.pos - offset)
     }
-    if (!(value instanceof Map)) return value
-    const save = lx.pos
-    const tok = lx.next()
-    if (tok.t !== 'op' || tok.v !== 'stream') {
-      lx.pos = save
-      return value
-    }
-    let start = lx.pos
-    if (this.s[start] === '\r') start++
-    if (this.s[start] === '\n') start++
-    const declared = this.resolve(value.get('Length'))
-    let end = typeof declared === 'number' ? start + declared : -1
-    if (end < start || end > this.s.length || !/^\s*endstream/.test(this.s.slice(end, end + 30))) {
-      // A wrong /Length is common; the keyword is the truth.
-      const found = this.endstreamFrom(start)
-      end = found < 0 ? this.s.length : found
-      if (this.s[end - 1] === '\n') end--
-      if (this.s[end - 1] === '\r') end--
-    }
-    return new Stream(value, this.buf.subarray(start, end))
   }
 
   /**
@@ -703,6 +804,8 @@ export class PdfDoc {
     const data = this.decode(stream)
     if (!data) return undefined
     const s = data.toString('latin1')
+    // The objects inside are text to lex like any other, on the same account.
+    this.lexable += MAX_OBJECT_PASSES * s.length
     const count = Number(stream.dict.get('N') ?? 0)
     const first = Number(stream.dict.get('First') ?? 0)
     const lx = new Lexer(s, 0)
@@ -713,6 +816,7 @@ export class PdfDoc {
       if (a.t !== 'num' || b.t !== 'num') break
       offsets.push([a.v, b.v])
     }
+    this.lexed(lx.pos)
     const parsed = { s, first, offsets }
     this.objectStreams.set(num, parsed)
     return parsed
@@ -726,26 +830,39 @@ export class PdfDoc {
     let slot = parsed.offsets[index]
     if (!slot || slot[0] !== num) slot = parsed.offsets.find(([n]) => n === num)
     if (!slot) return undefined
-    return parseValue(new Lexer(parsed.s, parsed.first + slot[1]))
+    const start = parsed.first + slot[1]
+    const lx = new Lexer(parsed.s, start)
+    try {
+      return parseValue(lx)
+    } finally {
+      this.lexed(lx.pos - start)
+    }
   }
 
   get(num) {
     if (this.cache.has(num)) return this.cache.get(num)
+    // Not cached: read from a shallower place, the object is itself again.
+    if (this.fetching >= MAX_FETCH_DEPTH) return null
     this.cache.set(num, null)
-    let value
-    const entry = this.entries.get(num)
-    if (entry?.type === 1) value = this.readObjectAt(entry.offset, num)
-    else if (entry?.type === 2) value = this.fromObjectStream(entry.stream, entry.index, num)
-    if (value === undefined) {
-      // The recorded offset did not hold this object: trust the file over its index.
-      const scanned = this.scan().get(num)
-      if (scanned?.type === 1) value = this.readObjectAt(scanned.offset, num)
-      else if (scanned?.type === 2) value = this.fromObjectStream(scanned.stream, scanned.index, num)
-      if (value !== undefined && entry) this.repaired = true
+    this.fetching++
+    try {
+      let value
+      const entry = this.entries.get(num)
+      if (entry?.type === 1) value = this.readObjectAt(entry.offset, num)
+      else if (entry?.type === 2) value = this.fromObjectStream(entry.stream, entry.index, num)
+      if (value === undefined) {
+        // The recorded offset did not hold this object: trust the file over its index.
+        const scanned = this.scan().get(num)
+        if (scanned?.type === 1) value = this.readObjectAt(scanned.offset, num)
+        else if (scanned?.type === 2) value = this.fromObjectStream(scanned.stream, scanned.index, num)
+        if (value !== undefined && entry) this.repaired = true
+      }
+      value = value === undefined ? null : value
+      this.cache.set(num, value)
+      return value
+    } finally {
+      this.fetching--
     }
-    value = value === undefined ? null : value
-    this.cache.set(num, value)
-    return value
   }
 
   resolve(value, depth = 0) {
@@ -812,7 +929,8 @@ export class PdfDoc {
       }
       const kids = this.resolve(node.get('Kids'))
       if (node.get('Type') === 'Pages' || (Array.isArray(kids) && node.get('Type') !== 'Page')) {
-        for (const kid of kids ?? []) walk(kid, scope, depth + 1)
+        // A /Kids that is no array (a number, a name) holds no pages; iterated, it threw.
+        for (const kid of Array.isArray(kids) ? kids : []) walk(kid, scope, depth + 1)
       } else out.push({ dict: node, ...scope })
     }
     walk(this.root()?.get('Pages'), {}, 0)
@@ -881,7 +999,11 @@ function glyphToUnicode(name) {
   let m = /^uni([0-9A-Fa-f]{4})+$/.exec(base)
   if (m) return base.slice(3).match(/.{4}/g).map((h) => String.fromCharCode(Number.parseInt(h, 16))).join('')
   m = /^u([0-9A-Fa-f]{4,6})$/.exec(base)
-  if (m) return String.fromCodePoint(Number.parseInt(m[1], 16))
+  if (m) {
+    // Six hex digits reach past the last code point, where `fromCodePoint` throws: such a name maps to nothing.
+    const point = Number.parseInt(m[1], 16)
+    return point <= 0x10ffff ? String.fromCodePoint(point) : undefined
+  }
   if (base.includes('_')) return base.split('_').map((part) => glyphToUnicode(part) ?? '').join('') || undefined
   return undefined
 }
@@ -983,7 +1105,7 @@ const codeOf = (bytes) => {
 
 /**
  * How many codespace ranges a CMap keeps. Every shown code is tried against
- * each range in turn (`splitBySpace`), so their number is a per-glyph cost;
+ * each range in turn (`lengthBySpace`), so their number is a per-glyph cost;
  * Adobe's CMap format allows 100 per block, and real CMaps carry a handful.
  */
 const MAX_CODESPACE_RANGES = 256
@@ -1046,34 +1168,21 @@ function cmapLookup(cmap, code, length) {
   return undefined
 }
 
-/** Splits shown bytes into codes by codespace: the first range whose bytes all fit wins. */
-function splitBySpace(bytes, codespace) {
-  const codes = []
-  let i = 0
-  // A loop, not `Math.min(...ranges)`: spreading 200,000 ranges as arguments threw a RangeError (review, S20.5).
-  const shortest = codespace.reduce((least, range) => Math.min(least, range.length), Number.POSITIVE_INFINITY)
-  while (i < bytes.length) {
-    let taken = 0
-    for (const range of codespace) {
-      if (i + range.length > bytes.length) continue
-      let fits = true
-      for (let k = 0; k < range.length; k++) {
-        const b = bytes.charCodeAt(i + k)
-        if (b < range.lo[k] || b > range.hi[k]) {
-          fits = false
-          break
-        }
-      }
-      if (fits) {
-        taken = range.length
+/** How many bytes the code at `i` takes, by codespace: the first range whose bytes all fit wins, else the shortest range's length. */
+function lengthBySpace(bytes, i, codespace, shortest) {
+  for (const range of codespace) {
+    if (i + range.length > bytes.length) continue
+    let fits = true
+    for (let k = 0; k < range.length; k++) {
+      const b = bytes.charCodeAt(i + k)
+      if (b < range.lo[k] || b > range.hi[k]) {
+        fits = false
         break
       }
     }
-    if (taken === 0) taken = Math.min(shortest, bytes.length - i)
-    codes.push({ code: codeOf(bytes.slice(i, i + taken)), length: taken })
-    i += taken
+    if (fits) return range.length
   }
-  return codes
+  return Math.min(shortest, bytes.length - i)
 }
 
 class Font {
@@ -1158,15 +1267,21 @@ class Font {
     }
   }
 
-  codes(bytes) {
-    if (!this.composite) return Array.from(bytes, (ch) => ({ code: ch.charCodeAt(0), length: 1 }))
-    if (this.codespace) return splitBySpace(bytes, this.codespace)
-    const out = []
-    for (let i = 0; i < bytes.length; i += 2) out.push({ code: codeOf(bytes.slice(i, i + 2)), length: Math.min(2, bytes.length - i) })
-    return out
+  /**
+   * How many bytes the code at `i` of a shown string takes: one in a simple
+   * font, two in a composite one unless its codespace says otherwise. Asked
+   * code by code, because a shown string is walked and never turned into a
+   * list of its codes (see MAX_PAGE_GLYPHS).
+   */
+  codeLength(bytes, i) {
+    if (!this.composite) return 1
+    if (!this.codespace) return Math.min(2, bytes.length - i)
+    // A loop, not `Math.min(...ranges)`: spreading 200,000 ranges as arguments threw a RangeError (review, S20.5).
+    this.shortest ??= this.codespace.reduce((least, range) => Math.min(least, range.length), Number.POSITIVE_INFINITY)
+    return lengthBySpace(bytes, i, this.codespace, this.shortest)
   }
 
-  text({ code, length }) {
+  text(code, length) {
     if (this.toUnicode) {
       const mapped = cmapLookup(this.toUnicode, code, length)
       if (mapped !== undefined) return mapped
@@ -1275,9 +1390,14 @@ class TextSink {
  * a page stops at these counts (a form's bytes counted each time it is drawn)
  * with a note, and a form never draws itself while it is being drawn. The
  * counts bound the work only because each operator's own cost is bounded:
- * `TextSink` keeps its text in pieces for exactly that reason.
+ * `TextSink` keeps its text in pieces for exactly that reason, and the glyphs
+ * a show operator draws are counted for it. One `Tj` is one operator and as
+ * many glyphs as its string has bytes: a 62 KB file showing 60 MiB of them
+ * ran for 28 s and died of the heap. A million glyphs is the text of some
+ * five hundred printed pages, on one.
  */
 const MAX_PAGE_OPERATORS = 10_000_000
+const MAX_PAGE_GLYPHS = 1_000_000
 const MAX_PAGE_FORMS = 100_000
 const MAX_PAGE_BYTES = 256 * MIB
 
@@ -1290,16 +1410,19 @@ const MAX_PAGE_BYTES = 256 * MIB
  * worth of each (the operators about 27 s at the review's measured 5.5 s per
  * 10 million), and a page past it is not read and says so. `--max-chars`
  * bounds what is SHOWN, so a page with no text never stopped the work; this
- * does.
+ * does. Glyphs get ten pages' worth, about 13 s at the 1.3 s per million
+ * measured here: glyphs are what a long document really has, and ten
+ * million is some 4,000 dense pages read in one call.
  */
 const MAX_DOCUMENT_OPERATORS = 5 * MAX_PAGE_OPERATORS
+const MAX_DOCUMENT_GLYPHS = 10 * MAX_PAGE_GLYPHS
 const MAX_DOCUMENT_FORMS = 5 * MAX_PAGE_FORMS
 const MAX_DOCUMENT_DRAWN_BYTES = 4 * MAX_PAGE_BYTES
-const DOCUMENT_SPENT = `the document's drawing budget is spent (${(MAX_DOCUMENT_OPERATORS / 1e6).toLocaleString('en-US')} million operators, ${MAX_DOCUMENT_FORMS.toLocaleString('en-US')} form XObjects or ${MAX_DOCUMENT_DRAWN_BYTES / MIB} MiB of content across its pages); the rest of the document was not read`
+const DOCUMENT_SPENT = `the document's drawing budget is spent (${(MAX_DOCUMENT_OPERATORS / 1e6).toLocaleString('en-US')} million operators, ${(MAX_DOCUMENT_GLYPHS / 1e6).toLocaleString('en-US')} million glyphs, ${MAX_DOCUMENT_FORMS.toLocaleString('en-US')} form XObjects or ${MAX_DOCUMENT_DRAWN_BYTES / MIB} MiB of content across its pages); the rest of the document was not read`
 
 /** True once any of the document's drawing accounts has run out. */
 function documentSpent(doc) {
-  return doc.drawn.operators > MAX_DOCUMENT_OPERATORS || doc.drawn.forms > MAX_DOCUMENT_FORMS || doc.drawn.bytes > MAX_DOCUMENT_DRAWN_BYTES
+  return doc.drawn.operators > MAX_DOCUMENT_OPERATORS || doc.drawn.glyphs > MAX_DOCUMENT_GLYPHS || doc.drawn.forms > MAX_DOCUMENT_FORMS || doc.drawn.bytes > MAX_DOCUMENT_DRAWN_BYTES
 }
 
 /** Runs a content stream; `ctm` is where it starts (a form's matrix times its caller's). */
@@ -1335,18 +1458,30 @@ function contentText(doc, data, resources, sink, depth, fontCache, work, initial
   }
   const show = (bytes) => {
     const font = state.font
-    const codes = font ? font.codes(bytes) : Array.from(bytes, (ch) => ({ code: ch.charCodeAt(0), length: 1 }))
-    for (const unit of codes) {
+    // Walked by index and counted: see MAX_PAGE_GLYPHS.
+    for (let i = 0; i < bytes.length && work.stopped === undefined; ) {
+      if (++work.glyphs > MAX_PAGE_GLYPHS) {
+        work.stopped = `drawing stopped after ${MAX_PAGE_GLYPHS.toLocaleString('en-US')} glyphs; the rest of this page was not read`
+        break
+      }
+      if (++doc.drawn.glyphs > MAX_DOCUMENT_GLYPHS) {
+        work.stopped = DOCUMENT_SPENT
+        break
+      }
+      const taken = font ? font.codeLength(bytes, i) : 1
+      let code = 0
+      for (let k = 0; k < taken; k++) code = code * 256 + bytes.charCodeAt(i + k)
+      i += taken
       const trm = multiply([state.size * state.scale, 0, 0, state.size, 0, state.rise], multiply(tm, ctm))
-      const width = font ? font.width(unit.code) : 0.5
-      const advance = (width * state.size + state.charSpace + (unit.length === 1 && unit.code === 32 ? state.wordSpace : 0)) * state.scale
+      const width = font ? font.width(code) : 0.5
+      const advance = (width * state.size + state.charSpace + (taken === 1 && code === 32 ? state.wordSpace : 0)) * state.scale
       const start = [trm[4], trm[5]]
       tm = multiply([1, 0, 0, 1, advance, 0], tm)
       const after = multiply([state.size * state.scale, 0, 0, state.size, 0, state.rise], multiply(tm, ctm))
       const length = Math.hypot(trm[0], trm[1]) || 1
       const direction = [trm[0] / length, trm[1] / length]
       const size = Math.hypot(trm[2], trm[3])
-      let text = font ? font.text(unit) : String.fromCharCode(unit.code)
+      let text = font ? font.text(code, taken) : String.fromCharCode(code)
       if (text !== undefined) text = dropControls(text)
       if (text === '') continue
       sink.add(text, start, [after[4], after[5]], size, direction)
@@ -1484,7 +1619,7 @@ function contentText(doc, data, resources, sink, depth, fontCache, work, initial
 export function pageText(doc, page) {
   if (documentSpent(doc)) return { text: '', glyphs: 0, unmapped: 0, notes: [DOCUMENT_SPENT] }
   const raised = doc.notes.length
-  const work = { operators: 0, forms: 0, bytes: 0, drawing: new Set(), notes: new Set(), stopped: undefined }
+  const work = { operators: 0, glyphs: 0, forms: 0, bytes: 0, drawing: new Set(), notes: new Set(), stopped: undefined }
   const contents = doc.resolve(page.dict.get('Contents'))
   const parts = (Array.isArray(contents) ? contents : [contents]).map((c) => doc.resolve(c)).filter((c) => c instanceof Stream)
   const chunks = parts.map((part) => doc.decode(part, false)).filter(Boolean)

@@ -147,6 +147,11 @@ function write(abs, out, bytes, force) {
     writeFileSync(abs, bytes, { flag: 'wx' })
   } catch (error) {
     if (error?.code === 'EEXIST') throw fail(EXIT.refused, `${out} already exists; pass --force to overwrite it`)
+    // What the file system refused is the refused exit and one line a person
+    // can act on, not an internal error: on Windows a PDF open in a viewer is
+    // held against deletion, and `--force` fails with EBUSY or EPERM. Only an
+    // error the operating system returned (it names a system call) is one.
+    if (typeof error?.syscall === 'string') throw fail(EXIT.refused, `${out} cannot be written (${error.code}): it may be open in another program, read-only, or in a place that does not take a file; close it or name another path`)
     throw error
   }
 }
@@ -218,10 +223,16 @@ function probe() {
     pdftotext: find(['pdftotext'], []),
   }
   const browser = tools.chrome ?? tools.edge ?? tools.chromium
+  // A command line for the shell a model has here: PowerShell on Windows,
+  // where a line that begins with a quoted path is an expression and runs
+  // nothing without the call operator; sh elsewhere, where `&` is an error.
+  // Every argument is quoted whole, which both take: bare, PowerShell splits
+  // `-env:UserInstallation=...` in two at the colon.
+  const call = (program) => `${win ? '& ' : ''}"${program}"`
   const routes = ['read/info/build (Latin text) work here with Node alone']
-  if (browser) routes.push(`HTML -> PDF: "${browser}" --headless --no-pdf-header-footer --print-to-pdf=<out.pdf> --user-data-dir=<dir> <file.html>`)
-  if (tools.soffice) routes.push(`docx/xlsx/pptx -> PDF: "${tools.soffice}" -env:UserInstallation=file:///<dir> --headless --convert-to pdf --outdir <dir> <file>`)
-  if (tools.pdftotext) routes.push(`second opinion on text: "${tools.pdftotext}" -layout <file.pdf> -`)
+  if (browser) routes.push(`HTML -> PDF: ${call(browser)} --headless --no-pdf-header-footer "--print-to-pdf=<absolute out.pdf>" "--user-data-dir=<absolute profile dir>" "<absolute file.html>"`)
+  if (tools.soffice) routes.push(`docx/xlsx/pptx -> PDF: ${call(tools.soffice)} "-env:UserInstallation=file:///<absolute profile dir>" --headless --convert-to pdf --outdir "<absolute dir>" "<absolute file>"`)
+  if (tools.pdftotext) routes.push(`second opinion on text: ${call(tools.pdftotext)} -layout "<file.pdf>" -`)
   if (!browser) routes.push('no browser found: a PDF that needs non-Latin text, images or styled layout cannot be made here; say so')
   print({ platform: process.platform, tools: Object.fromEntries(Object.entries(tools).map(([k, v]) => [k, v ?? null])), routes })
 }
@@ -255,6 +266,8 @@ function pageList(spec, count) {
   return [...pages].toSorted((a, b) => a - b)
 }
 
+const pageHeading = (number) => `--- page ${number} ---`
+
 function read(file, { pages: pagesFlag, maxChars, json }) {
   const doc = open(file)
   if (doc.encrypted()) throw fail(EXIT.unsupported, `${file} is encrypted; this helper cannot decrypt it. If probe found pdftotext, try that; otherwise ask for an unencrypted copy.`)
@@ -280,9 +293,14 @@ function read(file, { pages: pagesFlag, maxChars, json }) {
     else if (text.replace(/[\s\u{FFFD}]/gu, '').length === 0) note = unmapped > 0 ? `only blank characters on this page, and ${unmapped} glyphs with no Unicode map` : 'only blank characters on this page'
     else if (unmapped > 0) note = `${unmapped} of ${glyphs} glyphs have no Unicode map (shown as \u{FFFD})`
     if (skipped.length > 0) note = [note, ...skipped].filter(Boolean).join('; ')
+    // A page's heading and note are output like its text, and are counted
+    // like it. Counting text alone, a page without any cost nothing, so a
+    // scanned document of 1,000 pages printed 2,000 lines and no notice.
+    used += pageHeading(number).length + 1 + (note ? note.length + 3 : 0)
     let shown = text
-    if (used + shown.length > maxChars) {
-      shown = shown.slice(0, maxChars - used)
+    const room = Math.max(0, maxChars - used)
+    if (shown.length > room) {
+      shown = shown.slice(0, room)
       truncated = true
     }
     used += shown.length
@@ -295,7 +313,7 @@ function read(file, { pages: pagesFlag, maxChars, json }) {
   const lines = [`file: ${resolve(file)} (PDF ${doc.version}, ${all.length} page${all.length === 1 ? '' : 's'}${pagesFlag ? `; pages ${pagesFlag}` : ''})`]
   if (doc.repaired) lines.push('(the cross-reference index is damaged; objects were found by scanning the file)')
   for (const r of results) {
-    lines.push(`--- page ${r.page} ---`)
+    lines.push(pageHeading(r.page))
     if (r.note) lines.push(`(${r.note})`)
     if (r.text) lines.push(r.text)
   }

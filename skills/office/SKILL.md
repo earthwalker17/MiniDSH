@@ -59,10 +59,13 @@ Finish with `read` on the output, and check exactly what was asked: every requir
 If probe found `soffice`, you can also render the file: `pdf` gives the page count and page breaks, `png` an image of the first page if your file tools can show images.
 
 ```
-"<soffice from probe>" -env:UserInstallation=file:///<absolute profile dir> --headless --convert-to pdf --outdir "<absolute dir>" "<absolute file>"
+# bash, sh
+"<soffice from probe>" "-env:UserInstallation=file:///<absolute profile dir>" --headless --convert-to pdf --outdir "<absolute dir>" "<absolute file>"
+# PowerShell
+& "<soffice from probe>" "-env:UserInstallation=file:///<absolute profile dir>" --headless --convert-to pdf --outdir "<absolute dir>" "<absolute file>"
 ```
 
-Use a fresh profile directory: under `$TMPDIR` when your shell is confined by bubblewrap, inside the workspace under macOS Seatbelt. Remove it afterwards if it is in the workspace.
+The line is spelled per shell: PowerShell needs `&` before a quoted program path (a line that starts with a quoted string is an expression there and runs nothing), and bash must not have it. Keep the quotes around the whole `-env:` argument: bare, PowerShell splits it at the colon. Use a fresh profile directory: under `$TMPDIR` when your shell is confined by bubblewrap, inside the workspace under macOS Seatbelt. Remove it afterwards if it is in the workspace.
 
 Without a renderer, say in one plain sentence that the content and structure were checked and the visual appearance was not.
 
@@ -71,3 +74,4 @@ Without a renderer, say in one plain sentence that the content and structure wer
 - Formulas are stored, not calculated. Give the cached value when you know it; otherwise tell the user Excel will calculate it on open.
 - Macros are not created; password-protected files cannot be opened.
 - Images and charts have no spec; adding one by hand touches several parts, so do it only when asked.
+- A file whose parts hold more than two million elements, attributes and text runs is refused as too large: roughly a sheet of 300,000 cells, or a document of a few thousand pages.

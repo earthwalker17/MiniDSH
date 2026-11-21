@@ -141,7 +141,8 @@ function tableXml(table, path, textWidth) {
     if (!Array.isArray(row)) throw bad(`${path}.rows[${r}]`, 'expected an array of cells')
     rows.push({ header: false, cells: row.map((v, c) => cell(v, `${path}.rows[${r}][${c}]`)) })
   })
-  const columns = Math.max(1, ...rows.map((row) => row.cells.length))
+  // A loop, not `Math.max(...rows)`: spread, 130,000 rows are more arguments than a call takes.
+  const columns = rows.reduce((most, row) => Math.max(most, row.cells.length), 1)
   const width = Math.floor(textWidth / columns)
   const grid = Array.from({ length: columns }, () => `<w:gridCol w:w="${width}"/>`).join('')
   const body = rows

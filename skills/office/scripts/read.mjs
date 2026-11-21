@@ -34,6 +34,15 @@ function relsOf(load, part) {
 /** The branch of an `mc:AlternateContent` a reader takes when it does not know the newer markup: the Fallback, else the first Choice. */
 const alternative = (el) => kid(el, 'Fallback') ?? kid(el, 'Choice')
 
+/**
+ * `into.push(...items)` for a list of any length. Spread, a list is passed as
+ * call arguments, and a call takes only so many: a table of 200,000 rows
+ * overflowed the stack into an internal error.
+ */
+function append(into, items) {
+  for (const item of items) into.push(item)
+}
+
 // ---------------------------------------------------------------------------
 // docx
 
@@ -47,9 +56,14 @@ function marked(pieces) {
   }
   return merged
     .map(({ text, bold, italic, underline, deleted }) => {
-      if (text.trim().length === 0) return text
+      const core = text.trim()
+      if (core.length === 0) return text
       // Marks hug the words; surrounding spaces stay outside, as in Markdown.
-      const [, lead, core, trail] = /^(\s*)([^]*?)(\s*)$/.exec(text)
+      // By trimming, not by /^(\s*)([^]*?)(\s*)$/: that pattern retried the
+      // trailing group at every character of a white-space run between two
+      // words, so one paragraph of 200,000 spaces (a 2 KB .docx) took 35 s.
+      const lead = text.slice(0, text.length - text.trimStart().length)
+      const trail = text.slice(text.trimEnd().length)
       let out = core
       if (underline) out = `<u>${out}</u>`
       if (italic) out = `*${out}*`
@@ -105,7 +119,7 @@ function paragraphPieces(p, notes, boxes = []) {
       else pieces.push({ ...style, key, text: '\n' })
     } else if (kind === 'drawing' || kind === 'pict') {
       const found = textBoxes(part)
-      if (found.length > 0) boxes.push(...found)
+      if (found.length > 0) append(boxes, found)
       else pieces.push({ ...style, key: 'img', text: '[image]' })
     } else if (kind === 'AlternateContent') for (const inner of elements(alternative(part))) runPart(inner, style, key)
     else if (kind === 'footnoteReference' || kind === 'endnoteReference') pieces.push({ ...style, key, text: '[note]' })
@@ -143,13 +157,13 @@ function docxParagraph(p, styleNames) {
   if (!(notes.has('page break') && text.length === 0)) lines.push(`[${label.join(', ')}] ${text}`.trimEnd())
   if (notes.has('page break')) lines.push('[page break]')
   // A text box's paragraphs follow the paragraph that anchors it.
-  for (const box of boxes) for (const inner of through(box, 'p')) lines.push(...docxParagraph(inner, styleNames).map((line) => `[text box] ${line}`))
+  for (const box of boxes) for (const inner of through(box, 'p')) append(lines, docxParagraph(inner, styleNames).map((line) => `[text box] ${line}`))
   return lines
 }
 
 function docxTable(tbl, depth) {
   const rows = through(tbl, 'tr')
-  const width = Math.max(0, ...rows.map((tr) => through(tr, 'tc').length))
+  const width = rows.reduce((most, tr) => Math.max(most, through(tr, 'tc').length), 0)
   const out = [`${'  '.repeat(depth)}[table: ${rows.length} rows x ${width} columns]`]
   for (const tr of rows) {
     const cells = through(tr, 'tc')
@@ -161,7 +175,7 @@ function docxTable(tbl, depth) {
         .replace(/\n/g, ' '),
     )
     out.push(`${'  '.repeat(depth)}| ${texts.join(' | ')} |`)
-    for (const tc of cells) for (const inner of through(tc, 'tbl')) out.push(...docxTable(inner, depth + 1))
+    for (const tc of cells) for (const inner of through(tc, 'tbl')) append(out, docxTable(inner, depth + 1))
   }
   return out
 }
@@ -191,10 +205,10 @@ function readDocx(load, main, maxChars) {
       const local = localName(child.name)
       if (local === 'p') {
         paragraphs++
-        lines.push(...docxParagraph(child, styleNames))
+        append(lines, docxParagraph(child, styleNames))
       } else if (local === 'tbl') {
         tables++
-        lines.push(...docxTable(child, 0))
+        append(lines, docxTable(child, 0))
       } else if (local === 'sdt') walk(kid(child, 'sdtContent'))
       else if (local === 'customXml') walk(child)
       for (let k = before; k < lines.length; k++) used += lines[k].length + 1
@@ -214,7 +228,14 @@ function readDocx(load, main, maxChars) {
 const BUILTIN_DATE_FORMATS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47])
 const BUILTIN_CODES = { 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00', 9: '0%', 10: '0.00%', 11: '0.00E+00', 14: 'mm-dd-yy', 49: '@' }
 
+/** Excel's own limit on a number format code, in characters. */
+const MAX_FORMAT_CODE = 255
+
 function isDateCode(code) {
+  // A code past Excel's limit is no format Excel applies, and is not searched:
+  // the bracket pattern below rescans to the end from every unclosed `[`
+  // (200,000 of them took 43 s), and every cell style naming the code asks again.
+  if (code.length > MAX_FORMAT_CODE) return false
   const bare = code.replace(/"[^"]*"/g, '').replace(/\[[^\]]*\]/g, '').replace(/\\./g, '')
   return /[dmyhs]/i.test(bare) && !/^[#0.,%E+-]+$/.test(bare)
 }
@@ -409,7 +430,7 @@ function readPptx(load, main, maxChars) {
       const text = []
       for (const sp of descendants(notes, 'sp')) {
         const ph = kid(kid(kid(sp, 'nvSpPr'), 'nvPr'), 'ph')
-        if (ph && attr(ph, 'type') === 'body') text.push(...shapeText(sp).map((p) => p.text))
+        if (ph && attr(ph, 'type') === 'body') append(text, shapeText(sp).map((p) => p.text))
       }
       const joined = text.join('\n').trim()
       if (joined) out.push(`notes: ${joined.replace(/\n/g, '\n       ')}`)
