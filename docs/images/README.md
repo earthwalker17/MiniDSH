@@ -11,6 +11,7 @@ Every screenshot shows a real session. None is drawn, retouched or recompressed,
 | `web-light.png`, `web-dark.png` | the web UI on that session, the finished turn's work opened to the edit's diff | `scripts/capture-shots.ts` against a keyless host serving the log, 1280×800 at twice the density |
 | `approval.png` | an approval waiting to be answered | the same tool against a live host and a real key: the model was asked to save the test output outside the working folder, which the sandbox does not allow, so it asked to run that one command unconfined |
 | `terminal.png` | the full-screen terminal on that session | a real Windows Terminal window, captured with `PrintWindow` (`scripts/shots/Capture-Terminal.ps1`) |
+| `desktop.png` | the desktop app in its own window, after the same task done live on Windows, where each shell command is approved by a click | the installer CI built for the release candidate, installed, driven and captured by `scripts/shots/capture-desktop.ts` |
 
 All were taken on version 2.0.0.
 
@@ -29,6 +30,7 @@ node scripts/capture-shots.ts --url <the link> --out docs/images --name web \
 - `scripts/shots/Run-Capture.ps1` does the last two steps from Windows, with a fresh host for each capture.
 - `scripts/shots/serve.sh live` serves a fresh copy of the project with a real key, for the approval picture (`--prompt`, `--until approval`).
 - `scripts/shots/tui.sh <log>` opens the log in the full-screen terminal, for `Capture-Terminal.ps1`.
+- `scripts/shots/capture-desktop.ts` starts an installed app with a data folder and a home of its own, gives it the task, clicks each approval, and captures its window when the turn is over.
 - `scripts/shots/record.sh <directory>` records a new session, and `scripts/shots/scan.mjs <log>` fails on a log that holds a key, a user name, a host name or a home path. Scan before publishing a log.
 
 ## Logo

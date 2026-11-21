@@ -5,218 +5,146 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![node ≥ 24](https://img.shields.io/badge/node-%E2%89%A5%2024-brightgreen)
 
-![MiniDSH: an architecture-first, local-first agent harness](https://raw.githubusercontent.com/earthwalker17/MiniDSH/main/docs/images/README_hero.png)
+![MiniDSH: an architecture-first, local-first agent harness](docs/images/README_hero.png)
 
-> **Minimal surface. Complete architecture.**
-
-MiniDSH is a small, local-first coding-agent harness: the runtime around a model that gives it tools, sessions and permissions. Install it, point it at a repository, and use it from a terminal, a browser, a desktop app or a script.
-
-It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) — DeepSeek's open-source, plugin-composed and unusually well documented coding agent — as a textbook, and asks how small a system can be while keeping the same architectural properties. It is an independent project: not a fork, not a product, and not affiliated with DeepSeek.
+MiniDSH is a small coding-agent harness that runs on your own machine: the program around a language model that gives it tools, sessions and permissions. It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) as a textbook and is written independently of it. It is an experiment and a learning resource first, and it does not compete with DSH or with any product.
 
 ## What MiniDSH is
 
-Three things:
-
-1. **Useful software.** A coding agent that edits files and runs commands under an authority you set and can audit afterwards; whose sessions survive a killed process and resume or fork from their log; that manages its own context and can hand a bounded task to a child, or a visual check to a model that can see. Three providers ship (DeepSeek, Anthropic and OpenAI), switchable mid-conversation.
-2. **A reference architecture.** About forty-one thousand lines of TypeScript in one package with one runtime dependency: four layers under a dependency rule a script enforces, eighteen service contracts in core plus one in the application, thirty-five durable event kinds, and one document — [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) — that says where every new thing goes.
-3. **A systems-engineering experiment.** Whether a project built almost entirely by coding-agent sessions can keep a global architecture intact across months, by making it explicit, inspectable and continuously falsified rather than letting sessions gradually invent it.
-
-The thesis is **fewer concepts and stronger invariants**, not fewer lines or more features.
+- **Software you can use.** A coding agent for a terminal, a browser, a desktop window or a script. It edits files and runs commands in one project folder, under permissions you set.
+- **An architecture small enough to read whole.** Four layers in one package, with a rule about which layer may import which. The [code tour](src/README.md) follows one turn through it.
+- **An experiment in method.** Coding-agent sessions wrote nearly all of the code against an architecture that was written down first. The [case study](docs/CASE-STUDY.md) reports what held and what did not.
 
 ## Quick start
 
-Requirements:
+You need:
 
-- **Node 24** or newer.
-- **Windows:** PowerShell 7 (`pwsh`), never 5.1. Windows cannot confine a shell command, so each one costs an approval until the session accepts that with `--accept none` — see [Status and limitations](#status-and-limitations).
-- **Linux:** `bubblewrap` (`apt install bubblewrap`) if you want shell commands confined by the operating system instead of approved one by one. **macOS** needs nothing extra.
-- **A provider key:** `DEEPSEEK_API_KEY` for the default provider, `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI (and `TAVILY_API_KEY` for the opt-in web search), in the environment, or in `~/.minidsh/credentials.json` as `{"DEEPSEEK_API_KEY": "…"}` (`minidsh credentials set <NAME>` writes it).
+- **Node 24 or later**, and a provider key: `DEEPSEEK_API_KEY` (the default), `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+- **Windows:** PowerShell 7 (`pwsh`). Shell commands cannot be confined there, so by default none runs until you approve it ([details](#status-and-limitations)).
+- **Linux:** `bubblewrap`, so the kernel can confine shell commands. Without it Linux behaves like Windows. **macOS:** nothing extra.
 
 ```sh
-npm install -g minidsh            # or run it without installing: npx minidsh …
+npm install -g minidsh
+minidsh credentials set DEEPSEEK_API_KEY   # asks for the key and stores it
 
-minidsh chat --cwd path/to/repo   # full-screen terminal (--cwd defaults to the current directory; a pipe or --plain: line mode)
-minidsh web  --cwd path/to/repo   # the same runtime in a browser; open the one URL it prints
-minidsh run "fix the failing test in src/slug.test.mjs" --approve
-                                  # --approve answers every approval yes (chat, serve and web then never ask);
-                                  # without it a headless run refuses anything that needs one
-minidsh run "review this module for unchecked inputs" --provider anthropic --model claude-sonnet-5
-minidsh run "summarize this repository" --json     # one JSON line per event; exit 0 iff it completed
+minidsh chat                 # the terminal, in the current folder
+minidsh web                  # the browser UI: open the link it prints
+minidsh sessions list        # what is stored
+minidsh resume <id>          # continue a stored session
 
-minidsh sessions list                     # what is stored, by name
-minidsh sessions show <id> --audit        # what this session was allowed to do, and what each call did
-minidsh sessions verify <id>              # can this log be resumed? (exit 1 if not; reads it without resuming it)
-minidsh sessions inspect <id>             # its lifecycles, authority, and what a resume would append
-minidsh resume <id> "continue"            # pick a stored session up; fork <id> --at <seq> branches it at a turn boundary
-                                          # (fork <id> --salvage branches a damaged log from what is still readable)
-minidsh config                            # the effective plugin composition, and which file set each entry
-minidsh skills                            # the skills a session here is offered, and why the others are not
-minidsh --help
+# One task from a script. --approve answers every ask with yes.
+minidsh run "fix the failing test" --approve
+# Another provider: name the model too.
+minidsh chat --provider anthropic --model claude-sonnet-5
 ```
 
-In the terminal: Enter sends (mid-turn, it steers); Ctrl+J, Ctrl+Enter on Windows or `\` then Enter is a new line; `/` opens the command palette and `/help` lists every key and command; Esc stops a turn. An approval takes the composer's place: `y`, `n`, or `a` when offered, which allows that exact call until the session ends or its authority changes (`/grants`, `/revoke <id>`); it arms once read to its end with the keyboard quiet, so typing never answers it. `/sandbox`, `/ask`, `/accept` and `/preset` switch authority, `/model` the model; `/resume`, `/new` and `/fork` switch sessions in place.
+**Desktop app.** Download it for [Windows x64](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-Setup-x64.exe), [Linux x64 (AppImage)](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-x86_64.AppImage), [macOS Apple silicon](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-arm64.zip) or [macOS Intel](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-x64.zip). The builds are unsigned, so Windows and macOS may warn or block on first run. The guide covers [the first run](docs/GUIDE.md#desktop-app) and how to [verify a download](docs/GUIDE.md#verify-a-download).
 
-**Or the desktop app** (Windows, Linux, macOS on Apple silicon): download `MiniDSH-Setup-x.y.z.exe`, the `.AppImage` or the `-mac-arm64.zip` from [Releases](https://github.com/earthwalker17/MiniDSH/releases), from the next release on (until then, [CONTRIBUTING](CONTRIBUTING.md) builds it from a checkout). It brings its own Node and runs the same runtime and web UI in a window: File › Open Folder chooses where it works, and its welcome view saves a provider key. It is unsigned for now, so Windows SmartScreen asks (More info › Run anyway), Smart App Control must be off, and macOS needs System Settings › Privacy & Security › Open Anyway. Closing it asks first if work is running; it keeps everything in the same `~/.minidsh`.
-
-Everything MiniDSH keeps lives under `~/.minidsh` (override with `MINIDSH_HOME`): `sessions/` (one JSONL log per session), `spill/` (oversized tool output, swept after 30 days), `attachments/` (images, never swept), `composition.json`, `settings.json`, `credentials.json`, `skills/` (your own skills), and an optional `AGENTS.md` that every session reads. Nothing in the harness deletes a log.
-
-From a checkout: `pnpm install`, then `pnpm minidsh …` (no build step: TypeScript runs natively on Node 24) and `pnpm check` for the whole verification suite; see [`CONTRIBUTING.md`](CONTRIBUTING.md). Read [Status and limitations](#status-and-limitations) before relying on it.
+The [guide](docs/GUIDE.md) has the rest: keys and models, approvals, sessions, configuration and troubleshooting.
 
 ## What you get
 
-**Authority you set, and a record you can read back.** A run defaults to `workspace-write` with approvals `ask`: file writes are restricted to the working directory, reads are unrestricted, and shell commands are confined by the operating system where it can (bubblewrap on Linux, Seatbelt on macOS). An approval shows what the runtime says the call will do — the command itself and the authority it would run under — with the model's reason beside it rather than instead of it. Every session records the authority it starts under and every later switch, request and decision; `sessions show --audit` prints that history back.
+<p align="center"><img src="docs/images/web-light.png" width="49%" alt="The web UI in the light theme with a finished turn's work opened: an edit refused because the file had not been read, the read, then the edit shown as a diff"> <img src="docs/images/web-dark.png" width="49%" alt="The same view in the dark theme"></p>
 
-**Sessions that survive their process.** Everything the model was shown and did is one append-only JSONL log. Kill the process mid-turn and the next `resume` repairs the tail and continues under the authority the log recorded. A second process cannot resume a session another one holds.
+- **Sessions that outlive their process.** A session is one append-only log under `~/.minidsh/sessions`. Kill the process mid-turn and `minidsh resume` repairs the log and continues. `minidsh fork` branches a session at an earlier turn.
+- **Permissions you set, and a record of them.** By default writes stay inside the project folder. A shell command that needs more must ask, and the ask shows the exact command. `minidsh sessions show <id> --audit` prints what was allowed and what each call did.
 
-**Context that manages itself.** Near the model's window, or when the provider refuses a request as too large, the oldest history is replaced by a summary (*compaction*); the summarized events stay in the log, and the model can read them back with `history_read`. An `AGENTS.md` (or `CLAUDE.md`) in the workspace enters as instructions to the model, never permissions for the harness.
+<p align="center"><img src="docs/images/approval.png" width="70%" alt="The web UI asking before a command that would write outside the project folder"></p>
 
-**Switch models mid-conversation.** The route — provider, model, reasoning effort — is a durable fact a session can change at any point, and a `model-roles` entry in `composition.json` routes a *purpose* — the compaction summary, a delegated child — elsewhere. An option a provider cannot honour is refused, never silently dropped. The DeepSeek adapter ships `deepseek-flash` (the default, which reads images) and the text-only `deepseek-v4-pro`; the Anthropic adapter the Claude 5.5, 5 and 4 families; the OpenAI adapter the GPT-6 and GPT-5 families on the Responses API.
+- **Three providers.** DeepSeek, Anthropic and OpenAI. A session can change model partway through.
+- **Long conversations are summarised.** When history nears the model's window, or the provider refuses a request as too large, the oldest part is replaced by a summary. The originals stay in the log. The model can read them back, and nothing makes it do so.
+- **Delegation.** The model can hand a bounded task to a child agent whose permissions cannot exceed its parent's. Several children can run at once.
+- **Background jobs.** A dev server or a slow test run keeps going while the agent works. Its end is reported to the session.
+- **A browser tool.** Where Chrome, Edge or Chromium is installed, the agent can open a local page, read it, click and take a screenshot. It reaches only localhost and the project's files. Web search is a separate tool, off until you add it.
+- **Skills.** A folder with a `SKILL.md` teaches the agent a kind of task. Two ship, for Office documents and PDFs ([skills/README.md](skills/README.md)).
+- **Four ways in.** The terminal, the web UI, the desktop app and the headless `run` use one runtime and the same stored sessions. `minidsh serve` speaks the terminal's and the web UI's [JSON-RPC protocol](src/capabilities/protocol/README.md) on stdio, for a client of your own.
 
-**Delegation with a ceiling, in parallel.** The model can hand a bounded task to a `subagent`: a child with its own session and log whose authority is fixed at its parent's or narrower and cannot be widened from inside; approvals are off, so an action needing one is refused. Several `subagent` calls in one message run at the same time (up to four, `maxParallelToolCalls`), and the parent continues once all have answered. A verifier that can *see* is a second `subagent` entry on a vision model with the built-in, off-by-default `view_image` tool.
-
-**Background jobs that report back.** The model can start a long command — a dev server, a slow test run — with `job_start`, keep working, read its output with `job_output` and stop it with `job_cancel`. When a job ends on its own, its notice arrives in the session and wakes an idle agent, a bounded number of times. A job runs under the session's own authority and ends with its session.
-
-**A real browser to check a frontend.** Where Chrome, Edge or Chromium is installed, the model can open a page (a dev server it started as a job, or a workspace file), read it as an accessibility tree, click, type, take a screenshot and run JavaScript; each result says what the page logged or failed. It reaches only localhost and the workspace's own files, enforced inside the browser.
-
-**Web search, when you mount it.** One `composition.json` row adds `web_search` (Tavily). Every query asks first, naming the exact text that would leave the machine, where it goes and under which credential; results are titles, URLs and snippets behind a fixed untrusted-content notice. A delegated child is not offered it.
-
-**Skills: know-how as data.** A skill is a folder holding a `SKILL.md` (the open [agentskills.io](https://agentskills.io) format) in `~/.minidsh/skills/` or a repository's `.agents/skills/` or `.claude/skills/`. A session is shown a short list of them, and the model reads one with its ordinary file tools when a task fits: advice, never a permission. Two ship, both on Node alone: `office` (create, read and edit .docx, .xlsx, .pptx) and `pdf`. A repository's skill never replaces yours.
-
-**Composition from disk.** The default composition is a list of forty-one plugin entries (*rows*); `~/.minidsh/composition.json` and `--patch` files override it. A row can be disabled, reconfigured or replaced by module specifier; `minidsh config` flags any authority-sensitive row a file changed.
-
-**One runtime, four ways in.** The headless CLI, the terminal, the web UI and the desktop app (the web UI in a window, over the same `minidsh web`) are clients of one runtime speaking one newline-delimited JSON-RPC protocol (`minidsh serve` exposes it on stdio for your own client). Several clients can watch one session, and a browser tab closing ends nothing but an approval only that tab could have answered, which is refused on the record. The web UI draws each tool call and approval as a card, and from the page switches model, effort and permissions, revokes a grant, stops a job or opens a subagent.
-
-![The web UI asking for an approval](https://raw.githubusercontent.com/earthwalker17/MiniDSH/main/docs/images/web-ui.png)
+<p align="center"><img src="docs/images/terminal.png" width="49%" alt="The full-screen terminal with a session open"> <img src="docs/images/desktop.png" width="49%" alt="The desktop app window on Windows"></p>
 
 ## Status and limitations
 
-**Version 1.2.0** is the smallest release a developer can install, point at a repository and use daily without reading the architecture; what each release added is in [`CHANGELOG.md`](CHANGELOG.md). It is a small project with one maintainer. The full register of limitations is [ARCHITECTURE §13](docs/ARCHITECTURE.md); the ones most likely to matter first:
+**Version 2.0.0.** MiniDSH is one person's project. The [changelog](CHANGELOG.md) lists what each release changed. The limits you are likely to meet first:
 
-- Windows has no shell-confinement backend and is not getting one. By default a shell command there costs an approval and runs in a fresh shell (`cd` and environment changes do not persist); `--accept none` records that the session accepts an unconfined shell and runs it normally, with file edits still fenced, instead of `danger-full-access`, which drops the fence too.
-- Confinement governs file effects only. A confined command still reaches the network. Its environment is scrubbed of this deployment's declared provider keys and of `MINIDSH_*`, and of nothing else: a credential-shaped variable you set is yours and reaches the shell. That scrub is defence in depth, not a boundary: reads are unfenced, so a credentials file stays readable to a command that looks.
-- The filesystem fence resolves symbolic links but cannot detect hard links: a hard link inside the workspace to an outside file is written through. A confined shell writes through such a link too, because the OS confines paths; neither backend lets it create one across the workspace boundary (measured under bubblewrap and Seatbelt).
-- Only delegations run in parallel; every other tool call runs alone, in order. Parallel children share the workspace: give them separate files. A child is foreground: a message to the parent waits until its slowest child is done, and stopping the parent's turn stops all of them. A background job's process can outlive a MiniDSH process that is killed (on macOS, and unconfined on Linux): the resume reports it lost and does not stop it. On Windows a job runs only in a session that accepts an unconfined shell (`--accept none`); there, whatever a job or a shell command starts ends with it, a program started through WMI or the Task Scheduler excepted.
-- Nothing confines the network: web search is consent per query, and there is no `web_fetch`. The browser is fenced from the internet, not from localhost: it reaches every local service, from any sandbox mode and a delegated child. No session deletion, search or rename; composition changes need a restart. Loading a plugin from an installed `minidsh` is unproven (BLUEPRINT §3).
+- **Windows has no shell confinement.** A shell command there can write wherever your account can, so by default it is refused and the model's retry asks you. `--accept none` stops the asking and keeps file edits fenced. A headless `run` cannot be asked. It prints which flag to pass.
+- **The installers are unsigned and do not update themselves.** A new version is a new download.
+- **macOS is tested in CI only.** The desktop builds launch and pass a keyless suite on Apple silicon and Intel runners. Nobody has checked them by hand.
+- **The web sign-in cookie is scoped to the host name, not the port.** A browser also sends it to other servers on that name, and one of them could drive a session. The desktop app is not affected.
+- **There is no MCP client and no plugin marketplace.**
 
-What comes next: the V2 release candidate ([BLUEPRINT §2](docs/BLUEPRINT.md)).
+The full list is [ARCHITECTURE section 13](docs/ARCHITECTURE.md#13-known-limitations-current). [SECURITY.md](SECURITY.md) says where the boundaries are. In short, the sandbox limits where files are written. It does not limit reads or the network.
 
 ## The question it investigates
 
-The failure mode it answers is *architectural accretion*: each coding-agent session ships a feature cluster that passes its tests, features acquire local homes rather than principled ones, ownership blurs, and every later session must rediscover why the system looks the way it does ([`PROJECT.md`](docs/PROJECT.md)).
+Coding agents add features to a repository quickly. A common result passes its tests while its structure decays: features land where it is convenient, ownership blurs, and each later session has to rediscover why the system looks the way it does.
 
-DSH's answer to that pressure is explicit: an *everything-is-a-plugin* harness built on [Cordis](https://github.com/cordiverse/cordis), whose [paper](https://github.com/cordiverse/paper) names the two properties that make dynamic composition sound — *temporal composability* (a component's effects can be fully reverted on removal) and *spatial composability* (dependencies are declared and reacted to). The question MiniDSH asks of that textbook is:
+DSH answers that pressure with a harness composed of plugins on [Cordis](https://github.com/cordiverse/cordis), each with a declared lifecycle. MiniDSH asks what the minimum agent harness is that still keeps the properties needed for composition, observability, verification, several surfaces and long-term maintenance.
 
-> **What is the minimum modern agent harness that still preserves the architectural properties required for long-term composition, observability, verification, multi-surface evolution and maintainability?**
-
-The working rule is **everything evolvable has a seam** — a composition boundary — and not everything is evolvable: a capability earns one when it may realistically need to be replaced, scoped, disabled or owned by a different lifecycle; a pure helper or a type does not. The answer is concrete: a kernel with five mechanisms, nineteen seams, and everything else ordinary code.
+The working rule is that everything meant to be replaced has a seam, and a plain helper does not need one. [PROJECT.md](docs/PROJECT.md) has the argument.
 
 ## Architecture
 
-This is a reading guide; [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the contract. One word to hold while reading: a **fold** is a pure derivation over the session log (the model's history, the current authority and the context pressure are all folds).
-
-### Layers and the dependency rule
-
 ```
-src/app/            application assembly and user interfaces: composition, disk config, CLI, terminal, web UI, stdio host
-src/capabilities/   providers and consumers over core seams — never import each other, never app
-src/core/           the spine: the service contracts (Service Definitions) and their default drivers as plugins
-src/kernel/         composition substrate: Context, plugin lifecycle, services, effects, events
-src/test-support/   scripted adapter, replay-from-log adapter, composition harness
+src/app/           assembly and surfaces: the CLI, the terminal, the web host, configuration
+src/capabilities/  one directory per provider, tool or policy. None imports another
+src/core/          the contracts and their default drivers: sessions, agents, tools, authority
+src/kernel/        contexts, plugins, services and events. Imports nothing above it
 ```
 
-A script in `pnpm check` enforces the dependency direction (ARCHITECTURE §1) and that `core` is acyclic at file level.
+A script in `pnpm check` fails an import that points the wrong way.
 
-### The subsystems and what each owns
+- **The log is the only record.** The model's history and the current permissions are derived from it.
+- **What the model sees is what was logged.** Each request is checked against the log before it is sent.
+- **Disk before action.** The log is synced before every model call and every tool effect.
+- **The model proposes, policy decides, the effect boundary enforces.** A write is checked where it happens.
 
-**The kernel** (`src/kernel`) is the two Cordis properties in the fewest mechanisms: a context tree where *registration context = visibility = lifetime*, typed service tokens, plugins with a declared dependency lifecycle, disposers run in reverse order, and typed events with an `observe` hook.
-
-**Core** (`src/core`) is eighteen service contracts (*keys*), each a Definition with one provider — a core default driver or a capability — and consumers over it.
-
-| Concern | Keys | Owns |
-|---|---|---|
-| Facts | `sessions`, `persistence` | the append-only session log and everything derived from it; the read contract for stored logs |
-| Cognition | `llm`, `prompt`, `agents` (+ the `loop` driver, a plugin) | the provider-neutral model stream and adapters; stable prompt sections; the agent registry; the turn/step driver |
-| Effects | `tools`, `fs`, `shell`, `jobs` | the guarded tool pipeline; the filesystem contract, with the write fence inside its provider; the policy-bound shell; owner-scoped background jobs |
-| Authority | `sandbox`, `approval`, `authority-presets`, `credentials` | the current policy record and how it changes; approvals and their audit; named bundles of both; credentials by *name* only |
-| Context | `compaction`, `spill`, `attachments` (+ metering, a pure fold with no key) | summarizing old history; oversized output; images; the one context-pressure number |
-| Assembly | `settings`, `invariants` | user defaults a client may change; validation of every event before it enters the log |
-
-ARCHITECTURE §3 also states what each key must *not* own — `sandbox` never owns an enforcement backend or a word of what the model is told, `tools` never owns policy — and those negative clauses are where most of the design lives.
-
-### The invariants that hold
-
-- **The log is the only truth.** The model's history is a fold over three *model-visible* event kinds; everything else is a log-only fact or trace. New durable state is a new log-only event kind, never a field a user interface holds: an interface renders the log by the page and owns only live state such as the current input and connection.
-- **Model-visible ⟺ logged.** Every model request is exactly what the log derives — the message history plus the request settings — and a runtime check verifies that before every call.
-- **Durable before every action.** A sync to disk precedes every paid model call and every tool effect.
-- **The model proposes, policy decides, the effect boundary enforces, the log records.** Enforcement lives at the effect, never at the tool gate.
-- **A repository may say how it likes its code and may not say what the harness is allowed to do.** There is deliberately no per-workspace configuration layer; composition and settings live only under `~/.minidsh`.
-
-### Where a new thing goes
-
-ARCHITECTURE §11 is a table from *new thing* to *home*: a model provider is an adapter under `capabilities/llm-<p>`, a model-facing capability a tool under `capabilities/tool-<x>`, an authority knob a log-only event with a fold, a capability that needs no code edit a row in `composition.json`.
+Start with the [code tour](src/README.md), then the notes for each layer: [kernel](src/kernel/README.md), [core](src/core/README.md), [capabilities](src/capabilities/README.md), [app](src/app/README.md) and the [desktop app](desktop/README.md). [ARCHITECTURE.md](docs/ARCHITECTURE.md) is the contract: what each part owns and where a new thing goes.
 
 ## What MiniDSH learned from DeepSeek Harness
 
-DSH is a large, fast-moving system (363 packages by its [module graph](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/module-graph.md) on 2026-10-23); [`references/`](references/README.md) is this project's pinned map of it, and ARCHITECTURE §12 the reason for each difference below.
+DSH is the larger and more capable system: 391 packages by its own module graph on 2026-11-18, with MCP, agent teams and a plugin manager that MiniDSH does not attempt.
 
-### Ideas taken
+**Taken**
 
-- **Capabilities have lifecycle and dependency semantics.** Plugins depend on Service Definitions, never concrete providers ([packages/README.md](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/README.md)).
-- **Each agent gets its own registration scope**, disposed when the agent ends ([note of 2026-07-08](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-08-agent-scope-contexts.md)).
-- **A tiny model-facing tool surface is enough.** DSH's `minimal` preset ([minimal.patch.yml](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/web-app/presets/minimal.patch.yml)) is a persona and one persistent shell (since 2026-10-12 plus image reading and compaction); MiniDSH's default is `bash`/`pwsh`, `str_replace_editor` and `subagent`, plus three job tools and, where a browser is installed, five browser tools.
-- **The session log is the record; the model-visible history is derived from it** ([session](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/session.md), [compaction](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/compaction.md)).
-- **Bytes beside the log, references in it** ([attachment seam](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/attachment.md)).
-- **Confinement is a spawn wrapper inside the shell provider** ([sandbox](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/sandbox.md), [sandbox-local](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/sandbox-local/README.md)), its bubblewrap profile adopted flag for flag.
-- **The wire is newline-delimited JSON-RPC, and the browser is a client, not a second agent** ([SDK](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sdk/README.md), [web client note](https://github.com/deepseek-ai/deepseek-harness/blob/master/.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md)).
+- Capabilities are plugins with a declared lifecycle and dependencies.
+- The model's history is derived from an append-only session log.
+- The wire is newline-delimited JSON-RPC. The bubblewrap profile starts from DSH's.
 
-### Deliberately simplified
+**Simplified**
 
-- **An own kernel instead of Cordis**: the two properties in five mechanisms and about nine hundred lines.
-- **One package with a dependency gate instead of hundreds.**
-- **Parallel only where it is joined:** a step's delegations run at once and the parent waits for them; no background or continuable children, no agent teams (DSH: every child an async activation). A background job belongs to its session, is closed `lost` if the process dies, and wakes it a bounded number of times (DSH: a lost job stays open, wakes unbounded).
-- **One protocol over three transports** (stdio, in-process, WebSocket), not several composition profiles.
-- **Two confinement backends, not four:** no Landlock (a native launcher) and no Windows backend (DSH's reports only partial enforcement).
-- **A full-screen terminal ships** (DSH has none in its repository).
-- **History recall appears only when needed:** `history_read` is hidden until the first compaction; DSH's `session-query` tools are opt-in for the schemas they add to every request.
+- A small kernel in place of Cordis, and one package in place of hundreds.
+- Two shell confinement backends. DSH adds Landlock and a Windows one.
+- A child agent is a call its parent waits for. DSH's run in the background.
 
-### Where it diverges
+**Different**
 
-- **The workspace root is the whole writable ceiling**, where DSH's `workspace-write` also grants the temporary directories and any extra roots an operator names.
-- **Whether the host can confine is probed and recorded when the agent is created**, even for a sole backend, and "no backend" is an honestly reported state a session can accept on the record.
-- **A delegated child's starting authority is an enforced ceiling**; **a consent is to the runtime's record of the call**, where DSH shows the model's prose; **a model role can route one kind of call away from the session's recorded route**; **an approval no connected client can answer is refused, not left hanging.**
+- Writes stay in the project folder. DSH also allows temp directories and extra roots.
+- A child's permissions are an enforced ceiling. In DSH a later switch replaces them.
+- Web search is opt-in and asks per query. DSH mounts search and fetch by default.
 
-### Not built
-
-PTC (DSH's programmatic tool calling), model-written dynamic packages, an MCP client, session deletion and per-user identity: BLUEPRINT §2 lists them with the reason for each.
+The [core](src/core/README.md), [capabilities](src/capabilities/README.md) and [app](src/app/README.md) notes compare module by module. Reasons: [ARCHITECTURE section 12](docs/ARCHITECTURE.md#12-divergences-from-deepseek-harness-the-ones-that-still-shape-decisions). The map of DSH: [references/](references/README.md).
 
 ## The architecture-first experiment
 
-Nearly all of the code was written by coding-agent *development sessions* under a short constitution ([`CLAUDE.md`](CLAUDE.md)) whose first rule is that **architecture defines sessions; sessions do not define architecture.**
-
-**Every capability has a home before it has code.** A session states a capability's layer, seam, owned state and lifecycle before implementing it. When OS confinement arrived in the eleventh session the answer was "nowhere new": the shell contract had specified it since the third.
-
-**Falsify the architecture, and repair it.** A hardening checkpoint follows each cluster of architectural change and finds the documented invariants that are not true in code. Among what they found: a crash-repair path that resumed conversations in a shape the providers' APIs reject, a network client that could inject a prompt into a running delegated child, a documented security claim an experiment disproved; [`BLUEPRINT.md`](docs/BLUEPRINT.md) §4 records each with what it measured.
-
-What it taught: documentation drift is a defect, so the documents carry size budgets a gate enforces; a convention that is not gated does not hold, so the dependency rules are scripts; verification means the world, not the agent's account of it. After three releases, a new contributor can still answer where a capability belongs, what each layer owns and where truth is stored, from one document.
+The sessions that wrote the code run under a short constitution, [CLAUDE.md](CLAUDE.md). Its first rule is that the architecture defines what a session does, and a session does not redefine the architecture. A capability needs a home in the written architecture before it gets code. After each cluster of changes, a hardening session rereads the whole system and looks for documented claims the code does not keep. Those sessions found real defects, and CI found others they had missed. The [case study](docs/CASE-STUDY.md) is the dated record: what each kind of check found, where the method failed, and what might carry over to another project.
 
 ## Verification
 
-`pnpm check` is typecheck, lint, the dependency gate, the documentation gate and more than 1,900 tests, run in CI on Ubuntu, macOS and Windows, each leg followed by an install smoke of the packed tarball. Tests mount real compositions with the model scripted or replayed from a recorded log, and two real logs, one from `minidsh@1.0.0`, are repaired and replayed in every run.
+`pnpm check` runs the type check, the linter, the import gate, a documentation gate and more than 2,000 tests (2026-11). CI runs it on Ubuntu, macOS and Windows, then installs the packed tarball and starts it. The tests mount the real runtime and script or replay only the model.
 
-Fourteen live end-to-end tests — *arcs* — run against real providers before a release, in a workflow the release waits for (Linux, macOS) and by hand (Windows, Linux). Each asserts the world where one exists: a task killed inside a tool call is repaired by a second process and its log replays without a key; an edit outside the workspace is refused and the file absent; a context-budget crossing compacts and spills; a session switches provider mid-conversation; a delegated child's escalation is refused by its pin; three children delegated in one message run at once; two web clients share one session and an approval is answered over the wire; a job's end wakes an idle agent; a skill turns a PDF and a CSV into a Word report; the browser sees a runtime bug before the edit that fixes it. The macOS leg, under Seatbelt, is the only evidence this project has for that platform.
+Live tests give real tasks to real providers and assert on the outcome: a file changed, a killed process resumed, a page seen in a browser. A release waits for the ones CI holds keys for. The OpenAI and web-search ones are run by hand. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ARCHITECTURE section 10](docs/ARCHITECTURE.md#10-verification).
 
 ## Documents and help
 
-| | |
-|---|---|
-| [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) | the contract: layers, ownership, the log, authority, user interfaces, where new things go, limitations |
-| [`PROJECT.md`](docs/PROJECT.md) | the thesis, positioning and research context |
-| [`BLUEPRINT.md`](docs/BLUEPRINT.md) | what comes next, the open questions, and the per-session development record |
-| [`CLAUDE.md`](CLAUDE.md) | the working constitution the building sessions run under |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) · [`CHANGELOG.md`](CHANGELOG.md) | how to contribute, where the security boundaries are, what changed |
+- [Guide](docs/GUIDE.md): install, keys, the four surfaces, approvals, sessions, configuration, troubleshooting
+- [Case study](docs/CASE-STUDY.md): the method and what it found
+- [Code tour](src/README.md): the source in reading order
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md): the contract and the known limitations
+- [PROJECT.md](docs/PROJECT.md): the thesis
+- [BLUEPRINT.md](docs/BLUEPRINT.md): what comes next and the development record
+- [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md)
 
-**Getting help.** Bugs: the bug-report issue template. Design questions, or a capability with no line in the ARCHITECTURE §11 table: the architecture-question template. Vulnerabilities: privately, as [`SECURITY.md`](SECURITY.md) describes.
+Report a bug or ask a design question in the [issue tracker](https://github.com/earthwalker17/MiniDSH/issues). Report a vulnerability privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License and attribution
 
-MIT — see [`LICENSE`](LICENSE). MiniDSH is an independent educational and engineering project inspired by [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (MIT, © DeepSeek). It is not an official DeepSeek project and is not affiliated with or endorsed by DeepSeek. The code is implemented independently; where a contract, profile or wording is adapted, the source is credited in the adjacent comment and summarised in [`NOTICE`](NOTICE).
+MIT. See [LICENSE](LICENSE). MiniDSH is an independent project inspired by [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (MIT, © DeepSeek). It is not affiliated with or endorsed by DeepSeek. The code is written independently. Where a profile, a contract or artwork is adapted from DSH, [NOTICE](NOTICE) says so.

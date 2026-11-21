@@ -62,7 +62,7 @@ const BUDGETS: Record<string, number> = {
   'docs/PROJECT.md': 17 * 1024,
   'docs/ARCHITECTURE.md': 56 * 1024,
   'docs/BLUEPRINT.md': 30 * 1024,
-  'README.md': 32 * 1024,
+  'README.md': 18 * 1024,
   '.claude/skills/docs-maintenance/SKILL.md': 8 * 1024,
 }
 /** The constitution's own rule (CLAUDE.md §5): under 200 lines. */
