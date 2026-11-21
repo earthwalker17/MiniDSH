@@ -54,7 +54,7 @@ A test whose tool is missing skips itself, and a skip looks like a pass. Each fl
 | Strict TypeScript with `exactOptionalPropertyTypes` and `erasableSyntaxOnly`: no enums, no parameter properties. Rewrite the code, do not relax a flag | `tsconfig.json` |
 | oxlint, with warnings denied | `.oxlintrc.json` |
 
-Tests mount real compositions through the kernel (`src/test-support/harness.ts`). Services are not mocked: only the model is scripted (`scripted-adapter.ts`) or replayed from a recorded log (`llm-replay.ts`). A claim that spans capabilities is pinned in `src/app/app.test.ts`. End-to-end tests assert the file on disk, not the agent's account of it.
+Tests mount real compositions and script or replay only the model: see [How the tests work](src/README.md#how-the-tests-work). A claim that spans capabilities is pinned in `src/app/app.test.ts`. End-to-end tests assert the file on disk, not the agent's account of it.
 
 ## Durable state lives in the log
 

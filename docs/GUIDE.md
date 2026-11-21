@@ -28,13 +28,13 @@ What the model's shell tool needs:
 
 The desktop app is the web UI in its own window, with its own Node inside. No build is signed by a publisher, so Windows and macOS object at first.
 
-- **[Windows](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-Setup-x64.exe).** The installer needs no administrator rights and installs for your account. SmartScreen warns: choose More info, then Run anyway. Smart App Control must be off.
+- **[Windows](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-Setup-x64.exe).** The installer needs no administrator rights and installs for your account. SmartScreen may warn: choose More info, then Run anyway. Where Smart App Control is on, expect it to block an unsigned installer (not tested here).
 - **[Linux](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-x86_64.AppImage).** Run `chmod +x` on the AppImage, then start it. Where unprivileged user namespaces are off (Ubuntu 24.04's default), the window runs without Chromium's sandbox and the log says so.
 - **macOS, [Apple silicon](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-arm64.zip) or [Intel](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-x64.zip).** Unzip and open `MiniDSH.app`. The usual route for an unidentified developer's app is to try to open it, then allow it under System Settings > Privacy & Security > Open Anyway.
 
-Only the Windows build was installed and used on a real machine. The others were started and driven on CI runners only. What Gatekeeper does with a downloaded copy was not tested.
+Only the Windows build was installed and used on a real machine. The macOS apps were unzipped, started and driven on CI runners only. The Linux app was driven on CI runners and under WSL 2 from its unpacked form, so the AppImage's own launcher was not run. What Gatekeeper does with a downloaded copy was not tested.
 
-There is no updater: Help > Check for Updates asks GitHub for a newer release and offers its page. Sessions and keys live in `~/.minidsh`, shared with the npm install. The folder list and logs live in the app's own data folder (Help > Show Logs). Uninstalling removes neither.
+There is no updater: Help > Check for Updates asks GitHub for a newer release and offers its page. Sessions and keys live in `~/.minidsh`, shared with the npm install. The folder list lives in the app's own data folder, and Help > Show Logs opens its logs. Uninstalling removes neither.
 
 ### Verify a download
 
@@ -247,13 +247,13 @@ An example `settings.json`:
 | You see | What to do |
 |---|---|
 | `MISSING_CREDENTIAL`, `DeepSeek API key not set` | Run `minidsh credentials set DEEPSEEK_API_KEY`, or choose a provider whose key you have. |
-| `UNKNOWN_MODEL`, `NO_ADAPTER` | A wrong model or provider id. |
+| `UNKNOWN_MODEL`, `no provider "..." is mounted` | A wrong model or provider id. |
 | `SANDBOX_UNAVAILABLE` | The system cannot confine the shell. See [Approvals and the sandbox](#approvals-and-the-sandbox). |
 | `unavailable` or `SANDBOX_ESCALATION_DENIED` in `minidsh run` | Nobody could answer an approval. Pass `--approve`, or `--accept none` for an unconfined shell. |
 | `install PowerShell 7 (pwsh)` | Windows ships 5.1 only. Install 7 ([npm](#npm)) and open a new terminal. |
 | On Windows a command hangs until its time limit | It waits for input it cannot get. Ask for a non-interactive form. |
 | `that link has already been used` | Another browser spent the link. Restart `minidsh web` for a new one. |
-| `settings file ... is invalid`, `composition file ... is invalid` | Nothing ran. Fix the named file. `composition.json` is an object holding a `patches` list, and a bare list is refused. |
+| `settings file ... is invalid`, `composition file ... is invalid` | Fix the named file. The command stopped before it started anything (`sessions`, `skills` and `credentials` only warn about `settings.json`). `composition.json` is an object holding a `patches` list, and a bare list is refused. |
 | `the stored log is locked by pid ...` | Another MiniDSH has the session open. Remove the `.lock` file only if that process is gone and a resume still refuses. |
 
 More limitations: [ARCHITECTURE section 13](ARCHITECTURE.md#13-known-limitations-current). Report a vulnerability as [SECURITY.md](../SECURITY.md) describes.

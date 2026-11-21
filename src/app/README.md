@@ -2,7 +2,7 @@
 
 This layer assembles the runtime and holds its surfaces. It may import anything, and no source file in `kernel`, `core` or `capabilities` imports it, tests excepted ([ARCHITECTURE section 1](../../docs/ARCHITECTURE.md#1-layers-and-dependency-direction), enforced by `scripts/check-deps.ts`, which also keeps each browser module in `web` to sibling imports).
 
-One runtime, several surfaces. `main` in `cli.ts` maps a command to an entry function, and every surface boots the same rows through `bootComposition` in `headless.ts`.
+One runtime, four entry points in this layer (the guide's four surfaces count the desktop app, which spawns `web`, and not `serve`). `main` in `cli.ts` maps a command to an entry function, and every one boots the same rows through `bootComposition` in `headless.ts`.
 
 - **Terminal** (`minidsh chat`, and `resume` or `fork` without `--headless`): `runTerminal` in `terminal/index.ts` starts the protocol host on an in-process stream pair and talks to it as a client.
 - **Stdio** (`minidsh serve`): `startProtocolHost` in `serve.ts` puts the same host on the process's stdin and stdout.

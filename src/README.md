@@ -18,7 +18,7 @@ Imports point one way: `app` → `capabilities` → `core` → `kernel`.
 1. [`kernel/context.ts`](kernel/context.ts). Services, plugins, effects, scopes and the dispatch methods on one `Context`.
 2. [`app/compose.ts`](app/compose.ts). `compose()` lists every default row, so read it as a table of contents.
 3. [`core/session/types.ts`](core/session/types.ts). The event envelope, and which kinds are model history or trace.
-4. [`core/session/session.ts`](core/session/session.ts). `commit` is the only way into the log: validate, let observers refuse, push, deliver.
+4. [`core/session/session.ts`](core/session/session.ts). `commit` is the only way a live event enters the log: validate, let observers refuse, push, deliver. A continuation's seed enters through `seedOne`, unobserved.
 5. [`core/loop/driver.ts`](core/loop/driver.ts). `turn`, `step` and `executeTools` fix the order of a turn's records.
 6. [`core/tools/registry.ts`](core/tools/registry.ts). `execute` is the one path from a model's call to a tool body, and it awaits `onDispatch` before the body.
 7. [`core/sandbox/index.ts`](core/sandbox/index.ts). `resolve` returns the per-call authority stamp, and every fence derives from `writableRoots`.
@@ -55,7 +55,7 @@ The rules each hop keeps are listed in [`core/README.md`](core/README.md#the-con
 - `test-support/llm-replay.ts` derives that script from a recorded log's `assistant/chunk` events. `assertConsumed()` fails if a recorded step was never requested.
 - `test-support/fixtures/sessions/` holds real logs written by earlier builds. `app/fixtures.test.ts` reads, repairs and replays them.
 
-The live arcs are the `*.e2e.test.ts` files. [`vitest.e2e.config.ts`](../vitest.e2e.config.ts) runs them one at a time against real providers, so they need a real key and cost money. An arc without its key skips itself, and a skip looks like a pass. Each `MINIDSH_EXPECT_*` flag turns one such skip into a failure: `_KEYS` for promised keys, the others for a shell, Python, a browser, a confinement backend or the desktop app. Commands are in [CONTRIBUTING.md](../CONTRIBUTING.md#toolchain).
+The live arcs are `*.e2e.test.ts` files, beside three catalog drift probes and the desktop app's suites. [`vitest.e2e.config.ts`](../vitest.e2e.config.ts) runs them one at a time. All but the desktop's keyless suite call real providers, so they need a real key and cost money. An arc without its key skips itself, and a skip looks like a pass. Each `MINIDSH_EXPECT_*` flag turns one such skip into a failure: `_KEYS` for promised keys, the others for a shell, Python, a browser, a confinement backend or the desktop app. Commands are in [CONTRIBUTING.md](../CONTRIBUTING.md#toolchain).
 
 ## Where things go
 

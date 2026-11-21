@@ -44,7 +44,7 @@ Other kinds arrive in between: `turn/start`, `assistant/chunk` (streamed text, t
 An ask has no notification of its own. It is the `approval/asked` event, answered by its `id`.
 
 ```json
-{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-a4a1…","event":{"type":"approval/asked","seq":745,"time":1795049298571,"data":{"id":"approval-745","toolName":"pwsh","reason":"…","subject":{"effect":"shell-command","command":"npm test","mode":"danger-full-access","enforcement":"none"}}}}}
+{"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session-a4a1…","event":{"type":"approval/asked","seq":745,"time":1795049298571,"data":{"id":"approval-745","toolName":"pwsh","callId":"call_00_…","reason":"…","subject":{"effect":"shell-command","command":"npm test","mode":"danger-full-access","enforcement":"none"}}}}}
 {"jsonrpc":"2.0","id":3,"method":"approval/answer","params":{"sessionId":"session-a4a1…","id":"approval-745","outcome":"allowed-once"}}
 {"jsonrpc":"2.0","id":3,"result":{"outcome":"accepted"}}
 ```

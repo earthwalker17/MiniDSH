@@ -20,7 +20,7 @@ The desktop app, for a machine without Node:
 - Linux x64: [MiniDSH-x86_64.AppImage](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-x86_64.AppImage)
 - macOS: [Apple silicon](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-mac-arm64.zip), [Intel](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-mac-x64.zip)
 
-No build is signed by a publisher, so Windows and macOS object at first run: the [guide](https://github.com/earthwalker17/MiniDSH/blob/main/docs/GUIDE.md#desktop-app) has the steps for each system and how to check a download against [SHA256SUMS](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/SHA256SUMS). Only the Windows build was installed and used on a real machine. The others were started and driven on CI runners.
+No build is signed by a publisher, so Windows and macOS object at first run: the [guide](https://github.com/earthwalker17/MiniDSH/blob/main/docs/GUIDE.md#desktop-app) has the steps for each system and how to check a download against [SHA256SUMS](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/SHA256SUMS). Only the Windows build was installed and used on a real machine. The others were started and driven by automated tests only.
 
 ### Added
 
