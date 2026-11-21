@@ -1,9 +1,12 @@
-import { createServer, type ServerResponse } from 'node:http'
+import { createServer, type IncomingHttpHeaders, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { afterEach, describe, expect, it } from 'vitest'
-import { createRoot } from '../../kernel/index.ts'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createRoot, type Plugin } from '../../kernel/index.ts'
+import { asAttachmentId, type AttachmentRef, type Attachments } from '../../core/attachments/index.ts'
+import { CREDENTIALS, type CredentialRef } from '../../core/credentials/index.ts'
 import { asCallId } from '../../core/ids.ts'
-import { BlockAssembler, llmPlugin, type LlmError, type StreamChunk } from '../../core/llm/index.ts'
+import { imageDescriptor } from '../../core/llm/content.ts'
+import { BlockAssembler, LLM, llmPlugin, RETRYABLE_CODES, type LlmError, type LlmRequest, type Message, type StreamChunk } from '../../core/llm/index.ts'
 import { createAssistantMessage, createPluginMessage, createToolResultMessage, createUserMessage } from '../../core/llm/message.ts'
 import { credentialsLocalPlugin } from '../credentials-local/index.ts'
 import { AnthropicAdapter, classifyHttp } from './adapter.ts'
@@ -123,10 +126,25 @@ describe('Anthropic translation', () => {
     expect(() => translator.push('error', { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } })).toThrowError(expect.objectContaining({ code: 'SERVER' }))
     expect(() => translator.push('error', { type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } })).toThrowError(expect.objectContaining({ code: 'RATE_LIMIT' }))
   })
+
+  // Empty means NO block opened. A turn that only thought opened one, so it
+  // finishes `stop` with its signature kept: the OpenAI translator alone
+  // calls a thought with no answer EMPTY_RESPONSE.
+  it('finishes a turn that only thought as stop, with its signature, not as an empty response', () => {
+    const wire: Wire = [
+      ['message_start', { type: 'message_start', message: { model: 'm', usage: { input_tokens: 3, output_tokens: 1 } } }],
+      ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } }],
+      ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } }],
+      ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+      ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 4 } }],
+      ['message_stop', { type: 'message_stop' }],
+    ]
+    expect(translate(wire).at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' }, replayState: { response: { kind: 'anthropic', model: 'm', stopReason: 'end_turn' }, blocks: [{ type: 'thinking', signature: 'sig' }] } })
+  })
 })
 
 describe('Anthropic SSE parser', () => {
-  it('yields named events across split reads, and a body cut before message_stop is incomplete', async () => {
+  it('yields named events across split reads, and a translator that saw no message_stop says it is not complete', async () => {
     const stream = sseStream('event: message_start\ndata: {"a":', '1}\n\nevent: ping\ndata: {"type": "ping"}\n\n', 'event: message_stop\ndata: {"type":"message_stop"}\n\n')
     expect(await collect(parseNamedSse(stream, () => {}))).toEqual([
       { event: 'message_start', data: '{"a":1}' },
@@ -136,6 +154,20 @@ describe('Anthropic SSE parser', () => {
     const cut = new AnthropicTranslator()
     cut.push('message_start', { type: 'message_start', message: { usage: { input_tokens: 1 } } })
     expect(cut.complete).toBe(false)
+  })
+
+  // A body that ends inside an event is the dropped connection the adapter
+  // names when `message_stop` never came, one event sooner: handed on, the
+  // half payload failed MALFORMED_RESPONSE, which nothing retries.
+  it('names a body cut in the middle of an event as STREAM_CLOSED, and still hands on a whole event that only lacked its blank line', async () => {
+    const seen: unknown[] = []
+    const cut = (async () => {
+      for await (const event of parseNamedSse(sseStream('event: ping\ndata: {"type":"ping"}\n\nevent: content_block_delta\ndata: {"type":"content_bl'), () => {})) seen.push(event)
+    })()
+    await expect(cut).rejects.toMatchObject({ code: 'STREAM_CLOSED', message: expect.stringContaining('middle of an event') })
+    expect(seen).toEqual([{ event: 'ping', data: '{"type":"ping"}' }])
+    // Whole, with no blank line after it: an event like any other, with no mark of where it came from.
+    expect(await collect(parseNamedSse(sseStream('event: message_stop\ndata: {"type":"message_stop"}'), () => {}))).toEqual([{ event: 'message_stop', data: '{"type":"message_stop"}' }])
   })
 })
 
@@ -202,6 +234,37 @@ describe('Anthropic serialization', () => {
     const wire = serializeMessages([createUserMessage('go'), calls[0]!, createToolResultMessage(asCallId('c0'), [{ type: 'text', text: 'bad args' }], true), calls[1]!])
     const inputs = wire.flatMap((turn) => turn.content).flatMap((block) => (block.type === 'tool_use' ? [block.input] : []))
     expect(inputs).toEqual([{ _unparsed_arguments: '{"path": "a' }, { _unparsed_arguments: '[1, 2]' }])
+  })
+
+  // The logged arguments are well-formed TEXT that may hold a lone-surrogate
+  // ESCAPE. This wire parses them and re-encodes the object, so the escape
+  // would go out as the lone surrogate itself, which the API answers with a
+  // 400 on this and every later request of the session.
+  it('sends parsed arguments well-formed when their text held a lone-surrogate escape, in a value, a key or a nested list', () => {
+    const escape = String.raw`\ud83d`
+    const args = `{"text":"cut ${escape}","k${escape}":1,"list":["${escape}x",{"deep":"${escape}"}],"whole":"${escape}${String.raw`\ude00`}"}`
+    // The premise: the text itself is well-formed, and parsing it is what makes the lone surrogate.
+    expect(args.isWellFormed()).toBe(true)
+    expect((JSON.parse(args) as { text: string }).text.isWellFormed()).toBe(false)
+    const wire = serializeMessages([createUserMessage('go'), createAssistantMessage([{ type: 'tool-call', id: asCallId('c1'), name: 'write', arguments: args }], 'anthropic', 'claude-sonnet-5')])
+    const input = wire.flatMap((turn) => turn.content).flatMap((block) => (block.type === 'tool_use' ? [block.input] : []))[0]
+    // A paired escape is the character it spells; only the lone ones are replaced.
+    expect(input).toEqual({ text: 'cut �', 'k�': 1, list: ['�x', { deep: '�' }], whole: '\u{1F600}' })
+    // On the wire: no lone-surrogate escape anywhere in the body.
+    expect(JSON.stringify(wire)).not.toMatch(/\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])/i)
+  })
+
+  // The runtime strips a foreign envelope before any adapter sees it; this is
+  // the serializer's own guard, for a message that reached it unstripped.
+  it('never turns another provider\'s reasoning into a signed thinking block, even when an envelope came with it', () => {
+    const foreign = createAssistantMessage([{ type: 'reasoning', text: 'a thought' }, { type: 'text', text: 'ok' }], 'deepseek', 'deepseek-flash', {
+      response: { kind: 'anthropic' },
+      blocks: [{ type: 'thinking', signature: 'not-ours' }, null],
+    })
+    expect(serializeMessages([createUserMessage('hi'), foreign])).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    ])
   })
 
   it('serializes tools with their JSON schema as input_schema', () => {
@@ -313,6 +376,28 @@ describe('Anthropic adapter', () => {
     expect(classifyHttp(529, body('overloaded_error', 'Overloaded'), headers())).toMatchObject({ code: 'SERVER' })
     expect(classifyHttp(504, body('timeout_error', 'slow'), headers())).toMatchObject({ code: 'TIMEOUT' })
     expect(classifyHttp(502, '<html>bad gateway</html>', headers())).toMatchObject({ code: 'SERVER' })
+  })
+
+  // Every 404 used to read UNKNOWN_MODEL, so a base URL already ending in /v1
+  // (which asks for /v1/v1/messages) sent a person to check a model id that
+  // was fine.
+  it('reads a 404 as an unknown model only when the answer names the model, and says what a wrong path is', () => {
+    const body = (type: string, message: string) => JSON.stringify({ type: 'error', error: { type, message } })
+    const verdicts = [
+      classifyHttp(404, body('not_found_error', 'model: claude-nope-9'), new Headers()),
+      classifyHttp(404, body('not_found_error', 'Not Found'), new Headers()),
+      classifyHttp(404, '<html><body>404 page not found</body></html>', new Headers()),
+      // A gateway's page that happens to say "model" is still not the API saying so.
+      classifyHttp(404, 'no route for this model path', new Headers()),
+    ].map((failure) => [failure.code, failure.message.includes('check the base URL')])
+    expect(verdicts).toEqual([
+      ['UNKNOWN_MODEL', false],
+      ['INVALID_REQUEST', true],
+      ['INVALID_REQUEST', true],
+      ['INVALID_REQUEST', true],
+    ])
+    // Only a 404 carries the note: another refused request is not a wrong path.
+    expect(classifyHttp(400, body('invalid_request_error', 'messages: roles must alternate'), new Headers()).message).not.toContain('base URL')
   })
 })
 
@@ -481,6 +566,282 @@ describe('Anthropic wire framing and bounds', () => {
     expect(() => translator.push('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', input: {} } })).toThrowError(expect.objectContaining({ code: 'MALFORMED_RESPONSE' }))
     const unnamed = new AnthropicTranslator()
     expect(() => unnamed.push('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: '', input: {} } })).toThrowError(expect.objectContaining({ code: 'MALFORMED_RESPONSE' }))
+  })
+})
+
+// ---- S22.5: the stream loop itself, over a socket ------------------------------
+// Until here nothing under `pnpm check` drove `AnthropicAdapter.stream` through
+// a body: only an option refusal and a non-OK status reached it.
+
+interface Captured {
+  readonly method: string
+  readonly url: string
+  readonly headers: IncomingHttpHeaders
+  readonly body: string
+}
+
+/** A loopback API that keeps every request whole; `respond` writes the answer. */
+async function capturing(respond: (response: ServerResponse) => void): Promise<{ baseURL: string; requests: Captured[]; close: () => Promise<void> }> {
+  const requests: Captured[] = []
+  const server = createServer((request, response) => {
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', (chunk: string) => (body += chunk))
+    request.on('end', () => {
+      requests.push({ method: request.method ?? '', url: request.url ?? '', headers: request.headers, body })
+      respond(response)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  return {
+    baseURL: `http://127.0.0.1:${port}`,
+    requests,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+  }
+}
+
+const sse = (wire: Wire): string => wire.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('')
+
+const answering = (body: string) => (response: ServerResponse) => {
+  response.writeHead(200, { 'content-type': 'text/event-stream', 'request-id': 'req_ok' })
+  response.end(body)
+}
+
+/** The credential seam, in memory. */
+function credentialsPlugin(values: Readonly<Record<string, string>>): Plugin {
+  return {
+    name: 'test-credentials',
+    apply(ctx) {
+      const declared: CredentialRef[] = []
+      ctx.provide(CREDENTIALS, {
+        resolve: (ref) => values[ref],
+        describe: (ref) => `the ${ref} environment variable`,
+        declare: (ref) => void declared.push(ref),
+        declaredRefs: () => declared,
+      })
+    },
+  }
+}
+
+const BYTES = new Uint8Array([1, 2, 3, 4])
+const REF: AttachmentRef = { id: asAttachmentId(`sha256:${'cd'.repeat(32)}`), mediaType: 'image/png', bytes: BYTES.length, width: 8, height: 8, name: 'dot.png' }
+
+function userWithImage(text: string): Message {
+  const message = createUserMessage(text)
+  return { ...message, content: [...message.content, { type: 'image', attachment: REF, text: imageDescriptor(REF) }] }
+}
+
+/** A store that keeps what was read from it, so a test can say no attachment I/O happened. */
+function watchingStore(): { store: Attachments; reads: () => readonly string[] } {
+  const reads: string[] = []
+  return {
+    store: {
+      imageLimits: { maxImageBytes: 1, maxImageDimension: 1, maxImagePixels: 1, maxImagesPerRequest: 1, maxRequestImageBytes: 1, mediaTypes: ['image/png'] },
+      saveImage: () => Promise.reject(new Error('not used')),
+      readImage: (ref) => {
+        reads.push(ref.id)
+        return Promise.resolve(BYTES)
+      },
+      hostPath: () => undefined,
+    },
+    reads: () => reads,
+  }
+}
+
+describe('Anthropic stream loop', () => {
+  let closers: (() => Promise<void>)[] = []
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    for (const close of closers) await close()
+    closers = []
+  })
+  const KEY = 'sk-ant-ECHOED-IN-STREAM-42'
+  const adapterAt = (baseURL: string, attachments?: Attachments): AnthropicAdapter =>
+    new AnthropicAdapter({ apiKeyRef: 'ANTHROPIC_API_KEY', resolveKey: () => KEY, baseURL, defaultMaxTokens: 1024, ...(attachments ? { resolveAttachments: () => attachments } : {}) })
+  const request = (over: Partial<LlmRequest> = {}): LlmRequest => ({ provider: 'anthropic', model: 'claude-sonnet-5', messages: [createUserMessage('hi')], ...over })
+
+  /** Everything a stream yielded, and what it threw if it threw. */
+  async function drain(stream: AsyncIterable<StreamChunk>): Promise<{ chunks: StreamChunk[]; failure: LlmError | undefined }> {
+    const chunks: StreamChunk[] = []
+    try {
+      for await (const chunk of stream) chunks.push(chunk)
+      return { chunks, failure: undefined }
+    } catch (error) {
+      return { chunks, failure: error as LlmError }
+    }
+  }
+
+  it('streams the measured turn over a real socket: the endpoint, the headers, the body, and a protocol-valid fold', async () => {
+    const api = await capturing(answering(sse(CAPTURE)))
+    closers.push(api.close)
+    const root = createRoot({ logger: { warn: () => {}, error: () => {} } })
+    closers.push(() => root.dispose())
+    root.plugin(llmPlugin)
+    root.plugin(credentialsPlugin({ ANTHROPIC_API_KEY: 'test-key' }))
+    const handle = root.plugin(anthropicPlugin, { baseURL: api.baseURL })
+    await root.settle()
+    expect(handle.state).toBe('active')
+    // Through the runtime, so `validateStream` holds the translator to the protocol.
+    const chunks = await collect(
+      root.get(LLM).stream({ provider: 'anthropic', model: 'claude-sonnet-5', system: 'be terse', reasoningEffort: 'high', messages: [createUserMessage('what time is it?')], tools: [{ name: 'get_time', description: 'd', parameters: { type: 'object' } }] }),
+    )
+    expect(api.requests).toHaveLength(1)
+    const [sent] = api.requests
+    expect(sent).toMatchObject({ method: 'POST', url: '/v1/messages' })
+    expect(sent!.headers).toMatchObject({ 'x-api-key': 'test-key', 'anthropic-version': '2023-06-01', 'content-type': 'application/json', accept: 'text/event-stream', 'user-agent': expect.stringMatching(/^minidsh /) })
+    expect(JSON.parse(sent!.body)).toEqual({
+      model: 'claude-sonnet-5',
+      max_tokens: 8192,
+      stream: true,
+      cache_control: { type: 'ephemeral' },
+      system: 'be terse',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'what time is it?' }] }],
+      tools: [{ name: 'get_time', description: 'd', input_schema: { type: 'object' } }],
+      output_config: { effort: 'high' },
+    })
+    const assembler = new BlockAssembler()
+    for (const chunk of chunks) assembler.push(chunk)
+    expect(assembler.finish).toEqual({ kind: 'tool-calls' })
+    expect(assembler.blocks()).toEqual([
+      { type: 'reasoning', text: '' },
+      { type: 'tool-call', id: asCallId('toolu_01KC'), name: 'get_time', arguments: '{"zone": "UTC"}' },
+    ])
+    expect(assembler.replayState?.blocks).toEqual([{ type: 'thinking', signature: 'Eo8CCpABCBEYAipAew8v…sig' }, null])
+    // The loop stops at `message_stop`: nothing after the terminal finish.
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
+  })
+
+  it('reports an HTTP failure with its request-id, and a body cut before message_stop or inside an event as the retryable STREAM_CLOSED', async () => {
+    const missing = await capturing((response) => {
+      response.writeHead(404, { 'content-type': 'application/json', 'request-id': 'req_404' })
+      response.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: 'model: claude-nope-9' } }))
+    })
+    closers.push(missing.close)
+    expect((await drain(adapterAt(missing.baseURL).stream(request({ model: 'claude-nope-9' })))).failure).toMatchObject({ code: 'UNKNOWN_MODEL', failure: { status: 404, requestId: 'req_404' } })
+
+    // Every event whole, the terminator missing: a turn that would otherwise
+    // have finalized as a tool call the model never finished asking for.
+    const unterminated = await capturing(answering(sse(CAPTURE.slice(0, -1))))
+    closers.push(unterminated.close)
+    const early = await drain(adapterAt(unterminated.baseURL).stream(request()))
+    expect(early.failure).toMatchObject({ code: 'STREAM_CLOSED', message: expect.stringContaining('without message_stop') })
+    expect(early.chunks.some((chunk) => chunk.type === 'finish'), 'a cut stream yielded a finish').toBe(false)
+
+    // The same connection dropped one event sooner, in the middle of it.
+    const half = sse(CAPTURE.slice(0, 4))
+    const midEvent = await capturing(answering(half.slice(0, half.length - 25)))
+    closers.push(midEvent.close)
+    const cut = await drain(adapterAt(midEvent.baseURL).stream(request()))
+    expect(cut.failure).toMatchObject({ code: 'STREAM_CLOSED', message: expect.stringContaining('middle of an event') })
+    expect([early.failure!.code, cut.failure!.code].map((code) => RETRYABLE_CODES.has(code))).toEqual([true, true])
+  })
+
+  // `message_stop` ends the message; a connection the server keeps open
+  // after it must not hold the turn until the idle watchdog, minutes later.
+  it('finishes at message_stop without waiting for the body to close', { timeout: 10_000 }, async () => {
+    const api = await capturing((response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(sse(messageWith('end_turn', ['done'])))
+    })
+    closers.push(api.close)
+    const { chunks, failure } = await drain(adapterAt(api.baseURL).stream(request()))
+    expect(failure).toBeUndefined()
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('maps a caller abort mid-stream to ABORTED', async () => {
+    const api = await capturing((response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      // One block opens, then the body stays open: only the abort can end it.
+      response.write(sse(CAPTURE.slice(0, 2)))
+    })
+    closers.push(api.close)
+    const controller = new AbortController()
+    const iterator = adapterAt(api.baseURL).stream(request({ signal: controller.signal }))[Symbol.asyncIterator]()
+    expect((await iterator.next()).value).toEqual({ type: 'block-start', index: 0, blockType: 'reasoning' })
+    controller.abort()
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'ABORTED' })
+  })
+
+  // Both in-stream failures carry provider text: the `error` event is THROWN
+  // from inside the loop, an unexpected stop reason is YIELDED as the finish.
+  it('never quotes the key in a failure the stream itself reports, thrown or yielded', async () => {
+    const thrown = await capturing(answering(sse([CAPTURE[0]!, ['error', { type: 'error', error: { type: 'overloaded_error', message: `upstream rejected ${KEY}` } }]])))
+    closers.push(thrown.close)
+    const failed = await drain(adapterAt(thrown.baseURL).stream(request()))
+    expect(failed.failure).toMatchObject({ code: 'SERVER' })
+    expect([failed.failure!.message, failed.failure!.failure.message]).toEqual(['Anthropic stream error: upstream rejected [redacted]', 'Anthropic stream error: upstream rejected [redacted]'])
+
+    const yielded = await capturing(answering(sse(messageWith(`refused ${KEY}`, ['x']))))
+    closers.push(yielded.close)
+    const finished = await drain(adapterAt(yielded.baseURL).stream(request()))
+    expect(finished.failure).toBeUndefined()
+    const finish = finished.chunks.find((chunk) => chunk.type === 'finish')
+    expect(finish).toMatchObject({ reason: { kind: 'error', failure: { code: 'MALFORMED_RESPONSE' } } })
+    expect(JSON.stringify(finish)).not.toContain(KEY)
+    expect(JSON.stringify(finish)).toContain('unexpected stop_reason \\"refused [redacted]\\"')
+  })
+
+  // `fetch failed` alone reads the same offline, behind a mistyped base URL
+  // and behind a proxy that refused: the reason is on the error's cause.
+  it('says why a fetch failed, from the cause Node attached, with the key still redacted', async () => {
+    const gone = await capturing(answering(''))
+    await gone.close()
+    const refused = await drain(adapterAt(gone.baseURL).stream(request()))
+    expect(refused.failure).toMatchObject({ code: 'TRANSPORT' })
+    expect(refused.failure!.message).toContain(`ECONNREFUSED 127.0.0.1:${new URL(gone.baseURL).port}`)
+
+    const shapes: [cause: unknown, expected: string][] = [
+      [Object.assign(new Error('getaddrinfo ENOTFOUND api.anthropic.invalid'), { code: 'ENOTFOUND' }), 'fetch failed (getaddrinfo ENOTFOUND api.anthropic.invalid)'],
+      [Object.assign(new AggregateError([new Error('connect ECONNREFUSED ::1:8080'), new Error('connect ECONNREFUSED 127.0.0.1:8080')], ''), { code: 'ECONNREFUSED' }), 'fetch failed (connect ECONNREFUSED ::1:8080; connect ECONNREFUSED 127.0.0.1:8080)'],
+      [Object.assign(new Error(''), { code: 'UND_ERR_CONNECT_TIMEOUT' }), 'fetch failed (UND_ERR_CONNECT_TIMEOUT)'],
+      [new Error(`proxy refused the tunnel for x-api-key ${KEY}`), 'fetch failed (proxy refused the tunnel for x-api-key [redacted])'],
+      [undefined, 'fetch failed'],
+    ]
+    const said: string[] = []
+    for (const [cause] of shapes) {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('fetch failed', { cause }))
+      const { failure } = await drain(adapterAt('http://127.0.0.1:9').stream(request()))
+      expect(failure).toMatchObject({ code: 'TRANSPORT' })
+      said.push(failure!.message)
+    }
+    expect(said).toEqual(shapes.map(([, expected]) => expected))
+  })
+
+  // The order the comments promise, pinned: an option refusal costs no read
+  // of the images the request carries. `buildBody` validates again after the
+  // reads, so without the first check the refusal still came, one read late.
+  it('refuses an option before it reads a single image, and reads it for a request it serves', async () => {
+    const watched = watchingStore()
+    const refused = await drain(adapterAt('http://127.0.0.1:9', watched.store).stream(request({ messages: [userWithImage('look')], temperature: 0.3 })))
+    expect(refused.failure).toMatchObject({ code: 'UNSUPPORTED_OPTION' })
+    expect(watched.reads()).toEqual([])
+    // The control: the same history, served, is read and sent as bytes.
+    const api = await capturing(answering(sse(messageWith('end_turn', ['a dot']))))
+    closers.push(api.close)
+    expect((await drain(adapterAt(api.baseURL, watched.store).stream(request({ messages: [userWithImage('look')] })))).failure).toBeUndefined()
+    expect(watched.reads()).toEqual([REF.id])
+    expect((JSON.parse(api.requests[0]!.body) as { messages: unknown }).messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: Buffer.from(BYTES).toString('base64') } }] },
+    ])
+  })
+
+  // The wrong base path, end to end: the answer is the gateway's own page.
+  it('names the base URL, not the model, when the path it built was not found', async () => {
+    const api = await capturing((response) => {
+      response.writeHead(404, { 'content-type': 'text/html' })
+      response.end('<html><body>404 page not found</body></html>')
+    })
+    closers.push(api.close)
+    const { failure } = await drain(adapterAt(`${api.baseURL}/v1`).stream(request()))
+    expect(api.requests.map((sent) => sent.url)).toEqual(['/v1/v1/messages'])
+    expect(failure).toMatchObject({ code: 'INVALID_REQUEST', failure: { status: 404 } })
+    expect(failure!.message).toContain('check the base URL, which must not end in /v1')
   })
 })
 

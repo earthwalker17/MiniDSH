@@ -171,6 +171,11 @@ export class AnthropicTranslator {
       case 'pause_turn':
       case 'compaction':
       case undefined:
+        // Empty is NO block. A turn that only thought opened one and finishes
+        // `stop`, its signed block kept for replay: measured 2026-11-21 on
+        // Haiku 5.5 and Haiku 4.5, the API answers 200 to an assistant turn
+        // whose only block is a signed thinking block. Only the OpenAI
+        // translator calls a thought with no answer an empty response.
         if (this.order.length === 0) return { kind: 'error', failure: { message: 'model returned no content', code: 'EMPTY_RESPONSE' } }
         return { kind: 'stop' }
       case 'tool_use':

@@ -228,3 +228,23 @@ export function redactLlmError(error: LlmError, secret: string | undefined): Llm
     ...(requestId === undefined ? {} : { requestId }),
   })
 }
+
+/**
+ * A failed fetch, in words that say why. Node's own message is always
+ * `fetch failed`, or `terminated` for a body cut mid-stream; the reason (a
+ * refused connection, a host that does not resolve, a proxy's answer) is on
+ * `cause`, and one per address on `cause.errors` when the host has several.
+ * Without it, being offline, a mistyped base URL and a refused proxy all read
+ * the same after the retries run out. Bounded, because it is logged. Here,
+ * like the rest of this file, because three adapters each had their own copy.
+ */
+export function transportMessage(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const cause: unknown = error.cause
+  if (cause === undefined || cause === null) return error.message
+  const reasons: readonly unknown[] = cause instanceof AggregateError ? cause.errors : [cause]
+  const said = [...new Set(reasons.map((reason) => (reason instanceof Error ? reason.message : String(reason))).filter((text) => text.length > 0))]
+  const code = (cause as { code?: unknown }).code
+  if (said.length === 0 && typeof code === 'string') said.push(code)
+  return said.length === 0 ? error.message : `${error.message} (${said.join('; ').slice(0, 300).toWellFormed()})`
+}

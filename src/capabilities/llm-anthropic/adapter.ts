@@ -1,6 +1,6 @@
 import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from '../../core/llm/index.ts'
 import { isHeaderSafe } from '../../core/credentials/index.ts'
-import { readErrorBody, redactChunk, redactLlmError, retryAfterNote } from '../../core/llm/wire.ts'
+import { readErrorBody, redactChunk, redactLlmError, retryAfterNote, transportMessage } from '../../core/llm/wire.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
 import { AnthropicTranslator, ANTHROPIC_PROVIDER, errorCode } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
@@ -15,7 +15,6 @@ const IDLE_TIMEOUT_MS = 300_000
 // No version in it, for the reason the sibling adapter gives: one version string, in package.json.
 const USER_AGENT = 'minidsh (+https://github.com/earthwalker17/MiniDSH)'
 
-/** A `thinking.type` the API accepts, as `capabilities.thinking.types` lists them. */
 /**
  * The listing's `capabilities.thinking.types`. `between_tools` is recorded
  * because the listing names it (Sonnet 5.5, first seen 2026-10-26) and the
@@ -410,8 +409,15 @@ function mapAbort(error: unknown, caller: AbortSignal | undefined, idle: AbortSi
   if (error instanceof LlmError) return error
   if (caller?.aborted) return new LlmError('ABORTED', 'request aborted by caller')
   if (idle.aborted) return new LlmError('TIMEOUT', 'Anthropic stream idle timeout')
-  return new LlmError('TRANSPORT', error instanceof Error ? error.message : String(error))
+  return new LlmError('TRANSPORT', transportMessage(error))
 }
+
+/**
+ * What a 404 that names no model most often is: `/v1/messages` is appended to
+ * the base URL as given, so a base that already ends in `/v1` (how the OpenAI
+ * convention spells one, and many gateways with it) asks for `/v1/v1/messages`.
+ */
+const WRONG_PATH_NOTE = ' (the endpoint itself was not found: check the base URL, which must not end in /v1 because /v1/messages is appended to it)'
 
 /** HTTP failures, as codes; the body's own `error.type` decides where the status is ambiguous. */
 export function classifyHttp(status: number, body: string, headers: Headers): LlmError {
@@ -436,12 +442,16 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   else if (status === 400 && /temperature|top_p|top_k|is deprecated for this model|not supported for this model/i.test(message)) code = 'UNSUPPORTED_OPTION'
   else if (status === 401 || status === 403) code = 'AUTH'
   else if (status === 402) code = 'QUOTA'
-  else if (status === 404) code = 'UNKNOWN_MODEL'
+  // The API answers an id it does not serve (or this organization may not use)
+  // with `not_found_error` and a message that names the model ("model: <id>").
+  // Any other 404 is the PATH that was not found, which no other model fixes.
+  else if (status === 404) code = type === 'not_found_error' && /\bmodel\b/i.test(message) ? 'UNKNOWN_MODEL' : 'INVALID_REQUEST'
   else if (status === 429) code = detailCode === 'enforced_spend_limit_reached' ? 'QUOTA' : 'RATE_LIMIT'
   else if (status === 504) code = 'TIMEOUT'
   else if (status >= 500) code = 'SERVER'
   else code = type === undefined ? 'INVALID_REQUEST' : errorCode(type) === 'SERVER' ? 'INVALID_REQUEST' : errorCode(type)
-  return new LlmError(code, `Anthropic ${status}: ${message}${retryAfterNote(retryAfterMs)}`, options)
+  const wrongPath = status === 404 && code !== 'UNKNOWN_MODEL' ? WRONG_PATH_NOTE : ''
+  return new LlmError(code, `Anthropic ${status}: ${message}${wrongPath}${retryAfterNote(retryAfterMs)}`, options)
 }
 
 function parseRetryAfter(value: string | null): number | undefined {

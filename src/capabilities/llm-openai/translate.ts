@@ -280,8 +280,10 @@ export class OpenAITranslator {
     }
     const toolCall = this.order.some((block) => block.type === 'tool-call')
     // Reasoning alone is not an answer: a completion with nothing else in it
-    // is EMPTY_RESPONSE, as the sibling adapters say it, so the retry policy
-    // sees it instead of the driver appending a thought and stopping.
+    // is EMPTY_RESPONSE, so the retry policy sees it instead of the driver
+    // appending a thought and stopping. This adapter's rule alone: the
+    // DeepSeek and Anthropic translators call a response empty only when NO
+    // block opened, so there a thought with no answer finishes `stop`.
     if (!toolCall && !this.order.some((block) => block.type === 'text' && block.text.length > 0)) {
       return { kind: 'error', failure: { message: 'model returned no answer', code: 'EMPTY_RESPONSE' } }
     }

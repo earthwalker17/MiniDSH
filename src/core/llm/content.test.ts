@@ -14,7 +14,7 @@ import { asCallId } from '../ids.ts'
 import { estimateImageTokens, estimateMessage } from '../metering/index.ts'
 import { serializeMessages as serializeAnthropic } from '../../capabilities/llm-anthropic/serialize.ts'
 import { serializeMessages as serializeDeepSeek } from '../../capabilities/llm-deepseek/serialize.ts'
-import { blockText, collectImageRefs, contentText, imageDescriptor, wellFormedContent } from './content.ts'
+import { blockText, collectImageRefs, contentText, imageDescriptor, wellFormedArguments, wellFormedContent } from './content.ts'
 import { createAssistantMessage, createPluginMessage, createToolResultMessage, createUserMessage, messageText } from './message.ts'
 import type { ContentBlock } from './types.ts'
 
@@ -85,6 +85,49 @@ describe('wellFormedContent', () => {
     ]
     expect(built.map((message) => JSON.stringify(message.content).includes(`x${fixed}`))).toEqual([true, true, true, true])
     expect(built.map((message) => /\\ud83d/i.test(JSON.stringify(message.content)))).toEqual([false, false, false, false])
+  })
+})
+
+// A call's arguments are JSON text. A lone surrogate can sit in them as an
+// ESCAPE, in a string that is itself well-formed: OpenAI answers a history
+// holding one with HTTP 500, three times of three (S22.5, 2026-11-21).
+describe('wellFormedArguments', () => {
+  const B = '\\' // one backslash, as the arguments string holds it
+
+  it('replaces an unpaired surrogate escape, whichever half it is and whatever its case', () => {
+    expect(wellFormedArguments(`{"q":"${B}ud83d"}`)).toBe(`{"q":"${B}ufffd"}`)
+    expect(wellFormedArguments(`{"q":"${B}ude00 tail"}`)).toBe(`{"q":"${B}ufffd tail"}`)
+    expect(wellFormedArguments(`{"q":"${B}uD83D"}`)).toBe(`{"q":"${B}ufffd"}`)
+    // A low half before a high one is two lone halves, not a pair.
+    expect(wellFormedArguments(`{"q":"${B}ude00${B}ud83d"}`)).toBe(`{"q":"${B}ufffd${B}ufffd"}`)
+    // A lone half followed by a real pair: only the first is replaced.
+    expect(wellFormedArguments(`{"q":"${B}ud83d${B}ud83d${B}ude00"}`)).toBe(`{"q":"${B}ufffd${B}ud83d${B}ude00"}`)
+    for (const args of [`{"q":"${B}ud83d"}`, `{"q":"${B}ude00${B}ud83d"}`]) {
+      expect((JSON.parse(args) as { q: string }).q.isWellFormed()).toBe(false)
+      expect((JSON.parse(wellFormedArguments(args)) as { q: string }).q.isWellFormed()).toBe(true)
+    }
+  })
+
+  it('leaves a pair, an escaped backslash, every other escape and plain text exactly as written', () => {
+    const kept = [
+      `{"q":"${B}ud83d${B}ude00"}`,
+      // An escaped backslash, then the letters: the text \ud83d, not an escape.
+      `{"path":"C:${B}${B}ud83d${B}${B}users"}`,
+      `{"q":"${B}u0041 ${B}n ${B}" ${B}t"}`,
+      `{"q":"\u{1F600} plain"}`,
+      '{}',
+      // Not JSON at all: a model's broken arguments are logged as they came.
+      `{"q": ${B}`,
+    ]
+    expect(kept.map((args) => wellFormedArguments(args))).toEqual(kept)
+  })
+
+  it('is what a tool call gets wherever a message is built, and the same string comes back when nothing changed', () => {
+    const call: ContentBlock = { type: 'tool-call', id: asCallId('c1'), name: 'search', arguments: `{"q":"${B}ud83d"}` }
+    expect(wellFormedContent([call])).toEqual([{ ...call, arguments: `{"q":"${B}ufffd"}` }])
+    expect(createAssistantMessage([call], 'p', 'm').content).toEqual([{ ...call, arguments: `{"q":"${B}ufffd"}` }])
+    const fine: ContentBlock = { type: 'tool-call', id: asCallId('c2'), name: 'search', arguments: `{"q":"${B}u00e9"}` }
+    expect(wellFormedContent([fine])[0]).toBe(fine)
   })
 })
 

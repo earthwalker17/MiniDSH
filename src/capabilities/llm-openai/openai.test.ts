@@ -386,6 +386,20 @@ describe('OpenAI serialization', () => {
     expect(serializeInput(history(own('gpt-6-luna')), new Map(), 'gpt-6-luna')).toEqual(REPLAYED)
   })
 
+  // A message built now cannot hold one (core/llm/content.ts), a log written
+  // before 2.0 can: a call whose arguments carry a lone surrogate ESCAPE. The
+  // Responses API answers a history holding one with HTTP 500 (measured
+  // 2026-11-21, three of three; a paired escape and plain text answer 200).
+  it('sends a stored call whose arguments hold a lone surrogate escape with that escape replaced', () => {
+    const built = createAssistantMessage([{ type: 'text', text: 'x' }], 'deepseek', 'deepseek-flash')
+    const stored: Message = { ...built, content: [{ type: 'tool-call', id: call, name: 'read', arguments: '{"path":"\\ud83d","pair":"\\ud83d\\ude00"}' }] }
+    expect(serializeInput([createUserMessage('hi'), stored, createToolResultMessage(call, [{ type: 'text', text: 'noon' }], false)], new Map(), 'gpt-6-luna')).toEqual([
+      user('hi'),
+      { type: 'function_call', call_id: 'call_1', name: 'read', arguments: '{"path":"\\ufffd","pair":"\\ud83d\\ude00"}' },
+      output,
+    ])
+  })
+
   it('sends a different model none of them: plain text and the call_id only, its reasoning dropped', () => {
     expect(serializeInput(history(own('gpt-6-luna')), new Map(), 'gpt-5.4')).toEqual(PLAIN)
     // The family split is exact, never a prefix.
@@ -718,6 +732,9 @@ describe('OpenAI adapter', () => {
     expect(classifyHttp(400, body('Invalid input.', 'invalid_value'), headers())).toMatchObject({ code: 'INVALID_REQUEST' })
     expect(classifyHttp(401, body('Incorrect API key provided.', 'invalid_api_key'), headers())).toMatchObject({ code: 'AUTH' })
     expect(classifyHttp(403, body('Country not supported.', 'unsupported_country_region_territory'), headers())).toMatchObject({ code: 'AUTH' })
+    // A gateway's Payment Required: out of money, as the other two adapters read a 402.
+    expect(classifyHttp(402, body('Insufficient credits.', null), headers())).toMatchObject({ code: 'QUOTA', failure: { status: 402 } })
+    expect(classifyHttp(402, '<html>payment required</html>', headers())).toMatchObject({ code: 'QUOTA' })
     expect(classifyHttp(404, body('The model `gpt-7` does not exist or you do not have access to it.', 'model_not_found'), headers())).toMatchObject({ code: 'UNKNOWN_MODEL' })
     expect(classifyHttp(404, '<html>not found</html>', headers())).toMatchObject({ code: 'INVALID_REQUEST' })
     expect(classifyHttp(429, body('Rate limit reached.', 'rate_limit_exceeded', 'requests'), headers({ 'retry-after': '7' }))).toMatchObject({ code: 'RATE_LIMIT', failure: { retryAfterMs: 7000 } })
@@ -945,6 +962,44 @@ describe('OpenAI wire bounds (S20.5)', () => {
     expect(finish).toMatchObject({ reason: { kind: 'error' } })
     expect(JSON.stringify(finish)).not.toContain(key)
     expect(JSON.stringify(finish)).toContain('[redacted]')
+  })
+
+  // `fetch failed` alone reads the same offline, behind a mistyped base URL
+  // and behind a proxy that refused: the reason is on the error's cause.
+  it('says why a fetch failed, from the cause Node attached, with the key still redacted', async () => {
+    const key = 'sk-proj-ECHOED-BY-A-PROXY-42'
+    const adapterAt = (baseURL: string): OpenAIAdapter => new OpenAIAdapter({ apiKeyRef: 'OPENAI_API_KEY', resolveKey: () => key, baseURL, defaultMaxTokens: 1024 })
+    const failure = (adapter: OpenAIAdapter): Promise<Error & { code?: string }> =>
+      adapter.stream(base)[Symbol.asyncIterator]().next().then(
+        () => new Error('the stream did not fail'),
+        (error: unknown) => error as Error,
+      )
+    // A real refused connection: a port that was listening a moment ago.
+    const gone = await loopback(() => {})
+    await gone.close()
+    const refused = await failure(adapterAt(gone.baseURL))
+    expect(refused).toMatchObject({ code: 'TRANSPORT' })
+    expect(refused.message).toContain(`ECONNREFUSED 127.0.0.1:${new URL(gone.baseURL).port}`)
+
+    const shapes: [cause: unknown, expected: string][] = [
+      [Object.assign(new Error('getaddrinfo ENOTFOUND api.openai.invalid'), { code: 'ENOTFOUND' }), 'fetch failed (getaddrinfo ENOTFOUND api.openai.invalid)'],
+      [Object.assign(new AggregateError([new Error('connect ECONNREFUSED ::1:8080'), new Error('connect ECONNREFUSED 127.0.0.1:8080')], ''), { code: 'ECONNREFUSED' }), 'fetch failed (connect ECONNREFUSED ::1:8080; connect ECONNREFUSED 127.0.0.1:8080)'],
+      [Object.assign(new Error(''), { code: 'UND_ERR_CONNECT_TIMEOUT' }), 'fetch failed (UND_ERR_CONNECT_TIMEOUT)'],
+      [new Error(`proxy refused the tunnel for Bearer ${key}`), 'fetch failed (proxy refused the tunnel for Bearer [redacted])'],
+      [undefined, 'fetch failed'],
+    ]
+    const said: string[] = []
+    try {
+      for (const [cause] of shapes) {
+        vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('fetch failed', { cause }))
+        const failed = await failure(adapterAt('http://127.0.0.1:9/v1'))
+        expect(failed).toMatchObject({ code: 'TRANSPORT' })
+        said.push(failed.message)
+      }
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(said).toEqual(shapes.map(([, expected]) => expected))
   })
 
   // The S20.5 review: past llm-retry's ceiling the turn ends on this message,

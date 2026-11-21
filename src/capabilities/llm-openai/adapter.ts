@@ -2,7 +2,7 @@ import { LlmError, type LlmAdapter, type LlmErrorCode, type LlmRequest, type Mod
 import { isHeaderSafe } from '../../core/credentials/index.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
 import { resolveRequestImages } from '../../core/llm/content.ts'
-import { readErrorBody, redactChunk, redactLlmError, retryAfterNote } from '../../core/llm/wire.ts'
+import { readErrorBody, redactChunk, redactLlmError, retryAfterNote, transportMessage } from '../../core/llm/wire.ts'
 import { catalogEntry, factsFor, OPENAI_CATALOG, type OpenAICatalogModel } from './catalog.ts'
 import { serializeInput, serializeTools, type ImageBytes } from './serialize.ts'
 import { parseNamedSse, parseWireEvent } from './sse.ts'
@@ -257,7 +257,7 @@ function mapAbort(error: unknown, caller: AbortSignal | undefined, idle: AbortSi
   if (error instanceof LlmError) return error
   if (caller?.aborted) return new LlmError('ABORTED', 'request aborted by caller')
   if (idle.aborted) return new LlmError('TIMEOUT', 'OpenAI stream idle timeout')
-  return new LlmError('TRANSPORT', error instanceof Error ? error.message : String(error))
+  return new LlmError('TRANSPORT', transportMessage(error))
 }
 
 /** HTTP failures, as codes; the body's own `error.code` decides where the status is ambiguous. */
@@ -287,6 +287,10 @@ export function classifyHttp(status: number, body: string, headers: Headers): Ll
   // model." — the shape of every option this adapter failed to refuse first.
   else if (status === 400 && (code === 'unsupported_value' || code === 'unsupported_parameter' || /Unsupported parameter|Unsupported value/i.test(message))) result = 'UNSUPPORTED_OPTION'
   else if (status === 401 || status === 403) result = 'AUTH'
+  // Payment Required. OpenAI itself says "out of money" with a 429 (below); a
+  // gateway behind OPENAI_BASE_URL says it this way, and the sibling adapters
+  // already read it so. Never retried, never INVALID_REQUEST.
+  else if (status === 402) result = 'QUOTA'
   // Measured: "The model `x` does not exist or you do not have access to it.", code model_not_found.
   else if (status === 404 && code === 'model_not_found') result = 'UNKNOWN_MODEL'
   // A 429 is "slow down" OR "out of money", and only the body says which:

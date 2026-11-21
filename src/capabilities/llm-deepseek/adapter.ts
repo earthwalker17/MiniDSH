@@ -4,7 +4,7 @@ import { parseSse } from './sse.ts'
 import { DeepSeekTranslator, parseWireChunk } from './translate.ts'
 import type { Attachments } from '../../core/attachments/index.ts'
 import { resolveRequestImages } from '../../core/llm/content.ts'
-import { readErrorBody, redactChunk, redactLlmError, retryAfterNote } from '../../core/llm/wire.ts'
+import { readErrorBody, redactChunk, redactLlmError, retryAfterNote, transportMessage } from '../../core/llm/wire.ts'
 import { serializeMessages, serializeTools } from './serialize.ts'
 
 export const DEEPSEEK_PROVIDER = 'deepseek'
@@ -260,7 +260,7 @@ function mapAbort(error: unknown, caller: AbortSignal | undefined, idle: AbortSi
   if (error instanceof LlmError) return error
   if (caller?.aborted) return new LlmError('ABORTED', 'request aborted by caller')
   if (idle.aborted) return new LlmError('TIMEOUT', 'DeepSeek stream idle timeout')
-  return new LlmError('TRANSPORT', error instanceof Error ? error.message : String(error))
+  return new LlmError('TRANSPORT', transportMessage(error))
 }
 
 /**

@@ -57,11 +57,31 @@ function textOf(blocks: readonly ContentBlock[]): string {
 function parseInput(args: string): unknown {
   try {
     const parsed: unknown = JSON.parse(args)
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return wellFormed(parsed)
   } catch {
     // Not JSON: the same projection.
   }
   return { _unparsed_arguments: args }
+}
+
+/**
+ * A parsed JSON value with every string in it, keys included, made
+ * well-formed UTF-16.
+ *
+ * The logged arguments are well-formed as TEXT (`wellFormedContent`), and
+ * that text may still hold a lone-surrogate ESCAPE: the six characters
+ * backslash, `u`, `d83d`. Parsing decodes the escape into the lone surrogate
+ * itself, and this wire re-encodes the parsed object, so it would go out as
+ * one. All three providers answer a request holding a lone surrogate with a
+ * 400, and the call stays in history, so every later request of the session
+ * would fail the same way. The sibling serializers send the arguments as the
+ * string the log holds and never decode it.
+ */
+function wellFormed(value: unknown): unknown {
+  if (typeof value === 'string') return value.toWellFormed()
+  if (Array.isArray(value)) return value.map(wellFormed)
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key.toWellFormed(), wellFormed(inner)]))
 }
 
 function imageBlock(image: ResolvedImage): WireBlock {

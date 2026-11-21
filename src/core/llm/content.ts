@@ -83,7 +83,8 @@ export function contentText(blocks: readonly ContentBlock[]): string {
  * driver), never at serialization, so the log holds exactly what is sent (§4);
  * `core-session` refuses a surface event that got past it. Exhaustive like
  * `blockText`, and it returns the block it was given when nothing changed. A
- * call's id is left alone: it pairs records, it is not text.
+ * call's id is left alone: it pairs records, it is not text. A call's
+ * arguments get one rule more (`wellFormedArguments`).
  */
 export function wellFormedBlock(block: ContentBlock): ContentBlock {
   switch (block.type) {
@@ -91,8 +92,11 @@ export function wellFormedBlock(block: ContentBlock): ContentBlock {
     case 'reasoning':
     case 'image':
       return block.text.isWellFormed() ? block : { ...block, text: block.text.toWellFormed() }
-    case 'tool-call':
-      return block.name.isWellFormed() && block.arguments.isWellFormed() ? block : { ...block, name: block.name.toWellFormed(), arguments: block.arguments.toWellFormed() }
+    case 'tool-call': {
+      const name = block.name.toWellFormed()
+      const args = wellFormedArguments(block.arguments)
+      return name === block.name && args === block.arguments ? block : { ...block, name, arguments: args }
+    }
     case 'tool-result': {
       const content = wellFormedContent(block.content)
       return content.every((inner, index) => inner === block.content[index]) ? block : { ...block, content }
@@ -102,6 +106,32 @@ export function wellFormedBlock(block: ContentBlock): ContentBlock {
       throw new Error(`wellFormedBlock: unhandled content block ${JSON.stringify(exhaustive)}`)
     }
   }
+}
+
+/**
+ * One escape at a time: a surrogate PAIR written as two escapes, a lone
+ * surrogate escape, or any other backslash and the character it escapes (so
+ * the `ud83d` after an escaped backslash is never read as an escape).
+ */
+const ARGUMENT_ESCAPE = /\\(?:u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|u([dD][89a-fA-F][0-9a-fA-F]{2})|[\s\S])/g
+
+/**
+ * A tool call's arguments, made safe to send back. They are JSON TEXT, so they
+ * can hold a lone surrogate a second way: as an ESCAPE (`"\ud83d"`), six
+ * ordinary characters that decode to half a pair. Such a string is well-formed
+ * and `toWellFormed` leaves it alone; a provider that decodes the arguments
+ * does not. Measured 2026-11-21, the arguments sent back as history: OpenAI
+ * answers HTTP 500 every time, Anthropic is sent them decoded and answers 400,
+ * DeepSeek accepts. So an unpaired surrogate escape becomes `�`, and a
+ * pair, an escaped backslash and every other character stay as written.
+ *
+ * A message built now passes through here (`wellFormedBlock`). A serializer
+ * calls it too where the provider refuses, for a log written before this rule.
+ */
+export function wellFormedArguments(text: string): string {
+  const formed = text.toWellFormed()
+  if (!formed.includes('\\u')) return formed
+  return formed.replace(ARGUMENT_ESCAPE, (escape: string, lone: string | undefined) => (lone === undefined ? escape : '\\ufffd'))
 }
 
 /** A fresh list of the same blocks, each made well-formed (`wellFormedBlock`). */

@@ -5,7 +5,7 @@
  * listener — so retrying QUOTA, or never retrying at all, passed everything.
  */
 import { afterEach, describe, expect, it } from 'vitest'
-import { LlmError, type LlmErrorCode } from '../../core/llm/index.ts'
+import { LlmError, RETRYABLE_CODES, type LlmErrorCode } from '../../core/llm/index.ts'
 import { createUserMessage, messageText } from '../../core/llm/message.ts'
 import { coreHarness, type CoreHarness } from '../../test-support/harness.ts'
 import { assistantText } from '../../test-support/scripted-adapter.ts'
@@ -60,6 +60,45 @@ describe('llm-retry', () => {
     const outcome = await run(h)
     expect(outcome.calls).toBe(1)
     expect(outcome.end).toMatchObject({ kind: 'error', code: 'QUOTA' })
+  })
+
+  // Which codes are retried is the whole policy, and only three of them had a
+  // test: a cut stream (STREAM_CLOSED), a dead socket (TRANSPORT), a stalled
+  // one (TIMEOUT) and an empty answer could each stop being retried, or a
+  // refusal start being, with everything green. Every code an adapter emits,
+  // through the real loop, against the real set.
+  it('retries exactly the transient codes, once here, and lets every other code end the turn at its first failure', async () => {
+    const transient: readonly LlmErrorCode[] = ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE', 'STREAM_CLOSED']
+    const final: readonly LlmErrorCode[] = [
+      'QUOTA',
+      'AUTH',
+      'INVALID_REQUEST',
+      'CONTEXT_WINDOW_EXCEEDED',
+      'MALFORMED_RESPONSE',
+      'MISSING_CREDENTIAL',
+      'INVALID_CREDENTIAL',
+      'UNSUPPORTED_OPTION',
+      'UNSUPPORTED_REASONING_EFFORT',
+      'UNSUPPORTED_CONTENT',
+      'ATTACHMENT_UNREADABLE',
+      'UNKNOWN_MODEL',
+      'REFUSAL',
+    ]
+    const seen: Record<string, string> = {}
+    for (const code of [...transient, ...final]) {
+      const h = await mount({ initialDelayMs: 0 })
+      h.adapter.script(failing(code), assistantText('recovered'))
+      const outcome = await run(h)
+      seen[code] = `${outcome.calls} attempt(s), turn ${outcome.end.kind}${outcome.end.code === undefined ? '' : ` ${outcome.end.code}`}`
+      await h.dispose()
+      harness = undefined
+    }
+    expect(seen).toEqual({
+      ...Object.fromEntries(transient.map((code) => [code, '2 attempt(s), turn completed'])),
+      ...Object.fromEntries(final.map((code) => [code, `1 attempt(s), turn error ${code}`])),
+    })
+    // The set itself says the same, so the table above cannot pass by an accident of the loop.
+    expect([...RETRYABLE_CODES].toSorted()).toEqual([...transient].toSorted())
   })
 
   it('stops at its cap and lets the last failure end the turn', async () => {

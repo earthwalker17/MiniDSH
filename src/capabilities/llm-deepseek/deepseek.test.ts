@@ -1,8 +1,10 @@
 import { createServer, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRoot } from '../../kernel/index.ts'
-import { BlockAssembler, llmPlugin, type LlmError, type StreamChunk } from '../../core/llm/index.ts'
+import { asAttachmentId, type AttachmentRef, type Attachments } from '../../core/attachments/index.ts'
+import { imageDescriptor } from '../../core/llm/content.ts'
+import { BlockAssembler, llmPlugin, RETRYABLE_CODES, type LlmError, type LlmRequest, type Message, type StreamChunk } from '../../core/llm/index.ts'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '../../core/llm/message.ts'
 import { asCallId } from '../../core/ids.ts'
 import { credentialsLocalPlugin } from '../credentials-local/index.ts'
@@ -37,6 +39,28 @@ describe('DeepSeek SSE parser', () => {
   it('throws when the stream ends without [DONE]', async () => {
     const stream = sseStream('data: {"a":1}\n\n')
     await expect(collect(parseSse(stream, () => {}))).rejects.toThrowError(/without \[DONE\]/)
+  })
+
+  // A body that ends inside an event is the same dropped connection, one
+  // event sooner: handed on, the half payload failed MALFORMED_RESPONSE,
+  // which nothing retries.
+  it('names a body cut in the middle of an event as STREAM_CLOSED, and still hands on a whole event that only lacked its blank line', async () => {
+    const seen: string[] = []
+    const cut = (async () => {
+      for await (const data of parseSse(sseStream('data: {"a":1}\n\ndata: {"b"'), () => {})) seen.push(data)
+    })()
+    await expect(cut).rejects.toMatchObject({ code: 'STREAM_CLOSED', message: expect.stringContaining('middle of an event') })
+    expect(seen).toEqual(['{"a":1}'])
+    // Cut inside the sentinel itself: the same thing.
+    await expect(collect(parseSse(sseStream('data: {"a":1}\n\ndata: [DON'), () => {}))).rejects.toMatchObject({ code: 'STREAM_CLOSED', message: expect.stringContaining('middle of an event') })
+    // Whole, with no blank line after it: an event like any other, and the sentinel ends the stream.
+    expect(await collect(parseSse(sseStream('data: {"a":1}\n\ndata: [DONE]'), () => {}))).toEqual(['{"a":1}', '[DONE]'])
+    const whole: string[] = []
+    const unterminated = (async () => {
+      for await (const data of parseSse(sseStream('data: {"a":1}\n\ndata: {"b":2}'), () => {})) whole.push(data)
+    })()
+    await expect(unterminated).rejects.toThrowError(/without \[DONE\]/)
+    expect(whole).toEqual(['{"a":1}', '{"b":2}'])
   })
 })
 
@@ -94,6 +118,15 @@ describe('DeepSeek translation', () => {
     translator.push({ choices: [{ delta: { content: 'partial' } }] })
     translator.push({ choices: [{ finish_reason: 'length' }] })
     expect(translator.finalize().at(-1)).toEqual({ type: 'finish', reason: { kind: 'max-tokens' } })
+  })
+
+  // Empty means NO block opened. A thought with no answer after it opened one,
+  // so it finishes `stop`: the OpenAI translator alone calls that EMPTY_RESPONSE.
+  it('finishes a completion that only thought as stop, not as an empty response', () => {
+    const translator = new DeepSeekTranslator()
+    translator.push({ choices: [{ delta: { reasoning_content: 'hm' } }] })
+    translator.push({ choices: [{ finish_reason: 'stop' }] })
+    expect(translator.finalize().at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
   })
 
   it('rejects a non-JSON chunk', () => {
@@ -393,6 +426,184 @@ describe('DeepSeek finish reasons and tool-call indices', () => {
     const assembler = new BlockAssembler()
     for (const chunk of chunks) assembler.push(chunk)
     expect(assembler.blocks()).toEqual([{ type: 'tool-call', id: asCallId('c1'), name: 'read', arguments: '{"p":1}' }])
+  })
+
+  // The name beside that id had kept the old test: anything but `undefined`
+  // replaced it, so the same proxies renamed the call to '' or null.
+  it('reads an empty or null name on a continuation delta as more of the same call, never as its new name', () => {
+    const translator = new DeepSeekTranslator()
+    const chunks: StreamChunk[] = []
+    chunks.push(...translator.push({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'read', arguments: '{"p":' } }] } }] }))
+    chunks.push(...translator.push({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: '', arguments: '1' } }] } }] }))
+    chunks.push(...translator.push({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: null, arguments: '}' } }] } }] }))
+    chunks.push(...translator.push({ choices: [{ finish_reason: 'tool_calls' }] }))
+    chunks.push(...translator.finalize())
+    // Every delta of the call names it as the first one did.
+    expect(chunks.flatMap((chunk) => (chunk.type === 'tool-call-delta' ? [chunk.name] : []))).toEqual(['read', 'read', 'read'])
+    const assembler = new BlockAssembler()
+    for (const chunk of chunks) assembler.push(chunk)
+    expect(assembler.blocks()).toEqual([{ type: 'tool-call', id: asCallId('c1'), name: 'read', arguments: '{"p":1}' }])
+  })
+})
+
+// ---- S22.5: what the stream loop does with a cut, a failure it yields, a dead socket and an image ----
+
+/** A loopback API that keeps each request's JSON body; `respond` writes the answer. */
+async function capturing(respond: (response: ServerResponse) => void): Promise<{ baseURL: string; bodies: Record<string, unknown>[]; close: () => Promise<void> }> {
+  const bodies: Record<string, unknown>[] = []
+  const server = createServer((request, response) => {
+    let raw = ''
+    request.setEncoding('utf8')
+    request.on('data', (chunk: string) => (raw += chunk))
+    request.on('end', () => {
+      bodies.push(JSON.parse(raw) as Record<string, unknown>)
+      respond(response)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  return {
+    baseURL: `http://127.0.0.1:${port}`,
+    bodies,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+  }
+}
+
+const BYTES = new Uint8Array([1, 2, 3, 4])
+const REF: AttachmentRef = { id: asAttachmentId(`sha256:${'cd'.repeat(32)}`), mediaType: 'image/png', bytes: BYTES.length, width: 8, height: 8, name: 'dot.png' }
+
+function userWithImage(text: string): Message {
+  const message = createUserMessage(text)
+  return { ...message, content: [...message.content, { type: 'image', attachment: REF, text: imageDescriptor(REF) }] }
+}
+
+/** A store that keeps what was read from it, so a test can say no attachment I/O happened. */
+function watchingStore(): { store: Attachments; reads: () => readonly string[] } {
+  const reads: string[] = []
+  return {
+    store: {
+      imageLimits: { maxImageBytes: 1, maxImageDimension: 1, maxImagePixels: 1, maxImagesPerRequest: 1, maxRequestImageBytes: 1, mediaTypes: ['image/png'] },
+      saveImage: () => Promise.reject(new Error('not used')),
+      readImage: (ref) => {
+        reads.push(ref.id)
+        return Promise.resolve(BYTES)
+      },
+      hostPath: () => undefined,
+    },
+    reads: () => reads,
+  }
+}
+
+describe('DeepSeek stream loop', () => {
+  let closers: (() => Promise<void>)[] = []
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    for (const close of closers) await close()
+    closers = []
+  })
+  const KEY = 'sk-ECHOED-IN-STREAM-42'
+  const adapterAt = (baseURL: string, attachments?: Attachments): DeepSeekAdapter =>
+    new DeepSeekAdapter({ apiKeyRef: 'DEEPSEEK_API_KEY', resolveKey: () => KEY, baseURL, defaultMaxTokens: 16, ...(attachments ? { resolveAttachments: () => attachments } : {}) })
+  const request = (over: Partial<LlmRequest> = {}): LlmRequest => ({ provider: 'deepseek', model: 'deepseek-flash', messages: [createUserMessage('hi')], ...over })
+  const answering = (body: string) => (response: ServerResponse) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' })
+    response.end(body)
+  }
+  const OK = 'data: {"choices":[{"delta":{"content":"a dot"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+
+  /** Everything a stream yielded, and what it threw if it threw. */
+  async function drain(stream: AsyncIterable<StreamChunk>): Promise<{ chunks: StreamChunk[]; failure: LlmError | undefined }> {
+    const chunks: StreamChunk[] = []
+    try {
+      for await (const chunk of stream) chunks.push(chunk)
+      return { chunks, failure: undefined }
+    } catch (error) {
+      return { chunks, failure: error as LlmError }
+    }
+  }
+
+  it('fails a body cut in the middle of an event as the retryable STREAM_CLOSED, never MALFORMED_RESPONSE', async () => {
+    const api = await capturing(answering('data: {"choices":[{"delta":{"content":"whole "}}]}\n\ndata: {"choices":[{"delta":{"content":"par'))
+    closers.push(api.close)
+    const { chunks, failure } = await drain(adapterAt(api.baseURL).stream(request()))
+    expect(failure).toMatchObject({ code: 'STREAM_CLOSED' })
+    expect(RETRYABLE_CODES.has(failure!.code)).toBe(true)
+    // What arrived whole was streamed; the half event was never read as one.
+    expect(chunks.flatMap((chunk) => (chunk.type === 'text-delta' ? [chunk.text] : []))).toEqual(['whole '])
+  })
+
+  // The stream's own failure is YIELDED, so it never passes the catch that
+  // redacts what is thrown: here a finish_reason, which is provider text.
+  it('never quotes the key in a failure the stream itself reports', async () => {
+    const api = await capturing(answering(`data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: {"choices":[{"finish_reason":"rejected ${KEY}"}]}\n\ndata: [DONE]\n\n`))
+    closers.push(api.close)
+    const { chunks, failure } = await drain(adapterAt(api.baseURL).stream(request()))
+    expect(failure).toBeUndefined()
+    const finish = chunks.find((chunk) => chunk.type === 'finish')
+    expect(finish).toMatchObject({ reason: { kind: 'error', failure: { code: 'MALFORMED_RESPONSE' } } })
+    expect(JSON.stringify(finish)).not.toContain(KEY)
+    expect(JSON.stringify(finish)).toContain('unexpected finish_reason \\"rejected [redacted]\\"')
+  })
+
+  // `fetch failed` alone reads the same offline, behind a mistyped base URL
+  // and behind a proxy that refused: the reason is on the error's cause.
+  it('says why a fetch failed, from the cause Node attached, with the key still redacted', async () => {
+    // A real refused connection: a port that was listening a moment ago.
+    const gone = await capturing(answering(OK))
+    await gone.close()
+    const refused = await drain(adapterAt(gone.baseURL).stream(request()))
+    expect(refused.failure).toMatchObject({ code: 'TRANSPORT' })
+    expect(refused.failure!.message).toContain(`ECONNREFUSED 127.0.0.1:${new URL(gone.baseURL).port}`)
+
+    // The other shapes Node gives a cause, staged: one error per address, a
+    // cause with a code and no words, and one that echoes the key.
+    const shapes: [cause: unknown, expected: string][] = [
+      [Object.assign(new Error('getaddrinfo ENOTFOUND api.deepseek.invalid'), { code: 'ENOTFOUND' }), 'fetch failed (getaddrinfo ENOTFOUND api.deepseek.invalid)'],
+      [Object.assign(new AggregateError([new Error('connect ECONNREFUSED ::1:8080'), new Error('connect ECONNREFUSED 127.0.0.1:8080')], ''), { code: 'ECONNREFUSED' }), 'fetch failed (connect ECONNREFUSED ::1:8080; connect ECONNREFUSED 127.0.0.1:8080)'],
+      [Object.assign(new Error(''), { code: 'UND_ERR_CONNECT_TIMEOUT' }), 'fetch failed (UND_ERR_CONNECT_TIMEOUT)'],
+      [new Error(`proxy refused the tunnel for Bearer ${KEY}`), 'fetch failed (proxy refused the tunnel for Bearer [redacted])'],
+      [undefined, 'fetch failed'],
+    ]
+    const said: string[] = []
+    for (const [cause] of shapes) {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('fetch failed', { cause }))
+      const { failure } = await drain(adapterAt('http://127.0.0.1:9').stream(request()))
+      expect(failure).toMatchObject({ code: 'TRANSPORT' })
+      said.push(failure!.message)
+    }
+    expect(said).toEqual(shapes.map(([, expected]) => expected))
+  })
+
+  // The order the comments promise, pinned: an option refusal costs no read
+  // of the images the request carries.
+  it('refuses an option before it reads a single image', async () => {
+    const watched = watchingStore()
+    const refused = await drain(adapterAt('http://127.0.0.1:9', watched.store).stream(request({ messages: [userWithImage('look')], reasoningEffort: 'medium' })))
+    expect(refused.failure).toMatchObject({ code: 'UNSUPPORTED_REASONING_EFFORT' })
+    expect(watched.reads()).toEqual([])
+  })
+
+  // Substitute at projection: `deepseek-v4-pro` accepts an image block and
+  // ignores it without a word, so whether one is sent is this catalog's call.
+  it('never reads an image for a text-only model, and sends its stored descriptor instead', async () => {
+    const api = await capturing(answering(OK))
+    closers.push(api.close)
+    const watched = watchingStore()
+    const adapter = adapterAt(api.baseURL, watched.store)
+    const textOnly = await drain(adapter.stream(request({ model: 'deepseek-v4-pro', messages: [userWithImage('what is it?')] })))
+    expect(textOnly.failure).toBeUndefined()
+    expect(watched.reads()).toEqual([])
+    expect(api.bodies[0]!.messages).toEqual([{ role: 'user', content: `what is it?${imageDescriptor(REF)}` }])
+    // The same history on the vision row reads the bytes and sends them.
+    await drain(adapter.stream(request({ messages: [userWithImage('what is it?')] })))
+    expect(watched.reads()).toEqual([REF.id])
+    expect(api.bodies[1]!.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'what is it?' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${Buffer.from(BYTES).toString('base64')}` } }] },
+    ])
   })
 })
 

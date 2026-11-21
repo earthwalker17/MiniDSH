@@ -24,7 +24,7 @@
  * ids, one model's reasoning sent to another (silently omitted). Its leniency
  * proves nothing about this serializer, so the tests pin the shapes.
  */
-import { blockText, contentText, type ResolvedImage } from '../../core/llm/content.ts'
+import { blockText, contentText, wellFormedArguments, type ResolvedImage } from '../../core/llm/content.ts'
 import type { ContentBlock, Message, ToolSchema } from '../../core/llm/index.ts'
 import { canonicalModel } from './catalog.ts'
 import { OPENAI_PROVIDER, type OpenAIReplayBlock } from './translate.ts'
@@ -154,7 +154,10 @@ function assistantItems(message: Message, requestModel: string): InputItem[] {
       case 'tool-call':
         // A tool-call block's id IS the `call_id`, the key its output answers
         // to; the `fc_` item id is replay state and goes back only under REPLAY.
-        out.push({ type: 'function_call', call_id: block.id, name: block.name, arguments: block.arguments, ...(entry?.type === 'function_call' ? { id: entry.id } : {}) })
+        // The arguments go back as the logged string. A log written before 2.0
+        // can hold a lone surrogate ESCAPE in them, and this API answers a
+        // history carrying one with HTTP 500 (`wellFormedArguments`).
+        out.push({ type: 'function_call', call_id: block.id, name: block.name, arguments: wellFormedArguments(block.arguments), ...(entry?.type === 'function_call' ? { id: entry.id } : {}) })
         break
       case 'image':
       case 'tool-result':

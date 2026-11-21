@@ -9,8 +9,8 @@ export interface WireChunk {
       readonly reasoning_content?: string | null
       readonly tool_calls?: readonly {
         readonly index: number
-        readonly id?: string
-        readonly function?: { readonly name?: string; readonly arguments?: string }
+        readonly id?: string | null
+        readonly function?: { readonly name?: string | null; readonly arguments?: string }
       }[]
     }
     readonly finish_reason?: string | null
@@ -85,7 +85,10 @@ export class DeepSeekTranslator {
         out.push({ type: 'block-start', index: block.index, blockType: 'tool-call' })
       }
       if (id !== undefined) block.id = id
-      if (call.function?.name !== undefined) block.name = call.function.name
+      // The name takes the id's test, for the id's reason: `""` or `null` on a
+      // continuation delta is more of the same call, never its new name.
+      const name = call.function?.name
+      if (typeof name === 'string' && name.length > 0) block.name = name
       const argsDelta = call.function?.arguments ?? ''
       block.args += argsDelta
       const deltaChunk: StreamChunk = {
@@ -132,7 +135,9 @@ export class DeepSeekTranslator {
       // whether or not the wire named a finish_reason: an empty delta must
       // not open a block (above), and an unnamed finish must not turn the
       // same emptiness into a `stop` the driver appends as an empty message
-      // and the retry policy never sees.
+      // and the retry policy never sees. "Nothing" is NO block: a thought
+      // with no answer after it opened one and finishes `stop` (only the
+      // OpenAI translator calls that an empty response).
       case 'stop':
       case undefined:
         if (this.order.length === 0) return { kind: 'error', failure: { message: 'model returned no content', code: 'EMPTY_RESPONSE' } }
