@@ -24,6 +24,22 @@ import { basename, dirname, isAbsolute, resolve as resolvePath } from 'node:path
 import { relative as posixRelative } from 'node:path/posix'
 import { parse as winParse } from 'node:path/win32'
 
+/**
+ * `lstat`, with "this name cannot exist" as no entry. That is a missing name,
+ * and on POSIX also a name beneath a regular file: `<file>/child` answers
+ * ENOTDIR there, which `throwIfNoEntry` does not cover (Windows answers ENOENT).
+ * It was thrown raw and reached a tool result as an uncoded errno line; walked
+ * up like any missing tail, the operation then refuses it in its own words.
+ */
+function entryAt(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path, { throwIfNoEntry: false })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOTDIR') return undefined
+    throw error
+  }
+}
+
 /** Matches the kernel's own limit closely enough; a cycle must terminate, not hang. */
 const MAX_LINK_HOPS = 32
 
@@ -44,7 +60,7 @@ export function canonicalPath(path: string): string {
   let hops = 0
   for (;;) {
     // lstat, not exists: a dangling link IS an entry, and the one that matters.
-    const entry = lstatSync(current, { throwIfNoEntry: false })
+    const entry = entryAt(current)
     if (entry?.isSymbolicLink()) {
       if (++hops > MAX_LINK_HOPS) throw new Error(`too many symbolic links while resolving "${path}"`)
       const target = readlinkSync(current)

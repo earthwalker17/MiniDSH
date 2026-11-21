@@ -18,8 +18,9 @@
  * **Under recorded authority.** A job runs under the stamp its start resolved,
  * never an escalation. A durable switch of the session's mode or acceptance
  * ends every job its owner runs (`by: 'authority'`), including one still
- * starting — the same rule that restarts the persistent shell and ends a
- * grant: no process keeps an authority the session no longer grants.
+ * starting — the rule that ends a grant: no process this registry supervises
+ * keeps an authority the session no longer grants. (The persistent shell is
+ * not this registry's: it is replaced when its next command arrives, §13.)
  *
  * **Bounded.** Refused at start past a per-owner cap; a completion wakes an
  * idle owner only while `foldJobWakes` is under the budget, and only a job's
@@ -31,7 +32,7 @@ import { AGENTS, type Agent, type Agents } from '../agent/index.ts'
 import { SANDBOX_ACCEPTANCE, SANDBOX_MODE, type SandboxEnforcement, type SandboxMode } from '../sandbox/events.ts'
 import { matches, SESSION_EVENT, type EventEnvelope, type Session } from '../session/index.ts'
 import { SPILL, type SpillStream } from '../spill/index.ts'
-import { clip, printableText } from '../text.ts'
+import { clip, clipEnd, printableText } from '../text.ts'
 import { foldJobWakes, JOB_END, JOB_START, jobNotice, type JobCanceller, type JobEnd, type JobKind, type JobStart } from './events.ts'
 
 export * from './events.ts'
@@ -514,7 +515,7 @@ class JobsService implements Jobs {
   private onOutput(entry: Entry, chunk: string): void {
     if (entry.done || chunk.length === 0) return
     entry.total += chunk.length
-    entry.tail = (entry.tail + chunk).slice(-TAIL_CHARS)
+    entry.tail = clipEnd(entry.tail + chunk, TAIL_CHARS)
     const size = Buffer.byteLength(chunk, 'utf8')
     entry.bytes += size
     if (entry.stream && !entry.capped) {

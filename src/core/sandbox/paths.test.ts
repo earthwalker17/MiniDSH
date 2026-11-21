@@ -201,4 +201,14 @@ describe('canonicalPath without links', () => {
     expect(() => canonicalPath(join(workspace, 'nope', 'still-fine.txt'))).not.toThrow()
     expect(isInside(canonicalPath(workspace), canonicalPath(join(workspace, 'nope', 'still-fine.txt')))).toBe(true)
   })
+
+  // POSIX answers ENOTDIR for a name beneath a regular file, which lstat's
+  // `throwIfNoEntry: false` does not cover: it was thrown raw and reached a
+  // tool result as an uncoded errno line. It is a name that cannot exist, so it
+  // resolves like any other missing tail (Windows answered ENOENT all along).
+  it('resolves a name beneath a regular file as a missing one, on every platform', () => {
+    const workspace = tempDir('minidsh-ws-')
+    writeFileSync(join(workspace, 'plain.txt'), 'a file, not a directory')
+    expect(canonicalPath(join(workspace, 'plain.txt', 'child', 'deeper.txt'))).toBe(join(canonicalPath(workspace), 'plain.txt', 'child', 'deeper.txt'))
+  })
 })

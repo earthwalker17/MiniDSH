@@ -23,9 +23,8 @@
  *
  * **The failure rule, and why it is narrow.** Absence and failure are decided
  * by `listDir`'s errno ALONE. `LocalFs.stat` swallows every error into
- * "absent" and `readBytes` maps every failure to `FS_NOT_FOUND`
- * (`fs-local/index.ts`), so neither can tell a missing directory from one the
- * host refused to show. Guessing "absent" from them would read a transient
+ * "absent", and `readBytes` is about a file (`fs-local/index.ts`), so neither
+ * can tell a missing directory from one the host refused to show. Guessing "absent" from them would read a transient
  * EACCES as "every skill was removed" and retire a list the model is using.
  * So: a root whose listing fails ENOENT/ENOTDIR is absent; any other failure,
  * and a `SKILL.md` a listing showed but a read could not return, makes the

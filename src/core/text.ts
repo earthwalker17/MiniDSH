@@ -66,6 +66,17 @@ export function clip(text: string, maxUnits: number): string {
 }
 
 /**
+ * At most the LAST `maxUnits` UTF-16 units of `text`, never starting on the
+ * second half of a surrogate pair: `clip` for a tail (a job's last output).
+ */
+export function clipEnd(text: string, maxUnits: number): string {
+  if (text.length <= maxUnits) return text
+  const from = text.length - maxUnits
+  const first = text.charCodeAt(from)
+  return text.slice(first >= 0xdc00 && first <= 0xdfff ? from + 1 : from)
+}
+
+/**
  * The same rule for text that keeps its LINES: `\n` and `\t` survive, every
  * other control character becomes a space. For a streamed answer, whose
  * paragraphs and code blocks are the model's own structure; `printableText`

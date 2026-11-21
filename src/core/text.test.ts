@@ -4,7 +4,7 @@
  * or renders as nothing.
  */
 import { describe, expect, it } from 'vitest'
-import { clip, isInvisible, printableLines, printableText } from './text.ts'
+import { clip, clipEnd, isInvisible, printableLines, printableText } from './text.ts'
 
 describe('printableText', () => {
   it('blanks controls and every character that renders as nothing, and keeps ordinary text', () => {
@@ -40,6 +40,16 @@ describe('clip', () => {
     expect([1, 2, 3, 4, 5, 6].map((bound) => clip(text, bound).isWellFormed())).toEqual([true, true, true, true, true, true])
     // What the plain cut it replaces would have produced.
     expect(text.slice(0, 3).isWellFormed()).toBe(false)
+  })
+
+  it('keeps a tail the same way: the last units, never starting on the second half of a pair', () => {
+    const text = 'ab\u{1f600}cd'
+    expect(clipEnd('abcdef', 4)).toBe('cdef')
+    expect(clipEnd('abc', 4)).toBe('abc')
+    expect(clipEnd(text, 3)).toBe('cd')
+    expect(clipEnd(text, 4)).toBe('\u{1f600}cd')
+    expect([1, 2, 3, 4, 5, 6].map((bound) => clipEnd(text, bound).isWellFormed())).toEqual([true, true, true, true, true, true])
+    expect(text.slice(-3).isWellFormed()).toBe(false)
   })
 })
 
