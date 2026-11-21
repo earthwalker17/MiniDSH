@@ -55,13 +55,28 @@ export function canonicalPath(path: string): string {
       // A throw here is not recoverable by guessing: a path whose identity the
       // host will not disclose must be refused, never trusted by its spelling.
       const real = realpathSync.native(current)
-      return suffix.length === 0 ? real : resolvePath(real, ...suffix)
+      if (suffix.length === 0) return real
+      const joined = resolvePath(real, ...suffix)
+      // The tail was collected because nothing under it exists, so its names
+      // cannot be links, UNLESS one of them is `..`: the join cancels it
+      // against a missing segment and lands on names beside that segment,
+      // which do exist and which this walk never looked at
+      // (`<root>/missing/../link` joins to `<root>/link`). The joined path is
+      // then walked like any other; a plain tail, every new file's, costs
+      // nothing more. Counted as a hop so a link that keeps answering with
+      // such a target still terminates.
+      if (!suffix.includes('..')) return joined
+      if (++hops > MAX_LINK_HOPS) throw new Error(`too many symbolic links while resolving "${path}"`)
+      current = joined
+      suffix.length = 0
+      continue
     }
     const parent = dirname(current)
-    if (parent === current) return resolvePath(path)
+    // Not even a root exists (a drive that is not there). What was walked, not
+    // `path`: after a link was followed, `path` is still the link's own name.
+    if (parent === current) return resolvePath(current, ...suffix)
     // basename, not slice(parent.length + 1): a root parent ("C:\") already ends
     // in a separator, and slicing would eat the first character of the segment.
-    // Nothing here exists, so no accumulated segment can itself be a link.
     suffix.unshift(basename(current))
     current = parent
   }

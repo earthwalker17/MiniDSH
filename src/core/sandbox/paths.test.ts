@@ -47,6 +47,8 @@ function makeLink(target: string, link: string): boolean {
 
 const probe = tempDir('minidsh-linkprobe-')
 const linksWork = makeLink(join(probe, 'nothing-here'), join(probe, 'probe-link'))
+/** A drive letter with nothing mounted on it (Windows only): somewhere a junction can point that has no root. */
+const absentDrive = process.platform === 'win32' ? [...'QRSTUVWXYZ'].find((letter) => !existsSync(`${letter}:\\`)) : undefined
 
 describe.skipIf(!linksWork)('canonicalPath and links', () => {
   it('follows a DANGLING link, which existsSync and realpath both miss but a write does not', () => {
@@ -85,6 +87,63 @@ describe.skipIf(!linksWork)('canonicalPath and links', () => {
     await expect(fs.writeText(fs.resolve('escape/owned.txt', workspace), 'no', { kind: 'unconditional' }, {})).rejects.toThrowError(/FS_SANDBOX_DENIED|outside/)
     expect(existsSync(join(elsewhere, 'target', 'owned.txt'))).toBe(false)
     expect(existsSync(join(elsewhere, 'target'))).toBe(false)
+  })
+
+  /**
+   * The spelling a wire client can send as a new session's `cwd`. On Linux and
+   * macOS nothing under `<root>/missing/..` exists, so the walk collected
+   * `missing`, `..` and `link` as a tail it never examined and joined them
+   * back to `<root>/link`: a link, unfollowed, that containment then accepted
+   * by name where the direct spelling `<root>/link` was refused. Windows
+   * resolves `..` before it looks, so there this passes with or without the
+   * second walk; the POSIX run is the one that fails without it.
+   */
+  it('follows a link reached through `..` after a missing segment, exactly as it follows it by name', () => {
+    const workspace = tempDir('minidsh-ws-')
+    const elsewhere = tempDir('minidsh-out-')
+    mkdirSync(join(elsewhere, 'real'))
+    expect(makeLink(join(elsewhere, 'real'), join(workspace, 'link'))).toBe(true)
+    const inside = canonicalPath(workspace)
+    const direct = canonicalPath(join(workspace, 'link'))
+    expect(isInside(inside, direct)).toBe(false)
+
+    // Built by hand: `join` would resolve the `..` before canonicalPath saw it.
+    const spellings: [spelled: string, expected: string][] = [
+      [`${workspace}/missing/../link`, direct],
+      [`${workspace}/missing/../link/new.txt`, join(direct, 'new.txt')],
+      [`${workspace}/a/b/../../link/deep/new.txt`, join(direct, 'deep', 'new.txt')],
+      // No link in the way: the same spelling of an ordinary missing file stays inside.
+      [`${workspace}/missing/../plain/new.txt`, join(inside, 'plain', 'new.txt')],
+    ]
+    expect(spellings.map(([spelled]) => canonicalPath(spelled))).toEqual(spellings.map(([, expected]) => expected))
+    expect(spellings.map(([spelled]) => isInside(inside, canonicalPath(spelled)))).toEqual([false, false, false, true])
+    // The contract, stated as a fixpoint: a result has nothing left to follow.
+    for (const [spelled] of spellings) expect(canonicalPath(canonicalPath(spelled)), spelled).toBe(canonicalPath(spelled))
+  })
+
+  it.skipIf(process.platform === 'win32')('follows a link whose own target is spelled that way, and stops on one that answers so forever', () => {
+    const workspace = tempDir('minidsh-ws-')
+    const elsewhere = tempDir('minidsh-out-')
+    mkdirSync(join(elsewhere, 'real'))
+    symlinkSync(join(elsewhere, 'real'), join(elsewhere, 'hop'))
+    // An absolute target is taken as the link spells it, `..` included.
+    symlinkSync(`${elsewhere}/missing/../hop`, join(workspace, 'via-target'))
+    expect(canonicalPath(join(workspace, 'via-target', 'new.txt'))).toBe(join(canonicalPath(join(elsewhere, 'real')), 'new.txt'))
+    symlinkSync(`${workspace}/missing/../again`, join(workspace, 'again'))
+    expect(() => canonicalPath(join(workspace, 'again', 'x.txt'))).toThrowError(/too many symbolic links/)
+  })
+
+  // A junction may name a drive that is not there. Nothing along its target
+  // exists, not even a root, and the walk then answered with the path it was
+  // GIVEN, the junction's own name, inside the workspace: an unfollowed link
+  // the write would follow the moment that drive appeared.
+  it.skipIf(absentDrive === undefined)('follows a junction to a drive that is not there, rather than answering with its own name', () => {
+    const workspace = tempDir('minidsh-ws-')
+    const target = `${absentDrive}:\\nothing\\here`
+    expect(makeLink(target, join(workspace, 'offline'))).toBe(true)
+    const resolved = canonicalPath(join(workspace, 'offline', 'owned.txt'))
+    expect(resolved).toBe(`${target}\\owned.txt`)
+    expect(isInside(canonicalPath(workspace), resolved)).toBe(false)
   })
 
   it('leaves an ordinary path alone', () => {

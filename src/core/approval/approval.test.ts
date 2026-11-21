@@ -333,19 +333,37 @@ describe('standing grants', () => {
    * and the lifecycle's end by the one below; `/accept none` is precisely a
    * change to what the shell world does, so it is the one a grant must not
    * survive, and a preset writes through both setters.
+   *
+   * `approval/policy` is the fifth kind, and the "pinned never" test further
+   * down cannot tell whether it ends a grant: under `never` the policy refuses
+   * before any grant is consulted, so the request is rejected either way. What
+   * tells is the grant list after the switch, and that the grant does not come
+   * back once the policy is `ask` again: the next identical request asks.
    */
-  it('ends a grant on the OTHER two authority kinds too, which no type checks', async () => {
-    for (const move of ['acceptance', 'preset'] as const) {
+  it('ends a grant on the OTHER three authority kinds too, which no type checks', async () => {
+    for (const move of ['acceptance', 'preset', 'policy'] as const) {
       harness = await coreHarness()
       const { agent } = await harness.create()
-      harness.root.on(APPROVAL_REQUEST, async () => ({ outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }))
+      let consulted = 0
+      harness.root.on(APPROVAL_REQUEST, async () => {
+        consulted += 1
+        return { outcome: 'allowed-once' as const, by: 'user' as const, grant: true as const }
+      })
       const approval = harness.root.get(APPROVAL)
       await approval.request({ agent, toolName: 'bash', subject })
       expect(approval.grants(agent.session), move).toHaveLength(1)
 
       if (move === 'acceptance') harness.root.get(SANDBOX).setAcceptance(agent.session, 'none', 'workspace-write')
-      else agent.session.append(AUTHORITY_PRESET, { name: 'workspace-write' })
+      else if (move === 'preset') agent.session.append(AUTHORITY_PRESET, { name: 'workspace-write' })
+      else approval.setPolicy(agent.session, 'never')
       expect(approval.grants(agent.session), move).toHaveLength(0)
+      if (move === 'policy') {
+        // Back to `ask`: the consent given before the switch is not standing again.
+        approval.setPolicy(agent.session, 'ask')
+        expect(approval.grants(agent.session), 'after never -> ask').toHaveLength(0)
+        expect(await approval.request({ agent, toolName: 'bash', subject })).toBe('allowed-once')
+        expect({ consulted, lastDecider: (agent.session.events.findLast((event) => matches(event, APPROVAL_DECIDED))!.data as { decidedBy?: string }).decidedBy }).toEqual({ consulted: 2, lastDecider: 'user' })
+      }
       await harness.dispose()
       harness = undefined
     }
