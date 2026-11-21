@@ -22,6 +22,11 @@ process.on('warning', (warning) => {
 // of ours, and a CLI whose output cannot be piped into anything that exits
 // early is a CLI that fails on the first thing a person tries. This is the
 // conventional Unix answer — stop, quietly, with the status the pipeline wants.
+//
+// For the commands that only PRINT. One that drives or hosts a turn (`run`,
+// `resume`, `fork`, `chat`, `serve`, `web`) replaces this handler before it
+// starts (`quietStreams` in src/app/cli.ts): exiting here would end a paid
+// turn part way, with status 0, its lease held and nothing disposed.
 for (const stream of [process.stdout, process.stderr]) {
   stream.on('error', (error) => {
     if (error.code === 'EPIPE') process.exit(0)

@@ -1,20 +1,31 @@
 /**
- * The headless CLI surface. It renders exclusively from `session/event`, drives
- * only `ctx.agents`/`ctx.sessions` via the runner, and exits 0 iff the turn
- * completed, 2 on a usage failure (a malformed or unlisted flag, a bad settings
- * file), never starting a paid run on one. `--json` streams raw session events
- * to stdout; `sessions show` reads the log only.
+ * The `minidsh` command line: argv to one command, and the process's exit
+ * code. It is the headless surface itself (`run`, `resume --headless`,
+ * `fork --headless`: rendered exclusively from `session/event`, driven only
+ * through `ctx.agents`/`ctx.sessions` by the runner in `headless.ts`) and the
+ * launcher of the others — the terminal (`chat`, an interactive `resume` or
+ * `fork`), `serve` and `web`, which are protocol hosts with their own modules
+ * — plus the commands that open no session (`config`, `sessions`, `skills`,
+ * `credentials`).
  *
- * Every command boots through ONE preamble (`prepareBoot`): flags, settings,
- * the disk layers, the preset and agent-preset flags — so `config`, `--preset`
- * validation and `sessions` compose the exact rows a boot would mount, not an
- * approximation of them.
+ * A headless command exits 0 iff the turn it drove completed; every command
+ * exits 2 on a usage failure (a malformed or unlisted flag, a bad settings or
+ * composition file), never starting a paid run on one. `--json` streams raw
+ * session events to stdout; `sessions show` reads the log only.
+ *
+ * Every command plans its boot through ONE preamble (`planBoot`; `prepareBoot`
+ * is the same plan with a refusal flattened to its message, and `web` calls
+ * `planBoot` itself because its supervisor is owed the refusal's code):
+ * flags, settings, the disk layers, the preset and agent-preset flags — so
+ * `config`, `--preset` validation and `sessions` compose the exact rows a
+ * boot would mount, not an approximation of them.
  */
 import { createRoot, describeConfigError, type Logger } from '../kernel/index.ts'
 import { formatTokens, meterSession } from '../core/metering/index.ts'
-import { foldRequestContext, foldSessionTitle, matches, SessionFormatError, TOOL_RESULT, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
+import { foldRequestContext, foldRequestHeader, foldSessionTitle, matches, SessionFormatError, TOOL_RESULT, TURN_END, TURN_START, USER_MESSAGE, type EventEnvelope } from '../core/session/index.ts'
 import { heldByWriter, PERSISTENCE, type Persistence, type StoredSession } from '../core/persistence/index.ts'
-import { repairTail } from '../core/agent/index.ts'
+import { foldAgentOptions, repairTail, type AgentOptions } from '../core/agent/index.ts'
+import { LLM } from '../core/llm/index.ts'
 import { persistenceJsonlPlugin, unreadableHeader } from '../capabilities/persistence-jsonl/index.ts'
 import { APPROVAL_POLICIES, isApprovalPolicy, type ApprovalPolicy } from '../core/approval/index.ts'
 import { isSandboxMode, SANDBOX_MODES, type SandboxEnforcement, type SandboxMode } from '../core/sandbox/index.ts'
@@ -38,7 +49,7 @@ import {
   loadCompositionFile,
   toPatches,
   toRow,
-  withSkillRoots,
+  withDeployment,
   type DiskRow,
   type EffectiveComposition,
   type NamedLayer,
@@ -47,7 +58,7 @@ import { bootComposition, forkTask, resumeTask, runTask, type ContinueOptions, t
 import { compositionPath, homeLayout, resolveHome, settingsPath, type HomeLayout } from './home.ts'
 import { ATTACHMENTS, type Attachments } from '../core/attachments/index.ts'
 import { collectImageRefs } from '../core/llm/content.ts'
-import { printableText } from '../core/text.ts'
+import { printableLines, printableText } from '../core/text.ts'
 import { auditLines, CallNames, describeEvent } from './present.ts'
 import { inspectLines, inspectStored, verdictExitCode, verifyAttachments, verifyLines, verifyStored } from './inspect.ts'
 import { resolveSettings, type ResolvedSettings } from './settings.ts'
@@ -140,12 +151,11 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   const patchFiles: string[] = []
   const workspaceDirs: string[] = []
   const first = argv[0]
-  // `--help`/`-h` ANYWHERE make this the help command, and help is never a
-  // usage error. Anywhere, because `minidsh run -h` used to start a paid run
-  // whose task was "-h".
-  // Before help, and anywhere, for the reason help is anywhere: `minidsh run
-  // -h` used to start a paid run whose task was "-h", and `--version` on a
-  // command that does not list it would otherwise be a usage error.
+  // `--version`/`-v` and `--help`/`-h` ANYWHERE make this that command, never
+  // a usage error: `minidsh run -h` used to start a paid run whose task was
+  // "-h", and `--version` on a command that does not list it would otherwise
+  // be refused as an unlisted flag. Version is checked first, so it wins when
+  // both are given.
   if (argv.some(isVersion)) return { command: 'version', positional, flags, patchFiles, workspaceDirs }
   if (first === undefined || argv.some(isHelp)) {
     const helpFor = first !== undefined && !isHelp(first) && first in COMMANDS ? first : undefined
@@ -172,8 +182,21 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   return { command, positional, flags, patchFiles, workspaceDirs }
 }
 
+/**
+ * A warning is said once per command (`main` clears this). One fact can reach
+ * this logger twice on the way through a single command: the boot-time
+ * settings read and the runtime store both report an empty settings.json, in
+ * the same words on purpose, and a cold read before a boot (`fork --at`,
+ * `fork --salvage`) prints the layer warnings the boot then prints again.
+ */
+const warned = new Set<string>()
+
 const stderrLogger: Logger = {
-  warn: (message) => process.stderr.write(`warn: ${message}\n`),
+  warn: (message) => {
+    if (warned.has(message)) return
+    warned.add(message)
+    process.stderr.write(`warn: ${message}\n`)
+  },
   error: (message) => process.stderr.write(`error: ${message}\n`),
 }
 
@@ -260,6 +283,13 @@ function refuseMalformedFlags(args: ParsedArgs): string | undefined {
     const value = typeof maxSteps === 'string' ? Number(maxSteps) : Number.NaN
     if (!Number.isInteger(value) || value <= 0) return `--max-steps expects a positive integer, got "${String(maxSteps)}"`
   }
+  // A value flag at the end of the line parses as the empty string, and an
+  // empty id is not "no flag": `run "x" --model` recorded a session routed to
+  // the model "", which no provider has.
+  for (const name of ['provider', 'model', 'effort'] as const) {
+    const value = args.flags.get(name)
+    if (value !== undefined && (typeof value !== 'string' || value.trim() === '')) return `--${name} expects ${name === 'effort' ? 'an effort' : `a ${name}`} id`
+  }
   return undefined
 }
 
@@ -285,9 +315,13 @@ function bootFields(plan: BootPlan): {
   return { ...plan.home, agentDefaults: plan.settings.agent, agentSettingsBase: plan.settings.agentBase, agentOverrides: plan.settings.agentOverrides, configLayers: plan.loaded.layers, logger: stderrLogger, ...plan.authority }
 }
 
-/** The rows a boot would mount from the built-ins alone — the base every layered view starts from. */
-function baseRows(home: HomeLayout, authority: AuthorityFlags = {}): Row[] {
-  return compose({ ...home, dialect: defaultDialect(), ...authority })
+/**
+ * The rows a boot would mount from the built-ins alone — the base every
+ * layered view starts from. `approve` travels as the boot passes it (`false`
+ * for no flag), so this base is the boot's row for row.
+ */
+function baseRows(home: HomeLayout, authority: AuthorityFlags, approve: boolean): Row[] {
+  return compose({ ...home, dialect: defaultDialect(), ...authority, approve })
 }
 
 /**
@@ -328,16 +362,26 @@ async function planBoot(args: ParsedArgs, presets: PresetUse, settingsUse: 'requ
   const home = homeLayout()
   // Layered ONCE: every later reader of the effective composition — `--preset`
   // validation, `config`, `sessions` — reads this, so none can disagree.
-  const base = baseRows(home, authority)
+  const approve = args.flags.get('approve') === true
+  const base = baseRows(home, authority, approve)
   const warnings: string[] = []
   let effective: EffectiveComposition
   try {
-    // The skill roots filled exactly as `bootComposition` fills them, so
-    // `config` prints the hash a session records and `skills` reads the roots
-    // a session is offered from.
-    effective = withSkillRoots(
-      applyLayers(base, loaded.layers, (message) => void warnings.push(message)),
-      home.skillRoots,
+    // The deployment's paths and the explicit authority flags applied after
+    // the layers exactly as `bootComposition` applies them, so `config`
+    // prints the rows and the hash a session records, `skills` reads the
+    // roots a session is offered from, and a flag that took a key from a
+    // layer is said here for a command that boots nothing.
+    const warn = (message: string): void => void warnings.push(message)
+    effective = withDeployment(
+      applyLayers(base, loaded.layers, warn),
+      {
+        skillRoots: home.skillRoots,
+        globalInstructionsPath: home.globalInstructionsPath,
+        installRoots: home.installRoots,
+        flags: { sandbox: authority.sandbox, accepts: authority.accepts, approvalPolicy: authority.approvalPolicy, approve },
+      },
+      warn,
     )
   } catch (error) {
     return configError(error instanceof Error ? error.message : String(error))
@@ -382,10 +426,14 @@ function authorityFlags(args: ParsedArgs): AuthorityFlags | string {
   }
 }
 
-/** Settings resolve once per command; a malformed file is a usage-class failure (exit 2), never silently ignored. */
+/**
+ * Settings resolve once per command; a malformed file is a usage-class failure
+ * (exit 2), never silently ignored. An EMPTY one is read as no settings and
+ * said on stderr (`settings.ts` `readSettingsFile`).
+ */
 function loadSettings(): ResolvedSettings | string {
   try {
-    return resolveSettings({ path: settingsPath() })
+    return resolveSettings({ path: settingsPath(), warn: stderrLogger.warn })
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
@@ -393,8 +441,10 @@ function loadSettings(): ResolvedSettings | string {
 
 /**
  * The disk layers, in fixed order: home composition.json, then each `--patch`
- * file. A missing home file is absent; a missing or malformed `--patch` file
- * is a usage error — someone asked for it by name.
+ * file. A missing home file is absent; a missing `--patch` file is a usage
+ * error — someone asked for it by name — and either one that is there and
+ * cannot be read or parsed stops the command in the loader's own words
+ * (`loadCompositionFile`), never read as absent.
  */
 async function loadConfigLayers(patchFiles: readonly string[]): Promise<LoadedConfig | string> {
   try {
@@ -412,7 +462,7 @@ async function loadConfigLayers(patchFiles: readonly string[]): Promise<LoadedCo
       if (raw.trim().length === 0) return '--patch expects a file path'
       const path = resolve(raw)
       const file = loadCompositionFile(path)
-      if (!file) return `--patch file not found or unreadable: ${raw}`
+      if (!file) return `--patch file not found: ${raw}`
       layers.push({ name: `patch:${raw}`, patches: await toPatches(file, dirname(path)) })
       collect(file, dirname(path))
     }
@@ -523,18 +573,78 @@ function eventPrinter(json: boolean): EventListener {
 }
 
 function finishTask(result: TaskResult, json: boolean): number {
-  if (!json) process.stdout.write(`${result.text}\n`)
+  // The answer is the model's text, and the one line of a headless run that
+  // carried all of it reached the terminal raw: an ESC in it could repaint the
+  // effect and denial lines printed above, or forge the `session:` line below
+  // (§8). Its own lines and tabs are kept, so a piped answer is unchanged.
+  if (!json) process.stdout.write(`${printableLines(result.text)}\n`)
   if (result.reason !== 'completed') process.stderr.write(`turn ended: ${result.reason}\n`)
   // Said, never folded into the exit code: the task's turn decides that, and a
   // job stopped at the end of a one-shot run is the rule working, not a failure.
   if (result.stoppedJobs > 0) process.stderr.write(`minidsh: ${result.stoppedJobs} background job(s) were still running when the run ended, and were stopped\n`)
+  for (const note of result.notes) process.stderr.write(`minidsh: ${printableText(note)}\n`)
   process.stderr.write(`session: ${result.sessionId}\n`)
   return result.exitCode
 }
 
+/**
+ * A refusal a command can only make once its composition has booted, and
+ * makes before any session exists: still the command line's fault, so it
+ * exits 2 like every other usage failure.
+ */
+class UsageRefusal extends Error {}
+
 function reportError(error: unknown): number {
+  if (error instanceof UsageRefusal) return usage(error.message)
   process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`)
   return 1
+}
+
+/**
+ * Refuses a route no request could be sent on. It is the boot's `prepare`:
+ * the composition has settled, so the mounted providers and their catalogs
+ * are known, and no session exists yet. `--provider anthropic` alone kept the
+ * MODEL of the route it replaced (`anthropic/deepseek-flash`), and that, like
+ * an unknown provider, failed only at the first paid step — after a session
+ * had been stored for it, naming no id that would have worked.
+ *
+ * `over` is the route the flags are merged over: the settings' for a new
+ * session, or the id of the stored session a continuation rebuilds its base
+ * from (read only if the question arises). `whole` also holds the merged
+ * provider to it, for `run`, which sends exactly one turn there. An unknown
+ * MODEL is not refused: an adapter serves ids its catalog does not list, and
+ * only the provider can say (`runNotes` then names the listed ones).
+ */
+function routeCheck(flags: CommonModelFlags, over: AgentOptions | { readonly stored: string }, whole: boolean): (root: Context) => void {
+  return (root) => {
+    const llm = root.tryGet(LLM)
+    if (!llm) return
+    const catalog = llm.providers()
+    const stored = 'stored' in over ? over.stored : undefined
+    const settings = 'stored' in over ? undefined : over
+    const provider = flags.provider ?? (whole ? settings?.provider : undefined)
+    if (provider !== undefined && !llm.hasProvider(provider)) {
+      throw new UsageRefusal(`no provider "${printableText(provider)}" is mounted; the mounted providers are: ${catalog.map((entry) => entry.id).join(', ')}`)
+    }
+    if (flags.provider === undefined || flags.model !== undefined) return
+    const base = settings ?? storedRoute(root, stored!)
+    if (base === undefined || base.provider === flags.provider) return
+    const listed = catalog.find((entry) => entry.id === flags.provider)?.models.map((model) => model.id) ?? []
+    throw new UsageRefusal(
+      `--provider ${flags.provider} needs --model: the model in use (${printableText(base.model)}) is ${printableText(base.provider)}'s. ${flags.provider} lists: ${listed.join(', ')}`,
+    )
+  }
+}
+
+/** The base route a continuation of `id` would rebuild (`agent/options`, or the request header of a log from before it); undefined when there is no such log to read. */
+function storedRoute(root: Context, id: string): { provider: string; model: string } | undefined {
+  try {
+    const events = root.tryGet(PERSISTENCE)?.load(id)?.events
+    return events === undefined ? undefined : (foldAgentOptions(events) ?? foldRequestHeader(events))
+  } catch {
+    // The continuation itself says what is wrong with the log.
+    return undefined
+  }
 }
 
 // ---- commands -----------------------------------------------------------------
@@ -546,6 +656,8 @@ async function runCommand(args: ParsedArgs): Promise<number> {
   if (typeof plan === 'string') return usage(plan)
   const json = args.flags.get('json') === true
   const flags = modelFlags(args)
+  // From here on a reader that went away is no reason to stop (`quietStreams`).
+  quietStreams()
   try {
     const result = await runTask(
       {
@@ -560,6 +672,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
         approve: args.flags.get('approve') === true,
         ...bootFields(plan),
+        prepare: routeCheck(flags, plan.settings.agent, true),
       },
       eventPrinter(json),
     )
@@ -595,6 +708,15 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
   if (typeof plan === 'string') return usage(plan)
   const approve = args.flags.get('approve') === true
   const at = kind === 'fork' && boundary !== undefined && !Number.isNaN(boundary) ? { boundary } : {}
+  if (at.boundary !== undefined) {
+    // "cannot fork inside an open turn" named no point that would work, and
+    // finding one meant reading every row of `sessions show` for `turn/end`.
+    const inside = await withPersistence(plan, (persistence) => forkPointRefusal(persistence, id, at.boundary))
+    if (inside !== undefined) return usage(inside)
+  }
+  const prepare = routeCheck(modelFlags(args), { stored: id }, false)
+  // From here on a reader that went away is no reason to stop (`quietStreams`).
+  quietStreams()
   // Salvage is asked for by name: a fork never quietly continues a damaged log.
   const salvage = kind === 'fork' && args.flags.get('salvage') === true ? { salvage: true } : {}
   if (salvage.salvage === true) {
@@ -619,6 +741,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
         ...(task.length > 0 ? { task } : {}),
         ...(args.flags.get('plain') === true ? { plain: true } : {}),
         ...modelFlags(args),
+        prepare,
       })
     } catch (error) {
       return reportError(error)
@@ -630,6 +753,7 @@ async function continueCommand(args: ParsedArgs, kind: 'resume' | 'fork'): Promi
     id,
     task,
     ...bootFields(plan),
+    prepare,
     ...(plan.preset === undefined ? {} : { preset: plan.preset }),
     ...(plan.agentWorld === undefined ? {} : { world: plan.agentWorld }),
     ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
@@ -651,6 +775,8 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
   const task = args.positional.join(' ').trim()
   const plan = await prepareBoot(args, 'interactive')
   if (typeof plan === 'string') return usage(plan)
+  // From here on a reader that went away is no reason to stop (`quietStreams`).
+  quietStreams()
   try {
     return await runTerminal({
       cwd: cwdFlag(args),
@@ -661,6 +787,9 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
       ...(task.length > 0 ? { task } : {}),
       ...(args.flags.get('plain') === true ? { plain: true } : {}),
       ...modelFlags(args),
+      // Only what the flags name: a settings route this composition cannot
+      // serve is still a session a person can open and `/model` out of.
+      prepare: routeCheck(modelFlags(args), plan.settings.agent, false),
     })
   } catch (error) {
     return reportError(error)
@@ -671,6 +800,10 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
 async function serveCommand(args: ParsedArgs): Promise<number> {
   const plan = await prepareBoot(args, 'none')
   if (typeof plan === 'string') return usage(plan)
+  // Stdout is the frame carrier here, so a client that died is a failed write
+  // on the next frame — possibly one racing the end of stdin that starts the
+  // disposal below. Stdin decides, as under `web --json` (`quietStreams`).
+  quietStreams()
   try {
     const host = await startProtocolHost({
       cwd: cwdFlag(args),
@@ -705,14 +838,6 @@ type WebErrorCode = 'USAGE' | 'CONFIG' | 'EADDRINUSE' | 'EACCES' | 'WORKSPACE' |
  */
 async function webCommand(args: ParsedArgs): Promise<number> {
   const json = args.flags.get('json') === true
-  // Refusals before anything booted exit 2, as every command's usage errors
-  // do; a boot or a listen that failed exits 1, as it always has.
-  const refuse = (code: WebErrorCode, message: string): number => {
-    const before = code === 'USAGE' || code === 'CONFIG' || code === 'WORKSPACE'
-    process.stderr.write(`${before ? '' : 'error: '}${message}\n`)
-    if (json) process.stdout.write(`${JSON.stringify({ type: 'error', code, message })}\n`)
-    return before ? 2 : 1
-  }
   // Until `ready`, a signal ends the process at once, as it always did, but
   // a supervisor is still owed its one record (armStop takes over after).
   const preReady = (signal: NodeJS.Signals): void => {
@@ -724,12 +849,27 @@ async function webCommand(args: ParsedArgs): Promise<number> {
   const unarm = (): void => {
     for (const signal of signals) process.off(signal, preReady)
   }
+  // Refusals before anything booted exit 2, as every command's usage errors
+  // do; a boot or a listen that failed exits 1, as it always has. The record
+  // was written, so the signal handlers that owed one come off with it.
+  const refuse = (code: WebErrorCode, message: string): number => {
+    const before = code === 'USAGE' || code === 'CONFIG' || code === 'WORKSPACE'
+    process.stderr.write(`${before ? '' : 'error: '}${message}\n`)
+    if (json) process.stdout.write(`${JSON.stringify({ type: 'error', code, message })}\n`)
+    unarm()
+    return before ? 2 : 1
+  }
   const plan = await planBoot(args, 'none')
   if ('refused' in plan) return refuse(plan.refused, plan.message)
   const port = args.flags.get('port')
-  if (port !== undefined && (typeof port !== 'string' || !/^\d+$/.test(port))) return refuse('USAGE', '--port takes a number')
+  // In range too: 99999 passed the digits check and failed inside `listen` as
+  // BOOT (exit 1), which tells a supervisor to retry what no retry can fix.
+  if (port !== undefined && (typeof port !== 'string' || !/^\d+$/.test(port) || Number(port) > 65_535)) return refuse('USAGE', '--port takes a number from 0 to 65535')
   const host = args.flags.get('host')
-  if (host !== undefined && typeof host !== 'string') return refuse('USAGE', '--host takes an address')
+  // An EMPTY address is the one that matters: the parser stores '' for a value
+  // flag with nothing after it (`--host`, `--host "$UNSET"`), and `listen`
+  // reads '' as every interface — the opposite of the loopback default.
+  if (host !== undefined && (typeof host !== 'string' || host.trim() === '')) return refuse('USAGE', '--host takes an address')
   const where = webWorkspaces(args)
   if (typeof where === 'string') return refuse('WORKSPACE', where)
   let web: WebHostHandle
@@ -872,7 +1012,18 @@ function exitCodeFor(signal: string): number {
   return number === undefined ? 1 : 128 + number
 }
 
-/** A failed write to stdout or stderr is dropped, never a reason to exit. */
+/**
+ * A failed write to stdout or stderr is dropped, never a reason to exit.
+ *
+ * The bin exits 0 on the first EPIPE (`bin/minidsh.js`), which is right for a
+ * command that only prints (`minidsh --help | head -1`) and wrong for one
+ * that is running something: `run … | head -2` stopped in the middle of a
+ * paid turn with status 0 — no `turn/end`, its lease left on disk, a job
+ * still running — and `serve` could exit part way through its disposal. So
+ * every command that drives or hosts a turn (`run`, `resume`, `fork`, `chat`,
+ * `serve`, and `web` once it is ready) calls this before it starts: the turn
+ * finishes, disposes, and the exit code is its own.
+ */
 function quietStreams(): void {
   for (const stream of [process.stdout, process.stderr]) {
     stream.removeAllListeners('error')
@@ -913,6 +1064,7 @@ const AUTHORITY_SENSITIVE_PLUGINS = new Set([
   'core-authority-invariant',
   'core-agent-invariant',
   'core-agent-loop-invariant',
+  'core-jobs-invariant',
   'composition-record',
   'fs-local',
   'shell-stdio',
@@ -953,72 +1105,87 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     const effective = plan.effective
     for (const warning of plan.warnings) process.stderr.write(`warn: ${warning}\n`)
     const touched = (id: string): string => effective.provenance.get(id) ?? 'built-in'
-    if (args.flags.get('json') === true) {
-      const rows = effective.rows.map((row) => {
-        let invalidConfig: string | undefined
-        if (row.disabled !== true && row.plugin.config) {
-          try {
-            row.plugin.config.parse(row.config)
-          } catch (error) {
-            invalidConfig = describeConfigError(error)
-          }
-        }
-        return {
-          id: row.id,
-          plugin: row.plugin.name,
-          ...(row.disabled === true ? { disabled: true } : {}),
-          layer: touched(row.id),
-          ...(invalidConfig === undefined ? {} : { invalidConfig }),
-        }
-      })
-      const agentPresets = [...plan.loaded.agentPresets].map(([name, spec]) => ({ name, rows: spec.rows.map((row) => ({ id: row.id, plugin: row.plugin })) }))
-      process.stdout.write(
-        `${JSON.stringify({ hash: effective.descriptor.hash, layers: effective.descriptor.layers, agentDefaults: plan.settings.agent, rows, agentPresets }, null, 2)}\n`,
-      )
-      return rows.some((row) => row.invalidConfig !== undefined) ? 1 : 0
-    }
-    process.stdout.write(`composition ${effective.descriptor.hash} (layers: ${effective.descriptor.layers.join(' → ')})\n`)
-    process.stdout.write(`agent defaults: ${plan.settings.agent.provider}/${plan.settings.agent.model}\n\n`)
-    const warnings: string[] = []
-    // What a boot would refuse, this command must refuse too: every enabled
-    // row's config is parsed against the plugin's contract, exactly as load does.
-    const invalid: string[] = []
-    for (const row of effective.rows) {
-      if (row.disabled === true || !row.plugin.config) continue
-      try {
-        row.plugin.config.parse(row.config)
-      } catch (error) {
-        invalid.push(`row "${row.id}" (${row.plugin.name}): invalid config: ${describeConfigError(error)}`)
-      }
-    }
-    for (const row of effective.rows) {
+    // Judged ONCE, before either view: the JSON view used to return before
+    // the marks were computed, so a machine reader got provenance and no sign
+    // that a layer had touched an authority-sensitive row.
+    const rows = effective.rows.map((row) => {
       const layer = touched(row.id)
       const sensitive = layer !== 'built-in' && (AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin.name) || !BUILTIN_PLUGIN_OBJECTS.has(row.plugin))
-      const marks = [row.disabled === true ? 'disabled' : undefined, sensitive ? '!' : undefined].filter((mark) => mark !== undefined)
-      process.stdout.write(`  ${row.id.padEnd(22)} ${row.plugin.name.padEnd(28)} ${layer}${marks.length > 0 ? `  [${marks.join(' ')}]` : ''}\n`)
-      if (sensitive) {
-        // A built-in row a layer touched was modified (or disabled); a row the
-        // layer brought in was added.
-        const verb = row.disabled === true ? 'DISABLED' : plan.baseIds.has(row.id) ? 'modified' : 'added'
-        warnings.push(`layer "${layer}" ${verb} authority-sensitive row "${row.id}" (${row.plugin.name})`)
+      // What a boot would refuse, this command must refuse too: every enabled
+      // row's config is parsed against the plugin's contract, exactly as load does.
+      let invalidConfig: string | undefined
+      if (row.disabled !== true && row.plugin.config) {
+        try {
+          row.plugin.config.parse(row.config)
+        } catch (error) {
+          invalidConfig = describeConfigError(error)
+        }
       }
-    }
+      return { row, layer, sensitive, invalidConfig }
+    })
     // Agent presets are composition too: they mount plugins into an agent's
     // world, so the same authority check applies. A preset naming
     // `approval-headless{approve:true}` grants blanket consent to every agent
     // it composes, and it used to print as an ordinary row.
-    if (plan.loaded.agentPresets.size > 0) {
+    const presets = [...plan.loaded.agentPresets].map(([name, spec]) => ({
+      name,
+      rows: spec.rows,
+      sensitive: spec.rows.filter((row) => AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin) || !builtinPlugins.has(row.plugin)),
+    }))
+    const warnings = [
+      // A built-in row a layer touched was modified (or disabled); a row the
+      // layer brought in was added.
+      ...rows.flatMap(({ row, layer, sensitive }) =>
+        sensitive ? [`layer "${layer}" ${row.disabled === true ? 'DISABLED' : plan.baseIds.has(row.id) ? 'modified' : 'added'} authority-sensitive row "${row.id}" (${row.plugin.name})`] : [],
+      ),
+      ...presets.flatMap(({ name, sensitive }) => sensitive.map((row) => `agent preset "${name}" mounts authority-sensitive row "${row.id}" (${row.plugin}) into every agent it composes`)),
+    ]
+    // On stderr in both views: they are about the deployment, not about how it is printed.
+    for (const warning of warnings) process.stderr.write(`warn: ${warning}\n`)
+    const invalid = rows.some(({ invalidConfig }) => invalidConfig !== undefined)
+    if (args.flags.get('json') === true) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            hash: effective.descriptor.hash,
+            layers: effective.descriptor.layers,
+            agentDefaults: plan.settings.agent,
+            rows: rows.map(({ row, layer, sensitive, invalidConfig }) => ({
+              id: row.id,
+              plugin: row.plugin.name,
+              ...(row.disabled === true ? { disabled: true } : {}),
+              layer,
+              ...(sensitive ? { sensitive: true } : {}),
+              ...(invalidConfig === undefined ? {} : { invalidConfig }),
+            })),
+            agentPresets: presets.map(({ name, rows: presetRows, sensitive }) => ({
+              name,
+              rows: presetRows.map((row) => ({ id: row.id, plugin: row.plugin })),
+              ...(sensitive.length === 0 ? {} : { sensitive: sensitive.map((row) => row.id) }),
+            })),
+          },
+          null,
+          2,
+        )}\n`,
+      )
+      return invalid ? 1 : 0
+    }
+    process.stdout.write(`composition ${effective.descriptor.hash} (layers: ${effective.descriptor.layers.join(' → ')})\n`)
+    process.stdout.write(`agent defaults: ${plan.settings.agent.provider}/${plan.settings.agent.model}\n\n`)
+    for (const { row, layer, sensitive } of rows) {
+      const marks = [row.disabled === true ? 'disabled' : undefined, sensitive ? '!' : undefined].filter((mark) => mark !== undefined)
+      process.stdout.write(`  ${row.id.padEnd(22)} ${row.plugin.name.padEnd(28)} ${layer}${marks.length > 0 ? `  [${marks.join(' ')}]` : ''}\n`)
+    }
+    if (presets.length > 0) {
       process.stdout.write(`\nagent presets:\n`)
-      for (const [name, spec] of plan.loaded.agentPresets) {
-        const sensitive = spec.rows.filter((row) => AUTHORITY_SENSITIVE_PLUGINS.has(row.plugin) || !builtinPlugins.has(row.plugin))
-        const marks = sensitive.length > 0 ? '  [!]' : ''
-        process.stdout.write(`  ${name.padEnd(22)} ${spec.rows.map((row) => `${row.id}(${row.plugin})`).join(', ')}${marks}\n`)
-        for (const row of sensitive) warnings.push(`agent preset "${name}" mounts authority-sensitive row "${row.id}" (${row.plugin}) into every agent it composes`)
+      for (const { name, rows: presetRows, sensitive } of presets) {
+        process.stdout.write(`  ${name.padEnd(22)} ${presetRows.map((row) => `${row.id}(${row.plugin})`).join(', ')}${sensitive.length > 0 ? '  [!]' : ''}\n`)
       }
     }
-    for (const warning of warnings) process.stderr.write(`warn: ${warning}\n`)
-    for (const line of invalid) process.stderr.write(`error: ${line}\n`)
-    return invalid.length > 0 ? 1 : 0
+    for (const { row, invalidConfig } of rows) {
+      if (invalidConfig !== undefined) process.stderr.write(`error: row "${row.id}" (${row.plugin.name}): invalid config: ${invalidConfig}\n`)
+    }
+    return invalid ? 1 : 0
   } catch (error) {
     return reportError(error)
   }
@@ -1081,6 +1248,44 @@ function pendingClosers(stored: StoredSession): EventEnvelope[] {
   } catch {
     return []
   }
+}
+
+/** A fold over a stored log's payloads, or `fallback` when one cannot be read: the view still prints the rest. */
+function safely<T>(fold: () => T, fallback: T): T {
+  try {
+    return fold()
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * Why `--at seq` cannot be a fork point of `id`, or undefined when it can (or
+ * when the fork itself will say what is wrong: no such log, a seq out of
+ * range). The rule is the fork's own (`sliceForkSeed`): no turn may be open at
+ * the boundary. This adds what that refusal cannot know to say from inside a
+ * slice — where the turn around `seq` begins and ends, so the person has a
+ * number to type next.
+ */
+function forkPointRefusal(persistence: Persistence, id: string, seq: number): string | undefined {
+  const read = safely(() => readStored(persistence, id), 'unreadable')
+  if (typeof read === 'string') return undefined
+  const events = read.events
+  if (seq < 0 || seq >= events.length) return undefined
+  let start: number | undefined
+  for (let i = seq; i >= 0 && start === undefined; i--) {
+    const type = events[i]!.type
+    if (type === TURN_END.type) return undefined
+    if (type === TURN_START.type) start = i
+  }
+  if (start === undefined) return undefined
+  const ends = events.filter((event) => event.type === TURN_END.type).map((event) => event.seq)
+  const before = ends.findLast((end) => end < seq)
+  const after = ends.find((end) => end > seq)
+  const nearest = [...(before === undefined ? [] : [`${before} (before)`]), ...(after === undefined ? [] : [`${after} (after)`])]
+  const turn = `the turn that starts at seq ${start}${after === undefined ? ' and never ended' : ` and ends at ${after}`}`
+  const points = nearest.length === 0 ? 'this log records no turn end to fork at' : `the nearest turn ${nearest.length === 1 ? 'end is' : 'ends are'} seq ${nearest.join(' and ')}`
+  return `--at ${seq} is inside ${turn}, and a fork needs a point where no turn is open: ${points} (\`minidsh sessions inspect ${printableText(id)}\` lists every one)`
 }
 
 /** A stored log, or the line saying why there is none to read: absent, or of a newer format (which is not damage). */
@@ -1226,7 +1431,10 @@ function skillLines(cwd: string, found: SkillDiscovery): string[] {
  * declared set is only known once each row has minted its own reference — a
  * layer may rename one (`apiKeyEnv`) — so it mounts the effective composition
  * on a throwaway root, as a boot would, with no agent, no session and no
- * surface, and reads `declaredRefs()`.
+ * surface, and reads `declaredRefs()`. It also names what the store holds
+ * that no mounted row declares (`credentialSources`' `unused`): a key saved
+ * for a row that is not mounted is otherwise a save that seems to have gone
+ * nowhere.
  *
  * `set NAME` reads the value from stdin alone (argv lands in shell history
  * and in every process listing; an environment is inherited): hidden on a
@@ -1305,15 +1513,20 @@ async function listCredentials(plan: BootPlan, store: string | undefined, json: 
   } catch (error) {
     return reportError(error)
   }
-  const { sources, problem } = credentialSources(store, refs)
+  // `unused`: what `set` saved and no mounted row reads. `credentials set
+  // TAVILY_API_KEY` answered "saved" and this list then showed three other
+  // names, as if the save had gone nowhere. The row that would read it is not
+  // mounted (web search is opt-in), which is the thing to say.
+  const { sources, unused, problem } = credentialSources(store, refs)
   if (problem !== undefined) stderrLogger.warn(problem)
   if (json) {
-    process.stdout.write(`${JSON.stringify({ home: resolveHome(), store: store ?? null, refs: sources })}\n`)
+    process.stdout.write(`${JSON.stringify({ home: resolveHome(), store: store ?? null, refs: sources, unused })}\n`)
     return 0
   }
   if (sources.length === 0) process.stdout.write('this composition declares no credential\n')
-  const width = Math.max(0, ...sources.map((entry) => entry.name.length))
+  const width = Math.max(0, ...sources.map((entry) => entry.name.length), ...unused.map((name) => name.length))
   for (const entry of sources) process.stdout.write(`${entry.name.padEnd(width)}  ${entry.source}\n`)
+  for (const name of unused) process.stdout.write(`${printableText(name).padEnd(width)}  stored, and read by no mounted row\n`)
   process.stdout.write(`store: ${store ?? 'none (no enabled credentials-local row names a path)'}\n`)
   return 0
 }
@@ -1391,7 +1604,12 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         // positions for anything already cutting this output apart. A title has
         // no tabs by construction: the fold collapses whitespace.
         // Each column neutralized: a stored header is not this runtime's word.
-        process.stdout.write(`${printableText(header.id)}\t${new Date(header.createdAt).toISOString()}\t${printableText(header.cwd)}\t${printableText(title ?? '')}${printableText(lineage)}\n`)
+        // Nor is its SHAPE: the store lists any header with an id and a
+        // numeric `createdAt`, and one header with no `cwd`, or a time outside
+        // a date's range, used to throw here and take every other row with it.
+        const created = new Date(header.createdAt)
+        const when = Number.isNaN(created.getTime()) ? printableText(String(header.createdAt)) : created.toISOString()
+        process.stdout.write(`${printableText(header.id)}\t${when}\t${printableText(String(header.cwd ?? ''))}\t${printableText(title ?? '')}${printableText(lineage)}\n`)
       }
       return 0
     })
@@ -1401,10 +1619,13 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
     if (!id) return usage(`usage: ${usageFor('sessions')}`)
     // Two views of one log, not a combination: one of them would be dropped.
     if (args.flags.get('json') === true && args.flags.get('audit') === true) return usage('"sessions show" takes --json or --audit, not both')
-    return withPersistence(plan, (persistence, attachments) => {
+    return withPersistence(plan, (persistence, attachments, storeRoot) => {
       const read = readStored(persistence, id)
       if (typeof read === 'string') {
-        process.stderr.write(`${read}\n`)
+        // A file whose header cannot be read is not a missing session
+        // (`coldReadCommand` says the same, in the same words).
+        const unreadable = read.startsWith('no session') ? unreadableHeader(storeRoot, id) : undefined
+        process.stderr.write(`${unreadable === undefined ? read : `session "${id}": its log exists and cannot be read at all: ${unreadable}`}\n`)
         return 1
       }
       const stored = read
@@ -1413,6 +1634,15 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         // A crashed log nobody resumed yet: the call in flight is only a line
         // once something repairs it, so the audit shows what a resume would say.
         for (const line of auditLines(stored.events, pendingClosers(stored))) process.stdout.write(`${line}\n`)
+        if (stored.damaged) {
+          // The view a person opens after something went wrong must not read
+          // as complete when reading stopped at damage: a last line of the
+          // audit itself (it may be saved or piped), and the plain view's warning.
+          const stop = stored.integrity?.stop
+          const where = stop === undefined ? '' : ` at line ${stop.line} (${stop.reason})`
+          process.stdout.write(`${printableText(`${String(stored.events.length).padStart(4)}  damaged     the log stops being readable here${where}: whatever it recorded after this is not in this audit`)}\n`)
+          process.stderr.write('warning: the stored log is damaged beyond this point\n')
+        }
       } else if (args.flags.get('json') === true) {
         for (const event of stored.events) process.stdout.write(`${JSON.stringify({ sessionId: stored.header.id, event })}\n`)
         // Machine readers must see damage too: a trailer object (no `event` field) a frame consumer skips.
@@ -1434,8 +1664,12 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         // against the window the log itself names for the route in use; a log
         // from before `request/context` existed prints the numbers alone.
         const window = foldRequestContext(stored.events)?.contextWindow ?? 0
-        const metrics = meterSession(stored.events, window)
-        if (metrics.sessionInput + metrics.sessionOutput + metrics.sessionCacheRead > 0) {
+        // `safely`, here and over the images below: a stored payload is not
+        // this runtime's word, and a known kind with a wrong shape (a hand
+        // edit, another tool's log) must cost its own summary line, not the
+        // rows that follow. The title fold above guards its own payloads.
+        const metrics = safely(() => meterSession(stored.events, window), undefined)
+        if (metrics !== undefined && metrics.sessionInput + metrics.sessionOutput + metrics.sessionCacheRead > 0) {
           const ratio = window > 0 ? ` (${Math.round(metrics.ratio * 100)}% of ${formatTokens(window)})` : ''
           process.stdout.write(
             `usage: ${formatTokens(metrics.sessionInput)} in · ${formatTokens(metrics.sessionCacheRead)} cached · ` +
@@ -1456,12 +1690,14 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
         if (attachments) {
           const seen = new Map<string, string>()
           for (const event of stored.events) {
-            const message = matches(event, TOOL_RESULT) ? event.data.message : matches(event, USER_MESSAGE) ? event.data.message : undefined
-            if (!message) continue
-            for (const ref of collectImageRefs(message.content).values()) {
-              const where = attachments.hostPath(ref)
-              if (where !== undefined) seen.set(ref.id, where)
-            }
+            safely(() => {
+              const message = matches(event, TOOL_RESULT) ? event.data.message : matches(event, USER_MESSAGE) ? event.data.message : undefined
+              if (!message) return
+              for (const ref of collectImageRefs(message.content).values()) {
+                const where = attachments.hostPath(ref)
+                if (where !== undefined) seen.set(ref.id, where)
+              }
+            }, undefined)
           }
           for (const [ref, where] of seen) process.stdout.write(`      ${ref.slice(0, 19)}… ${where}\n`)
         }
@@ -1475,6 +1711,7 @@ async function sessionsCommand(args: ParsedArgs): Promise<number> {
 
 export async function main(argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv)
+  warned.clear()
   switch (args.command) {
     case 'run':
       return runCommand(args)
@@ -1499,12 +1736,19 @@ export async function main(argv: readonly string[]): Promise<number> {
     case 'version':
       process.stdout.write(`minidsh ${VERSION}\n`)
       return 0
-    default:
+    default: {
       if (args.helpFor !== undefined) {
         process.stdout.write(`usage: ${usageFor(args.helpFor)}\n`)
         return 0
       }
-      process.stdout.write(
+      // Help that was asked for is output; the same text after a command
+      // nobody has is a refusal, so it goes to stderr under a line that names
+      // the mistake (`minidsh runn "hi"` used to print all of this on stdout
+      // and never say `runn`).
+      const asked = args.command === 'help'
+      const out = asked ? process.stdout : process.stderr
+      if (!asked) process.stderr.write(`minidsh: unknown command "${printableText(args.command)}"\n\n`)
+      out.write(
         [
           'MiniDSH — usage:',
           ...Object.keys(COMMANDS).map((command) => `  ${usageFor(command)}`),
@@ -1512,6 +1756,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           '',
           'config:    ~/.minidsh/composition.json + settings.json layer over the built-ins;',
           '           --patch <file> (repeatable) layers after them on any command',
+          'model:     --provider and --model, else MINIDSH_MODEL (the model alone), else settings.json, else the built-in default',
           'authority: --sandbox read-only|workspace-write|danger-full-access (default workspace-write)',
           '           --ask ask|never; --approve answers every request yes (headless runs; chat, serve and web then never ask)',
           '           --accept full|none: what a session accepts from a host that cannot confine the shell (default full)',
@@ -1522,6 +1767,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           '',
         ].join('\n'),
       )
-      return args.command === 'help' ? 0 : 2
+      return asked ? 0 : 2
+    }
   }
 }

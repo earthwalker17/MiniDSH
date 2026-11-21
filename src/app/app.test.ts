@@ -286,11 +286,18 @@ describe('headless runner (real composition, scripted model)', () => {
     const root = await bootComposition({ sessionsRoot, logger: silent, ...scripted(new ScriptedAdapter()) })
     try {
       const composition = root.get(COMPOSITION)
+      const before = root.get(TOOLS).get('str_replace_editor')
+      expect(before).toBeDefined()
       await expect(composition.reconfigure('tool-editor', { maxOutputChars: 'lots' })).rejects.toThrowError(/cannot reconfigure row "tool-editor": invalid config/)
-      // The old instance was never disposed: the editor is still registered.
-      expect(root.get(TOOLS).get('str_replace_editor')).toBeDefined()
+      // The old instance was never disposed: the editor registered is the SAME
+      // one, and the row still holds the config it was running on.
+      expect(root.get(TOOLS).get('str_replace_editor')).toBe(before)
+      expect(composition.rows().find((row) => row.id === 'tool-editor')?.config).toEqual({})
       await composition.reconfigure('tool-editor', { maxOutputChars: 500 })
+      // And an accepted one did remount: a fresh instance's tool, on the new config.
       expect(root.get(TOOLS).get('str_replace_editor')).toBeDefined()
+      expect(root.get(TOOLS).get('str_replace_editor')).not.toBe(before)
+      expect(composition.rows().find((row) => row.id === 'tool-editor')?.config).toEqual({ maxOutputChars: 500 })
     } finally {
       await root.dispose()
     }
@@ -841,7 +848,11 @@ describe('the CLI front door', () => {
     expect(await quiet(() => main(['web', '-h']))).toBe(0)
   })
 
-  it('refuses a flag a command does not list, for every command in the table', async () => {
+  // The exit codes of the cases that were once accepted and ignored. That
+  // EVERY command in the table refuses an unlisted flag, in the refusal's own
+  // words, is `cli.test.ts`: the list below is eight names typed here, and
+  // `sessions x` exits 2 for being no subcommand whatever its flags are.
+  it('refuses a flag a command does not list, with exit 2', async () => {
     // `resume <id> --at 12` used to resume at the log head silently; `chat --json` printed a terminal.
     for (const command of ['run', 'chat', 'resume', 'fork', 'serve', 'web', 'config', 'sessions']) {
       expect(await quiet(() => main([command, 'x', '--frobnicate']))).toBe(2)

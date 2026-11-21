@@ -121,15 +121,25 @@ export type CredentialSource = 'env' | 'store' | 'absent'
  * no value, not even a prefix. `problem` is why the store, if it exists,
  * cannot be read: every one of its references then reports `absent`, exactly
  * as `resolve` would treat it.
+ *
+ * `unused` is the other half of that report: the names the store holds a
+ * value under that were NOT asked about. A key saved for a row that is not
+ * mounted (web search is opt-in) resolves for nobody, and a list of the
+ * declared names alone made the save look as if it had gone nowhere.
  */
-export function credentialSources(path: string | undefined, refs: readonly CredentialRef[]): { readonly sources: readonly { readonly name: CredentialRef; readonly source: CredentialSource }[]; readonly problem?: string } {
+export function credentialSources(
+  path: string | undefined,
+  refs: readonly CredentialRef[],
+): { readonly sources: readonly { readonly name: CredentialRef; readonly source: CredentialSource }[]; readonly unused: readonly string[]; readonly problem?: string } {
   let read: StoreRead | undefined
   const once = (): StoreRead => (read ??= readStore(path!))
   const sources = refs.map((name) => ({ name, source: lookup(path, name, once).source }))
   // Read even when every reference came from the environment: a broken store
   // is worth saying whichever layer happens to answer today.
   if (path !== undefined) once()
-  return { sources, ...(read?.state === 'unusable' ? { problem: `credentials store ${path} ${read.why}` } : {}) }
+  const asked = new Set<string>(refs)
+  const unused = read?.state === 'read' ? Object.entries(read.store).flatMap(([name, value]) => (!asked.has(name) && present(value) !== undefined ? [name] : [])) : []
+  return { sources, unused, ...(read?.state === 'unusable' ? { problem: `credentials store ${path} ${read.why}` } : {}) }
 }
 
 /** Windows refuses a rename over a file another process has open for a moment; a reader's open is brief. */

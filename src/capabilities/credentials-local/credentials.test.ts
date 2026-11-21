@@ -104,7 +104,7 @@ describe('credentials-local', () => {
 
     expect(credentials.resolve(REF)).toBe('marked')
     expect(warnings).toEqual([])
-    expect(credentialSources(store, [REF])).toEqual({ sources: [{ name: REF, source: 'store' }] })
+    expect(credentialSources(store, [REF])).toEqual({ sources: [{ name: REF, source: 'store' }], unused: [] })
     expect(updateCredentialStore(store, credentialRef('MINIDSH_TEST_OTHER'), 'added')).toBe(true)
     expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ MINIDSH_TEST_SECRET: 'marked', MINIDSH_TEST_OTHER: 'added' })
 
@@ -233,10 +233,17 @@ describe('the source report (credentialSources)', () => {
     dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-'))
     const store = join(dir, 'credentials.json')
     const OTHER = credentialRef('MINIDSH_TEST_OTHER')
-    expect(credentialSources(store, [REF, OTHER])).toEqual({ sources: [{ name: REF, source: 'absent' }, { name: OTHER, source: 'absent' }] })
+    expect(credentialSources(store, [REF, OTHER])).toEqual({ sources: [{ name: REF, source: 'absent' }, { name: OTHER, source: 'absent' }], unused: [] })
     writeFileSync(store, JSON.stringify({ MINIDSH_TEST_SECRET: 'from-file', MINIDSH_TEST_OTHER: '  ' }))
     // A blank stored value is absent, exactly as resolve reads it.
     expect(credentialSources(store, [REF, OTHER]).sources).toEqual([{ name: REF, source: 'store' }, { name: OTHER, source: 'absent' }])
+    // What the store holds a value under and nobody asked about: named, never
+    // valued. A blank one holds nothing, and one that was asked about is not unused.
+    writeFileSync(store, JSON.stringify({ MINIDSH_TEST_SECRET: 'from-file', MINIDSH_TEST_OTHER: 'kept', MINIDSH_TEST_BLANK: ' ', MINIDSH_TEST_COUNT: 3 }))
+    expect(credentialSources(store, [REF]).unused).toEqual(['MINIDSH_TEST_OTHER'])
+    expect(credentialSources(store, [REF, OTHER]).unused).toEqual([])
+    expect(JSON.stringify(credentialSources(store, [REF]))).not.toContain('kept')
+    writeFileSync(store, JSON.stringify({ MINIDSH_TEST_SECRET: 'from-file', MINIDSH_TEST_OTHER: '  ' }))
     process.env.MINIDSH_TEST_SECRET = 'from-env'
     expect(credentialSources(store, [REF]).sources).toEqual([{ name: REF, source: 'env' }])
     // A blank environment value falls through to the store.

@@ -87,6 +87,22 @@ describe('minidsh credentials', () => {
     expect(listed(dir)).toMatchObject({ DEEPSEEK_API_KEY: 'absent' })
   })
 
+  // What PowerShell's pipe puts after a value (`"sk-…" | minidsh credentials set NAME`).
+  // The one trailing line ending is not part of the key, in either spelling:
+  // with only LF stripped the CR stayed, and the save was refused as a value
+  // "a request header cannot carry" — on the platform's own shell.
+  it('takes a value that ends in CR LF and saves it without the CR', { timeout: 120_000 }, () => {
+    const dir = home()
+    const CRLF = String.fromCharCode(13, 10)
+    const set = cli(dir, ['credentials', 'set', 'DEEPSEEK_API_KEY'], { input: `${SECRET}${CRLF}` })
+    expect(set.code, set.err).toBe(0)
+    expect(JSON.parse(readFileSync(join(dir, 'credentials.json'), 'utf8'))).toEqual({ DEEPSEEK_API_KEY: SECRET })
+    // One line ending, not every one: a second is content, and refused.
+    const twice = cli(dir, ['credentials', 'set', 'OPENAI_API_KEY'], { input: `${SECRET}${CRLF}${CRLF}` })
+    expect(twice.code, twice.err).toBe(2)
+    expect(twice.err).toMatch(/cannot carry/)
+  })
+
   it('refuses a value a request header cannot carry, and an empty one, naming the rule and never the value', { timeout: 120_000 }, () => {
     const dir = home()
     const store = join(dir, 'credentials.json')
