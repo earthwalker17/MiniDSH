@@ -1034,10 +1034,27 @@ describe('a workspace folder that no longer exists', () => {
  */
 describe.skipIf(!available)('a confinement wrapper that fails, and a command that only mentions one', () => {
   const policyIn = (root: string): SandboxExecutionPolicy => ({ mode: 'workspace-write', workspaceRoot: root })
-  /** A wrapper that works: another process, which runs the shell it was given and exits as it did. */
+  /**
+   * A wrapper that works: another process, which runs the shell it was given
+   * and exits as it did.
+   *
+   * `windowsHide`, because the stand-in must start the shell the way the
+   * product does: with no console. This wrapper has none itself (the harness
+   * spawns it hidden), and Windows gives a console program started from a
+   * console-less parent a NEW console unless told otherwise. A pwsh that
+   * begins that way and then runs the containment line now and then dies
+   * before its command with `Fatal error. Internal CLR error. (0x80131506)`,
+   * exit 3221225477: 3 of 550 runs under load, against 0 of 550 with the
+   * window hidden and 0 of 750 spawned directly, as the product spawns every
+   * pwsh (measured 2026-11-22, PowerShell 7.6). It failed the job test here
+   * twice in about seventeen full runs before it was traced.
+   */
   const running = (root: string): Confinement => {
     const runner = join(root, 'wrapper.cjs')
-    writeFileSync(runner, "const [cmd, ...args] = process.argv.slice(2); const run = require('node:child_process').spawnSync(cmd, args, { stdio: 'inherit' }); process.exit(run.status ?? 1)\n")
+    writeFileSync(
+      runner,
+      "const [cmd, ...args] = process.argv.slice(2); const run = require('node:child_process').spawnSync(cmd, args, { stdio: 'inherit', windowsHide: true }); process.exit(run.status ?? 1)\n",
+    )
     return { ...NO_CONFINEMENT, id: 'bwrap', enforcement: 'full', runnerFailureSignatures: ['bwrap: '], wrap: (cmd, args) => ({ cmd: process.execPath, args: [runner, cmd, ...args] }) }
   }
   /** A wrapper that dies before it runs anything, saying `line` on stderr, the way bwrap reports its own failure. */
