@@ -2,7 +2,7 @@
 
 All notable changes to MiniDSH are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The session-by-session engineering record, with what each session measured, lives in [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
-## [Unreleased]
+## [2.0.0] — 2026-11-21
 
 ### Added
 
@@ -211,6 +211,7 @@ The first public release: the smallest MiniDSH a developer can install, point at
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §13. The ones most likely to matter on day one: Windows has no shell confinement backend, so every shell command there costs one approval; confinement bounds file effects only, not the network or the environment; the filesystem fence cannot follow hard links.
 
+[2.0.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v2.0.0
 [1.2.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v1.2.0
 [1.1.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v1.1.0
 [1.0.0]: https://github.com/earthwalker17/MiniDSH/releases/tag/v1.0.0

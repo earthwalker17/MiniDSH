@@ -1,7 +1,7 @@
 {
   "name": "minidsh-desktop",
   "productName": "MiniDSH",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
   "description": "The MiniDSH desktop app: one window over the minidsh runtime and its Web UI",
   "license": "MIT",
