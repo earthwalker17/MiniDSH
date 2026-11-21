@@ -183,8 +183,25 @@ function parkedAt(pid: number): string {
   const sampled = spawnSync('sample', [String(pid), '1', '-mayDie'], { encoding: 'utf8', timeout: 30_000 })
   const out = String(sampled.stdout ?? '')
   const start = out.indexOf('Call graph:')
-  if (start === -1) return `\nsample: no call graph (${String(sampled.stderr ?? '').trim().slice(0, 200) || `status ${sampled.status}`})`
-  return `\nmain thread (sample):\n${out.slice(start).split('\n').slice(0, 45).join('\n')}`
+  if (start === -1) {
+    const said = `${String(sampled.stderr ?? '').trim()} | ${out.trim()}`.slice(0, 400)
+    return `\nsample: no call graph (status ${String(sampled.status)}, pid ${alive(pid) ? 'alive' : 'gone'}): ${said}`
+  }
+  const graph = out.slice(start).split('\n')
+  // The main thread is the first block; the next `Thread_` header ends it.
+  const next = graph.findIndex((line, index) => index > 1 && /^\s+\d+\s+Thread_/.test(line))
+  // Tree marks and addresses say nothing here; a symbol name is what is read.
+  const main = (next === -1 ? graph : graph.slice(0, next)).map((line) =>
+    line
+      .replace(/^[\s+!:|]+/, '')
+      .replace(/\s+\[0x[0-9a-f]+\]\s*$/, '')
+      .slice(0, 170),
+  )
+  // The outer frames are the run loop every app sits in. The INNERMOST say
+  // what it waits on, and the first version of this cut them off (S22.5: 45
+  // lines of a stack whose leaf was the answer).
+  const shown = main.length <= 64 ? main : [...main.slice(0, 10), `… ${main.length - 60} frames …`, ...main.slice(-50)]
+  return `\nmain thread (sample, innermost frames last):\n${shown.join('\n')}`
 }
 
 /** Whether a process is alive (signal 0). */

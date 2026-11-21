@@ -437,6 +437,9 @@ function requestQuit(): void {
     applyPendingChanges()
     await stopRuntime(false)
     exiting = true
+    // Both ends of the quit are logged: an app that stayed up after its
+    // runtime stopped (seen on a macOS runner, S22.5) must say how far it got.
+    log('quit: runtime stopped, closing')
     app.quit()
   }, true)
 }
@@ -949,6 +952,7 @@ app.on('before-quit', (event) => {
 app.on('window-all-closed', () => {
   if (exiting) app.quit()
 })
+app.on('will-quit', () => log('quit: every window closed'))
 
 void app.whenReady().then(() => {
   logsDir = app.getPath('logs')
