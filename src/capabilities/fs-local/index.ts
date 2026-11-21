@@ -60,8 +60,14 @@ async function boundedRead(target: FsTarget, options: FsReadOptions): Promise<{ 
   let handle: FileHandle
   try {
     handle = await open(target.path, READ_FLAGS)
-  } catch {
-    throw new FsError('FS_NOT_FOUND', `cannot read "${target.displayPath}"`)
+  } catch (error) {
+    // "Not found" only for a path that is not there. A file another process
+    // holds (EBUSY), one this user may not read (EPERM, EACCES) or a host out
+    // of descriptors is a file that EXISTS: told otherwise, a model's next
+    // move is to create it, which then fails FS_EXISTS.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw new FsError('FS_NOT_FOUND', `cannot read "${target.displayPath}"`)
+    throw new FsError('FS_IO', `cannot read "${target.displayPath}" (${code ?? 'unknown error'})`)
   }
   try {
     const info = await handle.stat()

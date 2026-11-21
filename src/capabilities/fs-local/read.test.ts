@@ -5,8 +5,8 @@
  * `/proc/self/pagemap`: a regular file of size 0 whose read never ends.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
@@ -100,6 +100,44 @@ describe('fs-local reads are bounded by the bytes they read', () => {
     const held = process.memoryUsage().arrayBuffers - before
     expect(read.bytes.length).toBeGreaterThan(256 * 1024)
     expect(held, `${read.bytes.length} bytes read, ${held} bytes of ArrayBuffer held`).toBeLessThan(64 * 1024 * 1024)
+  })
+})
+
+/**
+ * FS_NOT_FOUND means the path is not there, and nothing else: every failed
+ * open used to answer it, so a file the editor had just listed — held by
+ * another process, or closed to this user — was reported as not existing, and
+ * a model that then tried to create it met FS_EXISTS (S22.5 audit).
+ */
+describe('fs-local says why a read could not open the file', () => {
+  /** Closes a file to its own user, the way each platform can; returns the undo. */
+  function denyRead(path: string): () => void {
+    if (process.platform === 'win32') {
+      const user = userInfo().username
+      execFileSync('icacls', [path, '/deny', `${user}:(R)`], { stdio: 'ignore' })
+      return () => execFileSync('icacls', [path, '/remove:d', user], { stdio: 'ignore' })
+    }
+    chmodSync(path, 0o000)
+    return () => chmodSync(path, 0o644)
+  }
+
+  // Root reads through any mode bits, so there is nothing to refuse it with.
+  it.skipIf(process.getuid?.() === 0)('answers FS_IO with the errno for a file that exists and may not be read, FS_NOT_FOUND only for one that is absent', async () => {
+    const workspace = tempDir()
+    writeFileSync(join(workspace, 'closed.txt'), 'here')
+    const fs = await localFs(workspace)
+    const closed = fs.resolve('closed.txt', workspace)
+    const restore = denyRead(closed.path)
+    try {
+      for (const read of [() => fs.readBytes(closed, {}), () => fs.readText(closed, {})]) {
+        await expect(read()).rejects.toMatchObject({ code: 'FS_IO', message: expect.stringMatching(/cannot read "closed\.txt" \((EPERM|EACCES)\)/) })
+      }
+    } finally {
+      restore()
+    }
+    // The positive control: the same file, readable again, and a path that is really absent.
+    expect((await fs.readText(closed, {})).text).toBe('here')
+    await expect(fs.readBytes(fs.resolve('absent.txt', workspace), {})).rejects.toMatchObject({ code: 'FS_NOT_FOUND' })
   })
 })
 

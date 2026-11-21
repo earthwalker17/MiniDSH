@@ -54,21 +54,49 @@ describe.skipIf(process.platform !== 'linux')('fs-local against a process racing
     const fs = root.get(FS)
 
     const swapper = spawn(process.execPath, [join(base, 'swapper.cjs'), join(ws, 'd'), out], { stdio: 'ignore' })
-    let accepted = 0
+    // Every write ends one of four ways, and each is counted: a verdict about
+    // "nothing landed outside" is worth only as much as the race it survived.
+    //   accepted: the file was written, inside;
+    //   caught:   the handle turned out to be outside (the check under test);
+    //   fenced:   the name already led outside when it was resolved;
+    //   other:    the directory was mid-swap, said with a code: the
+    //             provider's own (FS_IO, FS_NOT_FOUND) or, where the path was
+    //             being resolved as it vanished, the raw errno of that step.
+    // Anything with no code at all is not the swap, and fails the case.
+    const count = { accepted: 0, caught: 0, fenced: 0, other: 0 }
+    const unexpected: string[] = []
+    let swapperAlive = false
+    const deadline = Date.now() + 40_000
+    let writes = 0
     try {
-      for (let i = 0; i < 2_000; i++) {
+      // Until the check has been seen to fire several times, not for a fixed
+      // number of writes: a slow host may need more of them to hit the window.
+      for (; writes < 2_000 || (count.caught < 5 && writes < 40_000 && Date.now() < deadline); writes++) {
         try {
-          await fs.writeText(fs.resolve(`d/f${i}.txt`, ws), 'x', { kind: 'unconditional' }, {})
-          accepted++
-        } catch {
-          // A refusal or an error: either way nothing was written outside, which is what is checked.
+          await fs.writeText(fs.resolve(`d/f${writes}.txt`, ws), 'x', { kind: 'unconditional' }, {})
+          count.accepted++
+        } catch (error) {
+          const { code, message } = error as { code?: string; message?: string }
+          if (code === 'FS_SANDBOX_DENIED' && message?.includes('changed while it was being written')) count.caught++
+          else if (code === 'FS_SANDBOX_DENIED') count.fenced++
+          else if (typeof code === 'string' && /^(FS_[A-Z_]+|E[A-Z]+)$/.test(code)) count.other++
+          else unexpected.push(String(message ?? error))
         }
       }
+      swapperAlive = swapper.exitCode === null && swapper.signalCode === null
     } finally {
       swapper.kill('SIGKILL')
       await new Promise((resolve) => swapper.once('exit', resolve))
     }
-    const landed = readdirSync(out).filter((name) => statSync(join(out, name)).size > 0)
-    expect(landed, `${landed.length} files with content landed outside after ${accepted} accepted writes`).toEqual([])
+    const outside = readdirSync(out)
+    const landed = outside.filter((name) => statSync(join(out, name)).size > 0)
+    const told = `${writes} writes: ${count.accepted} accepted, ${count.caught} caught by the open-handle check, ${count.fenced} refused at the fence, ${count.other} failed mid-swap; ${outside.length} entries outside, ${landed.length} with content`
+    expect(landed, told).toEqual([])
+    // The controls. Without them every write could have failed, or the swapper
+    // done nothing, and the line above would still hold.
+    expect(unexpected, `writes failed some other way: ${told}`).toEqual([])
+    expect(swapperAlive, `the swapper had stopped before the writes ended: ${told}`).toBe(true)
+    expect(count.accepted, `no write was ever accepted: ${told}`).toBeGreaterThan(0)
+    expect(count.caught, `the race was never exercised (no handle was found outside): ${told}`).toBeGreaterThan(0)
   })
 })

@@ -7,6 +7,7 @@ import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import { FS, FS_EDIT_INTENT, FsError, type Fs, type FsActor, type FsObservation, type FsTarget } from '../../core/fs/index.ts'
 import { defineTool, TOOLS } from '../../core/tools/index.ts'
+import { clip } from '../../core/text.ts'
 import type { Agent } from '../../core/agent/types.ts'
 
 const DESCRIPTION = `Custom editing tool for viewing, creating and editing files.
@@ -53,8 +54,28 @@ function numberLines(text: string, startLine: number): string {
   return lines.map((line, index) => `${String(startLine + index).padStart(6)}  ${line}`).join('\n')
 }
 
+/** Clipped by `clip`, never by `slice`: a bound that lands inside an emoji must not leave half of it in a tool result. */
 function truncate(text: string, max: number): string {
-  return text.length <= max ? text : text.slice(0, max) + TRUNCATED
+  return text.length <= max ? text : clip(text, max) + TRUNCATED
+}
+
+/**
+ * Whether a file's line endings are CRLF: it holds "\r\n" and no "\n"
+ * without a "\r" before it. Every text file of a Windows checkout with
+ * `core.autocrlf` is that. A model reads and writes "\n", so for such a file
+ * the view shows lines without their carriage return and an edit converts at
+ * the file (`toCrlf`); otherwise an insert landed a bare "\n" among CRLF lines
+ * and a multi-line old_str copied from the view never matched. A file that
+ * mixes both has no one ending to keep and is edited byte for byte, as an LF
+ * file is.
+ */
+function isCrlf(text: string): boolean {
+  return text.includes('\r\n') && !/(?<!\r)\n/.test(text)
+}
+
+/** Text the model wrote, in a CRLF file's endings. One that already spells "\r\n" is used as given. */
+function toCrlf(text: string): string {
+  return text.includes('\r\n') ? text : text.replaceAll('\n', '\r\n')
 }
 
 function cwdOf(agent: Agent | undefined): string {
@@ -129,9 +150,21 @@ async function view(fs: Fs, target: FsTarget, args: Input, max: number, actor: F
       .filter((entry) => !entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.name !== '__pycache__')
       .map((entry) => (entry.type === 'directory' ? `${entry.name}/` : entry.name))
       .toSorted()
-    return `Directory ${target.displayPath}:\n${shown.join('\n')}`
+    // Bounded like a file view: a cache or dataset directory holds hundreds of
+    // thousands of names, and a tool result is replayed in every later request.
+    let listing = `Directory ${target.displayPath}:`
+    let listed = 0
+    for (const name of shown) {
+      if (listing.length + 1 + name.length > max) break
+      listing += `\n${name}`
+      listed++
+    }
+    if (listed === shown.length) return listing
+    return `${listing}\n[${(shown.length - listed).toLocaleString('en-US')} more of ${shown.length.toLocaleString('en-US')} entries not shown; view a narrower path, or list this one with the shell]`
   }
-  const { text, complete } = await fs.readText(target, actor, { maxBytes: VIEW_READ_BYTES, partial: true })
+  const read = await fs.readText(target, actor, { maxBytes: VIEW_READ_BYTES, partial: true })
+  const complete = read.complete
+  const text = isCrlf(read.text) ? read.text.replaceAll('\r\n', '\n') : read.text
   const lines = text.split('\n')
   // A partial read can end inside a line; that line is not shown as if whole.
   if (!complete) lines.pop()
@@ -148,7 +181,7 @@ async function view(fs: Fs, target: FsTarget, args: Input, max: number, actor: F
     : `the first ${VIEW_READ_BYTES.toLocaleString('en-US')} bytes of ${(info?.size ?? 0).toLocaleString('en-US')}: ${lines.length} lines; read past them with the shell`
   const header = `Here's ${target.displayPath} (${extent})${args.view_range ? ` [lines ${start}-${args.view_range[1]}]` : ''}:`
   // Numbered no further than the clip can show: the work is the output's, not the file's.
-  return truncate(`${header}\n${numberLines(body.length > max ? body.slice(0, max) : body, start)}`, max)
+  return truncate(`${header}\n${numberLines(clip(body, max), start)}`, max)
 }
 
 async function create(_ctx: Context, fs: Fs, target: FsTarget, args: Input, actor: FsActor): Promise<string> {
@@ -166,7 +199,10 @@ async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, a
   const read = await readForEdit(fs, target, actor)
   const text = read.text
   const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version
-  const occurrences = text.split(args.old_str).length - 1
+  const crlf = isCrlf(text)
+  const oldStr = crlf ? toCrlf(args.old_str) : args.old_str
+  const newStr = crlf ? toCrlf(args.new_str ?? '') : (args.new_str ?? '')
+  const occurrences = text.split(oldStr).length - 1
   if (occurrences === 0) {
     throw new FsError('FS_EDIT_NOT_FOUND', `old_str did not appear in ${target.displayPath}. No replacement made.`)
   }
@@ -176,8 +212,8 @@ async function strReplace(ctx: Context, fs: Fs, target: FsTarget, args: Input, a
   // Spliced, never `String.prototype.replace`: a string replacement reads
   // `$$`, `$&` and `$'` as patterns, and a shell script's `$$` landed as `$`
   // while the result said "Edited" (S20.5). Uniqueness is proven above.
-  const at = text.indexOf(args.old_str)
-  const next = text.slice(0, at) + (args.new_str ?? '') + text.slice(at + args.old_str.length)
+  const at = text.indexOf(oldStr)
+  const next = text.slice(0, at) + newStr + text.slice(at + oldStr.length)
   await fs.writeText(target, next, { kind: 'replaceIfVersion', version }, actor)
   return `Edited ${target.displayPath}.`
 }
@@ -188,12 +224,14 @@ async function insert(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor
   const read = await readForEdit(fs, target, actor)
   const text = read.text
   const version = observed.kind === 'present' && observed.version.length > 0 ? observed.version : read.version
-  const lines = text.split('\n')
+  const crlf = isCrlf(text)
+  const eol = crlf ? '\r\n' : '\n'
+  const lines = text.split(eol)
   if (args.insert_line < 0 || args.insert_line > lines.length) {
     throw new FsError('FS_IO', `insert_line ${args.insert_line} is out of range [0, ${lines.length}]`)
   }
-  lines.splice(args.insert_line, 0, args.new_str)
-  await fs.writeText(target, lines.join('\n'), { kind: 'replaceIfVersion', version }, actor)
+  lines.splice(args.insert_line, 0, crlf ? toCrlf(args.new_str) : args.new_str)
+  await fs.writeText(target, lines.join(eol), { kind: 'replaceIfVersion', version }, actor)
   return `Inserted text into ${target.displayPath}.`
 }
 
@@ -202,16 +240,30 @@ async function insert(ctx: Context, fs: Fs, target: FsTarget, args: Input, actor
  * overwrite, and a refused edit whose read observed the new content let the
  * same call, repeated, write over text the model was never shown (S20.5). The
  * licence comes only from what the model viewed, or from its own last write.
+ *
+ * And it must decode EXACTLY: an edit writes the whole text back as UTF-8, so
+ * a byte the decoder could only render as U+FFFD would be rewritten as one. A
+ * GBK, Shift-JIS or Windows-1252 source file had every non-ASCII byte replaced
+ * that way by an edit that touched only ASCII, and the result said "Edited".
+ * So the decode is `fatal`, and a file that is not UTF-8 is refused whole.
  */
 async function readForEdit(fs: Fs, target: FsTarget, actor: FsActor): Promise<{ text: string; version: string }> {
+  let read: { bytes: Uint8Array; version: string }
   try {
-    const { bytes, version } = await fs.readBytes(target, actor, { maxBytes: EDIT_MAX_BYTES })
-    // A BOM stays the text's first character, so the edit writes it back.
-    return { text: new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes), version }
+    read = await fs.readBytes(target, actor, { maxBytes: EDIT_MAX_BYTES })
   } catch (error) {
     if (error instanceof FsError && error.code === 'FS_TOO_LARGE') {
       throw new FsError('FS_TOO_LARGE', `${target.displayPath} is larger than ${EDIT_MAX_BYTES.toLocaleString('en-US')} bytes, more than this tool edits; change it with the shell`)
     }
     throw error
+  }
+  try {
+    // A BOM stays the text's first character, so the edit writes it back.
+    return { text: new TextDecoder('utf-8', { ignoreBOM: true, fatal: true }).decode(read.bytes), version: read.version }
+  } catch {
+    throw new FsError(
+      'FS_IO',
+      `${target.displayPath} is not valid UTF-8 (it is in another encoding, or is binary), and this tool reads and writes UTF-8 only: an edit would rewrite its other bytes, so nothing was changed; change it with the shell`,
+    )
   }
 }
