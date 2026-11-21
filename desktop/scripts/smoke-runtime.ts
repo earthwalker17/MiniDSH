@@ -30,6 +30,8 @@ import { collectImports } from '../../scripts/deps-graph.ts'
 import { choosePort, HandoffError, probePort, RuntimeProcess, signIn } from '../src/runtime.ts'
 
 const resources = resolve(process.argv[2] ?? fail('usage: smoke-runtime.ts <resources directory>'))
+// A per-user installer that never elevates ships no elevation helper.
+if (existsSync(join(resources, 'elevate.exe'))) fail('the app ships resources/elevate.exe, an elevation helper nothing here uses (package.ts: nsis.packElevateHelper)')
 
 function fail(message: string): never {
   process.stderr.write(`desktop smoke: ${message}\n`)

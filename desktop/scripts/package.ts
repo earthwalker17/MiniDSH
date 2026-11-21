@@ -276,6 +276,11 @@ async function bundle(): Promise<void> {
       oneClick: true,
       perMachine: false,
       allowElevation: false,
+      // The helper that runs an installer elevated. This one installs per user
+      // and never elevates, so shipping it is shipping a binary nothing uses
+      // (electron-builder packs resources/elevate.exe unless told not to;
+      // smoke-runtime.ts refuses an app that has one).
+      packElevateHelper: false,
       deleteAppDataOnUninstall: false,
       include: join(DESKTOP, 'installer.nsh'),
       shortcutName: 'MiniDSH',
