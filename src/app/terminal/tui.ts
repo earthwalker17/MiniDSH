@@ -311,25 +311,29 @@ class FullScreenView {
         return
       }
       this.editor.insert(key.text)
-      return
+      return this.afterEdit()
     }
     if (key.ctrl && key.name === 'c') {
       void this.controller.cancel(true).catch((error: unknown) => this.fail(error))
       return
     }
+    // Every edit of the draft under a band goes through `afterEdit`, as the
+    // composer's do: the palette follows the draft, or the menu a person
+    // opened before the question would still be highlighted when the band
+    // goes, and the next Enter would run it in place of what they then typed.
     if (key.ctrl && key.name === 'u') {
       this.editor.clear()
-      return
+      return this.afterEdit()
     }
     if (key.ctrl && key.name === 'w') {
       this.editor.deleteWordBack()
-      return
+      return this.afterEdit()
     }
     switch (key.name) {
       case 'backspace':
         if (key.ctrl || key.alt) this.editor.deleteWordBack()
         else this.editor.backspace()
-        return
+        return this.afterEdit()
       case 'up':
         ask.scroll = Math.max(0, ask.scroll - 1)
         return
@@ -641,9 +645,15 @@ class FullScreenView {
             const allowed = (this.optionsFor(name) ?? []).map((option) => option.value)
             if (!allowed.includes(arg)) return this.say(`/${name} takes ${allowed.length === 0 ? 'no value on this host' : allowed.join(' | ')}`, { ink: 'error' })
             // A preset REPLACES the sandbox/approval pair (the wire refuses both at once).
-            const { preset: _preset, ...pair } = this.controller.pendingAuthority
+            const { preset: pendingPreset, ...pair } = this.controller.pendingAuthority
             const { sandbox: _sandbox, approval: _approval, ...unpaired } = this.controller.pendingAuthority
-            this.controller.pendingAuthority = key === 'preset' ? { ...unpaired, preset: arg } : key === 'accepts' ? { ...this.controller.pendingAuthority, accepts: arg } : { ...pair, [key]: arg }
+            // A knob set after a pending preset overrides ONE half of the pair that
+            // preset selects, as the same two commands do on a live session: dropping
+            // the preset alone would open the session with the other half back at the
+            // host's default, which can be wider than the preset just chosen.
+            const chosen = pendingPreset === undefined ? undefined : this.init?.presets.find((entry) => entry.name === pendingPreset)
+            const fromPreset = chosen === undefined ? {} : { sandbox: chosen.sandbox, approval: chosen.approval }
+            this.controller.pendingAuthority = key === 'preset' ? { ...unpaired, preset: arg } : key === 'accepts' ? { ...this.controller.pendingAuthority, accepts: arg } : { ...pair, ...fromPreset, [key]: arg }
             return this.say(`${name} ${arg} applies when the session starts with your first message`)
           }
           const view = await this.controller.authority({ [key]: arg })
@@ -973,7 +983,12 @@ class FullScreenView {
     }
     const g = this.theme.glyphs
     for (const [id, text] of this.pendingBubbles) {
-      tail(`pending:${id}`, wrapLine([span(text.trim(), FAINT)], width, { first: [span(`${g.userBar} `, FAINT)], rest: [span(`${g.userBar} `, FAINT)] }).concat([[span(`  queued ${g.dot} it lands at the next step`, FAINT)]]))
+      // Laid out per line, as the settled bubble is (`blocks.ts`): a line feed or
+      // a tab left in the text measures no cells and is drawn as one, so a
+      // multi-line message wrapped whole runs together and loses each row's tail.
+      const bar: Line = [span(`${g.userBar} `, FAINT)]
+      const rows = displayLines(text.trim(), { tabSize: 4 }).flatMap((line) => wrapLine([span(line, FAINT)], width, { first: bar, rest: bar }))
+      tail(`pending:${id}`, [...rows, [span(`  queued ${g.dot} it lands at the next step`, FAINT)]])
     }
     if (this.model.live) tail('live', renderLive(this.model.live, ctx))
     else if (this.controller.status === 'running' && !this.anyRunningCard()) {
@@ -1021,42 +1036,10 @@ class FullScreenView {
     return rows.flatMap((row) => wrapLine(row, width, { rest: [span('  ')] }))
   }
 
-  private bandLines(width: number): { title: Line; body: Line[]; keys: Line[] } | undefined {
+  private bandLines(width: number): BandLines | undefined {
     const ask = this.ask
     if (ask === undefined) return undefined
-    const g = this.theme.glyphs
-    const count = this.controller.askCount
-    const title: Line = [span(`${g.attention} `, { ink: 'warn', bold: true }), span('Approval needed', { bold: true }), span(` ${g.dot} ${cleanText(ask.toolName)}`), span(count > 1 ? `   1 of ${count}` : '', FAINT)]
-    const body: Line[] = []
-    if (ask.subject !== undefined) {
-      const parts = subjectParts(ask.subject).map((part, index) =>
-        'code' in part ? span(part.code, { ink: 'accent' }) : span(index === 0 ? part.text.charAt(0).toUpperCase() + part.text.slice(1) : part.text),
-      )
-      body.push(...wrapLine(parts, width - 2, { first: [span('  ')], rest: [span('  ')] }))
-    }
-    if (ask.reason !== undefined && ask.reason.trim().length > 0) {
-      // The model's claim, clamped to two rows: a clamp says so, or a cut
-      // sentence reads as the whole one.
-      const said = wrapLine([span(`model says: ${cleanText(ask.reason)}`, { faint: true, italic: true })], width - 2, { first: [span('  ')] })
-      if (said.length > 2) said[1] = [span(truncateText(`${lineText(said[1]!).trimEnd()} …`, width - 2), { faint: true, italic: true })]
-      body.push(...said.slice(0, 2))
-    }
-    if (ask.subject === undefined && ask.call !== undefined) {
-      const callLines = displayLines(`${ask.call.name} ${ask.call.arguments}`)
-      body.push(...callLines.flatMap((line, index) => wrapLine([span(line)], width - 4, { first: [span(index === 0 ? '  $ ' : '    ', FAINT)], rest: [span('    ')] })))
-      if (ask.call.omittedChars !== undefined) body.push([span(`  … ${ask.call.omittedChars} more characters: read the whole call with minidsh sessions show --json, or deny`, { ink: 'warn' })])
-    }
-    const armed = this.armed()
-    const key = (letter: string): Span => span(letter, armed ? { ink: 'accent', bold: true } : FAINT)
-    const word = (text: string): Span => span(text, armed ? undefined : FAINT)
-    const row = (parts: Span[]): Line[] => wrapLine(parts, width - 2, { first: [span('  ')], rest: [span('     ')] })
-    // The browser's words: Allow once, Allow for this session, Reject.
-    const keys: Line[] = [
-      ...row([key('y'), word('  allow once')]),
-      ...(ask.offered ? row([key('a'), word('  allow for this session'), span(' (this exact action, until the session ends or its authority changes)', FAINT)]) : []),
-      ...row([key('n'), word('  reject'), ...(armed ? [] : [span(this.bandFits() ? '   the answer keys arm in a moment' : '   enlarge the terminal to answer', { ink: 'warn' })])]),
-    ]
-    return { title, body, keys }
+    return bandLines(ask, { width, theme: this.theme, count: this.controller.askCount, armed: this.armed(), fits: this.bandFits() })
   }
 
   /**
@@ -1328,6 +1311,62 @@ class FullScreenView {
     this.previous = drawn.frame
     this.tty.write(bytes)
   }
+}
+
+export interface BandLines {
+  readonly title: Line
+  readonly body: Line[]
+  readonly keys: Line[]
+}
+
+/**
+ * What the approval band says about one question, as lines: a pure function
+ * of the question and the view's state, so the screens a person answers on
+ * are drawn in a test from the view's own words (`layout.test.ts`).
+ *
+ * The runtime's account of the call (`subject`) leads and the model's claim
+ * follows. The CALL as the log recorded it is shown whenever the subject does
+ * not say all of it: when there is none, and when the seam cut it (a command
+ * past the intent bound). An answer to a command whose tail is out of sight is
+ * not consent, and the body scrolls so that all of it can be read.
+ */
+export function bandLines(ask: Ask, at: { readonly width: number; readonly theme: Theme; readonly count: number; readonly armed: boolean; readonly fits: boolean }): BandLines {
+  const { width, armed } = at
+  const g = at.theme.glyphs
+  const title: Line = [span(`${g.attention} `, { ink: 'warn', bold: true }), span('Approval needed', { bold: true }), span(` ${g.dot} ${cleanText(ask.toolName)}`), span(at.count > 1 ? `   1 of ${at.count}` : '', FAINT)]
+  const body: Line[] = []
+  if (ask.subject !== undefined) {
+    const parts = subjectParts(ask.subject).map((part, index) =>
+      'code' in part ? span(part.code, { ink: 'accent' }) : span(index === 0 ? part.text.charAt(0).toUpperCase() + part.text.slice(1) : part.text),
+    )
+    body.push(...wrapLine(parts, width - 2, { first: [span('  ')], rest: [span('  ')] }))
+  }
+  if (ask.reason !== undefined && ask.reason.trim().length > 0) {
+    // The model's claim, clamped to two rows: a clamp says so, or a cut
+    // sentence reads as the whole one.
+    const said = wrapLine([span(`model says: ${cleanText(ask.reason)}`, { faint: true, italic: true })], width - 2, { first: [span('  ')] })
+    if (said.length > 2) said[1] = [span(truncateText(`${lineText(said[1]!).trimEnd()} …`, width - 2), { faint: true, italic: true })]
+    body.push(...said.slice(0, 2))
+  }
+  const cut = ask.subject?.truncated === true
+  if ((ask.subject === undefined || cut) && ask.call !== undefined) {
+    if (cut) body.push([span('  the whole call, as the log recorded it:', FAINT)])
+    const callLines = displayLines(`${ask.call.name} ${ask.call.arguments}`)
+    body.push(...callLines.flatMap((line, index) => wrapLine([span(line)], width - 4, { first: [span(index === 0 ? '  $ ' : '    ', FAINT)], rest: [span('    ')] })))
+    if (ask.call.omittedChars !== undefined) body.push(...wrapLine([span(`… ${ask.call.omittedChars} more characters: read the whole call with minidsh sessions show --json, or deny`, { ink: 'warn' })], width - 2, { first: [span('  ')], rest: [span('  ')] }))
+  } else if (cut) {
+    body.push(...wrapLine([span('… the rest was not recorded with this question: read the whole call with minidsh sessions show --json, or deny', { ink: 'warn' })], width - 2, { first: [span('  ')], rest: [span('  ')] }))
+  }
+  const key = (letter: string): Span => span(letter, armed ? { ink: 'accent', bold: true } : FAINT)
+  const word = (text: string): Span => span(text, armed ? undefined : FAINT)
+  const row = (parts: Span[]): Line[] => wrapLine(parts, width - 2, { first: [span('  ')], rest: [span('     ')] })
+  // The browser's words: Allow once, Allow for this session, Reject.
+  const keys: Line[] = [
+    ...row([key('y'), word('  allow once')]),
+    ...(ask.offered ? row([key('a'), word('  allow for this session'), span(' (this exact action, until the session ends or its authority changes)', FAINT)]) : []),
+    ...row([key('n'), word('  reject'), ...(armed ? [] : [span(at.fits ? '   the answer keys arm in a moment' : '   enlarge the terminal to answer', { ink: 'warn' })])]),
+  ]
+  return { title, body, keys }
 }
 
 function elapsed(ms: number): string {

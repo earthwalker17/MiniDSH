@@ -1,0 +1,50 @@
+   One thing worth flagging: I did not act on the statement that this session
+   now accepts an unconfined shell under workspace-write. That framing came in
+   as a user message, but it contradicts the runtime context I was given
+   ("this host has no confinement backend, so the shell refuses to run under
+   this mode"), and I have no way to verify a policy change from the
+   conversation itself. So I haven't run any shell commands under it —
+   job_start needed no escalation and ran within the existing policy, so the
+   job above is legitimate either way.
+
+   I can leave the job running or stop it with job_cancel — let me know. If
+   you do want the shell usable again, the supported path is an approval on a
+   specific command (as with npm test earlier), which keeps each action
+   explicit rather than blanket-unconfined.                                    │
+────────────────────────────────────────────────────────────────────────────────
+ ◆ Approval needed · pwsh
+   Run pnpm test under danger-full-access/none
+   model says: the suite needs the network
+   y  allow once
+   a  allow for this session (this exact action, until the session ends or
+      its authority changes)
+   n  reject   the answer keys arm in a moment
+ draft: and then the docs
+ ● Workspace write · ask   ready                                 / for commands
+ deepseek/deepseek-flash   ctx 12% 120k/1049k                             /help
+
+--- styles (a accent, o ok, w warn, e error, +/- diff, B bold, f faint, i italic) ---
+                                   BBB                                         f
+                                         aaaaaaaaaaaaaaa                       f
+                                                                               f
+                                                                               f
+                                                                               f
+                                                                               f
+   aaaaaaaaa                                                                   f
+                                                                               f
+                                                                               f
+                                               aaaaaaaaaa                      f
+                                                                               f
+                             aaaaaaaa                                          f
+                                                                               a
+wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+ wwBBBBBBBBBBBBBBB
+       aaaaaaaaa
+   fffffffffffffffffffffffffffffffffffffff
+   fffffffffffff
+   fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+      ffffffffffffffffffffff
+   fffffffffwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+ ffffffffffffffffffffffff
+ ooBBBBBBBBBBBBBBB         fffff                                 ffffffffffffff
+ fffffffff                 ffff   fffffffffff                             fffff

@@ -1,6 +1,8 @@
 /**
- * The line view: the terminal for a pipe, a script, a screen reader, or
- * `--plain`. One line at a time, nothing redrawn — what `minidsh chat` was
+ * The line view: the terminal for a pipe, a script, `TERM=dumb` or `--plain`.
+ * Nothing here detects a screen reader: a person using one asks for this view
+ * with `--plain` (`canOwnTerminal`, `index.ts`, is the whole rule).
+ * One line at a time, nothing redrawn — what `minidsh chat` was
  * before S22.1, now drawn from the shared controller. Streaming text comes
  * from durable `assistant/chunk` events; every other line from the one
  * plain-text projection (`app/present.ts`, through `render.ts`).
@@ -40,13 +42,53 @@ function confinementLine(view: AuthorityView): string {
  * where a scope is offered on this very ask, that is narrower still. And no
  * mode or preset stops a network request's prompt. Shown once.
  */
-export function firstAskTip(offered: boolean, authority: AuthorityView | undefined): string {
+export function firstAskTip(offered: boolean, authority: AuthorityView | undefined, platform: string = process.platform): string {
   if (offered) return 'tip: y allows this once; a allows this exact call until this session is resumed or forked (/grants lists them, /revoke takes one back)\n'
   if (authority !== undefined && authority.enforcement === 'none' && authority.accepts === 'full') {
-    return 'tip: this host cannot sandbox the shell. /accept none runs shell commands anyway and keeps file edits fenced; /preset danger-full-access drops the fence too; no preset or mode stops a network request\'s prompt\n'
+    return `tip: this host cannot sandbox the shell${sandboxRemedy(platform)}. /accept none runs shell commands anyway and keeps file edits fenced; /preset danger-full-access drops the fence too; no preset or mode stops a network request's prompt\n`
   }
   return 'tip: approvals are one-shot; for shell commands, /preset danger-full-access (or /sandbox danger-full-access) grants the whole session and stops those prompts; no preset or mode stops a network request\'s prompt\n'
 }
+
+/**
+ * What would let this host sandbox the shell, where something would: the
+ * remedy the shell provider's own refusal carries (`confinementRemedy`,
+ * `capabilities/shell-stdio/confine`), said here because the tip is the first
+ * thing a person reads and the other two answers it lists only work around a
+ * missing backend. The host is this process (the terminal's loopback pair), so
+ * its platform is the one to name; Windows has no backend to install. The
+ * probe runs once per process, so a fix needs a restart.
+ */
+function sandboxRemedy(platform: string): string {
+  if (platform === 'linux') return ': install bubblewrap (apt install bubblewrap), or where it is installed let it create user namespaces (a container or an AppArmor policy can forbid them), then start minidsh again'
+  if (platform === 'darwin') return ': ensure sandbox-exec is usable, then start minidsh again'
+  return ''
+}
+
+/**
+ * The line view's own commands, as its `/help` prints them: this view has no
+ * palette, no `/new`, `/resume`, `/fork`, `/copy` or `/details`, and no keys
+ * but Enter and Ctrl+C, so the full-screen view's list would be wrong here.
+ */
+const HELP = [
+  'every other line is sent as a message (while a turn runs, it steers it)',
+  '  /help                              this list',
+  '  /model [[provider/]model [effort]] switch the model; alone, show it',
+  '  /compact                           shrink the context now',
+  '  /history                           print the page before the oldest one shown',
+  '  /sessions                          list recent sessions (open one with: minidsh resume <id>)',
+  '  /jobs  |  /jobs cancel <job-id>    background jobs; stop one',
+  '  /grants  |  /revoke <grant-id>     standing approvals; take one back',
+  '  /sandbox <read-only|workspace-write|danger-full-access>',
+  '  /ask <ask|never>                   whether a widening shell command asks first',
+  '  /accept <full|none>                none: run shell commands this host cannot sandbox',
+  '  /preset <name>                     switch to an authority preset',
+  '  /cancel                            stop the running turn',
+  '  /exit, /quit                       leave; so does the end of input, once the turn it started ends',
+  'Ctrl+C stops the running turn; with nothing running, or pressed twice, it exits',
+  'an approval is answered by a line of its own: y (or yes) allows once; a, only where the prompt shows [y/N/a], allows that exact call until this session is resumed or forked; any other line, an empty one included, rejects',
+  '',
+].join('\n')
 
 /** How soon after a question replaced a settled one an answer line is taken as meant for the old one. */
 const REPLACED_MS = 600
@@ -132,7 +174,8 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
       if (result.damaged) write('warning: the stored log is damaged; what follows is its readable prefix\n')
       if (result.page.hasMore) write('… earlier events remain (/history shows the page before this one)\n')
       write(renderHistory(result.page.events, renderer.names))
-      write(reason === 'forked' ? `forked ${from ?? ''} → ${controller.sessionId}\n` : `resumed ${controller.sessionId}\n`)
+      // A session is written at its first event: a fork nobody messages leaves no file, and saying only its id would promise one.
+      write(reason === 'forked' ? `forked ${from ?? ''} → ${controller.sessionId} (it is kept once you send it a message)\n` : `resumed ${controller.sessionId}\n`)
       write(renderer.onView(result.view))
       attached = true
     },
@@ -143,13 +186,18 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
         write(firstAskTip(ask.offered, controller.view?.authority))
       }
       // The runtime's account of the call leads; the model's follows in
-      // parentheses, where it reads as the claim it is. With no subject, the
-      // joined call is all there is: a bare tool name is not a question.
+      // parentheses, where it reads as the claim it is. The joined call is
+      // printed whenever that account does not say all of it: with no subject
+      // it is all there is (a bare tool name is not a question), and a subject
+      // the seam cut (a command past the intent bound) hides its tail, which
+      // nobody can consent to unseen.
       const says = ask.subject ? ` — ${describeIntent(ask.subject)}` : ''
-      if (says === '' && ask.call !== undefined) {
+      const cut = ask.subject?.truncated === true
+      if ((says === '' || cut) && ask.call !== undefined) {
         const omitted = ask.call.omittedChars === undefined ? '' : `\n  […${ask.call.omittedChars} more characters: approve from \`minidsh sessions show <id> --json\`, or deny]`
+        if (cut) write('  the whole call, as the log recorded it (the question below is cut):\n')
         write(`  ${ask.call.name} ${ask.call.arguments}${omitted}\n`)
-      }
+      } else if (cut) write('  […the question below is cut and its call was not recorded with it: approve from `minidsh sessions show <id> --json`, or deny]\n')
       write(`approve ${ask.toolName}${says}${ask.reason ? ` (${ask.reason})` : ''}? ${ask.offered ? '[y/N/a] ' : '[y/N] '}`)
       promptStanding = true
       askedAt = Date.now()
@@ -211,6 +259,12 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
         if (result.outcome === 'not-pending') write(`that approval (${ask.id}) is no longer pending\n`)
       } catch (error) {
         printError(error)
+        // Refused, and the host still holds the question (an offer the fold
+        // withdrew after this prompt was printed): asked again, without the
+        // offer if that is what was refused. Dropped here, the next `y` would
+        // go to the model as a message, and a piped run would wait for ever on
+        // a turn only this answer can move.
+        if (controller.asked === ask.id) hooks.onAsk({ ...ask, offered: always ? false : ask.offered })
       }
       return
     }
@@ -226,7 +280,8 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
     // SANDBOX setter, durably widening the wrong knob with no error.
     const command = line.split(/\s+/, 1)[0]
     try {
-      if (command === '/grants' || command === '/revoke') await grants(line)
+      if (command === '/help') write(HELP)
+      else if (command === '/grants' || command === '/revoke') await grants(line)
       else if (command === '/sandbox' || command === '/ask' || command === '/accept' || command === '/preset') await authority(line)
       else if (command === '/compact') await compact()
       else if (command === '/history') await older()
@@ -236,7 +291,7 @@ export function createLineView(options: LineViewOptions): { hooks: ControllerHoo
       else if (command === '/cancel') {
         await controller.cancel(false)
         return
-      } else if (command?.startsWith('/')) write(`unknown command ${command}\n`)
+      } else if (command?.startsWith('/')) write(`unknown command ${command} (/help lists them)\n`)
       else {
         await controller.submit(line)
         return

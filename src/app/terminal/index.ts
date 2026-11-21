@@ -6,8 +6,10 @@
  * (`session/resume`, `session/fork`) like every other driving method.
  *
  * Two views over one controller (`controller.ts`): the full-screen view
- * (`tui.ts`) for a real terminal, and the line view (`line.ts`) for a pipe, a
- * script, a screen reader or `--plain`. Neither holds a copy of the session:
+ * (`tui.ts`) where both ends are a TTY, and the line view (`line.ts`) for a
+ * pipe, a script, `TERM=dumb` or `--plain`. `canOwnTerminal` below is the
+ * whole rule: nothing detects a screen reader, so a person using one passes
+ * `--plain`. Neither holds a copy of the session:
  * the full-screen view folds its attached window into the browser's
  * presentation model, which is presentation, never a surface fold.
  */
@@ -50,6 +52,8 @@ export interface TerminalOptions extends BootOptions {
     readonly output: NodeJS.WritableStream
     /** Run the full-screen view over these streams (a scripted terminal in tests). */
     readonly fullScreen?: { readonly columns: number; readonly rows: number; readonly depth?: 1 | 4 | 8 | 24 }
+    /** The full-screen view's clock: a test moves it instead of waiting out the approval band's arming time. */
+    readonly now?: () => number
   }
 }
 
@@ -62,7 +66,7 @@ function banner(init: InitializeResult, overrides: Partial<AgentOptions>): strin
   // shows no window here until the view's context reports one.
   const contextWindow = init.providers.find((entry) => entry.id === provider)?.models.find((entry) => entry.id === model)?.contextWindow
   const window = contextWindow ? ` · ctx ${formatTokens(contextWindow)}` : ''
-  return `minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/model switches the route, /compact shrinks context, /sessions lists them, /jobs lists background jobs, /exit quits, Ctrl+C cancels)\n`
+  return `minidsh ${init.serverInfo.version} — ${provider}/${model}${window} (/help lists the commands: /model switches the route, /compact shrinks context, /sessions lists them, /jobs lists background jobs, /exit quits, Ctrl+C cancels)\n`
 }
 
 /** Whether this process can own the terminal: a real TTY on both ends, and a terminal that can draw. */
@@ -127,6 +131,7 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
       ...(options.task === undefined ? {} : { task: options.task }),
       exit,
       ...(options.io === undefined ? {} : { io: options.io }),
+      ...(options.io?.now === undefined ? {} : { now: options.io.now }),
     })
     route = (method, params) => tui.controller.onNotification(method, params)
     hostEnded = () => tui.controller.closed()
@@ -148,5 +153,11 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
   route = (method, params) => controller.onNotification(method, params)
   hostEnded = () => controller.closed()
   await view.run(controller)
-  return finished
+  const code = await finished
+  // What to come back to, in the words `run` ends with and on stderr as it
+  // does: a piped transcript on stdout stays the conversation. The full-screen
+  // view says the same on leaving the alternate screen; this view said
+  // nothing, so a piped `chat` left no way to name its session but the list.
+  if (options.io === undefined && controller.sessionId !== undefined) process.stderr.write(`session: ${controller.sessionId}\n`)
+  return code
 }

@@ -26,6 +26,8 @@ import type { Block, Item, Live, Model, ProcessBlock, ToolItem } from '../web/co
 import { duration } from '../web/format.js'
 import { contextTitle, decisionWords, subjectParts, systemParts, tokens } from '../web/rows.js'
 import type { ToolDisplay } from '../../core/tools/types.ts'
+// The authority plane's result codes, from the one list every surface reads.
+import { DENIALS } from '../present.ts'
 import { renderMarkdown } from './markdown.ts'
 import { span, wrapLine, type Line, type Span, type Style, type Theme } from './style.ts'
 import { cleanText, displayLines, hidesText, textWidth, truncateText } from './width.ts'
@@ -45,9 +47,6 @@ export interface BlockContext {
   /** A running child's own conversation, when this view attached it. */
   readonly child?: (childId: string) => Model | undefined
 }
-
-/** Result codes that are the authority plane's decision, not a tool failure (`app/present.ts` DENIALS). */
-const DENIALS: ReadonlySet<string> = new Set(['DENIED', 'BLOCKED', 'ABORTED', 'ABORTED_BEFORE_DISPATCH', 'FS_SANDBOX_DENIED', 'SANDBOX_UNAVAILABLE', 'SANDBOX_ESCALATION_DENIED', 'SANDBOX_NOT_WIDER', 'SANDBOX_CEILING', 'NETWORK_DENIED'])
 
 const FAINT: Style = { faint: true }
 const indent = (n: number): Span => span(' '.repeat(n))
@@ -356,6 +355,18 @@ export function cardTitle(item: ToolItem, card: Card, ctx: BlockContext): Line[]
   return wrapLine(parts, ctx.width, { first: [glyph], rest: [indent(2)] })
 }
 
+/**
+ * Text the MODEL wrote and the runtime acted on (the command it ran, the
+ * lines of an edit, the code of a write or an eval), as display lines.
+ * Nothing in it is ever dropped: a control is blanked and a bare CR drawn as
+ * ` ↵ `, in the calm view as under Ctrl+O. The tidy mode of `displayLines`
+ * is for output the model READ, where a progress bar's last state is the
+ * useful one and a hidden-text row says what the tidying hid; applied here it
+ * would take an OSC payload or everything before a CR out of an executed
+ * command, with no mode left that shows it.
+ */
+const authored = (text: string, tabSize = 8): string[] => displayLines(text, { tabSize, faithful: true, escapes: false })
+
 /** How many lines of output a calm card shows. */
 const CALM = { headOk: 1, tailOk: 2, headFail: 10, tailFail: 6, middleFail: 4, diff: 14, code: 6, markdown: 3, command: 3 } as const
 /** Ctrl+O still bounds what one card may print: a 50,000-line log is a file, not a screen. */
@@ -375,7 +386,7 @@ function cardLines(item: ToolItem, card: Card, quiet: boolean, ctx: BlockContext
   const body: Line[] = []
   for (const section of card.sections) {
     if (section.kind === 'command') {
-      const lines = displayLines(section.text)
+      const lines = authored(section.text)
       const shown = ctx.details ? lines : lines.slice(0, CALM.command)
       for (const [index, line] of shown.entries()) body.push(...wrapLine([span(line)], inner, { first: [span(index === 0 ? '$ ' : '  ', FAINT)] }))
       if (shown.length < lines.length) body.push([span(`${g.ellipsis} +${lines.length - shown.length} lines`, FAINT)])
@@ -387,14 +398,15 @@ function cardLines(item: ToolItem, card: Card, quiet: boolean, ctx: BlockContext
       const rows = section.lines.map((line): Line => {
         const sign = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '
         const style: Style | undefined = line.type === 'add' ? { ink: 'add' } : line.type === 'del' ? { ink: 'del' } : FAINT
-        return [span(`${sign} ${displayLines(line.text, { tabSize: 4 })[0] ?? ''}`, style)]
+        // A diff line holds no line feed (`lineDiff` split on them) and `authored` breaks at nothing else, so the first row is all of it.
+        return [span(`${sign} ${authored(line.text, 4)[0] ?? ''}`, style)]
       })
       const limit = ctx.details ? DETAIL_CAP : CALM.diff
       for (const row of rows.slice(0, limit)) body.push(...wrapLine(row, inner, { rest: [indent(2)] }))
       const hidden = rows.length - Math.min(limit, rows.length) + section.hidden
       if (hidden > 0) body.push([span(`${g.ellipsis} +${hidden} diff lines ${g.dot} ctrl+o`, FAINT)])
     } else if (section.kind === 'code') {
-      const lines = displayLines(section.text, { tabSize: 4 })
+      const lines = authored(section.text, 4)
       const limit = ctx.details ? DETAIL_CAP : CALM.code
       for (const line of lines.slice(0, limit)) body.push(...wrapLine([span(line, FAINT)], inner))
       if (lines.length > limit) body.push([span(`${g.ellipsis} +${lines.length - limit} lines ${g.dot} ctrl+o`, FAINT)])

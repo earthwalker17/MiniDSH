@@ -154,7 +154,14 @@ export const ASCII_GLYPHS: Glyphs = {
   spinner: ['-', '\\', '|', '/'],
 }
 
-/** Which glyph table an environment gets. */
+/**
+ * Which glyph table an environment gets. POSIX is read from its locale; on
+ * Windows the Unicode table is unconditional, because no variable there says
+ * what the terminal draws. A console that draws East Asian Ambiguous glyphs
+ * two cells wide (a legacy console host under a CJK code page and font;
+ * `width.ts` counts them as one) is answered only by the person:
+ * `MINIDSH_ASCII=1`, or the line view (`--plain`).
+ */
 export function glyphsFor(env: Readonly<Record<string, string | undefined>>, platform: string = process.platform): Glyphs {
   if (env.MINIDSH_ASCII === '1') return ASCII_GLYPHS
   const term = env.TERM ?? ''

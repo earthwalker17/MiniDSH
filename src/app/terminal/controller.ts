@@ -131,6 +131,8 @@ export class SessionController {
   private readonly queue: Ask[] = []
   /** Ids queued or waiting for their microtask, so a re-delivery or an attach never asks twice. */
   private readonly queued = new Set<string>()
+  /** Set while the queue's head has not been shown yet: the decided question it follows (`showHead`). */
+  private headAfter: string | undefined
   private readonly hinted = new Set<string>()
 
   /** The launch flags' route: what `overrides` returns to once a choice made for a new session goes stale. */
@@ -186,6 +188,7 @@ export class SessionController {
       if (projected.sessionId !== this.sessionId) return
       this.view = projected.view
       this.hooks.onView(projected.view)
+      this.showHead()
       this.hintHeld()
     }
   }
@@ -205,14 +208,30 @@ export class SessionController {
     const at = this.queue.findIndex((ask) => ask.id === id)
     if (at !== -1) this.queue.splice(at, 1)
     this.hooks.onDecided(id)
-    if (at === 0 && this.queue.length > 0) {
-      // Its offer as the fold says NOW: a grant on the one just answered can
-      // have withdrawn it, and an `a` the host no longer offers is refused.
-      const head = this.queue[0]!
-      const open = this.view?.pendingApprovals.find((entry) => entry.id === head.id)
-      if (open !== undefined) this.queue[0] = { ...head, offered: open.offers?.includes('grant-session') === true }
-      this.hooks.onAsk(this.queue[0]!)
+    if (at === 0) {
+      this.headAfter = this.queue.length > 0 ? id : undefined
+      this.showHead()
     }
+  }
+
+  /**
+   * The next question up, shown once the view in hand is no older than the
+   * decision that brought it up. Its offer must be the fold's as of THAT
+   * decision: a grant taken on the question just answered goes live only with
+   * that decision, withdraws the offer on a question for the same action, and
+   * an `a` the host no longer offers is refused. The decision's frame arrives
+   * BEFORE the view it changed, so the view in hand at that moment still lists
+   * the decided question and still carries the old offers: the head waits for
+   * the next one (the host publishes a view with every decision).
+   */
+  private showHead(): void {
+    const head = this.queue[0]
+    if (this.headAfter === undefined || head === undefined) return
+    if (this.view?.pendingApprovals.some((entry) => entry.id === this.headAfter) === true) return
+    this.headAfter = undefined
+    const open = this.view?.pendingApprovals.find((entry) => entry.id === head.id)
+    if (open !== undefined) this.queue[0] = { ...head, offered: open.offers?.includes('grant-session') === true }
+    this.hooks.onAsk(this.queue[0]!)
   }
 
   /**
@@ -301,6 +320,7 @@ export class SessionController {
       this.answered.clear()
       this.queued.clear()
       this.queue.length = 0
+      this.headAfter = undefined
       // A route or authority chosen for a NEW session belongs to the session
       // the next first message creates, never to one opened instead: it would
       // come back as the opening of an unrelated session after `/new`.
@@ -465,6 +485,7 @@ export class SessionController {
       this.answered.clear()
       this.queued.clear()
       this.queue.length = 0
+      this.headAfter = undefined
       return undefined
     }
     let id: string

@@ -1,0 +1,12 @@
+────────────────────────────────────────
+ ◆ Approval needed · pwsh
+   Run pnpm test under
+   ↑↓ 1-1 of 4 lines · read to the end
+   y  allow once
+   a  allow for this session (this
+      exact action, until the session
+      ends or its authority changes)
+   n  reject   the answer keys arm in
+      a moment
+ ● Workspace write · ask   ready
+ deepseek/deepseek-flash
