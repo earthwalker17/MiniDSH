@@ -209,8 +209,9 @@ export function desktopImports(source: string): string[] {
  * `electron`, a `node:` builtin, or a relative path that stays inside
  * `desktop/src`. The desktop reaches the runtime by spawning the bundled CLI
  * and speaking its wire — never by importing `src/`, `dist/`, `bin/` or the
- * `minidsh` package — so the runtime keeps one way in, the one every other
- * surface uses (ARCHITECTURE §8). `importer` is relative to `desktop/src`,
+ * `minidsh` package — so the desktop gets no way in of its own: it is a
+ * client of the web host like a browser (ARCHITECTURE §8; headless, inside
+ * the package, is the one surface that drives core directly). `importer` is relative to `desktop/src`,
  * posix; `undefined` when allowed, otherwise the reason.
  */
 export function desktopImportViolation(importer: string, spec: string): string | undefined {
