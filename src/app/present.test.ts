@@ -13,7 +13,7 @@ import { createToolResultMessage, createUserMessage } from '../core/llm/message.
 import { asCallId } from '../core/ids.ts'
 import { SANDBOX_MODE } from '../core/sandbox/index.ts'
 import { SESSIONS, sessionPlugin, STEP_END, STEP_START, TOOL_CALL, TOOL_RESULT, TURN_END, TURN_START, USER_MESSAGE } from '../core/session/index.ts'
-import { auditLines, describeEvent, transcriptLines } from './present.ts'
+import { auditLines, DENIALS, describeEvent, transcriptLines } from './present.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 
@@ -211,7 +211,10 @@ describe('present: every field a provider or a stored log controls', () => {
     const lines = [
       describeEvent(at(TOOL_CALL.type, { turn: 1, step: 1, callId: 'c1', name: hostile, arguments: '{}' })),
       describeEvent(at('agent/options', { reason: 'change', options: { provider: 'deepseek', model: hostile } })),
-      describeEvent(at('request/context', { turn: 1, step: 1, route: { provider: 'deepseek', model: hostile } })),
+      // The payload's real shape (`RequestContextRecord`): flat. Nested under a
+      // `route` key, as this once was, the line read `undefined/undefined` and
+      // the hostile id never reached it.
+      describeEvent(at('request/context', { provider: 'deepseek', model: hostile, contextWindow: 100_000 })),
       describeEvent(at(APPROVAL_ASKED.type, { id: 'approval-1', toolName: hostile, callId: 'c1' })),
       describeEvent(at(TURN_END.type, { turn: 1, reason: { kind: 'error', code: hostile, message: 'm' } })),
       ...auditLines([
@@ -220,8 +223,59 @@ describe('present: every field a provider or a stored log controls', () => {
         at(TOOL_RESULT.type, { turn: 1, step: 1, callId: 'c1', error: { name: 'E', code: 'DENIED' } }, 2),
       ]),
     ].filter((line): line is string => line !== undefined)
-    expect(lines.length).toBeGreaterThanOrEqual(7)
+    expect(lines.length, lines.join(' | ')).toBeGreaterThanOrEqual(7)
     for (const line of lines) expect(line.includes(ESC), JSON.stringify(line)).toBe(false)
+    // Each hostile string is IN its line, neutralized: a line that never
+    // carried it would pass the check above whatever the projection did.
+    const carried = lines.filter((line) => line.includes('x [2K [1A'))
+    expect(carried, lines.join(' | ')).toHaveLength(7)
+    expect(lines).toContain('[route: deepseek/x [2K [1A · window 100k]')
+  })
+})
+
+describe('present: a stored payload that is not its kind\'s', () => {
+  // `matches` vouches for the kind alone. One such event used to throw out of
+  // `sessions show` and take every later line with it.
+  const at = (type: string, data: unknown, seq = 0) => ({ type, seq, time: 0, data }) as never
+
+  it('names the event it cannot read, on every plain-text view, and goes on to the next', () => {
+    expect(describeEvent(at(TURN_END.type, {}))).toBe('(unreadable payload)')
+    expect(describeEvent(at(TOOL_CALL.type, null))).toBe('(unreadable payload)')
+    expect(describeEvent(at('agent/options', { reason: 'change' }))).toBe('(unreadable payload)')
+    const good = at(SANDBOX_MODE.type, { mode: 'read-only', enforcement: 'full', reason: 'change' }, 2)
+    expect(transcriptLines([at(USER_MESSAGE.type, null, 0), at(TURN_END.type, {}, 1), good])).toEqual(['(unreadable payload)', '(unreadable payload)', '[sandbox: read-only (change; shell confinement full)]'])
+    expect(auditLines([at('approval/grant', null, 0), at(JOB_START.type, null, 1), good])).toEqual([
+      '   0  unreadable  approval/grant (unreadable payload)',
+      '   1  unreadable  job/start (unreadable payload)',
+      '   2  sandbox     read-only (change; shell confinement full)',
+    ])
+  })
+})
+
+describe('present: what the audit calls a denial', () => {
+  const call = (seq: number, callId: string, name: string, args: string) => ({ type: TOOL_CALL.type, seq, time: 0, data: { turn: 1, step: 1, callId, name, arguments: args } }) as never
+  const refused = (seq: number, callId: string, code: string) => ({ type: TOOL_RESULT.type, seq, time: 0, data: { turn: 1, step: 1, callId, error: { name: 'E', code } } }) as never
+
+  it('gives every refusal of the authority plane a `denied` line that names the call: a web search and a browser URL too', () => {
+    // The terminal's copy of this list had `NETWORK_DENIED` and the audit's did
+    // not, so a refused search showed as an ask and a decision and nothing else.
+    const audit = auditLines([
+      call(0, 'c1', 'web_search', '{"query":"the deploy key"}'),
+      refused(1, 'c1', 'NETWORK_DENIED'),
+      call(2, 'c2', 'browser_navigate', '{"url":"http://203.0.113.9/"}'),
+      refused(3, 'c2', 'BROWSER_URL_REFUSED'),
+      call(4, 'c3', 'bash', '{"command":"make"}'),
+      // A tool's own failure is not a denial, and gets no line.
+      refused(5, 'c3', 'SHELL_TIMEOUT'),
+    ])
+    expect(audit).toEqual(['   1  denied      NETWORK_DENIED (web_search {"query":"the deploy key"})', '   3  denied      BROWSER_URL_REFUSED (browser_navigate {"url":"http://203.0.113.9/"})'])
+  })
+
+  it('exports the one list both plain-text surfaces read, holding every code either of them styled as a denial', () => {
+    // What the terminal's own copy held when it was found to have drifted.
+    for (const code of ['DENIED', 'BLOCKED', 'ABORTED', 'ABORTED_BEFORE_DISPATCH', 'FS_SANDBOX_DENIED', 'SANDBOX_UNAVAILABLE', 'SANDBOX_ESCALATION_DENIED', 'SANDBOX_NOT_WIDER', 'SANDBOX_CEILING', 'NETWORK_DENIED']) {
+      expect(DENIALS.has(code), code).toBe(true)
+    }
   })
 })
 

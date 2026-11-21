@@ -56,10 +56,22 @@ function confinement(mode: string, enforcement: string): string {
  * ESC in any of them repaints the line above a person's [y/N].
  */
 export function describeEvent(event: EventEnvelope, names?: CallNames): string | undefined {
-  names?.see(event)
-  const line = lineFor(event, names)
+  let line: string | undefined
+  try {
+    names?.see(event)
+    line = lineFor(event, names)
+  } catch {
+    // `matches` vouches for the KIND only. A stored log (a hand edit, another
+    // tool's file) can hold a known kind with a payload of the wrong shape,
+    // and one such event used to throw out of `sessions show` and take every
+    // later line with it. Said, not skipped: the reader should know it is there.
+    line = UNREADABLE
+  }
   return line === undefined ? undefined : printableText(line)
 }
+
+/** What a line says of an event whose payload is not its kind's. */
+const UNREADABLE = '(unreadable payload)'
 
 /**
  * The tool each call id was made with, learned from the `tool/call`s a reader
@@ -224,21 +236,31 @@ export function transcriptLines(events: readonly EventEnvelope[], names: CallNam
 }
 
 function transcriptLine(event: EventEnvelope, names: CallNames): string | undefined {
-  if (matches(event, USER_MESSAGE)) {
-    const message = restoreMessage(event.data.message)
-    const text = messageText(message)
-    if (message.source.kind === 'user') return text.length > 0 ? `you> ${preview(text, 200)}` : undefined
-  } else if (matches(event, ASSISTANT_MESSAGE)) {
-    const text = messageText(restoreMessage(event.data.message))
-    if (text.length > 0) return preview(text, 400)
-  } else if (matches(event, TURN_END) && event.data.reason.kind === 'completed') {
-    return undefined
+  try {
+    if (matches(event, USER_MESSAGE)) {
+      const message = restoreMessage(event.data.message)
+      const text = messageText(message)
+      if (message.source.kind === 'user') return text.length > 0 ? `you> ${preview(text, 200)}` : undefined
+    } else if (matches(event, ASSISTANT_MESSAGE)) {
+      const text = messageText(restoreMessage(event.data.message))
+      if (text.length > 0) return preview(text, 400)
+    } else if (matches(event, TURN_END) && event.data.reason.kind === 'completed') {
+      return undefined
+    }
+  } catch {
+    // A payload that is not its kind's: `describeEvent` names it as such.
   }
   return describeEvent(event, names)
 }
 
-/** Result codes that are a decision of the authority plane, not a tool failure. */
-const DENIALS: ReadonlySet<string> = new Set([
+/**
+ * Result codes that are a decision of the authority plane, not a tool failure.
+ * Exported so that no surface keeps a copy, because a copy drifts: one gained
+ * `NETWORK_DENIED` while this list did not, and the audit then showed a
+ * refused web search as an ask and a decision with no `denied` line naming
+ * the call.
+ */
+export const DENIALS: ReadonlySet<string> = new Set([
   'DENIED',
   'BLOCKED',
   'ABORTED',
@@ -249,6 +271,13 @@ const DENIALS: ReadonlySet<string> = new Set([
   'SANDBOX_NOT_WIDER',
   // An approved escalation refused past a delegation ceiling (`sandbox.resolve`).
   'SANDBOX_CEILING',
+  // A network request whose consent was not given (`tool-web-search`).
+  'NETWORK_DENIED',
+  // A URL outside what the browser may reach (`tool-browser` `admitUrl`). That
+  // refusal has no approval pair, so this line is its only trace in the audit.
+  // The same code covers text that is not a URL at all; an audit that lists
+  // one refusal too many is the safe direction.
+  'BROWSER_URL_REFUSED',
 ])
 
 /** Why an answer is outcome-unknown, by the name repair gave it (`core/session/repair.ts`). */
@@ -281,7 +310,14 @@ export function auditLines(events: readonly EventEnvelope[], pending: readonly E
   for (const event of [...events, ...pending]) {
     const pendingLine = event.seq >= stored
     const before = lines.length
-    audit(event, pendingLine)
+    try {
+      audit(event, pendingLine)
+    } catch {
+      // A known kind whose payload is not its kind's (`describeEvent`): the
+      // audit names the event it could not read and goes on to the next.
+      lines.length = before
+      lines.push(`${at(event.seq)}  unreadable  ${event.type} ${UNREADABLE}`)
+    }
     // A closer nobody has written yet is marked on every line it produced.
     if (pendingLine) for (let i = before; i < lines.length; i++) lines[i] += ' (on resume)'
   }

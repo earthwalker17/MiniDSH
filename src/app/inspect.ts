@@ -276,6 +276,13 @@ export interface Inspection {
     readonly notCompleted: readonly { readonly turn: number; readonly seq: number; readonly reason: string }[]
     readonly open?: { readonly turn: number; readonly seq: number }
   }
+  /**
+   * The seq of every `turn/end`, in order: the points a fork may be taken at
+   * (`fork --at`). Listed because the fork's refusal of a seq inside a turn
+   * could name none, and the only other way to find one was to read every row
+   * of `sessions show`.
+   */
+  readonly forkPoints: readonly number[]
   /** What a resume would append (a salvaging fork, for a damaged log; a fork, for one a live writer holds). */
   readonly closers: readonly EventEnvelope[]
   /** Folded from the log alone, as it stands at its end — the enforcement is the one the LAST stamp recorded, never this host's. */
@@ -316,7 +323,7 @@ export interface InspectedJob {
   readonly closedOnResume?: true
 }
 
-type Report = Pick<Inspection, 'lifecycles' | 'turns' | 'authority' | 'narrowing' | 'undecidedApprovals' | 'inbox' | 'children' | 'jobs' | 'cost'> & { readonly facts: number }
+type Report = Pick<Inspection, 'lifecycles' | 'turns' | 'forkPoints' | 'authority' | 'narrowing' | 'undecidedApprovals' | 'inbox' | 'children' | 'jobs' | 'cost'> & { readonly facts: number }
 
 /**
  * What the report reads off the log: each section its owner's fold, each
@@ -344,6 +351,7 @@ function readFolds(events: readonly EventEnvelope[], closers: readonly EventEnve
   }
   let total = 0
   let open: { turn: number; seq: number } | undefined
+  const forkPoints: number[] = []
   const notCompleted: { turn: number; seq: number; reason: string }[] = []
   const children = new Map<string, { childId: string; callId: string; seq: number; ended?: string }>()
   let childInput = 0
@@ -366,6 +374,7 @@ function readFolds(events: readonly EventEnvelope[], closers: readonly EventEnve
         open = { turn: event.data.turn, seq: event.seq }
       } else if (matches(event, TURN_END)) {
         open = undefined
+        forkPoints.push(event.seq)
         const reason = event.data.reason
         if (reason.kind !== 'completed') notCompleted.push({ turn: event.data.turn, seq: event.seq, reason: reason.kind === 'error' ? `error ${reason.code}` : reason.kind })
       } else if (matches(event, SUBAGENT_START)) {
@@ -456,6 +465,7 @@ function readFolds(events: readonly EventEnvelope[], closers: readonly EventEnve
       facts: facts.length,
       lifecycles,
       turns: { total, notCompleted, ...(open === undefined ? {} : { open }) },
+      forkPoints,
       authority,
       ...(narrowing === undefined ? {} : { narrowing }),
       undecidedApprovals: asked,
@@ -533,7 +543,9 @@ export function inspectLines(inspection: Inspection): string[] {
   lines.push(`format ${header.version} · ${inspection.counts.events} events (${inspection.counts.trace} trace)${bytes}`)
   if (inspection.lease !== undefined) {
     const { pid, host, alive } = inspection.lease
-    lines.push(`lease: held by pid ${pid} on ${host} (${alive === 'unknown' ? 'another host: cannot probe' : alive ? 'alive' : 'dead: a resume reclaims it'})`)
+    // `unknown` is another machine, or another OS on this one: WSL 2 and its
+    // Windows host share a hostname and a home, and neither can probe the other's pids.
+    lines.push(`lease: held by pid ${pid} on ${host} (${alive === 'unknown' ? 'another host or OS: cannot probe' : alive ? 'alive' : 'dead: a resume reclaims it'})`)
   }
   const lineage = [
     ...(header.parentId === undefined ? [] : [`forked from ${header.parentId} (${header.seedLength ?? '?'} events)`]),
@@ -557,6 +569,7 @@ export function inspectLines(inspection: Inspection): string[] {
   const { turns } = inspection
   const ended = turns.notCompleted.map((entry) => `${entry.turn} ${entry.reason} at ${entry.seq}`)
   lines.push(`turns: ${turns.total}${ended.length > 0 ? ` (${ended.join('; ')})` : ''}${turns.open === undefined ? '' : ` · open: ${turns.open.turn} since ${turns.open.seq}`}`)
+  if (inspection.forkPoints.length > 0) lines.push(`  each ends at seq: ${inspection.forkPoints.join(', ')} (a point \`fork --at\` accepts)`)
   const { authority } = inspection
   const accepts = authority.accepts === undefined ? 'no acceptance recorded for it' : `accepts ${authority.accepts} for it`
   lines.push(

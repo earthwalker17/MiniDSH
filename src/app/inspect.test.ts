@@ -124,6 +124,31 @@ describe('verify: the verdict', () => {
     expect(verifyStored(stored(events, { lease: { pid: 1, host: hostname(), alive: false } })).inFlux).toBe(false)
   })
 
+  it('says of a lease it cannot probe that its holder is on another host or another OS, never that it is dead or alive', () => {
+    const events = log((add) => (opening(add), completedTurn(add)))
+    const line = (alive: boolean | 'unknown'): string | undefined =>
+      inspectLines(inspectStored(stored(events, { lease: { pid: 4242, host: 'elsewhere', alive } }), verifyStored(stored(events)))).find((entry) => entry.startsWith('lease: '))
+    // WSL 2 and its Windows host share a hostname and a home: the store reports
+    // a holder on the other platform as unknown too, so "another host" alone was wrong.
+    expect(line('unknown')).toBe('lease: held by pid 4242 on elsewhere (another host or OS: cannot probe)')
+    expect(line(true)).toBe('lease: held by pid 4242 on elsewhere (alive)')
+    expect(line(false)).toBe('lease: held by pid 4242 on elsewhere (dead: a resume reclaims it)')
+  })
+
+  it('lists the seq of every turn\'s end, which is where a fork may be taken', () => {
+    const events = log((add) => (opening(add), completedTurn(add)))
+    const ends = events.filter((event) => event.type === TURN_END.type).map((event) => event.seq)
+    expect(ends).toHaveLength(1)
+    const inspection = inspectStored(stored(events), verifyStored(stored(events)))
+    expect(inspection.forkPoints).toEqual(ends)
+    expect(inspectLines(inspection)).toContain(`  each ends at seq: ${ends[0]} (a point \`fork --at\` accepts)`)
+    // A log with no ended turn has none to offer, and says nothing about them.
+    const opened = log((add) => opening(add))
+    const none = inspectStored(stored(opened), verifyStored(stored(opened)))
+    expect(none.forkPoints).toEqual([])
+    expect(inspectLines(none).filter((entry) => entry.includes('each ends at seq'))).toEqual([])
+  })
+
   it('is torn for an unterminated final line, and damaged — exit 1 — past a readable prefix', () => {
     const events = log((add) => (opening(add), completedTurn(add)))
     expect(verifyStored(stored(events, { integrity: { bytes: 120, readableBytes: 100, tail: 'torn' } })).verdict).toBe('torn')
