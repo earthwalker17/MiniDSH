@@ -1,8 +1,9 @@
 /**
- * The mark is drawn in six places, each in the syntax its consumer needs: the
+ * The mark is drawn in seven places, each in the syntax its consumer needs: the
  * desktop icon's source, the shell page's mark, the web page's favicon (a data
- * URI) and its in-page mark (built with DOM calls), and the two files under
- * `docs/images/logo/` kept for listings. Nothing generates one from another,
+ * URI) and its in-page mark (built with DOM calls), the two files under
+ * `docs/images/logo/` kept for listings, and the repository's social preview
+ * (`docs/images/social-preview.svg`). Nothing generates one from another,
  * so a change to the drawing in one place is a second logo. This holds the
  * geometry equal, and the published PNG sizes to what their names say.
  */
@@ -44,6 +45,14 @@ describe('the mark', () => {
     expect(icons).toContain(`d: '${STRAP}'`)
     expect(icons).toContain(`{ x: '1', y: '1', width: '22', height: '22', rx: '7', class: 'mark-tile' }`)
     expect(icons).toContain(`{ cx: '17.75', cy: '6.25', r: '1.6', class: 'mark-dot' }`)
+  })
+
+  it('is the same glyph on the social preview, which is the size a repository page takes', () => {
+    // No tile there: the picture's own ground is the tile's colour.
+    const source = read('docs/images/social-preview.svg')
+    expect(source).toContain(GLYPH)
+    expect(source).toContain('<rect width="1280" height="640" fill="#0f1115"/>')
+    expect(pngSize('docs/images/social-preview.png')).toEqual({ width: 1280, height: 640 })
   })
 
   it('is published at the sizes its file names say, square', () => {

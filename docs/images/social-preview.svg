@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <rect width="1280" height="640" fill="#0f1115"/>
+  <g transform="translate(150 185) scale(11.25)"><path d="M6.5 16.5V9.5a2.5 2.5 0 0 1 5 0v7M11.5 9.5a2.5 2.5 0 0 1 5 0v7" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="17.75" cy="6.25" r="1.6" fill="#3cc2b0"/></g>
+  <g font-family="'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">
+    <text x="470" y="312" font-size="104" font-weight="600" fill="#ffffff">MiniDSH</text>
+    <text x="474" y="378" font-size="33" fill="#9aa3b2">An architecture-first, local-first agent harness</text>
+    <text x="474" y="426" font-size="33" fill="#9aa3b2">Minimal surface. Complete architecture.</text>
+  </g>
+</svg>
