@@ -4,9 +4,9 @@
  * would not validate, a document another process changed underneath, and a
  * hand-edited file that no longer parses.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createRoot, type Context, type Logger } from '../../kernel/index.ts'
@@ -27,11 +27,11 @@ afterEach(async () => {
   dirs = []
 })
 
-async function store(): Promise<{ settings: Settings; path: string; root: Context; changes: { ns: string; revision: number }[] }> {
+async function store(logger: Logger = silent): Promise<{ settings: Settings; path: string; root: Context; changes: { ns: string; revision: number }[] }> {
   const dir = mkdtempSync(join(tmpdir(), 'minidsh-settings-'))
   dirs.push(dir)
   const path = join(dir, 'settings.json')
-  const root = createRoot({ logger: silent })
+  const root = createRoot({ logger })
   roots.push(root)
   root.plugin(settingsLocalPlugin, { path })
   await root.settle()
@@ -125,12 +125,101 @@ describe('the settings store', () => {
     expect(described[0]!.schema).toEqual({ type: 'object' })
   })
 
-  it('writes atomically and privately, leaving no half-written document behind', async () => {
+  // That the temporary is synced before it is renamed is `settings-faults.test.ts`'s
+  // to show: only a wrapped `node:fs` can see the order of the two calls.
+  it('writes privately, leaving nothing but the document behind', async () => {
     const { settings, path, root } = await store()
     settings.register(root, 'agent', schema, { base })
     settings.write('agent', { maxSteps: 9 }, { expectedRevision: 0 })
     expect(read(path)).toEqual({ agent: { maxSteps: 9 }, revisions: { agent: 1 } })
-    expect(() => readFileSync(`${path}.writing`, 'utf8')).toThrow()
-    expect(() => readFileSync(`${path}.lock`, 'utf8')).toThrow()
+    expect(readdirSync(dirname(path))).toEqual(['settings.json'])
+    // Owner-only where the filesystem has modes; Windows keeps its folder's ACL.
+    if (process.platform !== 'win32') expect((statSync(path).mode & 0o777).toString(8)).toBe('600')
+  })
+
+  it('reads a document that begins with a byte-order mark, as an editor on Windows saves it', async () => {
+    const { settings, path, root } = await store()
+    settings.register(root, 'agent', schema, { base })
+    writeFileSync(path, `﻿${JSON.stringify({ agent: { model: 'marked' }, revisions: { agent: 3 } })}`, 'utf8')
+    expect(readFileSync(path).subarray(0, 3).toString('hex'), 'the mark is really on disk').toBe('efbbbf')
+    expect(settings.read('agent')).toMatchObject({ value: { provider: 'deepseek', model: 'marked' }, revision: 3 })
+    // …and a write over it goes through, on the revision the marked file held.
+    settings.write('agent', { model: 'next' }, { expectedRevision: 3 })
+    expect(read(path)).toEqual({ agent: { model: 'next' }, revisions: { agent: 4 } })
+  })
+
+  it('reads an empty or whitespace-only document as no settings, says so once, and replaces it at the next write', async () => {
+    const warnings: string[] = []
+    const { settings, path, root } = await store({ warn: (message) => void warnings.push(message), error: () => {} })
+    const scope = settings.register(root, 'agent', schema, { base })
+    for (const content of ['', ' \n\t\r\n', '﻿\n']) {
+      writeFileSync(path, content, 'utf8')
+      expect(scope.get(), JSON.stringify(content)).toEqual(base)
+      expect(settings.read('agent'), JSON.stringify(content)).toMatchObject({ value: base, user: {}, revision: 0 })
+    }
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain(path)
+    expect(warnings[0]).toMatch(/is empty; it is read as no settings/)
+    // A document that has bytes and is not JSON is still a hand-edit to report, not to guess at.
+    writeFileSync(path, '{ "agent": ', 'utf8')
+    expect(() => settings.read('agent')).toThrowError(expect.objectContaining({ code: 'SETTINGS_INVALID' }))
+
+    writeFileSync(path, '', 'utf8')
+    settings.write('agent', { model: 'saved' }, { expectedRevision: 0 })
+    expect(read(path)).toEqual({ agent: { model: 'saved' }, revisions: { agent: 1 } })
+  })
+})
+
+/**
+ * The lock is what makes "re-read, check the revision, validate, persist" one
+ * step across processes. A second process is modelled the only way it shows up
+ * here: as the files it would leave beside the document.
+ */
+describe('the settings store: one writer at a time', () => {
+  const STALE_MS = 5_000
+  const backdate = (path: string, ms: number): void => {
+    const when = (Date.now() - ms) / 1000
+    utimesSync(path, when, when)
+  }
+
+  it('refuses a write while another writer holds the lock, and leaves the document as it was', async () => {
+    const { settings, path, root, changes } = await store()
+    settings.register(root, 'agent', schema, { base })
+    settings.write('agent', { model: 'first' }, { expectedRevision: 0 })
+    const before = readFileSync(path, 'utf8')
+    writeFileSync(`${path}.lock`, '')
+
+    expect(() => settings.write('agent', { model: 'second' }, { expectedRevision: 1 })).toThrowError(expect.objectContaining({ code: 'SETTINGS_CONFLICT', message: expect.stringContaining('another writer holds') }))
+    expect(readFileSync(path, 'utf8')).toBe(before)
+    // Their lock is theirs: still there, and nothing was announced.
+    expect(existsSync(`${path}.lock`)).toBe(true)
+    expect(changes).toEqual([{ ns: 'agent', revision: 1 }])
+    // Nearly stale is still held.
+    backdate(`${path}.lock`, STALE_MS - 2_000)
+    expect(() => settings.write('agent', { model: 'second' }, { expectedRevision: 1 })).toThrowError(expect.objectContaining({ code: 'SETTINGS_CONFLICT' }))
+    expect(readFileSync(path, 'utf8')).toBe(before)
+  })
+
+  it('takes over a lock a killed writer left, once it is older than any write could be', async () => {
+    const { settings, path, root } = await store()
+    settings.register(root, 'agent', schema, { base })
+    writeFileSync(`${path}.lock`, '')
+    backdate(`${path}.lock`, STALE_MS + 60_000)
+
+    settings.write('agent', { model: 'after the crash' }, { expectedRevision: 0 })
+    expect(read(path)).toEqual({ agent: { model: 'after the crash' }, revisions: { agent: 1 } })
+    expect(readdirSync(dirname(path))).toEqual(['settings.json'])
+  })
+
+  it('does not take over a stale lock while another reclaimer holds the steal mutex', async () => {
+    const { settings, path, root } = await store()
+    settings.register(root, 'agent', schema, { base })
+    writeFileSync(`${path}.lock`, '')
+    backdate(`${path}.lock`, STALE_MS + 60_000)
+    writeFileSync(`${path}.lock.steal`, '')
+
+    expect(() => settings.write('agent', { model: 'mine' }, { expectedRevision: 0 })).toThrowError(expect.objectContaining({ code: 'SETTINGS_CONFLICT', message: expect.stringContaining('another writer is reclaiming') }))
+    // Nothing written, and neither of the other reclaimer's files touched.
+    expect(readdirSync(dirname(path)).toSorted()).toEqual(['settings.json.lock', 'settings.json.lock.steal'])
   })
 })

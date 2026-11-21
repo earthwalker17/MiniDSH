@@ -42,6 +42,11 @@ function readStore(path: string): StoreRead {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'missing' }
     return { state: 'unusable', why: `is unreadable: ${error instanceof Error ? error.message : String(error)}` }
   }
+  // One leading byte-order mark is an editor's habit (Notepad, Windows
+  // PowerShell's `Set-Content -Encoding UTF8`), not a syntax error: refusing it
+  // reports "not valid JSON" about a file that looks valid to the person
+  // reading it, and leaves every key in it unset.
+  if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1)
   let store: unknown
   try {
     store = JSON.parse(raw)

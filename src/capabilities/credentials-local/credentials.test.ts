@@ -86,6 +86,35 @@ describe('credentials-local', () => {
     expect(await warn('["sk-live-SECRETVALUE123"]')).toMatch(/is not a JSON object/)
   })
 
+  // Notepad and Windows PowerShell's `Set-Content -Encoding UTF8` put a
+  // byte-order mark in front of a file that otherwise looks valid to the person
+  // who saved it. `JSON.parse` refuses the mark, so unhandled it reads as "not
+  // valid JSON", every key in the store is unset, and the writer refuses to
+  // touch it.
+  it('reads and rewrites a store that begins with a byte-order mark', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'minidsh-cred-'))
+    const store = join(dir, 'credentials.json')
+    const warnings: string[] = []
+    root = createRoot({ logger: { warn: (message) => void warnings.push(message), error: () => {} } })
+    root.plugin(credentialsLocalPlugin, { path: store })
+    await root.settle()
+    const credentials = root.get(CREDENTIALS)
+    writeFileSync(store, `﻿${JSON.stringify({ MINIDSH_TEST_SECRET: 'marked' })}`)
+    expect(readFileSync(store).subarray(0, 3).toString('hex'), 'the mark is really on disk').toBe('efbbbf')
+
+    expect(credentials.resolve(REF)).toBe('marked')
+    expect(warnings).toEqual([])
+    expect(credentialSources(store, [REF])).toEqual({ sources: [{ name: REF, source: 'store' }] })
+    expect(updateCredentialStore(store, credentialRef('MINIDSH_TEST_OTHER'), 'added')).toBe(true)
+    expect(JSON.parse(readFileSync(store, 'utf8'))).toEqual({ MINIDSH_TEST_SECRET: 'marked', MINIDSH_TEST_OTHER: 'added' })
+
+    // A marked store that IS malformed is still reported, at the place an editor shows.
+    writeFileSync(store, `﻿{\n  "MINIDSH_TEST_SECRET": "sk-live-SECRETVALUE123",\n}`)
+    expect(credentials.resolve(REF)).toBeUndefined()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/is not valid JSON at line 3, column 1;/)
+  })
+
   it('resolves env over file, and the file when env is unset or blank', async () => {
     const { resolve, store } = await mountWithStore()
     writeFileSync(store, JSON.stringify({ MINIDSH_TEST_SECRET: 'from-file' }))

@@ -15,7 +15,7 @@
  * holds a value that would have to be redacted before it crossed a wire, and
  * needs no redacting read or field-level write verb to make that safe.
  */
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
@@ -51,11 +51,72 @@ interface Namespace {
   readonly watchers: Set<(next: unknown, previous: unknown) => void>
 }
 
+/**
+ * The Windows rules of a lock file and of a rename over a file somebody may
+ * have open. They are `credentials-local`'s, mirrored here because capabilities
+ * do not import each other; the measurement behind them lives there (6 of 100
+ * writers died of the first in a four-process race).
+ *
+ * A name its holder just removed stays DELETE-PENDING while any process still
+ * has a handle on it (another writer's stat, an antivirus scan), and creating
+ * it again answers EPERM, EACCES or EBUSY rather than EEXIST. A rename over a
+ * file a reader has open for a moment answers the same three. Both are busy,
+ * not broken, so both are asked again for a short bound, and at its end the
+ * real error is thrown.
+ */
+const PENDING_WAIT_MS = 1_000
+const PENDING_RETRY_MS = 25
+const RENAME_ATTEMPTS = 5
+const RENAME_RETRY_MS = 50
+
+function busyOnWindows(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code
+  return process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY')
+}
+
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * Exclusive create of an empty lock file: `false` when the name is taken.
+ * Anything else the filesystem says (a read-only directory, a full disk) is
+ * thrown in its own words: it is not another writer, and must not be reported
+ * as one.
+ */
+function createExclusive(path: string): boolean {
+  const deadline = Date.now() + PENDING_WAIT_MS
+  for (;;) {
+    try {
+      closeSync(openSync(path, 'wx', 0o600))
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+      if (!busyOnWindows(error) || Date.now() > deadline) throw error
+      pause(PENDING_RETRY_MS)
+    }
+  }
+}
+
+function renameOver(from: string, to: string): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (error) {
+      if (attempt >= RENAME_ATTEMPTS || !busyOnWindows(error)) throw error
+      pause(RENAME_RETRY_MS)
+    }
+  }
+}
+
 class LocalSettings implements Settings {
   private readonly ctx: Context
   private readonly path: string
   private readonly staleLockMs: number
   private readonly namespaces = new Map<string, Namespace>()
+  /** An empty document is reported once, not on every read of it. */
+  private warnedEmpty = false
 
   constructor(ctx: Context, config: SettingsLocalConfig) {
     this.ctx = ctx
@@ -166,7 +227,23 @@ class LocalSettings implements Settings {
   private document(): Record<string, unknown> {
     if (!existsSync(this.path)) return {}
     try {
-      return documentSchema.parse(JSON.parse(readFileSync(this.path, 'utf8'))) as Record<string, unknown>
+      let text = readFileSync(this.path, 'utf8')
+      // One leading byte-order mark is an editor's habit (Notepad, Windows
+      // PowerShell's `Set-Content -Encoding UTF8`), not a syntax error.
+      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+      // An EMPTY document says nothing, which is what no document says. It is
+      // what a power cut can leave of a file replaced without a sync (every
+      // version before 2.0 wrote it that way), and refusing it would stop every
+      // read and write until a person found the file and deleted it by hand.
+      // The next write replaces it with a whole one.
+      if (text.trim().length === 0) {
+        if (!this.warnedEmpty) {
+          this.warnedEmpty = true
+          this.ctx.logger.warn(`settings file ${this.path} is empty; it is read as no settings, and the next change saved replaces it`)
+        }
+        return {}
+      }
+      return documentSchema.parse(JSON.parse(text)) as Record<string, unknown>
     } catch (error) {
       throw new SettingsError('SETTINGS_INVALID', `settings file ${this.path} is not readable: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
     }
@@ -180,43 +257,60 @@ class LocalSettings implements Settings {
   private persist(document: Record<string, unknown>): void {
     mkdirSync(dirname(this.path), { recursive: true })
     const temporary = `${this.path}.writing`
-    // Written whole, then renamed: a crash leaves the old document, never half
-    // of a new one.
-    writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-    renameSync(temporary, this.path)
+    try {
+      // Written whole and SYNCED, then renamed: a crash leaves the old
+      // document, never half of a new one. The sync is what makes that true
+      // across a power cut, where a filesystem may keep the rename (journaled
+      // metadata) and lose the bytes it named: an empty settings.json.
+      const fd = openSync(temporary, 'w', 0o600)
+      try {
+        writeFileSync(fd, `${JSON.stringify(document, null, 2)}\n`, 'utf8')
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
+      renameOver(temporary, this.path)
+    } catch (error) {
+      // A write that did not land leaves no half-made file beside the document.
+      try {
+        rmSync(temporary, { force: true })
+      } catch {
+        // The failure to report is the write's, not the cleanup's.
+      }
+      throw error
+    }
   }
 
   private lock(): () => void {
     const lock = `${this.path}.lock`
     mkdirSync(dirname(this.path), { recursive: true })
+    const release = (): void => rmSync(lock, { force: true })
+    if (createExclusive(lock)) return release
+    // A holder that never released (a killed process) must not block writes
+    // forever; anything younger than the stale window is a real writer. A lock
+    // that is gone by now was released between the two calls, and is taken
+    // through the reclaim below like any other that nobody holds.
+    let age = Number.POSITIVE_INFINITY
     try {
-      closeSync(openSync(lock, 'wx'))
+      age = Date.now() - statSync(lock).mtimeMs
     } catch {
-      // A holder that never released (a killed process) must not block writes
-      // forever; anything younger than the stale window is a real writer.
-      const age = existsSync(lock) ? Date.now() - statSync(lock).mtimeMs : Number.POSITIVE_INFINITY
-      if (age < this.staleLockMs) throw new SettingsError('SETTINGS_CONFLICT', `another writer holds ${lock}`)
-      // Reclaiming is the protocol's one TWO-step (remove, then create), so it
-      // runs under its own exclusive-create mutex — the same discipline the
-      // session lease uses. Without it two reclaimers of one dead holder could
-      // both remove and both create, and the second remove would delete the
-      // first's fresh lock: two writers, both believing they hold it.
-      const steal = `${lock}.steal`
-      try {
-        closeSync(openSync(steal, 'wx'))
-      } catch {
-        throw new SettingsError('SETTINGS_CONFLICT', `another writer is reclaiming ${lock}`)
-      }
-      try {
-        rmSync(lock, { force: true })
-        closeSync(openSync(lock, 'wx'))
-      } catch {
-        throw new SettingsError('SETTINGS_CONFLICT', `another writer reclaimed ${lock} first`)
-      } finally {
-        rmSync(steal, { force: true })
-      }
+      // Released since the create was refused.
     }
-    return () => rmSync(lock, { force: true })
+    if (age < this.staleLockMs) throw new SettingsError('SETTINGS_CONFLICT', `another writer holds ${lock}`)
+    // Reclaiming is the protocol's one TWO-step (remove, then create), so it
+    // runs under its own exclusive-create mutex — the same discipline the
+    // session lease uses. Without it two reclaimers of one dead holder could
+    // both remove and both create, and the second remove would delete the
+    // first's fresh lock: two writers, both believing they hold it.
+    const steal = `${lock}.steal`
+    if (!createExclusive(steal)) throw new SettingsError('SETTINGS_CONFLICT', `another writer is reclaiming ${lock}`)
+    try {
+      rmSync(lock, { force: true })
+      if (!createExclusive(lock)) throw new SettingsError('SETTINGS_CONFLICT', `another writer reclaimed ${lock} first`)
+    } finally {
+      rmSync(steal, { force: true })
+    }
+    return release
   }
 }
 
