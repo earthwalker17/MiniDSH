@@ -15,6 +15,9 @@
 import { icon } from './icons.js'
 import { h, iconButton } from './ui.js'
 
+/** How long after a send the Stop that replaces Send takes no click: longer than a double-click (the approval card's bound). */
+const STOP_ARM_MS = 600
+
 /**
  * @typedef {{
  *   canSend: boolean,
@@ -42,6 +45,15 @@ export function createComposer(options) {
   /** @type {ComposerState | undefined} */
   let state
   let lastEscape = 0
+  /**
+   * A send was made a moment ago. The button that sent becomes Stop on the
+   * same pixels as soon as the host says the turn runs, which is inside a
+   * double-click: until this clears, Stop is drawn but takes no click, so the
+   * second press of the click that sent cannot cancel what it just started
+   * (the approval card arms its buttons the same way, `approval.js`).
+   */
+  let justSent = false
+  let arming = 0
 
   const plus = iconButton('plus', 'Actions', () => options.onPlus(plus), 'round-btn')
   plus.setAttribute('aria-haspopup', 'menu')
@@ -62,6 +74,12 @@ export function createComposer(options) {
     const text = textarea.value.trim()
     if (!text || !state?.canSend) return
     textarea.value = ''
+    justSent = true
+    clearTimeout(arming)
+    arming = window.setTimeout(() => {
+      justSent = false
+      syncSend()
+    }, STOP_ARM_MS)
     autosize()
     syncSend()
     options.onSend(text, mode)
@@ -70,7 +88,7 @@ export function createComposer(options) {
   options.form.addEventListener('submit', (event) => {
     event.preventDefault()
     if (state?.running && textarea.value.trim().length === 0) {
-      options.onStop()
+      if (!justSent) options.onStop()
       return
     }
     submit('auto')
@@ -103,7 +121,7 @@ export function createComposer(options) {
     const label = stop ? 'Stop the turn' : state?.running ? 'Send — it steers the running turn' : 'Send'
     send.setAttribute('aria-label', label)
     send.setAttribute('title', stop ? 'Stop the turn (Esc Esc)' : state?.running ? 'Send now (Enter) · after this turn (Ctrl+Enter)' : 'Send (Enter)')
-    send.disabled = !state?.canSend || (!draft && !stop)
+    send.disabled = !state?.canSend || (!draft && !(stop && !justSent))
   }
 
   return {

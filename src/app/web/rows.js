@@ -1,7 +1,10 @@
 // @ts-check
 /**
  * The browser's event projection, without the DOM: one row DESCRIPTOR per
- * durable event, which `app.js` turns into nodes.
+ * durable event. `conversation.js` reads it to decide whether an event is
+ * shown at all and keeps it on the block it places; `transcript.js` and the
+ * full-screen terminal's `blocks.ts` then draw a block's own shape and read
+ * only the descriptor's `text`.
  *
  * A different projection from `app/present.ts` on purpose: that one is the
  * single projection every PLAIN-TEXT surface shares, and this one feeds
@@ -66,8 +69,10 @@ function readableNarrowing(data) {
 }
 
 /**
- * What `app.js` renders: `cls` is the row's class list; a row with `who` is a
- * speaker row (a label and a body), any other is one line of text.
+ * One event as a line of text. The two renderers (`transcript.js`,
+ * `terminal/blocks.ts`) read `text` alone; `cls` and `who` say what kind of
+ * row it is (a speaker row carries `who`) and are read by the parity gate
+ * (`rows.test.ts`), not drawn.
  * @typedef {{ cls: string, who?: string, text: string }} Row
  */
 
@@ -110,8 +115,10 @@ const note = (text) => ({ cls: 'row note', text })
 /**
  * A consent subject as one clause — `describeIntent`'s words, spelled here
  * because nothing is imported at runtime. Both families, and only the two:
- * the authority invariant refuses any other before it reaches a log. Shared
- * with `app.js`'s approval bar, so the bar and the transcript say the same.
+ * the authority invariant refuses any other before it reaches a log. The
+ * joined form of `subjectParts` below, which the approval card (`approval.js`)
+ * and the terminal's band build from: so the card, a call's own approvals
+ * (`cards.js`), the panel's grants and the transcript all say the same.
  * Not a `switch`: the parity gate reads every `case` here as an event kind.
  * @param {EffectIntent} subject
  */

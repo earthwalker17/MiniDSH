@@ -98,6 +98,29 @@ describe('a call card', () => {
     expect(card.lang).toBe('js')
   })
 
+  it('shows no change counts on an edit whose call failed: the change it asked for did not happen', () => {
+    // As recorded by a live session (S22.5): the editor refused with FS_NOT_OBSERVED, and the row still said "+5 −1".
+    const refused = { seq: 4, time: 3, text: 'Error: src/slug.js changed since it was last read', images: [], isError: true, error: { name: 'ToolError', code: 'FS_NOT_OBSERVED' } }
+    const replace = item({ name: 'str_replace_editor', args: JSON.stringify({ command: 'str_replace', path: '/ws/slug.js', old_str: 'a', new_str: 'b\nc\nd\ne\nf' }), result: refused })
+    const failed = cardFor(replace, EDITOR, idle)
+    expect(failed.status).toBe('failed')
+    expect(failed.diffStat, 'counts on a refused str_replace').toBeUndefined()
+    // What it asked to change is still shown, beside why it was refused.
+    expect(failed.sections.map((section) => section.kind)).toEqual(['diff', 'output'])
+    const create = cardFor(item({ name: 'str_replace_editor', args: JSON.stringify({ command: 'create', path: '/ws/new.js', file_text: 'one\ntwo' }), result: refused }), EDITOR, idle)
+    expect(create.diffStat, 'counts on a refused create').toBeUndefined()
+    expect(create.sections.map((section) => section.kind)).toEqual(['code', 'output'])
+    // A call that never ran, or was denied, changed nothing either.
+    const notRun = { ...refused, error: { name: 'ToolError', code: 'ABORTED_BEFORE_DISPATCH' } }
+    expect(cardFor({ ...replace, result: notRun }, EDITOR, idle).diffStat).toBeUndefined()
+    // One that succeeded, and one still being made, keep theirs.
+    const done = { seq: 4, time: 3, text: 'edited', images: [], isError: false }
+    expect(cardFor({ ...replace, result: done }, EDITOR, idle).diffStat).toEqual({ added: 5, removed: 1 })
+    const { result: _result, ...running } = replace
+    expect(cardFor(running, EDITOR, { ...idle, running: true }).diffStat).toEqual({ added: 5, removed: 1 })
+    expect(cardFor({ ...item({ name: 'str_replace_editor', args: JSON.stringify({ command: 'create', path: '/ws/new.js', file_text: 'one\ntwo' }) }), result: done }, EDITOR, idle).diffStat).toEqual({ added: 2, removed: 0 })
+  })
+
   it('bounds a huge diff and says how much it hid', () => {
     const many = Array.from({ length: 1000 }, (_, at) => `line ${at}`).join('\n')
     const { lines, hidden } = lineDiff('', many)

@@ -547,38 +547,49 @@ async function send(text, mode) {
   const ticket = openTicket
   const bubble = h('div', { class: 'bubble-wrap' }, h('div', { class: 'bubble pending', text, attrs: { 'aria-label': `Sending: ${text}` } }))
   if (window_) showPending(bubble)
-  try {
-    /** @type {Record<string, unknown>} */
-    const params = window_
-      ? { sessionId: window_.sessionId, text, mode }
-      : {
-          text,
-          ...(state.pendingNew.agentOptions ? { agentOptions: state.pendingNew.agentOptions } : {}),
-          ...(state.pendingNew.authority ? { authority: state.pendingNew.authority } : {}),
-          ...(chosenWorkspace() ? { workspaceId: chosenWorkspace()?.id } : {}),
-        }
-    const result = await state.wire.request('session/prompt', params)
-    if (!window_) {
-      // Opened only if the person is still on the new-session page this send started from.
-      if (ticket !== openTicket || state.window !== undefined) {
-        bubble.remove()
-        void refreshSessions().catch(() => undefined)
-        return
+  /** @type {Record<string, unknown>} */
+  const params = window_
+    ? { sessionId: window_.sessionId, text, mode }
+    : {
+        text,
+        ...(state.pendingNew.agentOptions ? { agentOptions: state.pendingNew.agentOptions } : {}),
+        ...(state.pendingNew.authority ? { authority: state.pendingNew.authority } : {}),
+        ...(chosenWorkspace() ? { workspaceId: chosenWorkspace()?.id } : {}),
       }
-      state.pendingNew = {}
-      await openSession(result.sessionId)
-      // Re-read after the await: the open replaced the window.
-      const opened = /** @type {SessionWindow | undefined} */ (state.window)
-      if (opened && opened.sessionId === result.sessionId && !holds(opened, result.messageId)) showPending(bubble)
-    }
-    const now = state.window
-    if (!now || now.sessionId !== result.sessionId || holds(now, result.messageId)) bubble.remove()
-    else state.pending.set(result.messageId, bubble)
+  let result
+  try {
+    result = await state.wire.request('session/prompt', params)
   } catch (error) {
+    // Refused: the message went nowhere, so the person gets it back.
     bubble.remove()
     composer.restore(text)
     fail(error)
+    return
   }
+  if (!window_) {
+    // Opened only if the person is still on the new-session page this send started from.
+    if (ticket !== openTicket || state.window !== undefined) {
+      bubble.remove()
+      void refreshSessions().catch(() => undefined)
+      return
+    }
+    state.pendingNew = {}
+    try {
+      await openSession(result.sessionId)
+    } catch (error) {
+      // The message was ACCEPTED and its turn runs: only showing its session
+      // failed. Said as that, and the text is not handed back, since a second
+      // Enter would deliver the same message again. The list names the session.
+      toast(`Your message was sent, but its session could not be shown: ${String(/** @type {{ message?: unknown }} */ (error)?.message ?? error)}`, 'error')
+      void refreshSessions().catch(() => undefined)
+    }
+    // Re-read after the await: the open replaced the window.
+    const opened = /** @type {SessionWindow | undefined} */ (state.window)
+    if (opened && opened.sessionId === result.sessionId && !holds(opened, result.messageId)) showPending(bubble)
+  }
+  const now = state.window
+  if (!now || now.sessionId !== result.sessionId || holds(now, result.messageId)) bubble.remove()
+  else state.pending.set(result.messageId, bubble)
 }
 
 /** @param {SessionWindow} window_ @param {string} messageId */
@@ -722,8 +733,29 @@ async function openSession(sessionId) {
   })
   state.window = opened
   sidebar.setCurrent(sessionId)
+  // The identity and the content change together: the session left behind is
+  // never shown under the new one's name, neither while the new page is
+  // fetched (a cold log is a whole-file parse) nor for good if it is refused.
+  transcript.clear()
   renderAll()
-  const attached = await opened.attach()
+  /** @type {Awaited<ReturnType<SessionWindow['attach']>>} */
+  let attached
+  try {
+    attached = await opened.attach()
+  } catch (error) {
+    // Refused (no such session, a log this build cannot read): nothing is
+    // open, and the page says so instead of keeping a composer addressed to a
+    // session it does not show. A connection that DROPPED keeps the window:
+    // the reconnect re-attaches it.
+    if (state.window === opened && state.connected) {
+      state.window = undefined
+      sidebar.setCurrent(undefined)
+      document.title = 'MiniDSH'
+      togglePanel(false)
+      renderAll()
+    }
+    throw error
+  }
   if (state.window !== opened) {
     // Moved on while attaching: this window's stream is nobody's.
     if (state.window?.sessionId !== sessionId) void state.wire.request('session/detach', { sessionId }).catch(() => undefined)
@@ -826,7 +858,10 @@ function start() {
         // The browser narrows its EVENT stream to the open session, but stays
         // a control subscriber for all of them: one session's transcript is
         // what it renders, every session's wants are what its list shows.
-        await state.wire.request('session/detach')
+        // Subscribed BEFORE it narrows: a fresh connection watches everything,
+        // so a question asked since the socket opened is parked for it, and
+        // narrowing while it is neither a watcher nor yet a subscriber settles
+        // that question `unavailable` a moment before this page would show it.
         // A fresh connection's baseline replaces what an old one pushed — but
         // a push that lands before the answer is no older than it, so it stays.
         const fresh = new Map()
@@ -835,6 +870,7 @@ function start() {
         for (const [id, summary] of state.summaries) if (!fresh.has(id) && pushedSinceOpen.has(id)) fresh.set(id, summary)
         state.summaries = fresh
         pushedSinceOpen.clear()
+        await state.wire.request('session/detach')
         // A reconnect re-attaches and REPLACES the window: there is no
         // resume-from-seq in the protocol, by design.
         if (state.window) {

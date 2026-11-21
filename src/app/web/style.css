@@ -2609,7 +2609,34 @@ dialog.modal[open] {
 }
 
 .toast.error {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   background: #8f1d1d;
+}
+
+/* An error stays until dismissed (ui.js): its text can be selected, and the button is its way out. */
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.toast-close {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-xs);
+  color: inherit;
+  opacity: 0.8;
+}
+
+.toast-close:hover {
+  background: rgba(255, 255, 255, 0.16);
+  opacity: 1;
 }
 
 @keyframes toast-in {

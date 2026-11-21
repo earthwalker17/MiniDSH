@@ -7,8 +7,10 @@
  * The card never knows a tool by its name. A tool owns `display` (its card,
  * its title, which of its arguments plays which role, and a per-call selector
  * over one of its own arguments: `core/tools/types.ts`), and the host sends it
- * in `initialize` and `session/attach`. A name nobody declared draws the
- * generic card: the call's arguments and its result, honestly unlabelled.
+ * in `initialize` and `session/attach`. A name nobody declared, or one whose
+ * `display` is out of reach (a preset's tool on a cold read, the other shell
+ * dialect's), draws the generic card: the call's arguments and its result,
+ * honestly unlabelled.
  *
  * The RESULT side reads only durable structure: `effect/recorded` for an exit
  * code and the bytes a write left, `subagent/*` for a child, `job/*` for a
@@ -71,7 +73,7 @@ import { subjectText } from './rows.js'
  * }} CardContext
  */
 
-/** Codes the runtime writes when a call never ran or its outcome is unknown (§4). */
+/** Codes the runtime writes when a call never ran or its outcome is unknown (`TOOL_NOT_STARTED`: §4; the other two: §6). */
 const STOPPED_CODES = new Set(['ABORTED_BEFORE_DISPATCH', 'TOOL_NOT_STARTED', 'DURABILITY_LOST'])
 const UNKNOWN_CODES = new Set(['TOOL_OUTCOME_UNKNOWN'])
 
@@ -169,13 +171,17 @@ export function cardFor(item, display, context) {
     result.summary = shown === undefined ? '' : line === undefined ? shown : `${shown}:${line}`
     const lang = languageOf(path)
     if (lang) result.lang = lang
+    // The counts are of a change made or being made. A call whose result is an
+    // error (refused, denied, never run) changed nothing, and `+5 −1` beside
+    // its error text would say it had; what it ASKED to change stays below.
+    const changed = item.result?.isError !== true
     if (oldText !== undefined || newText !== undefined) {
       const diff = lineDiff(oldText ?? '', newText ?? '')
-      result.diffStat = { added: diff.lines.filter((l) => l.type === 'add').length, removed: diff.lines.filter((l) => l.type === 'del').length }
+      if (changed) result.diffStat = { added: diff.lines.filter((l) => l.type === 'add').length, removed: diff.lines.filter((l) => l.type === 'del').length }
       result.sections = [{ kind: 'diff', ...diff }]
       if (item.result?.isError) result.sections.push(...outputSection())
     } else if (content !== undefined) {
-      result.diffStat = { added: content.length === 0 ? 0 : content.split('\n').length, removed: 0 }
+      if (changed) result.diffStat = { added: content.length === 0 ? 0 : content.split('\n').length, removed: 0 }
       result.sections = [{ kind: 'code', text: content, ...(result.lang ? { lang: result.lang } : {}) }]
       if (item.result?.isError) result.sections.push(...outputSection())
     } else result.sections = outputSection()

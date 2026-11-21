@@ -228,7 +228,9 @@ export class SessionWindow {
   }
 
   /**
-   * One page further back, anchored to the cut this window attached on.
+   * One page further back: the events before `oldest`, read against the
+   * window's CURRENT cursor (`throughSeq`), which live events have moved past
+   * the cut it attached on.
    *
    * One at a time: a cold session's page is a whole-file parse on the host, so
    * two clicks land inside one round trip easily, and both would read the same

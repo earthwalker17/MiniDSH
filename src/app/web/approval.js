@@ -23,7 +23,8 @@ export function createApproval(options) {
   const { host } = options
   /** @type {string | undefined} */
   let shownId
-  let answering = false
+  /** The card whose answer is in flight, by its approval's id. @type {string | undefined} */
+  let answering
   let arming = 0
 
   /**
@@ -38,9 +39,8 @@ export function createApproval(options) {
       shownId = undefined
       return false
     }
-    if (open.id === shownId && !answering) return true
+    if (open.id === shownId && answering !== open.id) return true
     shownId = open.id
-    answering = false
     host.hidden = false
     const head = h('h2', { class: 'approval-head', attrs: { id: 'approval-head', tabindex: '-1' } })
     if (open.subject) head.append(...headline(subjectParts(open.subject)))
@@ -80,23 +80,26 @@ export function createApproval(options) {
     for (const button of buttons) button.disabled = true
     clearTimeout(arming)
     arming = window.setTimeout(() => {
-      if (shownId === open.id && !answering) for (const button of buttons) button.disabled = false
+      if (shownId === open.id && answering !== open.id) for (const button of buttons) button.disabled = false
     }, ARM_MS)
     return true
   }
 
   /** @param {OpenApproval} open @param {'allowed-once' | 'rejected'} outcome @param {'grant-session'} [offer] */
   async function answer(open, outcome, offer) {
-    if (answering) return
-    answering = true
+    if (answering === open.id) return
+    answering = open.id
     for (const button of host.querySelectorAll('button')) button.disabled = true
     try {
       await options.onAnswer(open, outcome, offer)
     } finally {
       // The view that follows the decision redraws (or hides) the card; a
-      // refused answer leaves it answerable again.
-      answering = false
-      for (const button of host.querySelectorAll('button')) button.disabled = false
+      // refused answer leaves it answerable again. THIS card only: one that
+      // took its place while the answer was in flight (another client answered
+      // first, and the next question arrived before this reply) is a question
+      // nobody has read, and it keeps its own arming delay.
+      if (answering === open.id) answering = undefined
+      if (shownId === open.id) for (const button of host.querySelectorAll('button')) button.disabled = false
     }
   }
 

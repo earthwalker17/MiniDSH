@@ -9,7 +9,7 @@
  * ended. The grouping is PRESENTATION over the log in seq order, never a fold
  * of the surface (ARCHITECTURE §8): nothing here decides what the model saw,
  * and every join is by an id the log records (`callId`, an approval's `id`, a
- * job's `jobId`, a compaction's `startSeq`), never by adjacency (§4).
+ * job's `jobId`, a compaction's `startSeq`), never by adjacency (§6).
  *
  * Four rules keep it honest:
  *

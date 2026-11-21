@@ -216,17 +216,33 @@ export function lightbox(src, alt) {
 
 // ---- toasts -----------------------------------------------------------------
 
+/** How many errors stay on screen at once; a newer one pushes the oldest out. */
+const MAX_ERRORS = 3
+
 /**
- * A transient notice, top centre: an outcome worth saying out loud (a command
- * that answers nothing reads as a broken button), or an error in one sentence.
+ * A notice, top centre: an outcome worth saying out loud (a command that
+ * answers nothing reads as a broken button), or an error in one sentence.
+ *
+ * A notice goes by itself. An ERROR stays until the person dismisses it: what
+ * it names is often a remedy to act on (a lock file to remove, a command that
+ * salvages a damaged log), and a message that leaves after seven seconds
+ * cannot be read twice, let alone copied.
  * @param {string} text @param {'notice' | 'error'} [kind]
  */
 export function toast(text, kind = 'notice') {
   // The container is a live region of its own (index.html); an error interrupts.
   const host = byId('toasts')
-  const node = h('div', { class: `toast${kind === 'error' ? ' error' : ''}`, text, ...(kind === 'error' ? { attrs: { role: 'alert' } } : {}) })
+  if (kind !== 'error') {
+    const node = h('div', { class: 'toast', text })
+    host.append(node)
+    setTimeout(() => node.remove(), 4000)
+    return
+  }
+  const node = h('div', { class: 'toast error', attrs: { role: 'alert' } }, h('span', { class: 'toast-text', text }))
+  node.append(iconButton('close', 'Dismiss', () => node.remove(), 'toast-close'))
   host.append(node)
-  setTimeout(() => node.remove(), kind === 'error' ? 7000 : 4000)
+  const errors = host.querySelectorAll('.toast.error')
+  for (let extra = 0; extra < errors.length - MAX_ERRORS; extra++) errors[extra]?.remove()
 }
 
 /** An error, said once and plainly. @param {unknown} error */

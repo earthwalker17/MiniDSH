@@ -152,7 +152,11 @@ describe.runIf(testBrowser)('the web UI, walked through a session', () => {
     await page.click('dialog.modal[open] .btn.primary')
     await page.waitFor(`document.querySelector('#rows').textContent.includes('Shell enforcement accepted: none')`, 10_000)
 
-    // A delegated review and a background job, in a second turn.
+    // A delegated review and a background job, in a second turn. Both tools are
+    // the web composition's: one going missing (a renamed card, a dropped row)
+    // is a failure here, not a state this gallery quietly leaves out.
+    expect(delegate, 'the web composition mounts a tool that declares the delegate card').toBeDefined()
+    expect(job, 'the web composition mounts job_start').toBeDefined()
     if (delegate !== undefined && job !== undefined) {
       ui!.adapter.script(
         message({ text: 'Asking a subagent for a review, and starting a watcher.' }, { call: ['c5', delegate, { description: 'Review slug.js', prompt: 'Review slug.js for edge cases.' }] }, { call: ['c6', job, { command: 'node -e "setInterval(() => {}, 1000)"' }] }),

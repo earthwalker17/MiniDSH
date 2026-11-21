@@ -11,7 +11,7 @@
  * - and the real logs MiniDSH has written since 1.0.0 fold without a throw,
  *   every visible event placed exactly once.
  */
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { asCallId } from '../../core/ids.ts'
@@ -286,7 +286,12 @@ describe('the conversation model', () => {
   })
 
   it('folds every real log MiniDSH has written, placing each visible event once', () => {
-    for (const name of ['minidsh-1.0.0.jsonl', 'minidsh-s16.jsonl', 'minidsh-s22-web.jsonl']) {
+    // Read from the directory, so a release's recorded logs cannot be left out
+    // of this list (the two the published 1.2.0 wrote were, and those are the
+    // sessions a 2.0.0 browser opens); named below, so one going missing fails.
+    const names = readdirSync(fileURLToPath(new URL('../../test-support/fixtures/sessions/', import.meta.url))).filter((name) => name.endsWith('.jsonl'))
+    expect(names.toSorted()).toEqual(expect.arrayContaining(['minidsh-1.0.0.jsonl', 'minidsh-1.2.0-child.jsonl', 'minidsh-1.2.0.jsonl', 'minidsh-s16.jsonl', 'minidsh-s22-web.jsonl']))
+    for (const name of names) {
       const lines = readFileSync(fileURLToPath(new URL(`../../test-support/fixtures/sessions/${name}`, import.meta.url)), 'utf8').trimEnd().split('\n')
       const events = lines.slice(1).map((line) => JSON.parse(line) as EventEnvelope)
       const live = createConversation()

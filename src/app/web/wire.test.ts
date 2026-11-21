@@ -156,6 +156,45 @@ describe('the browser session window', () => {
     expect(window_.events).toHaveLength(0)
   })
 
+  it('applies an event that arrives while the attach is in flight after the page, never against the cursor from before it', async () => {
+    // The host subscribes a client before it cuts the page, so the first live
+    // events can overtake the reply. Applied at once they find no page (and are
+    // dropped as "not attached") or, on a re-attach, the OLD cursor.
+    const log = step(0, 2)
+    // The page ends before the chunks; the chunks, the message and the call are the live tail.
+    const page = log.slice(0, 3)
+    const later = log.slice(3)
+    let answer!: () => void
+    const calls: string[] = []
+    const wire = {
+      request(method: string) {
+        calls.push(method)
+        if (method !== 'session/attach') throw new Error(`unexpected ${method}: nothing was missing`)
+        return new Promise((resolve) => {
+          answer = () => resolve({ header: { id: 's' }, view: { status: 'running', pendingApprovals: [], authority: {} }, page: { events: page, from: 0, to: page.at(-1)!.seq, hasMore: false }, cursor: page.at(-1)!.seq })
+        })
+      },
+    }
+    const changes: string[] = []
+    const window_ = new SessionWindow(wire, 's', (change) => changes.push(change.kind))
+    const attached = window_.attach()
+    // In flight: the live tail lands before the reply does.
+    const applied = later.map((event) => (event.type === 'assistant/chunk' ? window_.noted(event) : window_.apply(event)))
+    // Let the attach reach the wire, then answer it.
+    while (calls.length === 0) await new Promise((resolve) => setImmediate(resolve))
+    answer()
+    await attached
+    await Promise.all(applied)
+    await window_.queue
+    const stored = log.filter((event) => event.type !== 'assistant/chunk')
+    expect(window_.events.map((event: Frame) => event.seq), 'the page, then every live event, each once and in order').toEqual(stored.map((event) => event.seq))
+    expect(window_.cursor).toBe(log.at(-1)!.seq)
+    // One page, then appends: nothing was fetched again.
+    expect(calls).toEqual(['session/attach'])
+    expect(changes[0]).toBe('reset')
+    expect(changes.slice(1).every((kind) => kind === 'append'), changes.join(',')).toBe(true)
+  })
+
   it('refuses a re-attach that would move the cursor backwards', async () => {
     const log = step(0, 2)
     const window_ = new SessionWindow(scriptedWire(log, 5), 's', () => {})
