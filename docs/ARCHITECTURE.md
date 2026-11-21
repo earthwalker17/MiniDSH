@@ -331,7 +331,7 @@ Upstream facts and verdicts: `references/assumptions.md`.
 - Under bwrap a path in the ephemeral `/tmp` is invisible, its denial unhinted; on macOS a tool needing a writable temp escalates.
 - Composition changes need a restart; after a live `reconfigure` of `shell` (outside the spine, §9), `enforcementFor` and stamps describe a world no command runs in.
 - A module-loaded plugin is arbitrary code, `minidsh config`'s warnings advisory; an installed package reaches seams only by deep path into `dist/` (§9).
-- A shell child's environment withholds variables, not credentials (§9; `core/process.ts`): undeclared secrets, `SSH_AUTH_SOCK` and proxies pass; `credentials.json` is readable, the network open.
+- A shell child's environment withholds variables, not credentials (§9; `core/process.ts`): undeclared secrets, `SSH_AUTH_SOCK` and proxies pass; `credentials.json` is readable, the network open. Under bwrap an agent socket in the masked runtime directory is gone with it, unhinted (`confine/bwrap.ts`).
 - A network tool is consented, never confined or recorded (§7); headless, only `--approve` allows one.
 - `tool-browser` reaches EVERY loopback service, in any mode and from a child, unconsented and unrecorded (§7), each able to act or relay on its own authority.
 - `tool-browser`'s `file:` fence is each page's own: what a popup loads before its close lands is neither paused nor read (`tool-browser/page.ts`).

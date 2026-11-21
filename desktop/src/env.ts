@@ -29,16 +29,33 @@ const SEARCH_PATHS = ['PATH', 'LD_LIBRARY_PATH', 'XDG_DATA_DIRS', 'GSETTINGS_SCH
  * reads the LOWERCASE `no_proxy` first and the uppercase only when that one
  * is unset, so on a host whose environment is case-sensitive a `no_proxy`
  * that lacks loopback, even an empty one, would win over anything written to
- * `NO_PROXY` alone. Both spellings are therefore made to exempt it. Changes
- * `env` in place (it is `process.env`, where Windows keeps one variable under
- * both spellings: the second pass then finds the entry already there).
+ * `NO_PROXY` alone. Both spellings are therefore made to exempt it.
+ *
+ * A spelling that was NOT set takes the other one's entries first. Created
+ * holding loopback alone, it would shadow them for every reader that prefers
+ * it: this environment is also the runtime's and every agent shell's, and a
+ * person whose `NO_PROXY=corp.example` kept their git and curl off the proxy
+ * would have found a new `no_proxy=127.0.0.1` sending them through it.
+ *
+ * Changes `env` in place (it is `process.env`, where Windows keeps one
+ * variable under both spellings: the second pass then finds the entry already
+ * there).
  */
 export function exemptLoopbackFromProxy(env: NodeJS.ProcessEnv): void {
-  for (const name of ['NO_PROXY', 'no_proxy']) {
-    const entries = (env[name] ?? '')
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0)
+  const entriesOf = (value: string | undefined): string[] | undefined =>
+    value === undefined
+      ? undefined
+      : value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0)
+  const upper = entriesOf(env.NO_PROXY)
+  const lower = entriesOf(env.no_proxy)
+  for (const [name, own, other] of [
+    ['NO_PROXY', upper, lower],
+    ['no_proxy', lower, upper],
+  ] as const) {
+    const entries = [...(own ?? other ?? [])]
     if (!entries.includes('127.0.0.1')) entries.push('127.0.0.1')
     env[name] = entries.join(',')
   }

@@ -239,8 +239,14 @@ export interface Deployment extends DeploymentDefaults {
 export function withDeployment(effective: EffectiveComposition, deployment: Deployment, warn: (message: string) => void): EffectiveComposition {
   let rows = fillDeploymentDefaults(effective.rows, deployment)
   if (deployment.skillRoots !== undefined) rows = fillSkillRoots(rows, deployment.skillRoots)
-  rows = applyExplicitAuthority(rows, deployment.flags ?? {}, ({ row, flag, key, was }) => {
+  rows = applyExplicitAuthority(rows, deployment.flags ?? {}, ({ row, flag, key, was, disabled }) => {
     const layer = effective.provenance.get(row.id)
+    if (disabled === true) {
+      // The flag found its row switched off: said, never silent, because the
+      // run that follows would otherwise advise passing the flag it was given.
+      warn(`${flag} has no effect: ${layer === undefined || layer === BASE_LAYER ? 'the composition' : `layer "${layer}"`} disables row "${row.id}"`)
+      return
+    }
     // Only a LAYER is overridden. A built-in row no layer touched holds the
     // app's own default (`approve: false`), and a flag over that is no news.
     if (layer === undefined || layer === BASE_LAYER) return

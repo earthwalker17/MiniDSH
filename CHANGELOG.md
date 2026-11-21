@@ -6,7 +6,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 Three surfaces over the one runtime became things a person can use every day: a full-screen terminal, a redesigned web UI and a desktop app. Then the whole system was audited as a release candidate, and what the audit found was fixed or written down before this was tagged.
 
-It is a major version because some behaviour a 1.x user or script relies on changed: see **Changed**. The session log format did not. 2.0 reads, continues and forks what 1.x wrote, tested against a store the published 1.2.0 left behind. Going back is not supported: a 1.x build may refuse a session 2.0 has continued.
+It is a major version because some behaviour a 1.x user or script relies on changed: see **Changed**. The session log format did not. 2.0 reads, continues and forks what 1.x wrote, tested against a store the published 1.2.0 left behind. Going back is not promised, though in a test the published 1.2.0 still verified and continued a session 2.0 had appended to.
 
 ### Downloads
 
@@ -52,7 +52,7 @@ No build is signed by a publisher, so Windows and macOS object at first run: the
 
 Each of these was reproduced before it was fixed or written down. [SECURITY.md](https://github.com/earthwalker17/MiniDSH/blob/main/SECURITY.md) has the full account.
 
-- **Fixed.** On Linux a confined command could ask the user's own systemd, over the session bus, to write anywhere. The bubblewrap profile now hides the user runtime directory.
+- **Fixed.** On Linux a confined command could ask the user's own systemd, over the session bus, to write anywhere. The bubblewrap profile now hides the user runtime directory, and with it an ssh-agent or keyring socket that lives there: a confined `git push` over SSH now needs an approval.
 - **Fixed.** A new session's folder spelled through `..` after a missing directory could resolve to an unfollowed symbolic link, and the session then worked outside the host's workspace roots.
 - **Fixed.** A peer that was never signed in could end `minidsh web` by resetting a WebSocket upgrade it had been refused.
 - **Fixed.** A name beginning `127.` was exempt from the browser's resolver rules and reached DNS.

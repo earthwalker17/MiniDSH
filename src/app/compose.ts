@@ -376,6 +376,8 @@ export interface AuthorityOverride {
   readonly key: string
   /** What the layers left there. */
   readonly was: unknown
+  /** The row is disabled: the flag found nothing to say it to, and has no effect. */
+  readonly disabled?: true
 }
 
 /**
@@ -388,7 +390,9 @@ export interface AuthorityOverride {
  * layer had said something different, so the person is told.
  *
  * Matched by CAPABILITY, as `fillSkillRoots` is: a layer may mount the plugin
- * under any id. A disabled row is left alone.
+ * under any id. A disabled row is left alone, and that is said too
+ * (`disabled`): `--approve` over a layer that switched `approval-headless`
+ * off answered nothing, and the run then advised passing `--approve`.
  */
 export function applyExplicitAuthority(rows: readonly Row[], flags: ExplicitAuthority, overrode: (override: AuthorityOverride) => void = () => {}): Row[] {
   const named: Readonly<Record<string, readonly [key: string, value: unknown, flag: string][]>> = {
@@ -402,7 +406,11 @@ export function applyExplicitAuthority(rows: readonly Row[], flags: ExplicitAuth
   return rows.map((row) => {
     const keys = (named[row.plugin.name] ?? []).filter(([, value]) => value !== undefined)
     const config = configObject(row)
-    if (keys.length === 0 || row.disabled === true || config === undefined) return row
+    if (keys.length === 0 || config === undefined) return row
+    if (row.disabled === true) {
+      for (const [key, , flag] of keys) overrode({ row, flag, key, was: config[key], disabled: true })
+      return row
+    }
     const next = { ...config }
     for (const [key, value, flag] of keys) {
       if (next[key] === value) continue

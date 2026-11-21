@@ -181,6 +181,25 @@ describe('the bwrap profile', () => {
     // After the root bind it covers, or the bind would put the sockets back.
     expect(writable.indexOf('--ro-bind')).toBeLessThan(writable.indexOf(runtimeDir))
   })
+
+  // The mask is over a directory people also WORK in (a GVFS mount, a portal's
+  // document path) and an AppImage can be mounted in (TMPDIR set there). What
+  // must stay readable comes back, read-only, and nothing else of the directory does.
+  it('binds back beneath the mask only what must stay readable: a read-only workspace there, and the runtime\'s own directories', () => {
+    const runtimeDir = '/run/user/1000'
+    const workspace = `${runtimeDir}/gvfs/share/project`
+    const node = `${runtimeDir}/.mount_MiniDSabc/resources/node/bin`
+    const readOnly = bwrapArgs(policyFor('read-only', workspace), { runtimeDir, expose: [node, '/opt/minidsh'] })
+    expect(readOnly.slice(readOnly.indexOf('--tmpfs'))).toEqual(['--tmpfs', runtimeDir, '--ro-bind', node, node, '--ro-bind', workspace, workspace, '--remount-ro', runtimeDir])
+    expect(readOnly).not.toContain('--bind')
+
+    // Writable, the workspace's own bind shows it; the install directory still needs its own.
+    const writable = bwrapArgs(policyFor('workspace-write', workspace), { runtimeDir, expose: [node] })
+    expect(writable.slice(writable.indexOf('--tmpfs'))).toEqual(['--tmpfs', runtimeDir, '--ro-bind', node, node, '--tmpfs', '/tmp', '--bind', workspace, workspace])
+
+    // A session that works in the runtime directory ITSELF keeps the mask: showing it would be the sockets back.
+    expect(bwrapArgs(policyFor('read-only', runtimeDir), { runtimeDir, expose: [runtimeDir] }).slice(-4)).toEqual(['--tmpfs', runtimeDir, '--remount-ro', runtimeDir])
+  })
 })
 
 describe('the shell row\'s `expose`', () => {

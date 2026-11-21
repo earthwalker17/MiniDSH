@@ -103,8 +103,10 @@ function within(root: string, path: string): boolean {
  *   grants nowhere to write; under `workspace-write` it is a private scratch
  *   directory like `/tmp`, reaching no host file.
  * - `--ro-bind <path> <path>` for each of the runtime's own install
- *   directories that lies under `/tmp`, after the tmpfs that hid it and
- *   before the writable binds. Read-only, and reads are unrestricted by
+ *   directories that lies under `/tmp` or under the runtime directory, after
+ *   the tmpfs that hid it and before the writable binds; and, under
+ *   `read-only`, for a workspace that lies under the runtime directory, which
+ *   nothing else would show. Read-only, and reads are unrestricted by
  *   design (§7): the path was readable through `--ro-bind / /` until the
  *   mask covered it, so this widens nothing. One already inside a writable
  *   root is left to that root's bind.
@@ -117,16 +119,27 @@ function within(root: string, path: string): boolean {
 export function bwrapArgs(policy: SandboxExecutionPolicy, host: BwrapHost = {}): string[] {
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', '--proc', '/proc', '--die-with-parent', '--new-session']
   const roots = writableRoots(policy)
+  const exposed = (host.expose ?? []).map((given) => given.replace(/(?<=.)\/+$/, ''))
+  /** The exposed paths strictly beneath a mask, less those a writable root's own bind will show. */
+  const beneath = (mask: string): string[] => exposed.filter((path) => path !== mask && within(mask, path) && !roots.some((root) => within(root, path)))
   if (host.runtimeDir !== undefined) {
-    args.push('--tmpfs', host.runtimeDir)
-    if (roots.length === 0) args.push('--remount-ro', host.runtimeDir)
+    const mask = host.runtimeDir
+    args.push('--tmpfs', mask)
+    // Bound back beneath the mask, read-only, before it is sealed: what a
+    // command must still READ there. Under `read-only` nothing else binds the
+    // workspace, so one that lies in this directory (a GVFS mount, a portal's
+    // document path) would be an empty folder to its own session; and an
+    // AppImage started with TMPDIR set here has its Node and skills in it.
+    // Only that subtree comes back, never the directory's sockets. A workspace
+    // that IS the directory stays masked: showing it would be the mask undone.
+    const kept = new Set(beneath(mask))
+    if (roots.length === 0 && policy.workspaceRoot !== mask && within(mask, policy.workspaceRoot)) kept.add(policy.workspaceRoot)
+    for (const path of kept) args.push('--ro-bind', path, path)
+    if (roots.length === 0) args.push('--remount-ro', mask)
   }
   if (roots.length > 0) {
     args.push('--tmpfs', '/tmp')
-    for (const given of host.expose ?? []) {
-      const path = given.replace(/(?<=.)\/+$/, '')
-      if (path !== '/tmp' && within('/tmp', path) && !roots.some((root) => within(root, path))) args.push('--ro-bind', path, path)
-    }
+    for (const path of beneath('/tmp')) args.push('--ro-bind', path, path)
     for (const root of roots) args.push('--bind', root, root)
   }
   return args

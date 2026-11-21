@@ -137,7 +137,7 @@ Four settings decide what a session may do. The log records each one.
 
 A flag wins over the same setting in `composition.json`. MiniDSH checks the editor tool's writes itself, and under `workspace-write` refuses one outside the folder without asking. The operating system confines shell commands:
 
-- **Linux** (bubblewrap) and **macOS** (Seatbelt): commands run unasked. When one needs more than the mode allows, the model may ask to run it once in a wider mode, and you get an approval.
+- **Linux** (bubblewrap) and **macOS** (Seatbelt): commands run unasked. On Linux a confined command cannot reach your ssh-agent or keyring, so `git push` over SSH needs an approval. When one needs more than the mode allows, the model may ask to run it once in a wider mode, and you get an approval.
 - **Windows**, and Linux without bubblewrap: the first shell command is refused with `SANDBOX_UNAVAILABLE`. The model then asks to run it under `danger-full-access`, and you are asked for each command. An approved command gets a fresh shell, so `cd` does not carry over.
 - `--accept none` records that the session accepts an unconfined shell. Commands then run unasked in one persistent shell. Editor writes stay fenced. Shell commands can write anywhere your account can.
 

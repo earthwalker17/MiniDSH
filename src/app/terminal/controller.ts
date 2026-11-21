@@ -248,9 +248,12 @@ export class SessionController {
       }
       // Offers come from the fold, never from here: the view names only what
       // the runtime says is available. The attach path carries them; live, the
-      // view published in the same tick does.
+      // view published in the same tick does. The view in hand wins where it
+      // lists the question: it is never older than the attach result, and a
+      // grant another client took in between has withdrawn an offer that
+      // result still showed (an `a` the host would then refuse).
       const open = this.view?.pendingApprovals.find((entry) => entry.id === data.id)
-      const offered = data.offers?.includes('grant-session') === true || open?.offers?.includes('grant-session') === true
+      const offered = (open === undefined ? data.offers : open.offers)?.includes('grant-session') === true
       const call = data.call ?? open?.call
       this.queue.push({
         id: data.id,

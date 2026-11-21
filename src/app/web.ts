@@ -201,16 +201,23 @@ function hostOf(request: IncomingMessage): string | undefined {
  * The Host/Origin half of the fence. A browser sends `Origin` on an upgrade and
  * on a cross-site request; anything that is not one of this host's own
  * authorities is another page trying to drive this one, which is the whole
- * reason the check exists.
+ * reason the check exists. Exported for its test: no test can bind port 80,
+ * where the allow-list holds a bare name.
  */
-function sameAuthority(request: IncomingMessage, authorities: ReadonlySet<string> | undefined): boolean {
+export function sameAuthority(request: IncomingMessage, authorities: ReadonlySet<string> | undefined): boolean {
   const host = hostOf(request)
   if (host === undefined) return false
   if (authorities !== undefined && !authorities.has(host)) return false
   const origin = request.headers.origin?.toLowerCase()
   if (origin === undefined) return true
-  const originAuthority = origin.replace(/^https?:\/\//, '')
-  return authorities === undefined ? originAuthority === host : authorities.has(originAuthority)
+  // A wildcard bind knows none of its names, so the Origin is held to the Host
+  // it came with, whatever scheme a proxy in front terminated.
+  if (authorities === undefined) return origin.replace(/^https?:\/\//, '') === host
+  // A named bind speaks plain HTTP, so its own pages have an `http://` origin
+  // and nothing else does. With the scheme merely stripped, on port 80 (where
+  // the allow-list holds the bare name) `https://localhost` read as this host:
+  // a page from whatever serves 443 on the same name.
+  return origin.startsWith('http://') && authorities.has(origin.slice('http://'.length))
 }
 
 /**

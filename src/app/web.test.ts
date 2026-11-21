@@ -8,7 +8,7 @@
  * from another page.
  */
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
-import { createServer, request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage } from 'node:http'
 import { connect as tcpConnect, createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +19,7 @@ import { LLM } from '../core/llm/index.ts'
 import { createUserMessage } from '../core/llm/message.ts'
 import { assistantText, gate, ScriptedAdapter } from '../test-support/scripted-adapter.ts'
 import { WebClient } from '../test-support/web-process.ts'
-import { assetName, authoritiesFor, printableAuthority, startWebHost, type WebHostHandle } from './web.ts'
+import { assetName, authoritiesFor, printableAuthority, sameAuthority, startWebHost, type WebHostHandle } from './web.ts'
 
 const silent: Logger = { warn: () => {}, error: () => {} }
 const SCRIPTED = { provider: 'scripted', model: 'scripted-model' }
@@ -142,6 +142,10 @@ describe('a web host that cannot listen', () => {
   })
 })
 
+/** The Host/Origin rule asked directly, for a bind no test can make (port 80): each Origin beside the Host `localhost`. */
+const sameOrigins = (bind: string, port: number, origins: readonly string[]): boolean[] =>
+  origins.map((origin) => sameAuthority({ headers: { host: 'localhost', origin } } as IncomingMessage, authoritiesFor(bind, port)))
+
 /**
  * A raw request, so headers `fetch` refuses to forge (Host, Origin) can be set
  * — and so a request-TARGET can be sent verbatim: `fetch` normalizes `/../x`
@@ -244,6 +248,11 @@ describe('the web surface trust fence', () => {
     expect(await status(host.port, { cookie, origin: 'http://evil.example' })).toBe(403)
     // The same request with this host's own authority still works.
     expect(await status(host.port, { cookie, origin: `http://127.0.0.1:${host.port}` })).toBe(200)
+    // Its own authority under ANOTHER scheme is another origin: this host
+    // speaks plain HTTP. With the scheme merely stripped, on port 80 (where
+    // the list holds the bare name) `https://localhost` read as this host.
+    expect(await status(host.port, { cookie, origin: `https://127.0.0.1:${host.port}` })).toBe(403)
+    expect(sameOrigins('127.0.0.1', 80, ['http://localhost', 'https://localhost', 'https://localhost:80', 'http://localhost:80'])).toEqual([true, false, false, true])
   })
 
   // A SameSite=Strict cookie rides a WebSocket handshake from any other port

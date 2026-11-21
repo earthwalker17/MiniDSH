@@ -260,7 +260,7 @@ describe('configuration cannot widen recorded authority', () => {
  * the user's global AGENTS.md, and the runtime's own install directories.
  */
 describe('what the command line and the deployment say survives a layer on the same row', () => {
-  const home = (patches: readonly { id: string; config: unknown }[]): NamedLayer[] => [{ name: 'home', patches }]
+  const home = (patches: readonly { id: string; config?: unknown; disabled?: boolean }[]): NamedLayer[] => [{ name: 'home', patches }]
 
   /** A boot under `options`, with what it warned, read through `read` and disposed. */
   async function booted<T>(options: Partial<BootOptions>, read: (root: Context) => T | Promise<T>): Promise<{ value: T; warnings: string[] }> {
@@ -344,6 +344,11 @@ describe('what the command line and the deployment say survives a layer on the s
     const overridden = await booted({ approve: true, configLayers: home([{ id: 'approval-headless', config: { approve: false } }]) }, ask)
     expect(overridden.value).toBe('allowed-once')
     expect(overridden.warnings).toEqual(['--approve wins over layer "home", which sets approve: false on row "approval-headless"'])
+    // A layer that switched the row OFF leaves the flag nothing to say it to.
+    // That is said: silent, the run answered nothing and then advised `--approve`.
+    const disabled = await booted({ approve: true, configLayers: home([{ id: 'approval-headless', disabled: true }]) }, ask)
+    expect(disabled.value).toBe('unavailable')
+    expect(disabled.warnings).toEqual(['--approve has no effect: layer "home" disables row "approval-headless"'])
   })
 
   it('still reads the global AGENTS.md of the user when a layer patches workspace-instructions for its budget', async () => {

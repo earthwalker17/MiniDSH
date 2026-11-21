@@ -35,11 +35,12 @@ interface Ran {
   readonly err: string
 }
 
-/** One command through `main` under `home`, with both streams captured and no ambient model choice. */
-async function cli(home: string, argv: readonly string[]): Promise<Ran> {
+/** One command through `main` under `home`, with both streams captured and no ambient model choice: `MINIDSH_MODEL` is `env.model` or unset. */
+async function cli(home: string, argv: readonly string[], env: { readonly model?: string } = {}): Promise<Ran> {
   const saved = { home: process.env.MINIDSH_HOME, model: process.env.MINIDSH_MODEL }
   process.env.MINIDSH_HOME = home
-  delete process.env.MINIDSH_MODEL
+  if (env.model === undefined) delete process.env.MINIDSH_MODEL
+  else process.env.MINIDSH_MODEL = env.model
   const out: string[] = []
   const err: string[] = []
   const writeOut = process.stdout.write.bind(process.stdout)
@@ -54,7 +55,8 @@ async function cli(home: string, argv: readonly string[]): Promise<Ran> {
     process.stderr.write = writeErr
     if (saved.home === undefined) delete process.env.MINIDSH_HOME
     else process.env.MINIDSH_HOME = saved.home
-    if (saved.model !== undefined) process.env.MINIDSH_MODEL = saved.model
+    if (saved.model === undefined) delete process.env.MINIDSH_MODEL
+    else process.env.MINIDSH_MODEL = saved.model
   }
   return { code, out: out.join(''), err: err.join('') }
 }
@@ -258,6 +260,19 @@ describe('a route nothing can be sent on is refused before a session exists', ()
     expect(scripted.code, scripted.err).toBe(2)
     expect(scripted.err).toContain('scripted lists: scripted-model')
     expect(sessionFiles(home), 'a refused route stored a session').toEqual([])
+  })
+
+  // The documented order is flags, then MINIDSH_MODEL, then settings.json: a
+  // model the environment names is named, and `--provider X` beside it used
+  // to be refused as if the model were the settings provider's.
+  it('takes a model MINIDSH_MODEL names as named: --provider beside it is a whole route', async () => {
+    const home = scriptedHome(`assistantText('ran')`)
+    const cwd = tempDir('minidsh-cli-cwd-')
+    const ran = await cli(home, ['run', 'x', '--cwd', cwd, '--provider', 'scripted'], { model: 'scripted-model' })
+    expect(ran.code, ran.err).toBe(0)
+    expect(ran.out).toBe(`ran${NL}`)
+    const [options] = storedEvents(home, sessionOf(ran)).filter((event) => event.type === 'agent/options')
+    expect(options?.data.options).toMatchObject({ provider: 'scripted', model: 'scripted-model' })
   })
 
   it('refuses a provider no row mounts, naming the mounted ones, whether a flag or the settings named it', async () => {

@@ -611,11 +611,12 @@ function reportError(error: unknown): number {
  * `over` is the route the flags are merged over: the settings' for a new
  * session, or the id of the stored session a continuation rebuilds its base
  * from (read only if the question arises). `whole` also holds the merged
- * provider to it, for `run`, which sends exactly one turn there. An unknown
+ * provider to it, for `run`, which sends exactly one turn there. `envModel`
+ * is the model `MINIDSH_MODEL` named for a new session, if it did. An unknown
  * MODEL is not refused: an adapter serves ids its catalog does not list, and
  * only the provider can say (`runNotes` then names the listed ones).
  */
-function routeCheck(flags: CommonModelFlags, over: AgentOptions | { readonly stored: string }, whole: boolean): (root: Context) => void {
+function routeCheck(flags: CommonModelFlags, over: AgentOptions | { readonly stored: string }, whole: boolean, envModel?: string): (root: Context) => void {
   return (root) => {
     const llm = root.tryGet(LLM)
     if (!llm) return
@@ -627,6 +628,10 @@ function routeCheck(flags: CommonModelFlags, over: AgentOptions | { readonly sto
       throw new UsageRefusal(`no provider "${printableText(provider)}" is mounted; the mounted providers are: ${catalog.map((entry) => entry.id).join(', ')}`)
     }
     if (flags.provider === undefined || flags.model !== undefined) return
+    // A model named by `MINIDSH_MODEL` is named: it outranks the settings file
+    // for a new session (`settings.ts`), so `--provider X` beside it is a whole
+    // route, and refusing it said the environment's model was "deepseek's".
+    if (settings !== undefined && envModel !== undefined) return
     const base = settings ?? storedRoute(root, stored!)
     if (base === undefined || base.provider === flags.provider) return
     const listed = catalog.find((entry) => entry.id === flags.provider)?.models.map((model) => model.id) ?? []
@@ -672,7 +677,7 @@ async function runCommand(args: ParsedArgs): Promise<number> {
         ...(plan.agentPreset === undefined ? {} : { agentPreset: plan.agentPreset }),
         approve: args.flags.get('approve') === true,
         ...bootFields(plan),
-        prepare: routeCheck(flags, plan.settings.agent, true),
+        prepare: routeCheck(flags, plan.settings.agent, true, plan.settings.agentOverrides.model),
       },
       eventPrinter(json),
     )
@@ -789,7 +794,7 @@ async function chatCommand(args: ParsedArgs): Promise<number> {
       ...modelFlags(args),
       // Only what the flags name: a settings route this composition cannot
       // serve is still a session a person can open and `/model` out of.
-      prepare: routeCheck(modelFlags(args), plan.settings.agent, false),
+      prepare: routeCheck(modelFlags(args), plan.settings.agent, false, plan.settings.agentOverrides.model),
     })
   } catch (error) {
     return reportError(error)

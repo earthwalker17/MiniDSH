@@ -93,10 +93,16 @@ describe("main's own environment", () => {
 
   it('exempts loopback from an environment proxy under BOTH spellings, whichever were set', () => {
     expect(exempted({})).toEqual({ NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' })
-    expect(exempted({ no_proxy: 'example.com' })).toEqual({ NO_PROXY: '127.0.0.1', no_proxy: 'example.com,127.0.0.1' })
     expect(exempted({ no_proxy: '' })).toEqual({ NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' })
-    expect(exempted({ NO_PROXY: 'corp.example, .internal' })).toEqual({ NO_PROXY: 'corp.example,.internal,127.0.0.1', no_proxy: '127.0.0.1' })
     expect(exempted({ NO_PROXY: 'a.example', no_proxy: 'b.example' })).toEqual({ NO_PROXY: 'a.example,127.0.0.1', no_proxy: 'b.example,127.0.0.1' })
+  })
+
+  // This environment is the runtime's and every agent shell's too. A spelling
+  // created holding loopback alone shadowed the person's own exemptions for
+  // every reader that prefers it (curl and git read the lowercase one first).
+  it('gives a spelling that was not set the entries of the one that was, never loopback alone', () => {
+    expect(exempted({ NO_PROXY: 'corp.example, .internal' })).toEqual({ NO_PROXY: 'corp.example,.internal,127.0.0.1', no_proxy: 'corp.example,.internal,127.0.0.1' })
+    expect(exempted({ no_proxy: 'example.com' })).toEqual({ NO_PROXY: 'example.com,127.0.0.1', no_proxy: 'example.com,127.0.0.1' })
   })
 
   it('adds it once: an entry already there is not repeated, nor is a second pass', () => {
