@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type ChildProcessByStdio, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { statSync } from 'node:fs'
 import type { Readable } from 'node:stream'
 import {
   DEFAULT_ACCEPTANCE,
@@ -19,7 +20,7 @@ import {
   type ShellSession,
 } from '../../core/shell/index.ts'
 import { childEnvironment, killAndWait, killTree, spawnChild, spawnRefusal, transientSpawnText, type Spawner } from '../../core/process.ts'
-import { printableText } from '../../core/text.ts'
+import { clip, printableText } from '../../core/text.ts'
 import { confinementRemedy, NO_CONFINEMENT, type Confinement } from './confine/index.ts'
 
 export type ShellDialect = 'bash' | 'pwsh'
@@ -125,13 +126,82 @@ function containment(dialect: ShellDialect): string {
  * (measured 2026-10-15). Guarded, because a console setting can throw where
  * there is no console; the command's own exit code is unchanged. Then, on
  * Windows, the containment line (`PWSH_CONTAINMENT`).
+ *
+ * `started`, given only for a child that runs inside a confinement wrapper,
+ * is a line the shell prints before it reads the command: the one-shot's and
+ * the job's form of the persistent child's ready marker (`StartLine`). In
+ * bash it is a line of its own, so it is printed before the command is even
+ * parsed.
  */
-function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, command: string): { cmd: string; args: string[] } {
+function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, command: string, started?: string): { cmd: string; args: string[] } {
   if (dialect === 'pwsh') {
     const utf8 = 'try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; $OutputEncoding = [Text.Encoding]::UTF8; '
-    return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8 + containment(dialect) + command] }
+    const announce = started === undefined ? '' : `Write-Output '${started}'; `
+    // `pwsh -Command` ends by `$?`: 0, or 1 whatever a failing native program
+    // returned (`node` exiting 3 was reported as 1, measured S22.5), while the
+    // persistent child reports that program's own code. On Windows every
+    // approved command is a one-shot, so this is the code the model usually
+    // reads. `$?` is taken FIRST: any statement of ours would replace it. An
+    // `exit` or a terminating error in the command never reaches this line.
+    const exitCode = '\n$minidshOk = $?; if (-not $minidshOk) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }'
+    return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8 + containment(dialect) + announce + command + exitCode] }
   }
-  return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc', '-c', command] }
+  return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc', '-c', started === undefined ? command : `printf '%s\\n' '${started}'\n${command}`] }
+}
+
+/**
+ * The start line of a wrapped one-shot or job, taken off the head of its
+ * stdout.
+ *
+ * A wrapper that cannot start (bwrap refused a namespace, a bind's source is
+ * gone) prints its own diagnostic and exits non-zero without running
+ * anything, and that is a refusal with its own code and remedy. But the only
+ * evidence used to be the text, so a command that RAN, printed `bwrap: ...`
+ * and failed was reported as a wrapper that never started: refused, with an
+ * install hint, and no record of having run. The shell inside the wrapper
+ * now says it started, on stdout, before the command's first byte; a child
+ * that printed the line ran its command, whatever it printed afterwards.
+ *
+ * The line is the first thing written to that pipe and far shorter than a
+ * pipe's atomic write, so it arrives whole at the head of the first chunk;
+ * the undecided prefix is still held until it can be told apart, and anything
+ * that turns out not to be the line is passed on as the output it is.
+ */
+class StartLine {
+  /** True once the line arrived: the shell inside the wrapper ran. */
+  seen = false
+  private head: string | undefined = ''
+  private readonly marker: string
+
+  constructor(marker: string) {
+    this.marker = marker
+  }
+
+  /** A stdout chunk, less the start line. */
+  take(chunk: string): string {
+    if (this.head === undefined) return chunk
+    const head = this.head + chunk
+    const lineEnd = head.startsWith(this.marker) ? /^\r?\n/.exec(head.slice(this.marker.length)) : null
+    if (lineEnd !== null) {
+      this.seen = true
+      this.head = undefined
+      return head.slice(this.marker.length + lineEnd[0].length)
+    }
+    // Still a prefix of the line (its line end included): wait for the rest.
+    if (`${this.marker}\r\n`.startsWith(head) || `${this.marker}\n`.startsWith(head)) {
+      this.head = head
+      return ''
+    }
+    this.head = undefined
+    return head
+  }
+
+  /** At the stream's end: a held prefix that never became the line was output. */
+  rest(): string {
+    const held = this.head ?? ''
+    this.head = undefined
+    return held
+  }
 }
 
 /**
@@ -145,19 +215,34 @@ function initLine(dialect: ShellDialect, ready: string): string {
   if (dialect === 'pwsh') {
     // The containment line before the marker, so no command can run outside
     // the Job; a warning it prints lands before the marker too, and is kept
-    // for the first command's output (`takeReady`).
+    // for the first command's output (`answered`).
     return `[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Continue'; ${containment(dialect)}Write-Output '${ready}'\n`
   }
   return `export LC_ALL=C.UTF-8 2>/dev/null; printf '%s\\n' '${ready}'\n`
 }
 
+/**
+ * One command, framed: run it, then print the marker line with its exit code.
+ *
+ * pwsh has no one number for "how the command ended", so the code is built
+ * from what can be known. A native program's exit code is `$LASTEXITCODE`.
+ * An error that TERMINATED the command (a `throw`, a parse error, a cmdlet
+ * under `-ErrorAction Stop`) lands in the wrapper's own catch, and is 1: the
+ * marker used to be printed after the try statement from `$?`, which is the
+ * try statement's own and always true, so every such command was reported as
+ * a success beside its error text (measured 2026-11-21: `throw`, `1/0` and
+ * `if (` all answered 0, where a one-shot exits 1). What still cannot be
+ * told is a cmdlet's NON-terminating error (`Get-Item` of a missing path):
+ * `$?` after `Invoke-Expression` is Invoke-Expression's, which succeeded, so
+ * that command reports 0 and its error is in the output.
+ */
 function wrapper(dialect: ShellDialect, base64: string, marker: string): string {
   if (dialect === 'pwsh') {
     return (
       `$global:LASTEXITCODE=$null; ` +
-      `try { Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${base64}'))) } ` +
-      `catch { Write-Output ($_ | Out-String) }; ` +
-      `Write-Output ('${marker}:' + $(if($LASTEXITCODE -ne $null){$LASTEXITCODE}elseif($?){'0'}else{'1'}))\n`
+      `try { Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${base64}'))); ` +
+      `Write-Output ('${marker}:' + $(if($LASTEXITCODE -ne $null){$LASTEXITCODE}else{'0'})) } ` +
+      `catch { Write-Output ($_ | Out-String); Write-Output ('${marker}:' + $(if($LASTEXITCODE){$LASTEXITCODE}else{'1'})) }\n`
     )
   }
   // `< /dev/null`: a command that reads stdin would otherwise block until the
@@ -177,9 +262,127 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 const DRAIN_MS = 500
 
-/** Spread into `spawn` options. Always an explicit env: inheriting wholesale is what this stopped doing. */
-function envOption(declared: readonly string[], overlay: Readonly<Record<string, string>> | undefined): { env: NodeJS.ProcessEnv } {
-  return { env: childEnvironment(declared, overlay) }
+/** How much of a child's start-up output is kept: the containment warning is in its first lines, and a start-up failure quotes 200 characters. */
+const STARTUP_KEEP_CHARS = 8_192
+
+/**
+ * What the persistent child printed for ONE command, bounded WHILE it prints.
+ *
+ * The bound used to be applied when the command ended, to a string that had
+ * grown without one. A command that prints faster than it is read (`yes`, a
+ * log `cat`) took that string to V8's limit, about 512 MB, inside a stream's
+ * `'data'` listener: an uncaught RangeError, which ends the host and every
+ * session it serves. So the first `max` characters are kept and the rest is
+ * dropped as it arrives, and `overflowed` says that happened.
+ *
+ * Both marker lines are therefore looked for HERE, on arrival: once the text
+ * is no longer kept there is nothing left for a poll to search. A chunk
+ * boundary can fall inside a marker line, so the stream's last `hold`
+ * characters are held back until the next chunk shows whether a line was
+ * starting in them; that is all the scan needs beyond the bound.
+ *
+ * After the end marker nothing is kept at all: what a backgrounded process
+ * prints between two commands is no command's output.
+ */
+class Capture {
+  /** True once the command printed more than is kept. */
+  overflowed = false
+  /** The command's exit code, once its marker line has arrived whole. */
+  exitCode: number | undefined
+  /** False while a fresh child's ready line is still awaited. */
+  ready: boolean
+  private kept = ''
+  private held = ''
+  private startup = ''
+  private readonly max: number
+  private readonly hold: number
+  private readonly readyLine: RegExp | undefined
+  private readonly endLine: RegExp
+
+  constructor(max: number, marker: string, readyMarker: string | undefined) {
+    this.max = max
+    this.ready = readyMarker === undefined
+    this.readyLine = readyMarker === undefined ? undefined : new RegExp(`${readyMarker}\\r?\\n`)
+    // The code must be followed by something that is not a digit: a chunk
+    // that ended after `:1` of `:127` would otherwise end the command with
+    // the wrong code.
+    this.endLine = new RegExp(`${marker}:(-?\\d+)\\D`)
+    // A whole marker line and room to spare: the marker, a colon, a signed
+    // 32-bit code and a line end.
+    this.hold = Math.max(marker.length, readyMarker?.length ?? 0) + 16
+  }
+
+  push(data: string): void {
+    if (this.exitCode !== undefined) return
+    let text = this.held + data
+    this.held = ''
+    if (!this.ready) {
+      const line = this.readyLine!.exec(text)
+      if (line === null) {
+        text = this.holdBack(text)
+        this.startup = clip(this.startup + text, STARTUP_KEEP_CHARS)
+        return
+      }
+      this.startup = clip(this.startup + text.slice(0, line.index), STARTUP_KEEP_CHARS)
+      this.ready = true
+      text = text.slice(line.index + line[0].length)
+    }
+    const end = this.endLine.exec(text)
+    if (end !== null) {
+      this.keep(text.slice(0, end.index))
+      this.exitCode = Number(end[1])
+      return
+    }
+    this.keep(this.holdBack(text))
+  }
+
+  /** Everything but the last `hold` characters, which stay held; a pair is never split between the two. */
+  private holdBack(text: string): string {
+    let at = Math.max(0, text.length - this.hold)
+    const before = text.charCodeAt(at - 1)
+    if (before >= 0xd800 && before <= 0xdbff) at--
+    this.held = text.slice(at)
+    return text.slice(0, at)
+  }
+
+  private keep(text: string): void {
+    // Nothing after the first drop: a later, shorter piece that happened to
+    // fit would land out of order.
+    if (this.overflowed) return
+    const room = this.max - this.kept.length
+    if (text.length > room) this.overflowed = true
+    this.kept += clip(text, room)
+  }
+
+  /**
+   * What the command printed, as far as it was kept. Once something was
+   * dropped the held tail is no longer the continuation of the head, so it
+   * is left out; before the ready line nothing is the command's yet.
+   */
+  output(): string {
+    if (!this.ready) return ''
+    return this.overflowed ? this.kept : this.kept + this.held
+  }
+
+  /** What the child printed before its ready line: start-up noise, or the reason it never answered. */
+  startupText(): string {
+    return this.ready ? this.startup : this.startup + this.held
+  }
+}
+
+/**
+ * Spread into `spawn` options. Always an explicit env: inheriting wholesale
+ * is what this stopped doing. The overlay is the confinement's (`envFor`),
+ * applied after the scrub: a value is set, and a name it maps to `undefined`
+ * is taken out.
+ */
+function envOption(declared: readonly string[], overlay: Readonly<Record<string, string | undefined>> | undefined): { env: NodeJS.ProcessEnv } {
+  const env = childEnvironment(declared, undefined)
+  for (const [name, value] of Object.entries(overlay ?? {})) {
+    if (value === undefined) delete env[name]
+    else env[name] = value
+  }
+  return { env }
 }
 
 /**
@@ -265,7 +468,8 @@ export class ShellProcess implements ShellSession {
   private childWrapped = false
   /** A warning the live child printed before its ready marker, owed to the next command's output. */
   private startupNotice: string | undefined
-  private buffer = ''
+  /** Where the live child's output goes: the command in flight, or the last one, which keeps nothing more. */
+  private capture: Capture | undefined
   private readonly markerBase = `__DSH_${crypto.randomUUID().replace(/-/g, '')}__`
   /** The init line's handshake: sequence 0, which no command is ever given. */
   private readonly readyMarker = `${this.markerBase}0`
@@ -330,14 +534,44 @@ export class ShellProcess implements ShellSession {
     if (policy.mode === 'danger-full-access') return 'none'
     const enforcement = this.enforcementFor(policy.mode)
     if (!meetsAcceptance(enforcement, accepts)) {
+      // A refusal here is where the tool offers an escalation, and with the
+      // folder gone the approved command would fail the same way: the folder
+      // is the fact to report, before anyone's consent is spent.
+      const gone = this.workspaceGone()
+      if (gone !== undefined) throw gone
+      // The remedy rides the refusal a person or a model meets FIRST: on a
+      // Linux host without bubblewrap this sentence is all they are told.
+      const remedy = this.confinement.remedy === undefined ? '' : `; ${this.confinement.remedy}`
       throw new SandboxError(
         'SANDBOX_UNAVAILABLE',
         enforcement === 'none'
-          ? `this host has no confinement backend, so a command cannot run under "${policy.mode}" mode`
+          ? `this host has no confinement backend, so a command cannot run under "${policy.mode}" mode${remedy}`
           : `this host enforces "${policy.mode}" only "${enforcement}", and this session requires "${accepts}"`,
       )
     }
     return enforcement
+  }
+
+  /**
+   * The refusal for a session whose workspace folder is gone (deleted,
+   * renamed, on a drive no longer mounted), or `undefined` while it is there.
+   *
+   * Node reports a missing `cwd` as the same ENOENT as a missing binary, so
+   * every command of such a session answered "install bash" or "install
+   * PowerShell 7", and under a wrapper SANDBOX_UNAVAILABLE "install
+   * bubblewrap" with an escalation offered: a person was then asked to
+   * approve a wider mode for a command that failed the same way. Always the
+   * shell's code, never the sandbox's, so nothing offers an escalation.
+   */
+  private workspaceGone(): ShellError | undefined {
+    try {
+      if (statSync(this.cwd).isDirectory()) return undefined
+    } catch (error) {
+      // Only absence is this refusal's fact; a folder that cannot be examined is not known to be gone.
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return undefined
+    }
+    return new ShellError('SHELL_UNAVAILABLE', `this session's workspace folder ${this.cwd} no longer exists; nothing ran`)
   }
 
   /**
@@ -385,9 +619,12 @@ export class ShellProcess implements ShellSession {
     const piped = child as ChildProcessWithoutNullStreams
     piped.stdout.setEncoding('utf8')
     piped.stderr.setEncoding('utf8')
-    // Identity-guarded: output from a killed child never lands in the live buffer.
+    // A new child's output belongs to the command that is about to be given
+    // it (`runOne` sets its capture in this same turn), never to the last one.
+    this.capture = undefined
+    // Identity-guarded: output from a killed child never lands in the live capture.
     const append = (data: string): void => {
-      if (this.child === child) this.buffer += data
+      if (this.child === child) this.capture?.push(data)
     }
     piped.stdout.on('data', append)
     piped.stderr.on('data', append)
@@ -431,23 +668,27 @@ export class ShellProcess implements ShellSession {
         ? new SandboxError('SANDBOX_UNAVAILABLE', `the confinement wrapper "${cmd}" ${what} (a wider mode would meet the same limit)`)
         : new ShellError('SHELL_UNAVAILABLE', `the shell "${cmd}" ${what}`)
     }
+    // A missing `cwd` is reported exactly as a missing binary is (ENOENT on
+    // the spawn), so the folder is asked before anyone is told to install
+    // what is installed (`workspaceGone`).
+    if (kind === 'missing') {
+      const gone = this.workspaceGone()
+      if (gone !== undefined) return gone
+    }
     const code = (error as NodeJS.ErrnoException | undefined)?.code
     return this.startupFailure(cmd, wrapped, `could not be started (${code ?? (error instanceof Error ? error.message : String(error))})`)
   }
 
   /**
-   * Consume the ready marker once its whole line has arrived: what precedes it
-   * is the child's start-up noise, and what follows is the first command's.
+   * The child's ready line has arrived (`Capture` consumed it): what preceded
+   * it is start-up noise, and what follows is the first command's.
    */
-  private takeReady(): void {
-    const at = this.buffer.indexOf(this.readyMarker)
-    const end = at === -1 ? -1 : this.buffer.indexOf('\n', at + this.readyMarker.length)
-    if (end === -1) return
+  private answered(capture: Capture): void {
     // Start-up noise is dropped — except the containment line's own warning,
     // the one thing in it a reader must not lose: this shell's descendants are
     // not contained here, so it heads the first command's output.
-    const notice = this.buffer
-      .slice(0, at)
+    const notice = capture
+      .startupText()
       .split(/\r?\n/)
       .find((line) => line.includes('minidsh:'))
     // pwsh colours a warning even into a pipe; `printableText` would keep the
@@ -455,7 +696,6 @@ export class ShellProcess implements ShellSession {
     // ESC is matched on purpose: it is the thing being removed).
     // oxlint-disable-next-line no-control-regex
     if (notice !== undefined) this.startupNotice = printableText(notice.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')).trim()
-    this.buffer = this.buffer.slice(end + 1)
     this.fresh = false
   }
 
@@ -464,7 +704,7 @@ export class ShellProcess implements ShellSession {
     if (wrapped) {
       return new SandboxError(
         'SANDBOX_UNAVAILABLE',
-        `the confinement wrapper "${cmd}" ${what}, so a command cannot run confined on this host; ${confinementRemedy()}`,
+        `the confinement wrapper "${cmd}" ${what}, so a command cannot run confined on this host; ${confinementRemedy(this.confinement.id)}`,
       )
     }
     const remedy = this.dialect === 'pwsh' ? 'install PowerShell 7 (pwsh)' : 'install bash'
@@ -505,35 +745,33 @@ export class ShellProcess implements ShellSession {
     }
     const child = await this.ensureChild(request.policy, world)
     const closed = this.childClosed
-    this.buffer = ''
     const marker = `${this.markerBase}${++this.commandSeq}`
+    // One capture per command, replacing the last: whatever a backgrounded
+    // process printed between the two was never this command's.
+    const capture = new Capture(this.maxCaptureChars, marker, this.fresh ? this.readyMarker : undefined)
+    this.capture = capture
     const base64 = Buffer.from(request.command, 'utf8').toString('base64')
     child.stdin.write(wrapper(this.dialect, base64, marker))
     const startedAt = Date.now()
 
-    const pattern = new RegExp(`${marker}:(-?\\d+)`)
     const deadline = Date.now() + (request.timeoutMs ?? DEFAULT_TIMEOUT_MS)
     for (;;) {
-      if (this.fresh) this.takeReady()
-      const match = this.fresh ? null : pattern.exec(this.buffer)
-      if (match) {
-        const output = this.buffer.slice(0, this.buffer.indexOf(marker))
-        this.buffer = ''
-        const exitCode = Number(match[1])
-        return this.finalize(output, { exitCode, timedOut: false, reset: false, restarted, startedAt }, sandbox)
+      if (this.fresh && capture.ready) this.answered(capture)
+      if (capture.exitCode !== undefined) {
+        return this.finalize(capture.output(), { exitCode: capture.exitCode, timedOut: false, reset: false, restarted, startedAt, cut: capture.overflowed }, sandbox)
       }
       // The shell itself died (e.g. the command was `exit`): report immediately
       // instead of polling until the deadline — once its pipes have delivered
       // what it wrote, which the exit can outrun.
       if (child.exitCode !== null || child.killed) {
         await Promise.race([closed, sleep(DRAIN_MS)])
-        if (this.fresh) this.takeReady()
-        const output = this.buffer
+        if (this.fresh && capture.ready) this.answered(capture)
+        const output = capture.output()
         const code = child.exitCode
         const wrapped = this.childWrapped
         this.child = undefined
         this.childWorld = undefined
-        this.buffer = ''
+        this.capture = undefined
         // A child that died before its ready marker never answered the
         // harness: a broken shim, a wrapper that exits at startup, a build
         // that rejects `-Command -`. That is the same fact as a failed spawn
@@ -545,26 +783,25 @@ export class ShellProcess implements ShellSession {
         // command failing.
         if (this.fresh) {
           this.fresh = false
-          const trimmed = output.trim()
+          const trimmed = capture.startupText().trim()
           const runnerFailed = wrapped && this.isRunnerFailure(trimmed)
           throw this.startupFailure(
             runnerFailed ? this.confinement.id : (this.shellPath ?? this.dialect),
             runnerFailed,
-            `exited (code ${code ?? 'unknown'}) before it answered${trimmed.length > 0 ? `: ${trimmed.slice(0, 200)}` : ''}`,
+            `exited (code ${code ?? 'unknown'}) before it answered${trimmed.length > 0 ? `: ${clip(trimmed, 200)}` : ''}`,
           )
         }
-        return this.finalize(output, { timedOut: false, reset: true, restarted, startedAt }, sandbox)
+        return this.finalize(output, { timedOut: false, reset: true, restarted, startedAt, cut: capture.overflowed }, sandbox)
       }
       // `durationMs` is stamped HERE, before the reset: killing and reaping
       // the child can take seconds, and charging that to the command would
-      // report a 120 s deadline as "timed out, 120.9s".
-      if (request.signal?.aborted) {
+      // report a 120 s deadline as "timed out, 120.9s". The output is taken
+      // here too: the reset lets go of the capture.
+      if (request.signal?.aborted || Date.now() > deadline) {
+        const timedOut = request.signal?.aborted !== true
         const durationMs = Date.now() - startedAt
-        return this.finalize(this.buffer, { timedOut: false, reset: await this.reset(), restarted, startedAt, durationMs }, sandbox)
-      }
-      if (Date.now() > deadline) {
-        const durationMs = Date.now() - startedAt
-        return this.finalize(this.buffer, { timedOut: true, reset: await this.reset(), restarted, startedAt, durationMs }, sandbox)
+        const output = capture.output()
+        return this.finalize(output, { timedOut, reset: await this.reset(), restarted, startedAt, durationMs, cut: capture.overflowed }, sandbox)
       }
       await sleep(POLL_MS)
     }
@@ -574,14 +811,13 @@ export class ShellProcess implements ShellSession {
    * One command, one child, under a policy that is not this session's.
    *
    * No marker framing: the process exits when the command does, so its exit
-   * code IS the command's and its pipes carry the whole output. That is also
+   * code IS the command's (pwsh needs a line of help to say a native
+   * program's code: `oneShotCommand`) and its pipes carry the whole output. That is also
    * why an approved escalation leaves no shell state behind — a grant that
    * covers one call should not be able to.
    */
   private async runOneShot(request: ShellExecRequest, sandbox: ShellRunResult['sandbox']): Promise<ShellRunResult> {
-    const base = oneShotCommand(this.dialect, this.shellPath, request.command)
-    const { cmd, args } = this.confinement.wrap(base.cmd, base.args, request.policy)
-    const wrapped = cmd !== base.cmd
+    const { cmd, args, wrapped } = this.oneShotArgv(request.command, request.policy)
     // The one-shot is detached on POSIX whether or not it is wrapped, and for a
     // second reason: `danger-full-access` is never wrapped, so the escalated
     // child is the one child that is BOTH unconfined and running under the
@@ -620,24 +856,60 @@ export class ShellProcess implements ShellSession {
       const { stdout, stderr } = child as ChildProcessByStdio<null, Readable, Readable>
       stdout.setEncoding('utf8')
       stderr.setEncoding('utf8')
+      // Bounded as it arrives, for `Capture`'s reason: a string that grew
+      // until the command ended is how one large output ended the host.
       let output = ''
-      const append = (data: string): void => void (output += data)
-      stdout.on('data', append)
+      let cut = false
+      const append = (data: string): void => {
+        if (cut) return
+        const room = this.maxCaptureChars - output.length
+        if (data.length > room) cut = true
+        output += clip(data, room)
+      }
+      const started = wrapped ? new StartLine(this.readyMarker) : undefined
+      stdout.on('data', started === undefined ? append : (data: string) => append(started.take(data)))
       stderr.on('data', append)
+      const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
       const code = await ended
       // A wrapper that could not start printed its own line and never ran the
-      // command; the shell's own failures are not this refusal's business.
-      if (wrapped && code !== 0 && this.isRunnerFailure(output.trim())) {
-        throw this.startupFailure(this.confinement.id, true, `exited (code ${code ?? 'unknown'}): ${output.trim().slice(0, 200)}`)
+      // command; the shell's own failures are not this refusal's business. A
+      // child whose start line arrived ran its command (`StartLine`), and the
+      // exit can outrun that line, so the pipes get their grace before a
+      // command that may have run is called one that never did.
+      if (started !== undefined) {
+        if (code !== 0 && !started.seen) await Promise.race([closed, sleep(DRAIN_MS)])
+        append(started.rest())
+        if (code !== 0 && !started.seen && this.isRunnerFailure(output.trim())) {
+          throw this.startupFailure(this.confinement.id, true, `exited (code ${code ?? 'unknown'}): ${clip(output.trim(), 200)}`)
+        }
       }
       // `reset` is about the persistent shell, and this call never touched it.
-      return this.finalize(output, { ...(code === null ? {} : { exitCode: code }), timedOut, reset: false, restarted: false, startedAt }, sandbox)
+      return this.finalize(output, { ...(code === null ? {} : { exitCode: code }), timedOut, reset: false, restarted: false, startedAt, cut }, sandbox)
     } finally {
       clearTimeout(timer)
       request.signal?.removeEventListener('abort', onAbort)
       this.oneShotChildren.delete(child)
       this.pruneGroups()
+      // The call is over, and so is its capture: a descendant the command
+      // backgrounded may hold these pipes for as long as it lives, and each
+      // chunk it wrote was still being read here until disposal.
+      child.stdout?.destroy()
+      child.stderr?.destroy()
     }
+  }
+
+  /**
+   * The argv of a one-shot or a job: the one-command shell, inside this
+   * world's wrapper when the policy is a confined one. A wrapped shell is
+   * also asked to announce itself (`StartLine`).
+   */
+  private oneShotArgv(command: string, policy: SandboxExecutionPolicy): { cmd: string; args: string[]; wrapped: boolean } {
+    const announced = oneShotCommand(this.dialect, this.shellPath, command, this.readyMarker)
+    const inside = this.confinement.wrap(announced.cmd, announced.args, policy)
+    // Not wrapped (no backend, or a mode that is never confined): nothing can
+    // fail to start but the shell itself, so it has nothing to announce.
+    if (inside.cmd === announced.cmd) return { ...oneShotCommand(this.dialect, this.shellPath, command), wrapped: false }
+    return { ...inside, wrapped: true }
   }
 
   /**
@@ -657,9 +929,7 @@ export class ShellProcess implements ShellSession {
   async start(request: ShellJobRequest): Promise<ShellJob> {
     const enforcement = this.confine(request.policy, request.accepts ?? DEFAULT_ACCEPTANCE)
     if (this.disposed) throw Object.assign(new Error("this session's shell has been disposed; nothing was started"), { code: 'ABORTED_BEFORE_DISPATCH' })
-    const base = oneShotCommand(this.dialect, this.shellPath, request.command)
-    const { cmd, args } = this.confinement.wrap(base.cmd, base.args, request.policy)
-    const wrapped = cmd !== base.cmd
+    const { cmd, args, wrapped } = this.oneShotArgv(request.command, request.policy)
     const { child, spawned } = spawnChild(
       cmd,
       args,
@@ -699,13 +969,16 @@ export class ShellProcess implements ShellSession {
     stdout.setEncoding('utf8')
     stderr.setEncoding('utf8')
     // The first lines, kept only to tell a runner that never started from a
-    // command that failed; the output itself goes straight to the caller.
+    // command that failed; the output itself goes straight to the caller, so
+    // nothing of a job's is held here beyond them.
     let opening = ''
     const forward = (chunk: string): void => {
-      if (opening.length < 2_000) opening += chunk.slice(0, 2_000 - opening.length)
+      if (chunk.length === 0) return
+      if (opening.length < 2_000) opening += clip(chunk, 2_000 - opening.length)
       request.output(chunk)
     }
-    stdout.on('data', forward)
+    const started = wrapped ? new StartLine(this.readyMarker) : undefined
+    stdout.on('data', started === undefined ? forward : (chunk: string) => forward(started.take(chunk)))
     stderr.on('data', forward)
     let closed = false
     child.once('close', () => (closed = true))
@@ -725,11 +998,15 @@ export class ShellProcess implements ShellSession {
             }
           }
           forget()
-          const failed = wrapped && code !== 0 && this.isRunnerFailure(opening.trim())
+          // By now the pipes have closed or had their grace, so a start line
+          // that was written has arrived: a job that printed it RAN, whatever
+          // it printed after (`StartLine`).
+          if (started !== undefined) forward(started.rest())
+          const failed = started !== undefined && code !== 0 && !started.seen && this.isRunnerFailure(opening.trim())
           resolve({
             ...(code === null ? {} : { exitCode: code }),
             ...(signal === null ? {} : { signal }),
-            ...(failed ? { failure: `the confinement runner "${this.confinement.id}" failed: ${opening.trim().slice(0, 200)}` } : {}),
+            ...(failed ? { failure: `the confinement runner "${this.confinement.id}" failed: ${clip(opening.trim(), 200)}` } : {}),
             ...(disposedHere ? { disposed: true as const } : {}),
             ...(selfEnded ? { selfEnded: true as const } : {}),
           })
@@ -763,27 +1040,25 @@ export class ShellProcess implements ShellSession {
   /**
    * The wrapper failed, as opposed to the shell inside it.
    *
-   * The conjunction is nonzero exit + wrapped + the wrapper's own diagnostic
-   * prefix, minus the one diagnostic that is about the wrapped program rather
-   * than the wrapper: `bwrap: execvp bash: No such file or directory` is a
-   * MISSING SHELL reported in bwrap's voice, and calling it a sandbox failure
-   * sends the model to escalate — which would spawn the same missing shell
-   * unconfined and fail again, after spending someone's consent.
+   * The conjunction is nonzero exit + wrapped + a child that never said it
+   * started (the ready line, or a one-shot's `StartLine`: the callers' part)
+   * + the wrapper's own diagnostic OPENING what was printed, which is where a
+   * wrapper that dies before it runs anything puts it. Minus the one
+   * diagnostic that is about the wrapped program rather than the wrapper:
+   * `bwrap: execvp bash: No such file or directory` is a MISSING SHELL
+   * reported in bwrap's voice, and calling it a sandbox failure sends the
+   * model to escalate — which would spawn the same missing shell unconfined
+   * and fail again, after spending someone's consent.
    */
   private isRunnerFailure(text: string): boolean {
-    if (/^\s*bwrap: execvp /m.test(text)) return false
-    return this.matches(text, this.confinement.runnerFailureSignatures)
-  }
-
-  private matches(text: string, signatures: readonly string[]): boolean {
-    if (signatures.length === 0) return false
-    const lower = text.toLowerCase()
-    return signatures.some((signature) => lower.includes(signature))
+    const opening = text.trimStart().split('\n', 1)[0]!.toLowerCase()
+    if (opening.startsWith('bwrap: execvp ')) return false
+    return this.confinement.runnerFailureSignatures.some((signature) => opening.startsWith(signature))
   }
 
   private finalize(
     raw: string,
-    extra: { exitCode?: number; timedOut: boolean; reset: boolean; restarted: boolean; startedAt: number; durationMs?: number },
+    extra: { exitCode?: number; timedOut: boolean; reset: boolean; restarted: boolean; startedAt: number; durationMs?: number; cut: boolean },
     sandbox: ShellRunResult['sandbox'],
   ): ShellRunResult {
     const notice = this.startupNotice
@@ -793,9 +1068,12 @@ export class ShellProcess implements ShellSession {
     // A MEMORY bound, not a context bound. What the model should see is the
     // tool's decision, and it cannot make it from output the executor already
     // threw away — so everything captured is returned, and `truncated` reports
-    // only that the process outran this buffer.
-    const truncated = trimmed.length > this.maxCaptureChars
-    const output = truncated ? `${trimmed.slice(0, this.maxCaptureChars)}\n[output stopped at ${this.maxCaptureChars} captured characters]` : trimmed
+    // only that the process outran this buffer. The bound itself is applied
+    // as the output arrives (`Capture`, `extra.cut`); here it is only said.
+    const truncated = extra.cut || trimmed.length > this.maxCaptureChars
+    const output = truncated
+      ? `${clip(trimmed, this.maxCaptureChars)}\n[output stopped at ${this.maxCaptureChars} captured characters: the command printed more, and the rest was not kept]`
+      : trimmed
     return {
       output,
       timedOut: extra.timedOut,
@@ -817,7 +1095,7 @@ export class ShellProcess implements ShellSession {
     const old = this.child
     this.child = undefined
     this.childWorld = undefined
-    this.buffer = ''
+    this.capture = undefined
     await killAndWait(old)
   }
 

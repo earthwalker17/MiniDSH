@@ -7,6 +7,7 @@
  * child is spawned inside it, and both real mechanisms are inherited by every
  * descendant, so one wrap confines every command that shell will ever run.
  */
+import { isAbsolute } from 'node:path'
 import { z } from 'zod'
 import type { Context, Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../../core/agent/types.ts'
@@ -14,13 +15,13 @@ import { EFFECT_RECORDED } from '../../core/effects/index.ts'
 import { CREDENTIALS } from '../../core/credentials/index.ts'
 import { canonicalPath, type SandboxEnforcement, type SandboxMode } from '../../core/sandbox/index.ts'
 import { SHELL, type Shell, type ShellSession } from '../../core/shell/index.ts'
-import { CONFINEMENT_CHOICES, selectConfinementVerdict, type Confinement, type ConfinementChoice } from './confine/index.ts'
+import { CONFINEMENT_CHOICES, exposing, selectConfinementVerdict, type Confinement, type ConfinementChoice } from './confine/index.ts'
 import { ShellProcess, type ShellDialect } from './process.ts'
 
 export interface ShellStdioConfig {
   readonly dialect: ShellDialect
   readonly shellPath?: string | undefined
-  /** In-memory capture bound per command. What the MODEL sees is the tool's business, not the executor's. */
+  /** In-memory capture bound per command, held while the command prints. What the MODEL sees is the tool's business, not the executor's. */
   readonly maxCaptureChars?: number | undefined
   /**
    * Which OS confinement mechanism wraps the shell. `auto` (the default) picks
@@ -30,6 +31,16 @@ export interface ShellStdioConfig {
    * a test about that host does not depend on the machine it runs on.
    */
   readonly confinement?: ConfinementChoice | undefined
+  /**
+   * Absolute paths of the directories the RUNTIME ITSELF is installed in (its
+   * Node, its bundled skills), supplied by app assembly, never by a session.
+   * A profile that hides part of the filesystem keeps them readable: the
+   * Linux AppImage mounts all of it under `/tmp/.mount_*`, which bubblewrap's
+   * private `/tmp` hid from every confined command, so `node` and each
+   * bundled skill script were "not found" there. Read-only, and reads are
+   * unrestricted by design (§7), so naming a path here widens nothing.
+   */
+  readonly expose?: readonly string[] | undefined
 }
 
 const configSchema = z.strictObject({
@@ -37,6 +48,7 @@ const configSchema = z.strictObject({
   shellPath: z.string().min(1).optional(),
   maxCaptureChars: z.number().int().positive().optional(),
   confinement: z.enum(CONFINEMENT_CHOICES).optional(),
+  expose: z.array(z.string().refine(isAbsolute, 'expose takes absolute paths')).optional(),
 })
 
 class ShellStdioProvider implements Shell {
@@ -52,7 +64,7 @@ class ShellStdioProvider implements Shell {
     // Probed once, at mount, and then a synchronous fact: `enforcementFor` is
     // asked while a stamp is being recorded, inside event delivery.
     const verdict = selectConfinementVerdict(config.confinement ?? 'auto')
-    this.confinement = verdict.confinement
+    this.confinement = exposing(verdict.confinement, config.expose ?? [])
     if (!verdict.fact) {
       ctx.logger.warn(
         'shell-stdio: the confinement probe could not run (the host was out of descriptors or processes, or the probe hit its bound), so this process serves every session as a host without a backend; restart it once the load passes',

@@ -17,14 +17,18 @@
  * that exist to prove this and must never pass having proved nothing.
  */
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createRoot } from '../../kernel/index.ts'
+import { coreHarness } from '../../test-support/harness.ts'
 import { canonicalPath, type SandboxExecutionPolicy, type SandboxMode } from '../../core/sandbox/index.ts'
+import { SHELL } from '../../core/shell/index.ts'
+import { shellStdioPlugin } from './index.ts'
 import { bwrapArgs } from './confine/bwrap.ts'
 import { seatbeltArgs } from './confine/seatbelt.ts'
-import { NO_CONFINEMENT, selectConfinement, type ProbeRun } from './confine/index.ts'
+import { exposing, NO_CONFINEMENT, selectConfinement, type Confinement, type ProbeRun } from './confine/index.ts'
 import { ShellProcess } from './process.ts'
 
 // ---- the profiles, everywhere ---------------------------------------------
@@ -136,6 +140,112 @@ describe('the bwrap profile', () => {
   it('grants nothing at all under read-only', () => {
     expect(bwrapArgs(policyFor('read-only', '/ws'))).not.toContain('--bind')
     expect(bwrapArgs(policyFor('read-only', '/ws'))).not.toContain('--tmpfs')
+  })
+
+  /**
+   * The runtime's own install directories (the shell row's `expose`). An
+   * AppImage mounts the bundled Node and every bundled skill under
+   * `/tmp/.mount_*`, which the profile's private `/tmp` hid from each confined
+   * command: `node` and the office and pdf skill scripts were "not found" in
+   * the only Linux artifact (S22.5 audit).
+   */
+  it('re-exposes the runtime\'s own directories under the private /tmp: read-only, after the tmpfs that hid them, before the writable binds', () => {
+    const node = '/tmp/.mount_MiniDSabc/resources/node/bin'
+    const skills = '/tmp/.mount_MiniDSabc/resources/runtime/node_modules/minidsh'
+    const args = bwrapArgs(policyFor('workspace-write', '/tmp/ws'), { expose: [node, `${skills}/`, '/opt/minidsh', '/tmp/ws/vendored', '/tmp', '/tmpfoo/x'] })
+    expect(args.slice(args.indexOf('--tmpfs'))).toEqual(['--tmpfs', '/tmp', '--ro-bind', node, node, '--ro-bind', skills, skills, '--bind', '/tmp/ws', '/tmp/ws'])
+    // Never writable: a path named here is one a confined command may READ, which it already could.
+    expect(args.filter((arg, index) => arg === '--bind' && args[index + 1] !== '/tmp/ws')).toEqual([])
+  })
+
+  it('exposes nothing where nothing is hidden: read-only mounts no private /tmp', () => {
+    expect(bwrapArgs(policyFor('read-only', '/ws'), { expose: ['/tmp/.mount_MiniDSabc/resources/node/bin'] })).toEqual(bwrapArgs(policyFor('read-only', '/ws')))
+  })
+
+  /**
+   * The user runtime directory holds the session bus, the user systemd's
+   * private socket and a rootless container engine's: a read-only bind stops
+   * a write to a FILE, not a `connect()`, and a confined command had the
+   * user's systemd write outside the workspace for it (S22.5, reproduced).
+   */
+  it('masks the user runtime directory in every confined mode, read-only under read-only, and before anything is bound back', () => {
+    const runtimeDir = '/run/user/1000'
+    const readOnly = bwrapArgs(policyFor('read-only', '/ws'), { runtimeDir })
+    expect(readOnly.slice(-4)).toEqual(['--tmpfs', runtimeDir, '--remount-ro', runtimeDir])
+    // Still no host path is writable, and the only tmpfs is the mask itself.
+    expect(readOnly).not.toContain('--bind')
+    expect(readOnly.filter((arg) => arg === '--tmpfs')).toHaveLength(1)
+
+    const writable = bwrapArgs(policyFor('workspace-write', '/tmp/ws'), { runtimeDir })
+    expect(writable.slice(writable.indexOf('--tmpfs'))).toEqual(['--tmpfs', runtimeDir, '--tmpfs', '/tmp', '--bind', '/tmp/ws', '/tmp/ws'])
+    // After the root bind it covers, or the bind would put the sockets back.
+    expect(writable.indexOf('--ro-bind')).toBeLessThan(writable.indexOf(runtimeDir))
+  })
+})
+
+describe('the shell row\'s `expose`', () => {
+  const failures = async (config: Parameters<typeof shellStdioPlugin.apply>[1]): Promise<string[]> => {
+    const root = createRoot({ logger: { warn: () => {}, error: () => {} } })
+    try {
+      root.plugin(shellStdioPlugin, config)
+      const report = await root.settle()
+      return report.failed.map((entry) => (entry.error instanceof Error ? entry.error.message : String(entry.error)))
+    } finally {
+      await root.dispose()
+    }
+  }
+
+  // Assembly names the runtime's own directories as the platform spells them; a
+  // relative one would mean a different directory in every session's cwd.
+  it('takes absolute paths, and refuses a relative one when the row is parsed, naming the key', async () => {
+    const absolute = process.platform === 'win32' ? 'C:\\Program Files\\MiniDSH\\resources\\node' : '/tmp/.mount_MiniDSabc/resources/node/bin'
+    expect(await failures({ dialect: 'bash', confinement: 'none', expose: [absolute] })).toEqual([])
+    expect(await failures({ dialect: 'bash', confinement: 'none', expose: ['resources/node'] })).toEqual([expect.stringMatching(/invalid config: .*expose/s)])
+  })
+})
+
+/**
+ * On Linux without bubblewrap, the first thing a person or a model is told is
+ * the provider's own refusal, and it named no remedy: "install bubblewrap"
+ * sat behind a wrapper that had already passed its probe (S22.5 audit). The
+ * probe is staged, so this holds on every host.
+ */
+describe('a host whose backend does not work', () => {
+  const missing: ProbeRun = () => ({ status: null, signal: null, error: Object.assign(new Error('spawnSync bwrap ENOENT'), { code: 'ENOENT' }) })
+  const fresh = async (): Promise<typeof import('./confine/index.ts')> => {
+    vi.resetModules()
+    return import('./confine/index.ts')
+  }
+  const refusalOf = async (confinement: Confinement): Promise<Error> => {
+    const ws = tempDir('minidsh-confine-ws-')
+    shell = new ShellProcess('bash', ws, { confinement })
+    return shell.exec({ command: 'echo hi', policy: policyFor('workspace-write', ws), timeoutMs: 30_000 }).then(
+      () => new Error('the command was not refused'),
+      (error: Error) => error,
+    )
+  }
+
+  it('names the remedy in the refusal itself when the probe found the backend missing or unable to enforce', async () => {
+    const refused: ProbeRun = () => ({ status: 1, signal: null })
+    for (const answer of [missing, refused]) {
+      // A fresh module each time: `cannot` is a host fact, remembered per choice.
+      const confinement = (await fresh()).selectConfinement('bwrap', answer)
+      expect(confinement).toMatchObject({ id: 'none', enforcement: 'none' })
+      const refusal = await refusalOf(confinement)
+      expect(refusal).toMatchObject({ code: 'SANDBOX_UNAVAILABLE' })
+      expect(refusal.message).toContain('this host has no confinement backend')
+      expect(refusal.message).toContain('install bubblewrap (apt install bubblewrap)')
+    }
+  })
+
+  it('names none where there is nothing to install: a composition that chose `none`, or a moment that proved nothing', async () => {
+    const { selectConfinement: select, NO_CONFINEMENT: none } = await fresh()
+    const busy: ProbeRun = () => ({ status: null, signal: null, error: Object.assign(new Error('spawnSync bwrap EMFILE'), { code: 'EMFILE' }) })
+    for (const confinement of [select('none', missing), select('bwrap', busy), none]) {
+      const refusal = await refusalOf(confinement)
+      expect(refusal.message).toContain('this host has no confinement backend')
+      expect(refusal.message).not.toMatch(/install/i)
+    }
   })
 })
 
@@ -450,34 +560,209 @@ describe.skipIf(!installed)(`OS confinement on ${process.platform}`, () => {
 describe.skipIf(!installed || process.platform !== 'linux')('the bwrap ceiling', () => {
   it('points TMPDIR at the writable temp the profile actually granted', async () => {
     const ws = tempDir('minidsh-confine-ws-')
-    shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
-    // A host whose TMPDIR is outside the ceiling (pam_tmpdir, TMPDIR=$HOME/tmp)
-    // would otherwise send every mktemp and every spooled here-document at a
-    // path the sandbox correctly refuses, while the private tmpfs it was given
-    // went unused. Nothing is widened: this is the mount the profile made.
-    const result = await shell.exec({
-      command: 'echo "$TMPDIR"; f=$(mktemp) && echo "$f" && echo ok > "$f" && cat "$f"',
-      policy: policyFor('workspace-write', ws),
-      timeoutMs: 30_000,
-    })
-    expect(result.exitCode).toBe(0)
-    expect(result.output).toContain('/tmp')
-    expect(result.output).toContain('ok')
+    // The host this is about: a TMPDIR outside the ceiling (pam_tmpdir,
+    // TMPDIR=$HOME/tmp), which would otherwise send every mktemp and every
+    // spooled here-document at a path the sandbox correctly refuses, while the
+    // private tmpfs it was given went unused. Staged, because a host with NO
+    // TMPDIR passes every line below without the wiring: mktemp defaults to
+    // /tmp there (S22.5 audit). Under $HOME, which the profile binds read-only.
+    const hostTemp = canonicalPath(mkdtempSync(join(homedir(), '.minidsh-confine-tmp-')))
+    dirs.push(hostTemp)
+    const previous = process.env.TMPDIR
+    process.env.TMPDIR = hostTemp
+    let result: Awaited<ReturnType<ShellProcess['exec']>>
+    try {
+      // The child's environment is built from this process's at its spawn.
+      shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
+      result = await shell.exec({
+        command: 'echo "$TMPDIR"; f=$(mktemp) && echo "$f" && echo ok > "$f" && cat "$f"',
+        policy: policyFor('workspace-write', ws),
+        timeoutMs: 30_000,
+      })
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = previous
+    }
+    const [seenTemp, file, content] = result.output.split(NEWLINE).map((line) => line.trim())
+    expect(result.exitCode, result.output).toBe(0)
+    // Nothing is widened: this is the mount the profile made, and the child was told to use it.
+    expect(seenTemp).toBe('/tmp')
+    expect(file).toMatch(/^\/tmp\//)
+    expect(content).toBe('ok')
     // And it went nowhere on the host: the ceiling still describes every host
     // file that can change.
-    const leaked = result.output
-      .split(NEWLINE)
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith('/tmp/'))
-    for (const path of leaked) expect(existsSync(path), `${path} reached the host`).toBe(false)
+    expect(existsSync(file!), `${file} reached the host`).toBe(false)
+    expect(readdirSync(hostTemp), "the host's own TMPDIR was written to").toEqual([])
   })
 
-  it('grants no writable temp under read-only, because read-only means none', () => {
+  it('grants no writable temp under read-only, because read-only means none, and withholds the session bus address in both', () => {
     const confinement = selectConfinement('auto')
-    expect(confinement.envFor(policyFor('read-only', '/ws'))).toBeUndefined()
-    expect(confinement.envFor(policyFor('workspace-write', '/ws'))).toEqual({ TMPDIR: '/tmp' })
+    // `toStrictEqual`: a name that is present with no value is one the child does not inherit.
+    expect(confinement.envFor(policyFor('read-only', '/ws'))).toStrictEqual({ DBUS_SESSION_BUS_ADDRESS: undefined })
+    expect(confinement.envFor(policyFor('workspace-write', '/ws'))).toStrictEqual({ TMPDIR: '/tmp', DBUS_SESSION_BUS_ADDRESS: undefined })
     // Not confined at all: the caller's own environment, untouched.
     expect(confinement.envFor(policyFor('danger-full-access', '/ws'))).toBeUndefined()
+  })
+
+  /**
+   * The Linux AppImage mounts the runtime (its Node, its bundled skills)
+   * under `/tmp/.mount_*`, and the profile's private `/tmp` hid all of it from
+   * every confined command. The stand-in is a directory under `/tmp`
+   * literally, which is the path the profile masks whatever TMPDIR says.
+   */
+  it("keeps the runtime's own directory readable under the private /tmp when the row exposes it, never writable, and invisible without", async () => {
+    const ws = tempDir('minidsh-confine-ws-')
+    const install = mkdtempSync('/tmp/minidsh-confine-install-')
+    dirs.push(install)
+    const tool = join(install, 'tool.txt')
+    writeFileSync(tool, `bundled${NEWLINE}`)
+    const policy = policyFor('workspace-write', ws)
+    const read = `cat ${JSON.stringify(tool)}`
+
+    // Without the row's `expose`: the defect, and this test's control.
+    shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
+    const hidden = await shell.exec({ command: read, policy, timeoutMs: 30_000 })
+    expect(hidden.exitCode, hidden.output).not.toBe(0)
+    expect(hidden.output).toContain('No such file or directory')
+    await shell.dispose()
+
+    shell = new ShellProcess('bash', ws, { confinement: exposing(selectConfinement('auto'), [install]) })
+    const shown = await shell.exec({ command: read, policy, timeoutMs: 30_000 })
+    expect(shown.exitCode, shown.output).toBe(0)
+    expect(shown.output.trim()).toBe('bundled')
+    // Read-only: nothing in it changes, and nothing is added to it.
+    const written = await shell.exec({ command: `echo changed > ${JSON.stringify(tool)}; echo new > ${JSON.stringify(join(install, 'new.txt'))}`, policy, timeoutMs: 30_000 })
+    expect(written.exitCode).not.toBe(0)
+    expect(readFileSync(tool, 'utf8')).toBe(`bundled${NEWLINE}`)
+    expect(existsSync(join(install, 'new.txt'))).toBe(false)
+    // And the private /tmp beside it is still private and still writable.
+    const scratch = await shell.exec({ command: 'f=$(mktemp) && echo ok > "$f" && cat "$f" && echo "$f"', policy, timeoutMs: 30_000 })
+    expect(scratch.exitCode, scratch.output).toBe(0)
+    expect(existsSync(scratch.output.trim().split(NEWLINE).at(-1)!)).toBe(false)
+  })
+
+  it('takes `expose` from the shell row, which is how app assembly names those directories', async () => {
+    const ws = tempDir('minidsh-confine-ws-')
+    const install = mkdtempSync('/tmp/minidsh-confine-install-')
+    dirs.push(install)
+    writeFileSync(join(install, 'tool.txt'), `bundled${NEWLINE}`)
+    const harness = await coreHarness()
+    try {
+      harness.root.plugin(shellStdioPlugin, { dialect: 'bash', expose: [install] })
+      await harness.root.settle()
+      const { agent } = await harness.create({ cwd: ws })
+      const result = await harness.root.get(SHELL).sessionFor(agent).exec({ command: `cat ${JSON.stringify(join(install, 'tool.txt'))}`, policy: policyFor('workspace-write', ws), timeoutMs: 30_000 })
+      expect(result.exitCode, result.output).toBe(0)
+      expect(result.output.trim()).toBe('bundled')
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  /**
+   * The session bus, the user systemd's private socket and a rootless
+   * container engine's all live in the user runtime directory, and a
+   * read-only bind refuses a write to a file, not a `connect()`: a confined
+   * command ran `systemd-run --user`, and the user's systemd — outside every
+   * namespace — wrote a file outside the workspace for it, in workspace-write
+   * and in read-only alike (S22.5, reproduced under WSL 2). The profile now
+   * masks that directory and withholds the bus address.
+   */
+  for (const mode of ['workspace-write', 'read-only'] as const) {
+    it(`${mode}: the confined shell sees no user runtime directory and no session bus address`, async () => {
+      const ws = tempDir('minidsh-confine-ws-')
+      const runtimeDir = `/run/user/${process.getuid!()}`
+      const previous = process.env.DBUS_SESSION_BUS_ADDRESS
+      // Whatever this host's session has, the harness is given one to pass on.
+      process.env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${runtimeDir}/bus`
+      try {
+        shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
+        const result = await shell.exec({
+          command: `echo "address=[\${DBUS_SESSION_BUS_ADDRESS-unset}]"; if [ -e ${runtimeDir}/bus ]; then echo bus=present; else echo bus=absent; fi; ls -A ${runtimeDir} 2>/dev/null | wc -l`,
+          policy: policyFor(mode, ws),
+          timeoutMs: 30_000,
+        })
+        const lines = result.output.split(NEWLINE).map((line) => line.trim())
+        expect(lines[0], result.output).toBe('address=[unset]')
+        expect(lines[1], result.output).toBe('bus=absent')
+        // Where the host has the directory at all, the confined view of it is empty.
+        if (existsSync(runtimeDir)) expect(lines[2], `entries of ${runtimeDir} seen from inside`).toBe('0')
+        // The same for the two other children a confined policy can spawn: each builds its own environment and argv.
+        const see = `echo "address=[\${DBUS_SESSION_BUS_ADDRESS-unset}]"; if [ -e ${runtimeDir}/bus ]; then echo bus=present; else echo bus=absent; fi`
+        const oneShot = await shell.exec({ command: see, policy: policyFor(mode, ws), oneShot: true, timeoutMs: 30_000 })
+        expect(oneShot.output.trim().split(NEWLINE), 'a confined one-shot').toEqual(['address=[unset]', 'bus=absent'])
+        const chunks: string[] = []
+        await (await shell.start({ command: see, policy: policyFor(mode, ws), output: (chunk) => chunks.push(chunk) })).exited
+        expect(chunks.join('').trim().split(NEWLINE), 'a confined job').toEqual(['address=[unset]', 'bus=absent'])
+        // The positive control: an unconfined command of the same shell is given the address.
+        const outside = await shell.exec({ command: 'echo "address=[${DBUS_SESSION_BUS_ADDRESS-unset}]"', policy: policyFor('danger-full-access', ws), oneShot: true, timeoutMs: 30_000 })
+        expect(outside.output.trim()).toBe(`address=[unix:path=${runtimeDir}/bus]`)
+      } finally {
+        if (previous === undefined) delete process.env.DBUS_SESSION_BUS_ADDRESS
+        else process.env.DBUS_SESSION_BUS_ADDRESS = previous
+      }
+    })
+  }
+
+  /**
+   * The escape itself, asked of the real user systemd where this host has one.
+   * Measured, and printed, like the hard links: a host with no user bus or no
+   * `systemd-run` (a container, most CI images) cannot ask the question, and
+   * says so instead of passing for an answer.
+   */
+  it('cannot have the user systemd write outside the workspace for it: measured where the host has a user bus', async () => {
+    const ws = tempDir('minidsh-confine-ws-')
+    const outside = tempDir('minidsh-confine-out-')
+    const runtimeDir = `/run/user/${process.getuid!()}`
+    const systemdRun = spawnSync('systemd-run', ['--version'], { stdio: 'ignore' }).status === 0
+    const bus = existsSync(join(runtimeDir, 'bus'))
+    const unit = (target: string): string => `systemd-run --user --wait --collect --quiet /bin/sh -c ${JSON.stringify(`echo escaped > ${target}`)} 2>&1; echo "systemd-run exit: $?"`
+    // The control, UNCONFINED: this host's systemd really does write the file when asked.
+    const control = join(outside, 'control.txt')
+    const able = systemdRun && bus && spawnSync('bash', ['-c', unit(control)], { encoding: 'utf8', timeout: 60_000 }).status === 0 && existsSync(control)
+    const lines = [`[confine] user systemd on linux/${selectConfinement('auto').id} (${release()}): systemd-run ${systemdRun ? 'present' : 'absent'}, ${runtimeDir}/bus ${bus ? 'present' : 'absent'}, an unconfined transient unit ${able ? 'WROTE its file' : 'wrote nothing'}`]
+    for (const mode of ['workspace-write', 'read-only'] as const) {
+      const target = join(outside, `escaped-${mode}.txt`)
+      shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
+      const result = await shell.exec({ command: unit(target), policy: policyFor(mode, ws), timeoutMs: 60_000 })
+      await shell.dispose()
+      lines.push(`  ${mode}: outside file ${existsSync(target) ? 'WRITTEN' : 'absent'}; ${result.output.trim().replaceAll(NEWLINE, ' | ').slice(0, 200)}`)
+      // The world, never the exit code: no file outside the workspace, in either mode.
+      expect(existsSync(target), `${mode}: the user systemd wrote ${target} for a confined command\n${lines.join(NEWLINE)}`).toBe(false)
+    }
+    if (!able) lines.push('  NOT MEASURED on this host: nothing here could have written the file, so the absence above proves nothing')
+    reportMeasurement(lines.join(NEWLINE))
+  })
+
+  /**
+   * "The wrapper never started" against "the command ran and failed", with the
+   * real wrapper. A command that ran and printed `bwrap: ...` was refused
+   * SANDBOX_UNAVAILABLE "install bubblewrap", with no record of having run
+   * (S22.5 audit, reproduced); a bind whose source is missing is a wrapper
+   * that really cannot start.
+   */
+  it('tells a command that printed the wrapper\'s name from a wrapper that could not start, for a one-shot and a job', async () => {
+    const ws = tempDir('minidsh-confine-ws-')
+    shell = new ShellProcess('bash', ws, { confinement: selectConfinement('auto') })
+    const mention = "echo 'bwrap: mentioned by the command'; exit 1"
+    const ran = await shell.exec({ command: mention, policy: policyFor('workspace-write', ws), oneShot: true, timeoutMs: 30_000 })
+    expect(ran).toMatchObject({ exitCode: 1, sandbox: { mode: 'workspace-write', enforcement: 'full' } })
+    expect(ran.output.trim()).toBe('bwrap: mentioned by the command')
+    const chunks: string[] = []
+    const job = await shell.start({ command: mention, policy: policyFor('workspace-write', ws), output: (chunk) => chunks.push(chunk) })
+    const exit = await job.exited
+    expect(exit.failure, `a job that ran was recorded as a runner that never started: ${exit.failure}`).toBeUndefined()
+    expect(exit.exitCode).toBe(1)
+    expect(chunks.join('').trim()).toBe('bwrap: mentioned by the command')
+
+    // A root that is not there: bwrap refuses the bind and runs nothing.
+    const missing = policyFor('workspace-write', join(ws, 'no-such-root'))
+    await expect(shell.exec({ command: 'echo never', policy: missing, oneShot: true, timeoutMs: 30_000 })).rejects.toMatchObject({
+      code: 'SANDBOX_UNAVAILABLE',
+      message: expect.stringContaining('bwrap: '),
+    })
+    const failed = await (await shell.start({ command: 'echo never', policy: missing, output: () => {} })).exited
+    expect(failed.failure).toContain('the confinement runner "bwrap" failed')
   })
 
   it('gives the sandbox a PRIVATE /tmp: the write succeeds and the host temp directory is untouched', async () => {

@@ -5,7 +5,7 @@
  * against the workspace and the session log.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -16,6 +16,8 @@ import { JOB_END, JOB_START } from '../../core/jobs/index.ts'
 import { createUserMessage } from '../../core/llm/message.ts'
 import type { LlmRequest } from '../../core/llm/types.ts'
 import { matches, TOOL_RESULT, TURN_START, type EventEnvelope } from '../../core/session/index.ts'
+import { SPILL } from '../../core/spill/index.ts'
+import { TOOLS } from '../../core/tools/index.ts'
 import { shellStdioPlugin, type ShellDialect } from '../shell-stdio/index.ts'
 import { spillLocalPlugin } from '../spill-local/index.ts'
 import { toolJobsPlugin } from './index.ts'
@@ -135,6 +137,96 @@ describe.runIf(available)('the job tools', () => {
     expect(agent.session.events.filter((event) => matches(event, TURN_START))).toHaveLength(1)
   })
 
+  /**
+   * A job's output is held in memory only as a tail (`core/jobs`, 64 KiB); the
+   * rest is in its file. A read that reaches past the tail must say how much
+   * it no longer has and where the whole is, or the model takes the last part
+   * of a long log for all of it. No test printed more than a line (S22.5 audit).
+   */
+  it('a read past the in-memory tail says how many characters it no longer holds, and names the file that has them all', { timeout: TIMEOUT_MS }, async () => {
+    const { h, agent } = await setup()
+    // `head-of-output`, 200,000 characters, `end-of-output`: more than three tails.
+    const flood = ps
+      ? "Write-Output ('head-of-output' + ('x' * 200000) + 'end-of-output')"
+      : "printf head-of-output; head -c 200000 /dev/zero | tr '\\0' x; echo end-of-output"
+    h.adapter.script(
+      assistantToolCall('c1', 'job_start', { command: flood }),
+      (request) => assistantToolCall('c2', 'job_output', { job_id: jobIdIn(request), wait_ms: 60_000 }),
+      assistantText('read it'),
+    )
+    agent.followup(createUserMessage('run and read'))
+    await settled(agent, ended)
+    const start = agent.session.events.find((event) => matches(event, JOB_START))!.data as { output?: string }
+    expect(start.output, 'the job has no output file to point at').toBeDefined()
+    const whole = readFileSync(start.output!, 'utf8')
+    expect(whole).toContain('head-of-output')
+    const read = (resultOf(agent, 'c2').data as { message: { content: { content: { text: string }[] }[] } }).message.content[0]!.content[0]!.text
+    const lost = /^\[([\d,]+) earlier characters are no longer held in memory; the whole output is in (.+)\]$/m.exec(read)
+    expect(lost, `the read does not say what it left out: ${read.slice(0, 300)}`).not.toBeNull()
+    // Everything but the tail, counted in the characters the job wrote.
+    expect(Number(lost![1]!.replaceAll(',', '')), `of ${whole.length} characters written`).toBe(whole.length - 64 * 1024)
+    expect(lost![2]).toBe(start.output)
+    // What it does show is the END of the output, never its head.
+    expect(read).toContain('end-of-output')
+    expect(read).not.toContain('head-of-output')
+  })
+
+  /**
+   * A file that stopped short is never called the whole output. `core/jobs`
+   * marks it (`outputPartial`) when the store could not write, or past its
+   * own size cap; the store here is staged to stop after its first write,
+   * which is the first of those, and the read must not point at the file as
+   * if everything were in it.
+   */
+  it('a read whose output file stopped short says the file holds only part, and never calls it complete', { timeout: TIMEOUT_MS }, async () => {
+    const h = await coreHarness({ sandbox: { accepts: 'none' }, jobs: { stopWaitMs: 2_000 } })
+    harness = h
+    const dir = temp('minidsh-jobs-short-')
+    const path = join(dir, 'job-output.txt')
+    let writes = 0
+    h.root.plugin({
+      name: 'spill-that-stops-short',
+      apply(ctx) {
+        ctx.provide(SPILL, {
+          save: () => {
+            throw new Error('not used by a job')
+          },
+          open: () => ({
+            path,
+            get failed() {
+              return writes > 1
+            },
+            write(chunk: string) {
+              // The first write lands; the disk is "full" from the second on.
+              if (writes++ === 0) writeFileSync(path, chunk)
+            },
+            close() {},
+          }),
+        })
+      },
+    })
+    h.root.plugin(shellStdioPlugin, { dialect, confinement: 'none' })
+    h.root.plugin(toolJobsPlugin, {})
+    await h.root.settle()
+    const { agent } = await h.create({ cwd: temp('minidsh-jobs-ws-') })
+    // Two writes at least, and more than the in-memory tail in all.
+    const flood = ps
+      ? "Write-Output first; Start-Sleep -Milliseconds 300; Write-Output ('x' * 200000)"
+      : "echo first; sleep 0.3; head -c 200000 /dev/zero | tr '\\0' x; echo"
+    h.adapter.script(
+      assistantToolCall('c1', 'job_start', { command: flood }),
+      (request) => assistantToolCall('c2', 'job_output', { job_id: jobIdIn(request), wait_ms: 60_000 }),
+      assistantText('read it'),
+    )
+    agent.followup(createUserMessage('run and read'))
+    await settled(agent, ended)
+    expect(writes, 'the staged store was never asked to write twice, so it never stopped short').toBeGreaterThan(1)
+    const read = (resultOf(agent, 'c2').data as { message: { content: { content: { text: string }[] }[] } }).message.content[0]!.content[0]!.text
+    expect(read).toContain(`earlier characters are no longer held in memory; ${path} holds only part of it]`)
+    expect(read, 'a partial file was called the complete output').not.toContain('complete output is saved')
+    expect(read).not.toContain('the whole output is in')
+  })
+
   it('cancel stops a running job and is the report of its end', { timeout: TIMEOUT_MS }, async () => {
     const { h, agent } = await setup()
     h.adapter.script(
@@ -175,5 +267,22 @@ describe.runIf(available)('the job tools', () => {
     expect(read).toContain('earlier run of this session')
     expect(read).toContain('exited with code 0')
     await fork.dispose()
+  })
+})
+
+/**
+ * What `job_start` tells the model must be what a job's end does. Until S21.1
+ * a Windows job left a program it had started running, and the description
+ * said so; since the kill-on-close Job it ends with the job on every platform
+ * (`shell-stdio/job.test.ts` pins that), and a model still told the old rule
+ * started a server from a job's command and found it dead.
+ */
+describe('what job_start says about a job and what it starts', () => {
+  it('states the one rule every platform has: what a job started ends with it', async () => {
+    const { h } = await setup()
+    const description = h.root.get(TOOLS).schemas().find((schema) => schema.name === 'job_start')!.description
+    expect(description).toContain('what it started is stopped with it')
+    expect(description).toContain("run a server AS the job's command")
+    expect(description, 'the pre-S21.1 Windows exception is still told to the model').not.toMatch(/on Windows[^.]*not stopped/)
   })
 })

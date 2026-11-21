@@ -17,12 +17,55 @@
  *
  * The profile follows DeepSeek Harness's bwrap runner (`dsh-sandbox-local`,
  * https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/sandbox/sandbox-local/README.md)
- * flag for flag; the writable set it grants is MiniDSH's own (`writableRoots`).
+ * flag for flag, with two additions of MiniDSH's own; the writable set it
+ * grants is MiniDSH's own too (`writableRoots`).
+ *
+ * - **The user runtime directory is masked** (`BwrapHost.runtimeDir`, and
+ *   `BWRAP_WITHHELD_ENV`). Upstream leaves `/run/user/<uid>` visible, and a
+ *   read-only bind refuses a write to a file, not a `connect()` to a socket:
+ *   a confined command ran `systemd-run --user` over the session bus there,
+ *   and the user's own systemd, outside every namespace, wrote a file outside
+ *   the workspace for it, in workspace-write and in read-only alike (S22.5,
+ *   reproduced under WSL 2). A file effect the mode forbids, reached without
+ *   one forbidden write, so the profile hides the sockets that offer it.
+ * - **The runtime's own install directories stay readable** under the
+ *   private `/tmp` (`BwrapHost.expose`).
+ *
+ * What stays reachable, because the network namespace is shared and only
+ * this one directory is masked: the system bus and every service behind it,
+ * a docker socket for a user in the docker group, abstract sockets, and any
+ * service listening on loopback (ARCHITECTURE §13).
  */
 import type { SandboxExecutionPolicy } from '../../../core/sandbox/index.ts'
 import { writableRoots } from '../../../core/sandbox/index.ts'
 
 export const BWRAP_BIN = 'bwrap'
+
+/**
+ * Facts about THIS host and this installation that the profile is built
+ * around. Passed in, never looked up here, so the builder stays a pure
+ * function a test can read on any platform.
+ */
+export interface BwrapHost {
+  /**
+   * The user runtime directory (`/run/user/<uid>`), when this host has one:
+   * where the session bus, the user systemd's private socket and a rootless
+   * container engine's socket live.
+   */
+  readonly runtimeDir?: string | undefined
+  /**
+   * Directories the runtime itself is installed in (the shell row's `expose`):
+   * its Node, its bundled skills. An AppImage mounts all of it under
+   * `/tmp/.mount_*`, which the profile's private `/tmp` would hide from every
+   * confined command.
+   */
+  readonly expose?: readonly string[] | undefined
+}
+
+/** Whether `path` is `root` or lies beneath it. POSIX spellings only: bwrap exists nowhere else. */
+function within(root: string, path: string): boolean {
+  return path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`)
+}
 
 /**
  * The profile, in bwrap's strictly left-to-right order.
@@ -53,19 +96,49 @@ export const BWRAP_BIN = 'bwrap'
  *   breaking interactive use — is not a cost here, because this child is a
  *   non-interactive shell on pipes.
  *
+ * - `--tmpfs <runtime dir>` in EVERY confined mode, read-only included: the
+ *   sockets in it answer a `connect()` whatever the mount says (the header).
+ *   Under `read-only` the mask is remounted read-only, so that mode still
+ *   grants nowhere to write; under `workspace-write` it is a private scratch
+ *   directory like `/tmp`, reaching no host file.
+ * - `--ro-bind <path> <path>` for each of the runtime's own install
+ *   directories that lies under `/tmp`, after the tmpfs that hid it and
+ *   before the writable binds. Read-only, and reads are unrestricted by
+ *   design (§7): the path was readable through `--ro-bind / /` until the
+ *   mask covered it, so this widens nothing. One already inside a writable
+ *   root is left to that root's bind.
+ *
  * No `--unshare-net`: the mode vocabulary governs file effects only. No
  * `--chdir`: the cwd is inherited and lands correctly even under the masked
- * `/tmp` (measured). No `--clearenv`: the environment is the caller's.
+ * `/tmp` (measured). No `--clearenv`: the environment is the caller's, less
+ * `BWRAP_WITHHELD_ENV`.
  */
-export function bwrapArgs(policy: SandboxExecutionPolicy): string[] {
+export function bwrapArgs(policy: SandboxExecutionPolicy, host: BwrapHost = {}): string[] {
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--unshare-pid', '--proc', '/proc', '--die-with-parent', '--new-session']
   const roots = writableRoots(policy)
+  if (host.runtimeDir !== undefined) {
+    args.push('--tmpfs', host.runtimeDir)
+    if (roots.length === 0) args.push('--remount-ro', host.runtimeDir)
+  }
   if (roots.length > 0) {
     args.push('--tmpfs', '/tmp')
+    for (const given of host.expose ?? []) {
+      const path = given.replace(/(?<=.)\/+$/, '')
+      if (path !== '/tmp' && within('/tmp', path) && !roots.some((root) => within(root, path))) args.push('--ro-bind', path, path)
+    }
     for (const root of roots) args.push('--bind', root, root)
   }
   return args
 }
+
+/**
+ * Variables a confined child does not inherit: each names a service outside
+ * the sandbox by an address the profile no longer shows. Without the bus
+ * address a client falls back to `$XDG_RUNTIME_DIR/bus`, which is the masked
+ * directory, and finds nothing; `XDG_RUNTIME_DIR` itself stays, naming what is
+ * now an empty private directory.
+ */
+export const BWRAP_WITHHELD_ENV: readonly string[] = ['DBUS_SESSION_BUS_ADDRESS']
 
 /** What a write refused by this mechanism says, in its own words. */
 export const BWRAP_DENIALS: readonly string[] = ['read-only file system']

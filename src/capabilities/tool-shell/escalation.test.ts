@@ -280,6 +280,11 @@ describe('the shell on a host that DOES confine', () => {
     expect(description).toContain('inside an OS sandbox')
     // The unconfined host's guidance, which a confining host must not be handed.
     expect(description).not.toContain("is this session's recorded choice")
+    // What the sandbox governs is stated with its limit: the files a command's
+    // own processes write. A model told only "a write outside fails" was told
+    // something false wherever a reachable service would write for it (§13).
+    expect(description).toContain('the files a command and the processes it starts write directly')
+    expect(description).toContain('a service a command reaches over them acts under its own authority')
   })
 })
 

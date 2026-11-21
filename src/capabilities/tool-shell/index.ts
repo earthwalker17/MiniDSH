@@ -66,7 +66,13 @@ function confinementGuidance(confining: boolean): string {
   // result of such a command already says it — so a bullet would spend tokens
   // on every request of every session to repeat a notice that arrives exactly
   // when it is true. The description is the fixed prefix; the notice is not.
-  return `* Commands run inside an OS sandbox enforcing this session's policy. Under a confined mode a write outside what the policy allows fails because the operating system refused it, not because the tool did — reads and network are not restricted.
+  //
+  // The first bullet says WHAT the sandbox governs, and no more than it does:
+  // the files a command's own processes write. A service the command can
+  // reach (a socket, a loopback port) acts under its own authority, and a
+  // sentence that promised "a write outside fails" without that limit was
+  // false wherever such a service would write for it (S22.5, §13).
+  return `* Commands run inside an OS sandbox enforcing this session's policy. It governs the files a command and the processes it starts write directly: under a confined mode such a write outside what the policy allows fails because the operating system refused it, not because the tool did. Reads and the network are not restricted, and a service a command reaches over them acts under its own authority, not this sandbox's.
 * To run a command that must write outside those bounds, retry THE SAME command once with sandbox_permissions (the narrowest wider mode that suffices) and justification (why it is required). The user is asked to approve, and a grant covers that one call only.
 * Never work around a denial by rewriting the command to hide its effect.`
 }
