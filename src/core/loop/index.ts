@@ -1,4 +1,4 @@
-/** The concrete agent-loop driver and its request-reconstruction invariant. */
+/** The concrete agent loop: its driver, the factory that creates and disposes its agents, and the request-reconstruction invariant. */
 export { loopPlugin, type LoopConfig } from './factory.ts'
 export { loopInvariantPlugin } from './invariant.ts'
 export { ReactLoopAgent } from './driver.ts'

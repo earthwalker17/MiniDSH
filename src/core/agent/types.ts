@@ -1,3 +1,11 @@
+/**
+ * The agent contract (ARCHITECTURE §3 `agents`, §6): the live `Agent` handle,
+ * its options and narrowing, what a creator and a continuer may pass, and the
+ * subjects of the `agent/*` interception events.
+ *
+ * Types only, below the registry and the event tokens (`index.ts`,
+ * `events.ts`): it names no driver, and nothing here says how a turn runs.
+ */
 import type { Context } from '../../kernel/index.ts'
 import type { SessionId } from '../ids.ts'
 import type { Message } from '../llm/types.ts'

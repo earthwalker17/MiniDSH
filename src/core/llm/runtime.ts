@@ -1,3 +1,13 @@
+/**
+ * The LLM seam's runtime, `ctx.llm` (ARCHITECTURE §3, §5): the
+ * deployment-global adapter registry, the catalog built from it, and `stream`,
+ * the `llm/stream` waterfall whose terminal continuation picks the adapter,
+ * strips another provider's replay state and turns an adapter throw into a
+ * terminal finish. Every stream leaves through `validateStream`.
+ *
+ * It must not own a key, a default model, a session, or retry
+ * (`agent/request-error`).
+ */
 import { type Context, type Disposer, type Plugin, serviceKey, waterfallEvent } from '../../kernel/index.ts'
 import { deepFreeze } from '../json.ts'
 import { LlmError, type ContentBlockType, type LlmAdapter, type LlmRequest, type Message, type ModelInfo, type ModelModality, type ResolvedModel, type StreamChunk } from './types.ts'

@@ -98,7 +98,9 @@ function shorten(text: string): string {
  */
 function titleOf(event: EventEnvelope): string | undefined {
   if (!matches(event, USER_MESSAGE)) return undefined
-  if (event.data.message?.source?.kind !== 'user') return undefined
+  // The payload itself is guarded, not only the message: a stored line may
+  // say `"data": null`, and a throw here loses the session from a listing.
+  if (event.data?.message?.source?.kind !== 'user') return undefined
   let text: string
   try {
     text = clean(messageText(event.data.message))

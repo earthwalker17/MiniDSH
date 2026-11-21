@@ -1,3 +1,13 @@
+/**
+ * The agent factory and the loop plugin (ARCHITECTURE §3 `agents`, §6
+ * lifecycle). It owns creation as a transaction (session, scope and agent
+ * built unpublished, rolled back on any failure), each lifecycle's opening
+ * facts (`session/lifecycle`, `agent/options`, `agent/narrowing` and its
+ * re-application), and the one disposal every path to an agent's end shares.
+ *
+ * It must not own a turn (`driver.ts`), nor what a world, a `setup` or an
+ * `opening` composes: it runs them in order and settles what they mounted.
+ */
 import { z } from 'zod'
 import type { Context, Disposer, Plugin } from '../../kernel/index.ts'
 import {

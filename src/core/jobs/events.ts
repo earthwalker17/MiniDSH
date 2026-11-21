@@ -27,6 +27,7 @@
  */
 import { asMessageId } from '../ids.ts'
 import { deepFreeze, snapshotJson } from '../json.ts'
+import { wellFormedContent } from '../llm/content.ts'
 import { restoreMessage } from '../llm/message.ts'
 import type { Message } from '../llm/types.ts'
 import { INBOX_SPLICED, type InboxSplice } from '../agent/events.ts'
@@ -157,7 +158,9 @@ export function jobNotice(start: JobStart | undefined, end: JobEnd): Message {
   return restoreMessage({
     id: asMessageId(jobNoticeId(end.jobId)),
     role: 'user',
-    content: [{ type: 'text', text: jobNoticeText(start, end) }],
+    // Built by hand for its derived id, so it owes what `createMessage` does:
+    // a label is the model's own command, which may hold a lone surrogate.
+    content: wellFormedContent([{ type: 'text', text: jobNoticeText(start, end) }]),
     source: { kind: 'plugin', plugin: JOB_NOTICE_PLUGIN, form: JOB_NOTICE_FORM },
   })
 }

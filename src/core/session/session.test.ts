@@ -557,6 +557,54 @@ describe('Session: relational invariant', () => {
     expect(session.events.length).toBe(4)
   })
 
+  /**
+   * The tripwire behind the message constructors. A lone surrogate in a logged
+   * message makes Anthropic, DeepSeek and OpenAI each answer HTTP 400 to every
+   * later request of the session (measured 2026-11-21), so a producer that
+   * built its message by hand, past `createMessage`, is refused before the log
+   * holds it. A seed is still folded: an older log with one must stay readable.
+   */
+  it('refuses a hand-built surface message whose text holds a lone surrogate, in each of the three kinds', async () => {
+    const { sessions } = await harness(true)
+    const session = sessions.create({ cwd: '/w' })
+    // Half of U+1F600, as a cut between its two UTF-16 units leaves it.
+    const lone = `cut here ${String.fromCharCode(0xd83d)}`
+    const handBuilt = (role: 'user' | 'assistant', content: unknown, source: unknown) => ({ id: 'm-by-hand', role, content, source }) as never
+    session.append(TURN_START, { turn: 1 })
+    session.append(STEP_START, { turn: 1, step: 1 })
+    const refused = /holds text that is not well-formed UTF-16/
+    const before = session.events.length
+
+    expect(() =>
+      session.append(USER_MESSAGE, { message: handBuilt('user', [{ type: 'text', text: lone }], { kind: 'user' }) }, { surfaceOp: { op: 'append' } }),
+    ).toThrowError(refused)
+    expect(() =>
+      session.append(
+        ASSISTANT_MESSAGE,
+        { turn: 1, step: 1, message: handBuilt('assistant', [{ type: 'tool-call', id: 'c1', name: 'x', arguments: `{"a":"${lone}"}` }], { kind: 'assistant', provider: 'p', model: 'm' }) },
+        { surfaceOp: { op: 'append' } },
+      ),
+    ).toThrowError(refused)
+    session.append(TOOL_CALL, { turn: 1, step: 1, callId: 'c1', name: 'x', arguments: '{}' })
+    const nested = [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: lone }] }]
+    expect(() =>
+      session.append(TOOL_RESULT, { turn: 1, step: 1, callId: 'c1', message: handBuilt('user', nested, { kind: 'tool', callId: 'c1' }) }, { surfaceOp: { op: 'append' }, sourceEventSeqs: [] }),
+    ).toThrowError(refused)
+    // Pre-commit: none of the three entered the log, and the refusal never quotes the text.
+    expect(session.events.map((event) => event.type).slice(before)).toEqual(['tool/call'])
+    expect(session.deriveMessages()).toEqual([])
+
+    // The constructors are the fix: the same text through one is accepted, as U+FFFD.
+    const viaConstructor = createToolResultMessage(asCallId('c1'), [{ type: 'text', text: lone }], false)
+    session.append(TOOL_RESULT, { turn: 1, step: 1, callId: 'c1', message: viaConstructor }, { surfaceOp: { op: 'append' }, sourceEventSeqs: [] })
+    expect(JSON.stringify(session.deriveMessages())).toContain(`cut here ${String.fromCharCode(0xfffd)}`)
+
+    // A seed that already holds one is folded, not refused: only a live append is.
+    const stored = { type: USER_MESSAGE.type, seq: 2, time: 0, data: { message: handBuilt('user', [{ type: 'text', text: lone }], { kind: 'user' }) }, surfaceOp: { op: 'append' as const } }
+    const older = sessions.create({ cwd: '/w', seed: [...session.events.slice(0, 2), stored] })
+    expect(() => older.append(STEP_END, { turn: 1, step: 1 })).not.toThrow()
+  })
+
   it('throws on a non-contiguous turn number', async () => {
     const { sessions } = await harness(true)
     const session = sessions.create({ cwd: '/w' })

@@ -71,6 +71,44 @@ export function contentText(blocks: readonly ContentBlock[]): string {
   return out
 }
 
+/**
+ * One block with every string a provider is sent made well-formed UTF-16: a
+ * lone surrogate, which is what a cut between the two halves of an emoji
+ * leaves, becomes U+FFFD. `JSON.stringify` writes a lone surrogate as an escape
+ * that Anthropic, DeepSeek and OpenAI each answer with HTTP 400 "invalid JSON"
+ * (measured 2026-11-21), and a logged message is part of every later request,
+ * so one such character would fail its session for good, compaction included.
+ *
+ * Applied where a message is BUILT (`message.ts`, the tool pipeline, the
+ * driver), never at serialization, so the log holds exactly what is sent (§4);
+ * `core-session` refuses a surface event that got past it. Exhaustive like
+ * `blockText`, and it returns the block it was given when nothing changed. A
+ * call's id is left alone: it pairs records, it is not text.
+ */
+export function wellFormedBlock(block: ContentBlock): ContentBlock {
+  switch (block.type) {
+    case 'text':
+    case 'reasoning':
+    case 'image':
+      return block.text.isWellFormed() ? block : { ...block, text: block.text.toWellFormed() }
+    case 'tool-call':
+      return block.name.isWellFormed() && block.arguments.isWellFormed() ? block : { ...block, name: block.name.toWellFormed(), arguments: block.arguments.toWellFormed() }
+    case 'tool-result': {
+      const content = wellFormedContent(block.content)
+      return content.every((inner, index) => inner === block.content[index]) ? block : { ...block, content }
+    }
+    default: {
+      const exhaustive: never = block
+      throw new Error(`wellFormedBlock: unhandled content block ${JSON.stringify(exhaustive)}`)
+    }
+  }
+}
+
+/** A fresh list of the same blocks, each made well-formed (`wellFormedBlock`). */
+export function wellFormedContent(blocks: readonly ContentBlock[]): ContentBlock[] {
+  return blocks.map(wellFormedBlock)
+}
+
 /** Every image reference in a run of blocks, including inside a tool result, in order and deduped by id. */
 export function collectImageRefs(blocks: readonly ContentBlock[], into: Map<string, AttachmentRef> = new Map()): Map<string, AttachmentRef> {
   for (const block of blocks) {

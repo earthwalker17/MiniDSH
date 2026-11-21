@@ -3,8 +3,10 @@
  *
  * Writes carry an explicit `FsWriteIntent` chosen by the caller; an edit first
  * asks the `fs/edit-intent` single-slot waterfall so a read-before-edit policy
- * can supply the expected version (or refuse). Every read and mutation emits
- * the live `fs/observed` notification (not a session event).
+ * can supply the expected version (or refuse). Every TEXT read and every
+ * mutation emits the live `fs/observed` notification (not a session event);
+ * `readBytes` deliberately emits none, because an observation is a licence to
+ * overwrite (see the method).
  *
  * **Authority contract.** A provider MUST fence every mutation with the acting
  * session sandbox policy resolved from `ctx.sandbox` — refusing with

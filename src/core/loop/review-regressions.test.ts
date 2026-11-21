@@ -60,7 +60,60 @@ describe('review regressions: cancellation', () => {
         if (block.type === 'tool-result') resultIds.add(block.toolCallId)
       }
     }
+    // The call was logged before the cancel, so it IS in history: without it the loop below checks nothing.
+    expect([...callIds]).toEqual(['c1'])
     for (const id of callIds) expect(resultIds.has(id)).toBe(true)
+  })
+
+  /**
+   * The other half, which the test above never reaches: a cancel that lands
+   * MID-STREAM, after a tool-call block has fully arrived and before the
+   * stream finished. No `tool/call` is ever logged for it, so nothing would
+   * answer it, and an assistant message that kept the block would carry a
+   * call with no result into every later request, which every provider
+   * refuses. The driver keeps the visible text and drops the call.
+   */
+  it('drops the tool calls of a stream cancelled before it finished, and keeps what the model had said', async () => {
+    harness = await coreHarness()
+    const { ASSISTANT_CHUNK, ASSISTANT_MESSAGE, matches, TOOL_CALL, TURN_END } = await import('../session/index.ts')
+    const { gate } = await import('../../test-support/scripted-adapter.ts')
+    const held = Promise.withResolvers<void>()
+    harness.adapter.script(
+      [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'Let me look.' },
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'Let me look.' } },
+        { type: 'block-start', index: 1, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 1, id: asCallId('c1'), name: 'anything', argumentsDelta: '{}' },
+        { type: 'block-end', index: 1, block: { type: 'tool-call', id: asCallId('c1'), name: 'anything', arguments: '{}' } },
+        gate(held.promise),
+        { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+        { type: 'finish', reason: { kind: 'tool-calls' } },
+      ],
+      assistantText('after'),
+    )
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    // The whole tool-call block is on the record as chunks, and the stream is held open behind it.
+    const callStreamed = (): boolean =>
+      agent.session.events.some((event) => matches(event, ASSISTANT_CHUNK) && (event.data.chunk as { type?: string; block?: { type?: string } }).type === 'block-end' && (event.data.chunk as { block?: { type?: string } }).block?.type === 'tool-call')
+    await waitFor(callStreamed)
+    agent.cancel({ kind: 'user' })
+    held.resolve()
+    await agent.whenIdle()
+
+    const events = agent.session.events
+    const interrupted = events.filter((event) => matches(event, ASSISTANT_MESSAGE)).map((event) => (matches(event, ASSISTANT_MESSAGE) ? { interrupted: event.data.interrupted, content: event.data.message.content } : undefined))
+    expect(interrupted).toEqual([{ interrupted: true, content: [{ type: 'text', text: 'Let me look.' }] }])
+    expect(events.filter((event) => matches(event, TOOL_CALL))).toEqual([])
+    expect(events.filter((event) => matches(event, TURN_END)).map((event) => (matches(event, TURN_END) ? event.data.reason.kind : undefined))).toEqual(['cancelled'])
+
+    // The next request is answerable: it carries the text, and no call at all.
+    agent.followup(createUserMessage('again'))
+    await agent.whenIdle()
+    const sent = harness.adapter.calls.at(-1)!.messages.flatMap((message) => message.content.map((block) => block.type))
+    expect(sent).toEqual(['text', 'text', 'text'])
+    expect(agent.session.events.filter((event) => matches(event, TURN_END)).map((event) => (matches(event, TURN_END) ? event.data.reason.kind : undefined))).toEqual(['cancelled', 'completed'])
   })
 
   it('reports a cancellation during request-error recovery as cancelled, not error', async () => {

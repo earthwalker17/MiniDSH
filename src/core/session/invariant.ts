@@ -156,6 +156,15 @@ const installSessionInvariant: InvariantInstaller = (ctx, fail) => {
     if (matches(event, STEP_END) && trace.pending.size > 0) {
       fail(`step/end ${event.data.step} while tool call(s) ${[...trace.pending].join(', ')} are unanswered`)
     }
+    // The tripwire behind `wellFormedContent` (`core/llm/content.ts`), for a
+    // producer that built its message by hand: a lone surrogate on the surface
+    // is in every later request, and every provider answers such a request
+    // with HTTP 400, so the session would be unusable from this append on.
+    // Live appends only, like the rule above: an older log that holds one
+    // still loads. The text is not quoted: this message can itself be logged.
+    if (SURFACE_TYPES.has(event.type) && holdsIllFormedText(messageContent(event.data))) {
+      fail(`${event.type} holds text that is not well-formed UTF-16 (a lone surrogate): no provider accepts a request that carries it`)
+    }
     // Observation is pre-commit and any observer may still reject this event, so
     // the advanced trace is only staged here and committed once the event lands.
     const next: Trace = { ...trace, pending: new Set(trace.pending) }
@@ -213,6 +222,27 @@ function messageFault(message: unknown): string | undefined {
     if ((block as { type: string }).type === 'tool-call' && typeof (block as { id?: unknown }).id !== 'string') return 'a tool call without an id'
   }
   return undefined
+}
+
+/** A surface payload's content list, whatever shape the payload has. */
+function messageContent(data: unknown): unknown {
+  const message = typeof data === 'object' && data !== null ? (data as Record<string, unknown>).message : undefined
+  return typeof message === 'object' && message !== null ? (message as Record<string, unknown>).content : undefined
+}
+
+/**
+ * Whether a content list holds a string `wellFormedContent` would have
+ * changed: a block's text, a tool call's name or arguments, or the same inside
+ * a tool result. Read by field, not by block type, so a payload no constructor
+ * built is judged for this one fault and left to `messageFault` for its shape.
+ */
+function holdsIllFormedText(content: unknown): boolean {
+  if (!Array.isArray(content)) return false
+  return (content as unknown[]).some((block) => {
+    if (typeof block !== 'object' || block === null) return false
+    const { text, name, arguments: args, content: nested } = block as Record<string, unknown>
+    return [text, name, args].some((value) => typeof value === 'string' && !value.isWellFormed()) || holdsIllFormedText(nested)
+  })
 }
 
 /** Registers the session relational-trace invariant. Mount only where invariants run. */

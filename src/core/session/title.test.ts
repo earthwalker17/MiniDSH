@@ -119,6 +119,17 @@ describe('a session title', () => {
     for (const message of [null, 'oops', { content: 'oops', source: { kind: 'user' } }, { content: [{ type: 'audio' }], source: { kind: 'user' } }]) {
       expect(() => foldSessionTitle([event(USER_MESSAGE.type, { message })])).not.toThrow()
     }
+    // The payload itself can be the unknown shape: a line that says
+    // `"data": null` is valid JSON with a type and a seq, so a listing folds it.
+    const malformed: unknown[] = [null, undefined, 'oops', 7, [], { message: { source: null } }, { message: { source: { kind: 'user' } } }]
+    const outcomes = malformed.map((data) => {
+      try {
+        return foldSessionTitle([event(USER_MESSAGE.type, data), event(SESSION_TITLE.type, data), prompt('named anyway')])
+      } catch (error) {
+        return `threw: ${error instanceof Error ? error.message : String(error)}`
+      }
+    })
+    expect(outcomes).toEqual(malformed.map(() => 'named anyway'))
     expect(foldSessionTitle([event(USER_MESSAGE.type, { message: { content: [{ type: 'audio' }], source: { kind: 'user' } } }), prompt('the good one')])).toBe(
       'the good one',
     )

@@ -1,3 +1,12 @@
+/**
+ * The live session store, `ctx.sessions` (ARCHITECTURE §3, §4): which sessions
+ * exist in this process, deferred publication, and the four dispatches a
+ * session's life is told through (`session/created`, `session/event`,
+ * `session/flush`, `session/disposed`).
+ *
+ * It must not own storage: persistence is a subscriber of these dispatches,
+ * and a stored log is read through `core/persistence`, never from here.
+ */
 import { emitEvent, parallelEvent, serviceKey, type Context, type Plugin } from '../../kernel/index.ts'
 import { newSessionId, type SessionId } from '../ids.ts'
 import { Session, type SessionForkError, type SessionHost } from './session.ts'

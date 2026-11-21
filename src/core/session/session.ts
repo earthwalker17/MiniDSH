@@ -1,3 +1,13 @@
+/**
+ * One session: an immutable header and its append-only log (ARCHITECTURE §4).
+ * It owns the append path (snapshot, freeze, surface placement, pre-commit
+ * observation, then delivery), the fact tier beside the whole log, the seed a
+ * continuation starts from, and the closed state after detach.
+ *
+ * It must not own a backend, a registry of sessions (`store.ts`), or any
+ * payload's meaning beyond the surface: every other kind is opaque here, and
+ * its owner's invariant, not this class, judges it.
+ */
 import { asSessionId, type SessionId } from '../ids.ts'
 import { deepFreeze, snapshotJson } from '../json.ts'
 import type { Message } from '../llm/types.ts'

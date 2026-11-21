@@ -17,6 +17,7 @@ import type { ToolSchema } from '../llm/types.ts'
 export interface PromptSection {
   readonly name: string
   readonly order: number
+  /** A string is a TEMPLATE, its `{{var}}`s resolved strictly; a function returns finished text, taken as it is. */
   readonly text: string | ((agent: Agent | undefined) => string)
   /** When set, this section IS the entire system prompt (assembled after the waterfall). */
   readonly complete?: boolean
@@ -97,8 +98,12 @@ class PromptRegistry implements Prompt {
     const complete = ordered.filter((section) => section.complete)
     if (complete.length > 1) throw new Error(`multiple complete prompt sections: ${complete.map((s) => s.name).join(', ')}`)
 
+    // Only a string TEMPLATE is interpolated. What a function section returns
+    // is its finished text, and it may hold text nobody wrote as a template (a
+    // working directory named `{{name}}`): reading that as a variable failed
+    // every step of such a session with an error about a variable it never had.
     const render = (section: PromptSection): string =>
-      this.interpolate(typeof section.text === 'function' ? section.text(agent) : section.text, agent)
+      typeof section.text === 'function' ? section.text(agent) : this.interpolate(section.text, agent)
     const system = complete.length === 1 ? render(complete[0]!) : ordered.map(render).filter((text) => text.length > 0).join('\n\n')
 
     const tools = this.ctx.tryGet(TOOLS)?.schemas(agent) ?? []

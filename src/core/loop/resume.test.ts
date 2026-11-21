@@ -330,6 +330,87 @@ describe('durable inbox', () => {
     expect(foldInbox(agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
   })
 
+  /**
+   * A claim the log refused to open a step for is given back, never left
+   * pending. Left pending, the next claim replaced it and its record drained
+   * the REFUSED turn's prompt from the fold: the log kept the newest prompt
+   * queued although it had run, and every resume ran it again as a paid turn.
+   * The refusal is an observer's, as an invariant's is.
+   */
+  for (const refused of [STEP_START.type, USER_MESSAGE.type]) {
+    it(`leaves durable = live when the log refuses a turn's ${refused}: the next prompt runs once, and a resume runs nothing`, async () => {
+      const { harness: h } = await persistedHarness()
+      const { foldInbox, INBOX_SPLICED } = await import('../agent/index.ts')
+      const { matches } = await import('../session/index.ts')
+      const { messageText } = await import('../llm/message.ts')
+      let armed = true
+      h.root.observe((info) => {
+        if (!armed || info.name !== 'session/event' || (info.args[1] as EventEnvelope).type !== refused) return
+        armed = false
+        throw new Error(`refused ${refused}`)
+      })
+      h.adapter.script(assistantText('answer to the second prompt'))
+      const first = await h.create()
+      const id = first.agent.id
+      first.agent.followup(createUserMessage('PROMPT ONE'))
+      await first.agent.whenIdle()
+      first.agent.followup(createUserMessage('PROMPT TWO'))
+      await first.agent.whenIdle()
+
+      const events = first.agent.session.events
+      const reasons = events.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string; message?: string } }).reason)
+      expect(reasons).toEqual([{ kind: 'error', code: 'LOOP_FAILED', message: `refused ${refused}` }, { kind: 'completed' }])
+      // One claim per turn, each recorded in its own turn: the refused turn's before its `turn/end`.
+      const firstEnd = events.findIndex((event) => event.type === 'turn/end')
+      const claims = events.flatMap((event, index) => (matches(event, INBOX_SPLICED) && event.data.op === 'claim' ? [index < firstEnd ? 'turn 1' : 'turn 2'] : []))
+      expect(claims).toEqual(['turn 1', 'turn 2'])
+      // What a resume would restore is what is live: nothing.
+      const durable = foldInbox(first.agent.session.facts)
+      expect({ turns: durable.turnQueue.map((message) => messageText(message)), steps: durable.stepQueue.length }).toEqual({ turns: [], steps: 0 })
+      expect(h.adapter.calls).toHaveLength(1)
+      await first.dispose()
+
+      const resumed = await h.root.get(AGENTS).resume(h.root, id)
+      await resumed.agent.whenIdle()
+      expect(resumed.agent.status).toBe('idle')
+      expect(resumed.agent.session.events.filter((event) => event.type === 'turn/start')).toHaveLength(2)
+      expect(h.adapter.calls).toHaveLength(1)
+      await resumed.dispose()
+    })
+  }
+
+  // The same exit with a batch behind it: what followed the refused message
+  // was never seen, so a job's end notice among it is owed again, quiet, and
+  // the refused message itself is not offered to the log a second time.
+  it('requeues a job notice queued behind a message the log refused, and drops the refused one', async () => {
+    const { harness: h } = await persistedHarness()
+    const { foldInbox } = await import('../agent/index.ts')
+    const { jobNotice } = await import('../jobs/events.ts')
+    const { messageText } = await import('../llm/message.ts')
+    h.root.observe((info) => {
+      const event = info.args[1] as EventEnvelope | undefined
+      if (info.name === 'session/event' && event?.type === USER_MESSAGE.type && messageText((event.data as { message: Parameters<typeof messageText>[0] }).message) === 'poison') throw new Error('refused poison')
+    })
+    h.adapter.script(assistantText('ok'))
+    const { agent } = await h.create()
+    const notice = jobNotice({ jobId: 'job-9', kind: 'shell', label: 'sleep', mode: 'workspace-write', enforcement: 'full' }, { jobId: 'job-9', cause: 'exited', exitCode: 0 })
+    agent.inject(createUserMessage('poison'))
+    agent.inject(notice)
+    agent.followup(createUserMessage('the prompt'))
+    await agent.whenIdle()
+    // The prompt entered, the poison was refused, the notice behind it never entered.
+    expect(agent.session.deriveMessages().map((message) => messageText(message))).toEqual(['the prompt'])
+    expect(agent.session.events.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)).toEqual(['error'])
+    expect(foldInbox(agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
+    expect((agent as unknown as { inbox: { hasStepPending: boolean; hasWakingPending: boolean } }).inbox).toMatchObject({ hasStepPending: true, hasWakingPending: false })
+
+    // The next turn enters the notice, and nothing is left owed.
+    agent.followup(createUserMessage('next'))
+    await agent.whenIdle()
+    expect(agent.session.deriveMessages().map((message) => message.id)).toContain(notice.id)
+    expect(foldInbox(agent.session.facts)).toEqual({ turnQueue: [], stepQueue: [] })
+  })
+
   // The S20.5 review: a narrowed-out notice went straight back into the step
   // queue, which kept the turn stepping — 25 model calls for one question.
   it('owes a notice a listener narrowed out to a later turn, without stepping this one again', async () => {
@@ -351,6 +432,96 @@ describe('durable inbox', () => {
     // Still owed, live and durably.
     expect((agent as unknown as { inbox: { hasStepPending: boolean } }).inbox.hasStepPending).toBe(true)
     expect(foldInbox(agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
+  })
+
+  /**
+   * §6: an `agent/pre-step` listener may add to a batch, never create one, and
+   * an empty first step ends the turn. A notice that woke the agent and that a
+   * listener then left out is the whole batch: the turn opens no step, pays
+   * for no request, and still owes the notice.
+   */
+  it('ends a turn whose whole first batch a listener left out: no step, no request, the notice still owed', async () => {
+    const { harness: h } = await persistedHarness()
+    const { foldInbox, AGENT_PRE_STEP } = await import('../agent/index.ts')
+    const { isJobNotice, jobNotice } = await import('../jobs/events.ts')
+    h.root.on(AGENT_PRE_STEP, async (_context, next) => {
+      const decision = await next()
+      return decision.kind === 'enter' ? { kind: 'enter', messages: decision.messages.filter((message) => !isJobNotice(message)) } : decision
+    }, { global: true })
+    // Nothing is scripted: a request here would fail the turn, not complete it.
+    const { agent } = await h.create()
+    const notice = jobNotice({ jobId: 'job-5', kind: 'shell', label: 'sleep', mode: 'workspace-write', enforcement: 'full' }, { jobId: 'job-5', cause: 'exited', exitCode: 0 })
+    agent.steer(notice)
+    await agent.whenIdle()
+
+    const kinds = agent.session.events.map((event) => event.type)
+    expect(kinds.filter((type) => type.startsWith('turn/') || type.startsWith('step/') || type === 'user/message')).toEqual(['turn/start', 'turn/end'])
+    expect(agent.session.events.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)).toEqual(['completed'])
+    expect(h.adapter.calls).toHaveLength(0)
+    // Owed, quiet: it does not wake another turn on its own.
+    expect(foldInbox(agent.session.facts).stepQueue.map((entry) => ({ id: entry.message.id, waking: entry.waking }))).toEqual([{ id: notice.id, waking: false }])
+    expect((agent as unknown as { inbox: { hasStepPending: boolean; hasWakingPending: boolean } }).inbox).toMatchObject({ hasStepPending: true, hasWakingPending: false })
+  })
+
+  /**
+   * A held notice is recorded as a fresh insert, and whatever the same turn
+   * queues afterwards (a tool's deferred context, a steer) lands BEHIND it in
+   * the log. The next step's claim took only that later input, but a fold
+   * drains a claim's count from the front: it removed the held notice and
+   * left the context that had been entered. A host that stopped there
+   * restored the wrong queue: the notice gone, the context delivered twice.
+   */
+  it('keeps a held notice owed in the log when the same turn claims later input past it', async () => {
+    const { harness: h } = await persistedHarness()
+    const { z } = await import('zod')
+    const { foldInbox, AGENT_PRE_STEP } = await import('../agent/index.ts')
+    const { isJobNotice, jobNotice } = await import('../jobs/events.ts')
+    const { createPluginMessage, messageText } = await import('../llm/message.ts')
+    const { defineTool, TOOLS } = await import('../tools/index.ts')
+    h.root.on(AGENT_PRE_STEP, async (_context, next) => {
+      const decision = await next()
+      return decision.kind === 'enter' ? { kind: 'enter', messages: decision.messages.filter((message) => !isJobNotice(message)) } : decision
+    }, { global: true })
+    const context = createPluginMessage('test', 'context the tool deferred')
+    h.root.get(TOOLS).register(
+      h.root,
+      defineTool({
+        name: 'note',
+        description: 'defers a context',
+        input: z.object({}),
+        output: z.object({}),
+        execute: (_args, exec) => {
+          exec.deferContext(context)
+          return {}
+        },
+        render: () => [{ type: 'text', text: 'noted' }],
+      }),
+    )
+    const { assistantToolCall } = await import('../../test-support/scripted-adapter.ts')
+    h.adapter.script(assistantToolCall('c1', 'note', {}), assistantText('done'))
+    const first = await h.create()
+    const id = first.agent.id
+    const notice = jobNotice({ jobId: 'job-4', kind: 'shell', label: 'sleep', mode: 'workspace-write', enforcement: 'full' }, { jobId: 'job-4', cause: 'exited', exitCode: 0 })
+    first.agent.inject(notice)
+    first.agent.followup(createUserMessage('one question'))
+    await first.agent.whenIdle()
+
+    // Step 2 entered the deferred context, once, and the notice never entered.
+    const entered = first.agent.session.deriveMessages().filter((message) => message.source.kind !== 'tool' && message.role === 'user').map((message) => messageText(message))
+    expect(entered).toEqual(['one question', 'context the tool deferred'])
+    // The log owes exactly what is live: the notice, and not the context.
+    expect(foldInbox(first.agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
+    await first.dispose()
+
+    // A resume restores that queue, and the next turn's claim empties it.
+    h.adapter.script(assistantText('again'))
+    const resumed = await h.root.get(AGENTS).resume(h.root, id)
+    resumed.agent.followup(createUserMessage('a second question'))
+    await resumed.agent.whenIdle()
+    const after = resumed.agent.session.deriveMessages().filter((message) => message.source.kind !== 'tool' && message.role === 'user').map((message) => messageText(message))
+    expect(after).toEqual(['one question', 'context the tool deferred', 'a second question'])
+    expect(foldInbox(resumed.agent.session.facts).stepQueue.map((entry) => entry.message.id)).toEqual([notice.id])
+    await resumed.dispose()
   })
 })
 
@@ -547,6 +718,39 @@ describe('the base route survives its process', () => {
     ])
     await resumed.dispose()
     expect(fileEvents(base, id).some((event) => event.type === AGENT_OPTIONS.type)).toBe(true)
+  })
+
+  /**
+   * The loop's two limits are log facts a continuation keeps (§6: a child's
+   * width "bounding the tree"), against whatever the continuing surface would
+   * default to. Lost, a resumed child ran at the loop's default width and
+   * wrote an `agent/options{resume}` that dropped the width for good.
+   */
+  it('a resume and a fork keep the step ceiling and the width the opening recorded, and write no new base', async () => {
+    const { harness: h } = await persistedHarness()
+    const { AGENT_OPTIONS } = await import('../agent/index.ts')
+    const agents = h.root.get(AGENTS)
+    h.adapter.script(assistantText('one'))
+    const first = await h.create({ maxSteps: 12, maxParallelToolCalls: 1 })
+    const id = first.agent.id
+    first.agent.followup(createUserMessage('go'))
+    await first.agent.whenIdle()
+    await first.dispose()
+
+    const recorded = { provider: 'scripted', model: 'scripted-model', maxSteps: 12, maxParallelToolCalls: 1 }
+    // A surface's defaults name other limits: the recorded ones win.
+    const defaults = { provider: 'scripted', model: 'default-model', maxSteps: 3, maxParallelToolCalls: 8 }
+    const bases = (events: readonly EventEnvelope[]): unknown[] => events.filter((event) => event.type === AGENT_OPTIONS.type).map((event) => event.data)
+
+    const forked = await agents.fork(h.root, id, undefined, { defaults })
+    expect(forked.agent.options).toEqual(recorded)
+    expect(bases(forked.agent.session.events)).toEqual([{ options: recorded, reason: 'initial' }])
+    await forked.dispose()
+
+    const resumed = await agents.resume(h.root, id, { defaults })
+    expect(resumed.agent.options).toEqual(recorded)
+    expect(bases(resumed.agent.session.events)).toEqual([{ options: recorded, reason: 'initial' }])
+    await resumed.dispose()
   })
 })
 

@@ -14,8 +14,8 @@ import { asCallId } from '../ids.ts'
 import { estimateImageTokens, estimateMessage } from '../metering/index.ts'
 import { serializeMessages as serializeAnthropic } from '../../capabilities/llm-anthropic/serialize.ts'
 import { serializeMessages as serializeDeepSeek } from '../../capabilities/llm-deepseek/serialize.ts'
-import { blockText, collectImageRefs, contentText, imageDescriptor } from './content.ts'
-import { createAssistantMessage, createToolResultMessage, createUserMessage, messageText } from './message.ts'
+import { blockText, collectImageRefs, contentText, imageDescriptor, wellFormedContent } from './content.ts'
+import { createAssistantMessage, createPluginMessage, createToolResultMessage, createUserMessage, messageText } from './message.ts'
 import type { ContentBlock } from './types.ts'
 
 const REF: AttachmentRef = {
@@ -37,6 +37,54 @@ describe('imageDescriptor', () => {
   it('falls back to a generic name rather than inventing one', () => {
     const { name: _name, ...unnamed } = REF
     expect(imageDescriptor(unnamed)).toBe('[image image · image/png · 96×96 · 12 KB]')
+  })
+})
+
+describe('wellFormedContent', () => {
+  const half = String.fromCharCode(0xd83d) // the high half of U+1F600, alone
+  const fixed = String.fromCharCode(0xfffd)
+
+  it('replaces a lone surrogate in every string a provider is sent, and in nothing else', () => {
+    const call = asCallId(`c${half}`)
+    const blocks: ContentBlock[] = [
+      { type: 'text', text: `a${half}` },
+      { type: 'reasoning', text: `${half}b` },
+      { type: 'image', attachment: REF, text: `[image ${half}]` },
+      { type: 'tool-call', id: call, name: `n${half}`, arguments: `{"x":"${half}"}` },
+      { type: 'tool-result', toolCallId: call, content: [{ type: 'text', text: `c${half}d` }], isError: true },
+    ]
+    expect(wellFormedContent(blocks)).toEqual([
+      { type: 'text', text: `a${fixed}` },
+      { type: 'reasoning', text: `${fixed}b` },
+      { type: 'image', attachment: REF, text: `[image ${fixed}]` },
+      // The id pairs records; it is not text, and it is left as it came.
+      { type: 'tool-call', id: call, name: `n${fixed}`, arguments: `{"x":"${fixed}"}` },
+      { type: 'tool-result', toolCallId: call, content: [{ type: 'text', text: `c${fixed}d` }], isError: true },
+    ])
+    expect(JSON.stringify(wellFormedContent(blocks.slice(0, 3))).isWellFormed()).toBe(true)
+  })
+
+  it('hands back the very blocks it was given when there is nothing to replace, a whole pair included', () => {
+    const blocks: ContentBlock[] = [
+      { type: 'text', text: 'a whole pair: \u{1F600}' },
+      { type: 'tool-call', id: asCallId('c1'), name: 'view', arguments: '{}' },
+      { type: 'tool-result', toolCallId: asCallId('c1'), content: [{ type: 'text', text: 'out' }, IMAGE] },
+    ]
+    const out = wellFormedContent(blocks)
+    expect(out).not.toBe(blocks)
+    expect(out.map((block, index) => block === blocks[index])).toEqual([true, true, true])
+  })
+
+  it('is what every message constructor applies, so no constructor can log one', () => {
+    const lone = `x${half}`
+    const built = [
+      createUserMessage(lone),
+      createPluginMessage('p', lone),
+      createAssistantMessage([{ type: 'text', text: lone }], 'p', 'm'),
+      createToolResultMessage(asCallId('c1'), [{ type: 'text', text: lone }], false),
+    ]
+    expect(built.map((message) => JSON.stringify(message.content).includes(`x${fixed}`))).toEqual([true, true, true, true])
+    expect(built.map((message) => /\\ud83d/i.test(JSON.stringify(message.content)))).toEqual([false, false, false, false])
   })
 })
 

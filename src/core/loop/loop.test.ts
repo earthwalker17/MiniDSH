@@ -225,7 +225,18 @@ describe('agent creation', () => {
     const root = mkdtempSync(join(tmpdir(), 'minidsh-rollback-'))
     try {
       harness.root.plugin(persistenceJsonlPlugin, { root })
-      await harness.root.settle()
+      // The store is really mounted: an empty directory proves nothing about a
+      // provider that failed to load.
+      expect((await harness.root.settle()).failed).toEqual([])
+      // And it really writes here: a creation that is NOT rolled back leaves its log.
+      harness.adapter.script(assistantText('ok'))
+      const kept = await harness.create()
+      kept.agent.followup(createUserMessage('hi'))
+      await kept.agent.whenIdle()
+      await kept.agent.session.flush()
+      const before = readdirSync(root).toSorted()
+      expect(before.filter((name) => name.endsWith('.jsonl'))).toEqual([`${encodeURIComponent(kept.agent.id)}.jsonl`])
+
       await expect(
         harness.root.get(AGENTS).create(harness.root, {
           cwd: process.cwd(),
@@ -235,7 +246,8 @@ describe('agent creation', () => {
           },
         }),
       ).rejects.toThrowError(/bad setup/)
-      expect(readdirSync(root).filter((name) => name.endsWith('.jsonl'))).toEqual([])
+      // Nothing new at all: no log, and no lease left for a session that never was.
+      expect(readdirSync(root).toSorted()).toEqual(before)
     } finally {
       await harness.dispose()
       harness = undefined
@@ -351,6 +363,94 @@ describe('agent loop: turn/step lifecycle', () => {
     expect(messageText(agent.session.deriveMessages().at(-1)!)).toBe('done')
   })
 
+  /**
+   * A tool that cuts its output by UTF-16 unit can end it on half an emoji.
+   * `JSON.stringify` writes that half as an escape which Anthropic, DeepSeek
+   * and OpenAI each answer with HTTP 400 (measured 2026-11-21), and the result
+   * is in every later request, so the session would be dead. The pipeline and
+   * the message constructors replace it, so the log holds what is sent (§4).
+   */
+  it('logs, and sends, a tool result well-formed when its render ended on half a surrogate pair', async () => {
+    harness = await coreHarness()
+    const half = String.fromCharCode(0xd83d) // the high half of U+1F600
+    const replaced = String.fromCharCode(0xfffd)
+    const clip = defineTool({
+      name: 'clip',
+      description: 'returns text cut inside a character',
+      input: z.object({}),
+      output: z.object({}),
+      execute: () => ({}),
+      render: () => [{ type: 'text', text: `tail ${half}` }],
+    })
+    const { TOOLS_RESULT } = await import('../tools/index.ts')
+    harness.root.get(TOOLS).register(harness.root, clip)
+    const shown: string[] = []
+    harness.root.on(TOOLS_RESULT, (_execution, result) => void shown.push(...result.content.map((block) => (block.type === 'text' ? block.text : ''))), { global: true })
+    // The model's own text and a prompt can carry one too: each enters through a constructor.
+    harness.adapter.script(assistantToolCall('c1', 'clip', {}), [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: `said ${half}` },
+      { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage(`asked ${half}`))
+    await agent.whenIdle()
+
+    expect((agent.session.events.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('completed')
+    const texts = agent.session.deriveMessages().map((message) => {
+      const block = message.content[0]!
+      return block.type === 'tool-result' ? messageText({ ...message, content: block.content }) : messageText(message)
+    })
+    expect(texts).toEqual([`asked ${replaced}`, '', `tail ${replaced}`, `said ${replaced}`])
+    // What a `tools/result` listener was shown is what the log holds.
+    expect(shown).toEqual([`tail ${replaced}`])
+    // The request after the tool result is a pure function of that log.
+    expect(harness.adapter.calls).toHaveLength(2)
+    expect(JSON.stringify(harness.adapter.calls[1]!.messages)).toBe(JSON.stringify(agent.session.deriveMessages().slice(0, 3)))
+    expect(JSON.stringify(harness.adapter.calls[1]!.messages)).not.toMatch(/\\ud83d/i)
+  })
+
+  // The assembled blocks are made well-formed once, before the message, the
+  // `tool/call` record and the body read them: three readers of one call must
+  // never disagree about a character the message replaced.
+  it('logs, runs and replays one and the same arguments for a call that held half a surrogate pair', async () => {
+    harness = await coreHarness()
+    const half = String.fromCharCode(0xd83d)
+    const replaced = String.fromCharCode(0xfffd)
+    const ran: string[] = []
+    const echo = defineTool({
+      name: 'echo',
+      description: 'echo text back',
+      input: z.object({ text: z.string() }),
+      output: z.object({}),
+      execute: (args) => {
+        ran.push(args.text)
+        return {}
+      },
+      render: () => [{ type: 'text', text: 'ok' }],
+    })
+    harness.root.get(TOOLS).register(harness.root, echo)
+    const { asCallId } = await import('../ids.ts')
+    harness.adapter.script(
+      [
+        { type: 'block-start', index: 0, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 0, id: asCallId('c1'), name: 'echo', argumentsDelta: `{"text":"${half}"}` },
+        { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } },
+        { type: 'finish', reason: { kind: 'tool-calls' } },
+      ],
+      assistantText('done'),
+    )
+    const { agent } = await harness.create()
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+
+    const expected = `{"text":"${replaced}"}`
+    const logged = agent.session.events.find((event) => event.type === 'tool/call')!.data as { arguments: string }
+    const sent = harness.adapter.calls[1]!.messages.flatMap((message) => message.content).find((block) => block.type === 'tool-call')
+    expect({ logged: logged.arguments, sent: sent?.type === 'tool-call' ? sent.arguments : undefined, ran }).toEqual({ logged: expected, sent: expected, ran: [replaced] })
+  })
+
   it('ends the turn with max-tokens when the model is truncated', async () => {
     harness = await coreHarness()
     harness.adapter.script([
@@ -459,6 +559,51 @@ describe('agent loop: turn/step lifecycle', () => {
     await agent.whenIdle()
     expect(agent.status).toBe('idle')
     expect((agent.session.events.at(-1)!.data as { reason: { kind: string } }).reason.kind).toBe('cancelled')
+  })
+})
+
+describe('agent loop: the step limit', () => {
+  const hang = defineTool({
+    name: 'hang',
+    description: 'wait until aborted',
+    input: z.object({}),
+    output: z.object({}),
+    execute: (_args, exec) =>
+      new Promise((_resolve, reject) => {
+        exec.signal.addEventListener('abort', () => reject(new Error('aborted')))
+      }),
+    render: () => [{ type: 'text', text: 'never' }],
+  })
+  const quick = defineTool({ name: 'quick', description: 'returns at once', input: z.object({}), output: z.object({}), execute: () => ({}), render: () => [{ type: 'text', text: 'ok' }] })
+  const reasons = (events: readonly EventEnvelope[]): string[] =>
+    events.filter((event) => event.type === 'turn/end').map((event) => (event.data as { reason: { kind: string } }).reason.kind)
+
+  it('ends a turn whose last allowed step still owes a request as max-steps', async () => {
+    harness = await coreHarness()
+    harness.root.get(TOOLS).register(harness.root, quick)
+    harness.adapter.script(assistantToolCall('c1', 'quick', {}), assistantText('unreached'))
+    const { agent } = await harness.create({ maxSteps: 1 })
+    agent.followup(createUserMessage('go'))
+    await agent.whenIdle()
+    expect(reasons(agent.session.events)).toEqual(['max-steps'])
+    expect(harness.adapter.calls).toHaveLength(1)
+  })
+
+  // The cancelled step drains its tools and returns normally, so at the last
+  // allowed step the limit used to be read first: a person's cancel, a web
+  // stop and a cancelled child were each recorded as having run out of steps.
+  it('ends a turn cancelled during the tools of its last allowed step as cancelled, not max-steps', async () => {
+    harness = await coreHarness()
+    harness.root.get(TOOLS).register(harness.root, hang)
+    harness.adapter.script(assistantToolCall('c1', 'hang', {}), assistantText('unreached'))
+    const { agent } = await harness.create({ maxSteps: 1 })
+    agent.followup(createUserMessage('go'))
+    await waitFor(() => agent.session.events.some((event) => event.type === 'tool/dispatch'))
+    agent.cancel({ kind: 'user' })
+    await agent.whenIdle()
+    expect(reasons(agent.session.events)).toEqual(['cancelled'])
+    // The step still closed with its call answered.
+    expect(types(agent.session.events).filter((type) => type === 'tool/result' || type === 'step/end')).toEqual(['tool/result', 'step/end'])
   })
 })
 

@@ -202,12 +202,14 @@ export interface SessionHeader {
   /**
    * WHICH parent tool call created this child. `delegatedBy` alone cannot say
    * when one step delegated twice, and the parent's own `subagent/start` is
-   * not always there to ask: the child session is published and materialized
-   * by `agents.create`, and the parent appends that record afterwards, so a
-   * host death in between leaves a child on disk with NOTHING about it in the
-   * parent's log. This is the only durable join that survives it. Header
-   * rather than event because lineage is header-owned, and it travels through
-   * a resume and a fork exactly as the two fields beside it do.
+   * not always there to ask. The parent appends that record before the child's
+   * first message, and a child's file is written only from that message on, so
+   * a host that merely dies leaves no child without it; but the two logs are
+   * separate files, and a power cut, or a parent log that lost its tail, can
+   * keep the child's and lose the parent's record of it. This is the only
+   * durable join that survives that. Header rather than event because lineage
+   * is header-owned, and it travels through a resume and a fork exactly as the
+   * two fields beside it do.
    *
    * DSH has no structured join either: only the spawning call's result text
    * (`started subagent <id>`) names the child, and a host death before that

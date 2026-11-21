@@ -1,3 +1,13 @@
+/**
+ * The agent driver: one turn/step state machine per agent over its session log
+ * (ARCHITECTURE §6). It owns the order of a step's records (the claim, entered
+ * messages, the request, calls in one lane, results in model order, both
+ * brackets), the checkpoint before each action, and cancel, idle and owned work.
+ *
+ * It must not own what a step is made of: the route (`agent/request`), the
+ * batch (`agent/pre-step`), retry (`agent/request-error`), the tool pipeline
+ * and the prompt belong to other owners, reached by event or service.
+ */
 import type { Context } from '../../kernel/index.ts'
 import {
   AGENT_ERROR,
@@ -30,6 +40,7 @@ import { asCallId, type SessionId } from '../ids.ts'
 import { isJobNotice } from '../jobs/events.ts'
 import type { JsonValue } from '../json.ts'
 import { BlockAssembler, LLM, type ContentBlock, type Llm, type LlmRequest, type Message, type ModelModality } from '../llm/index.ts'
+import { wellFormedContent } from '../llm/content.ts'
 import { createAssistantMessage, createToolResultMessage } from '../llm/message.ts'
 import { PROMPT, type AssembledPrompt, type Prompt } from '../prompt/index.ts'
 import {
@@ -326,10 +337,11 @@ export class ReactLoopAgent implements Agent {
       while (true) {
         if (signal.aborted) throw new Error('turn aborted')
         step += 1
-        const { messages: claimed } = this.inbox.claim(firstStep)
+        const claimed = this.inbox.claim(firstStep)
         // Whatever consumed (or killed) the claim commits it, so durable = live
-        // on every exit path — including a pre-step listener throw or a cancel
-        // landing inside the pre-step await (whose clear records it first).
+        // on every exit path: a pre-step listener throw, a cancel landing
+        // inside the pre-step await (whose clear records it first), and an
+        // append of the step's own opening records that the log refused.
         const commitClaim = (): void => this.inbox.commitClaim()
         // A claim nothing entered, handed back. EXCEPT when a disposal is what
         // stopped this turn: its clear left the log's queue whole, so the
@@ -388,11 +400,33 @@ export class ReactLoopAgent implements Agent {
         // A listener may narrow a batch; a notice it left out is owed, not
         // consumed — owed to a later turn, or it would keep this one stepping.
         for (const message of dropped) if (isJobNotice(message)) this.inbox.hold(message)
-        this.session.append(STEP_START, { turn, step })
+        // The log may refuse either append below (an invariant, a payload it
+        // cannot store). The claim is then given back exactly as one a pre-step
+        // throw killed, never left pending: the NEXT claim would replace it,
+        // its record would drain THIS claim's messages from the fold, and every
+        // resume would then run the newest prompt again, as a paid turn.
+        try {
+          this.session.append(STEP_START, { turn, step })
+        } catch (error) {
+          giveBack(entered)
+          throw error
+        }
         let result: StepResult
         try {
           // Inside the try: a message append failure must still close the step.
-          for (const message of entered) this.session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'append' } })
+          let landed = 0
+          try {
+            for (const message of entered) {
+              this.session.append(USER_MESSAGE, { message }, { surfaceOp: { op: 'append' } })
+              landed += 1
+            }
+          } catch (error) {
+            // What followed the refused message was never seen. The refused
+            // one is not offered again: the log would refuse it again, and a
+            // notice requeued here would fail every later turn the same way.
+            giveBack(entered.slice(landed + 1))
+            throw error
+          }
           // The claim record lands AFTER the entered messages: a crash inside the
           // pre-step await re-delivers a prompt on resume rather than losing it
           // (the accepted failure mode is a rare double-delivery, never a loss).
@@ -419,6 +453,10 @@ export class ReactLoopAgent implements Agent {
           await this.ctx.serial(AGENT_TURN_STOPPING, { agent: this, turn, signal })
           if (!this.inbox.hasStepPending) break
         }
+        // Before the limit: a cancel that landed in this step's tools drained
+        // them and returned normally, and at the last allowed step the limit
+        // would otherwise name a turn a person (or a parent) stopped.
+        if (signal.aborted) throw new Error('turn aborted')
         if (step >= this.maxSteps) {
           reason = { kind: 'max-steps' }
           break
@@ -496,7 +534,10 @@ export class ReactLoopAgent implements Agent {
         assembler.push(chunk)
       }
       const finish = assembler.finish
-      const blocks = assembler.blocks()
+      // Well-formed BEFORE anything reads them: the message, each `tool/call`
+      // and the arguments a body runs with all come from these blocks, so the
+      // three cannot disagree about a character the assembled text replaced.
+      const blocks = wellFormedContent(assembler.blocks())
 
       if (finish.kind === 'aborted') {
         // Keep the visible prefix but drop tool-call blocks: an assistant message

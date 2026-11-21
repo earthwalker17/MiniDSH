@@ -1,3 +1,13 @@
+/**
+ * The surface: which logged events are model history, and in what order
+ * (ARCHITECTURE §4). It owns the node list with its `append` and range
+ * `replace`, the per-event projection to a message that every reader shares,
+ * and the small last-wins folds over a log (the request header and context,
+ * the last turn's end, the last assistant text).
+ *
+ * Pure over events: it holds no session, and validates no payload beyond a
+ * surface event's placement and citations.
+ */
 import { messageText, restoreMessage } from '../llm/message.ts'
 import type { Message } from '../llm/types.ts'
 import {

@@ -1,9 +1,20 @@
+/**
+ * The tool registry and the one pipeline from a model's call to a tool body
+ * (ARCHITECTURE §3 `tools`, §6): per-agent layered definitions and guards,
+ * restrictions through one visibility rule, argument validation, the gate
+ * (`tools/pre-execute`, guards, the ask), the deadline, the body and its
+ * render, `tools/post-execute`, `tools/result`.
+ *
+ * It must not own policy, an ask's answer, or any log record: the caller writes
+ * `tool/call`, `tool/dispatch` (via `ToolCall.onDispatch`) and `tool/result`.
+ */
 import { z } from 'zod'
 import { emitEvent, serviceKey, waterfallEvent, type Context, type Disposer, type Plugin } from '../../kernel/index.ts'
 import type { Agent } from '../agent/types.ts'
 import { APPROVAL } from '../approval/index.ts'
 import { asCallId, type CallId } from '../ids.ts'
 import { deepFreeze, snapshotJson, type JsonValue } from '../json.ts'
+import { wellFormedContent } from '../llm/content.ts'
 import type { ContentBlock, Message, ToolSchema } from '../llm/types.ts'
 import { ScopedLayers } from '../scope.ts'
 import type {
@@ -106,19 +117,28 @@ export function toParameters(schema: z.ZodType): Record<string, unknown> {
   return rest
 }
 
-/** A result the driver can log: a block list, and contexts that are a list when present. */
-function wellFormed(result: ToolResult): ToolResult {
+/**
+ * A result the driver can log: a block list, and contexts that are a list
+ * when present. Its text is made well-formed HERE (`wellFormedContent`), not
+ * only where the driver builds the message, so a `tools/result` listener is
+ * shown what the log will hold: a render that cut its text between the two
+ * halves of an emoji would otherwise put a character in the log that every
+ * provider refuses.
+ */
+function loggable(result: ToolResult): ToolResult {
   if (typeof result !== 'object' || result === null || !Array.isArray(result.content)) {
     throw new Error('the tool produced no content block list')
   }
   if (result.additionalContexts !== undefined && !Array.isArray(result.additionalContexts)) {
     throw new Error('the tool produced additional contexts that are not a list')
   }
-  return result
+  const content = wellFormedContent(result.content)
+  return content.every((block, index) => block === result.content[index]) ? result : { ...result, content }
 }
 
+/** The text is made well-formed for the same reason as `loggable`'s: `message` may quote what a tool cut. */
 function errorResult(message: string, name: string, code: string): ToolResult {
-  return { isError: true, content: [{ type: 'text', text: `Error: ${message}` }], error: { message, info: { name, code } } }
+  return { isError: true, content: [{ type: 'text', text: `Error: ${message}`.toWellFormed() }], error: { message, info: { name, code } } }
 }
 
 /**
@@ -151,9 +171,8 @@ class ToolRegistry implements Tools {
 
   register<Args, Value extends JsonValue>(owner: Context, definition: ToolDefinition<Args, Value>): Disposer {
     const def = definition as unknown as AnyToolDefinition
-    // Checked on the definition, never on the effective deadline: a deployment
-    // whose default budget is non-positive would otherwise admit here what
-    // another refuses.
+    // Checked on the definition, never on the effective deadline: what a tool
+    // may be registered as must not depend on one deployment's default budget.
     if (def.concurrencySafe === true && def.timeoutMs !== null) {
       throw new Error(`tool "${def.name}" is concurrencySafe and must own its clock (timeoutMs: null): a deadline abandons a body the step's pool would still be running`)
     }
@@ -286,7 +305,7 @@ class ToolRegistry implements Tools {
       // middleware that answered with nothing, rejected `execute` past it,
       // and the driver then logged a call with no result — a session every
       // provider refuses from then on (S20.5 review). A throw is a result.
-      result = wellFormed(gate ?? (await this.dispatch(tool, validated.data as unknown, execution, scope, call.onDispatch)))
+      result = loggable(gate ?? (await this.dispatch(tool, validated.data as unknown, execution, scope, call.onDispatch)))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       result = errorResult(message, error instanceof Error ? error.name : 'Error', codeOf(error))
@@ -299,7 +318,7 @@ class ToolRegistry implements Tools {
     return frozen
   }
 
-  /** The tool's own budget, else the registry default; a non-positive budget means none. */
+  /** The tool's own budget, else the registry default; a tool's own non-positive budget means none. */
   private deadlineFor(tool: AnyToolDefinition): number | undefined {
     if (tool.timeoutMs === null) return undefined
     const ms = tool.timeoutMs ?? this.defaultTimeoutMs
@@ -408,11 +427,19 @@ class ToolRegistry implements Tools {
 }
 
 export interface ToolsConfig {
-  /** Budget for a tool that declares none (default 60s). Non-positive means no deadline at all. */
+  /** Budget for a tool that declares none (default 60s): whole milliseconds, 1 to 2^31-1. A tool opts out for itself with `timeoutMs: null`. */
   readonly defaultTimeoutMs?: number | undefined
 }
 
-const configSchema = z.strictObject({ defaultTimeoutMs: z.number().optional() }).optional()
+/**
+ * What the deadline's timer can honour. `AbortSignal.timeout` throws on a
+ * fraction, which failed every call of every tool that took the default, and a
+ * timer past 2^31-1 ms fires after one millisecond, which timed each out at
+ * once: both are refused when the row is parsed instead.
+ */
+const MAX_TIMER_MS = 2 ** 31 - 1
+
+const configSchema = z.strictObject({ defaultTimeoutMs: z.number().int().positive().max(MAX_TIMER_MS).optional() }).optional()
 
 /** The tool registry plugin: provides `ctx.tools`. */
 export const toolsPlugin: Plugin<ToolsConfig | undefined> = {

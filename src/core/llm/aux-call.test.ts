@@ -114,13 +114,80 @@ describe('an out-of-loop model call', () => {
     expect(messageText(agent.session.deriveMessages().at(-1)!)).toBe('second')
   })
 
-  it('never lets `purpose` reach the model-visible request the loop builds', async () => {
+  // The loop builds its request field by field from the resolved route, so a
+  // route listener that returns a `purpose` beside it (a role that confused
+  // the two kinds of call) cannot make a step look like an auxiliary call:
+  // the listeners that tell them apart by this field would then skip the step.
+  it('never lets `purpose` reach the model-visible request the loop builds, even from a route listener that returns one', async () => {
     const test = await newHarness()
+    const { AGENT_REQUEST } = await import('../agent/index.ts')
     const { agent } = await test.create()
-    test.adapter.script(assistantText('hi'))
+    agent.ctx.on(AGENT_REQUEST, async (_context, next) => ({ ...(await next()), purpose: 'smuggled' }) as Awaited<ReturnType<typeof next>>)
+    test.adapter.script(assistantText('hi'), assistantText('a summary'))
     agent.followup(createUserMessage('hello'))
     await agent.whenIdle()
-    expect(test.adapter.calls.every((call) => call.purpose === undefined)).toBe(true)
+    await runAuxCall(test.root.get(LLM), agent.session, auxRequest())
+    // One loop request and one auxiliary call, and only the second carries a purpose.
+    expect(test.adapter.calls.map((call) => ({ purpose: call.purpose, hasKey: 'purpose' in call }))).toEqual([
+      { purpose: undefined, hasKey: false },
+      { purpose: 'compaction', hasKey: true },
+    ])
+    expect(agent.session.foldRequestHeader()).not.toHaveProperty('purpose')
+  })
+
+  /**
+   * What a failed call RECORDS is what its caller routes on (`code`, never the
+   * message): compaction counts a summariser failure toward giving up, and a
+   * cancellation must not count. Three ways to fail besides a provider's own
+   * error finish: a listener on `llm/stream` throwing an `LlmError`, one
+   * throwing anything else, and a request cancelled before it was sent.
+   */
+  it('records the failure a thrown or cancelled call ended with, under its own code', async () => {
+    const { LLM_STREAM } = await import('./runtime.ts')
+    const { LlmError } = await import('./types.ts')
+    const cases: [name: string, arrange: (test: CoreHarness) => Partial<LlmRequest>, failure: { message: string; code: string }][] = [
+      [
+        'a middleware throwing an LlmError',
+        (test) => {
+          test.root.on(LLM_STREAM, () => {
+            throw new LlmError('RATE_LIMIT', 'slow down')
+          })
+          return {}
+        },
+        { message: 'slow down', code: 'RATE_LIMIT' },
+      ],
+      [
+        'a middleware throwing a plain Error',
+        (test) => {
+          test.root.on(LLM_STREAM, () => {
+            throw new Error('a listener broke')
+          })
+          return {}
+        },
+        { message: 'a listener broke', code: 'AUX_CALL_FAILED' },
+      ],
+      ['a request cancelled before it was sent', () => ({ signal: AbortSignal.abort() }), { message: 'request aborted before the provider was called', code: 'ABORTED' }],
+    ]
+    const outcomes: Record<string, unknown> = {}
+    for (const [name, arrange] of cases) {
+      const test = await newHarness()
+      const { agent } = await test.create()
+      const over = arrange(test)
+      const thrown = await runAuxCall(test.root.get(LLM), agent.session, auxRequest(over)).then(
+        (result) => `returned ${JSON.stringify(result.text)}`,
+        (error: unknown) => error,
+      )
+      const records = foldAuxCalls(agent.session.events)
+      const last = agent.session.events.at(-1)!
+      outcomes[name] = {
+        thrown: thrown instanceof AuxCallError ? { failure: thrown.failure, namesItsRecord: thrown.seq === last.seq && last.type === LLM_AUX_CALL.type } : thrown,
+        recorded: records.map((record) => record.outcome),
+        adapterCalls: test.adapter.calls.length,
+      }
+    }
+    expect(outcomes).toEqual(
+      Object.fromEntries(cases.map(([name, , failure]) => [name, { thrown: { failure, namesItsRecord: true }, recorded: [{ kind: 'error', failure }], adapterCalls: 0 }])),
+    )
   })
 
   it('folds every recorded call in log order, which is what a replay script needs', async () => {

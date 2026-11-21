@@ -1,11 +1,16 @@
 import { asMessageId, newMessageId, type CallId } from '../ids.ts'
 import { deepFreeze } from '../json.ts'
-import { contentText } from './content.ts'
+import { contentText, wellFormedContent } from './content.ts'
 import type { ContentBlock, Message, MessageSource, ReplayEnvelope } from './types.ts'
 
-/** Builds a frozen message with a fresh id. */
+/**
+ * Builds a frozen message with a fresh id. Every constructor below goes
+ * through here, which is where a lone surrogate in its text is replaced
+ * (`wellFormedContent`): a message is built to be logged, and one such
+ * character in the log fails every later request of its session.
+ */
 export function createMessage(role: Message['role'], content: ContentBlock[], source: MessageSource): Message {
-  return deepFreeze({ id: newMessageId(), role, content: content.slice(), source })
+  return deepFreeze({ id: newMessageId(), role, content: wellFormedContent(content), source })
 }
 
 /** A user-authored prompt or steering message. */

@@ -17,7 +17,7 @@ import { AGENTS, INBOX_SPLICED, repairTail, type Agent } from '../agent/index.ts
 import { createPluginMessage, createUserMessage } from '../llm/message.ts'
 import { PERSISTENCE } from '../persistence/index.ts'
 import { SANDBOX } from '../sandbox/index.ts'
-import { matches, SESSION_EVENT, SESSION_FLUSH, TURN_END, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
+import { eventKind, matches, SESSION_EVENT, SESSION_FLUSH, TURN_END, TURN_START, USER_MESSAGE, type EventEnvelope } from '../session/index.ts'
 import { defineTool, TOOLS } from '../tools/index.ts'
 import {
   closeUnpairedJobs,
@@ -25,6 +25,7 @@ import {
   foldJobWakes,
   JOB_END,
   JOB_START,
+  jobNotice,
   jobNoticeId,
   JOBS,
   type JobExit,
@@ -342,6 +343,17 @@ describe('the closer and the folds, pure', () => {
   const at = (entries: { type: string; data: unknown }[]): EventEnvelope[] => entries.map((entry, seq) => ({ ...entry, seq, time: 1 }))
   const start = (jobId: string, callId?: string) => ({ type: JOB_START.type, data: { jobId, kind: 'shell', label: 'x', mode: 'read-only', enforcement: 'full', ...(callId ? { callId } : {}) } })
 
+  // A label is the model's own command, and the notice is built by hand for
+  // its derived id: it must still be text every provider accepts, because it
+  // enters the log as a `user/message` and stays in every later request.
+  it('builds a notice whose text is well-formed UTF-16 from a label that holds half a surrogate pair', () => {
+    const half = String.fromCharCode(0xd83d)
+    const notice = jobNotice({ jobId: 'job-x', kind: 'shell', label: `echo ${half}`, mode: 'workspace-write', enforcement: 'full' }, { jobId: 'job-x', cause: 'exited', exitCode: 0 })
+    const text = notice.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+    expect(text).toBe(`Background job job-x (\`echo ${String.fromCharCode(0xfffd)}\`) exited with code 0. Read its output with job_output.`)
+    expect(notice.id).toBe(jobNoticeId('job-x'))
+  })
+
   it('is deterministic, closes only what is open, and owes a notice an end never got', () => {
     const events = at([
       start('job-a'),
@@ -412,16 +424,40 @@ describe('the review cases', () => {
     expect(ofType(agent, JOB_END.type).map((event) => event.data)).toMatchObject([{ jobId, cause: 'cancelled', by: 'authority' }])
   })
 
-  it('an exit after its owner abandoned the job appends nothing: the closer owns it now', async () => {
-    const { agent, jobs, h } = await setup()
+  /**
+   * The abandonment latch, observed while the log is still OPEN. Once the
+   * session has detached it refuses every append, so an exit after a finished
+   * disposal writes nothing whatever the registry does. The window that needs
+   * the latch is earlier: the owner's unwind has given the job up, and the
+   * session has not detached yet. A `job/end` written there would sit beside
+   * the `lost` the next lifecycle's closer writes for the same job.
+   */
+  it('an exit after its owner abandoned the job appends nothing, while the log would still take it: the closer owns it now', async () => {
+    const { agent, jobs, h } = await setup({ stopWaitMs: 20 })
+    const STILL_OPEN = eventKind<Record<string, never>>('test/still-open')
+    const abandoned = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    // Registered BEFORE the job, so it unwinds after the registry's own
+    // effect: the scope parks here, past the abandonment, before the detach.
+    agent.ctx.effect(() => async () => {
+      abandoned.resolve()
+      await release.promise
+    }, 'test.park-the-unwind')
     const { process } = await launch(jobs, agent, { dies: false })
-    await h.dispose()
+    const disposing = h.dispose()
     harness = undefined
+    await abandoned.promise
     const before = agent.session.events.length
     process.exit({ exitCode: 0 })
-    await tick(20)
-    expect(agent.session.events.length).toBe(before)
-    expect(ofType(agent, JOB_END.type)).toHaveLength(0)
+    // The registry's reaction to the exit was attached first, so it has run.
+    await process.exited
+    // The control: an append in this window lands. Only the latch kept the end out.
+    expect(agent.session.isClosed).toBe(false)
+    agent.session.append(STILL_OPEN, {})
+    release.resolve()
+    await disposing
+    expect(agent.session.events.slice(before).map((event) => event.type)).toEqual([STILL_OPEN.type])
+    expect(ofType(agent, JOB_END.type)).toEqual([])
   })
 
   it('a job that ended on its own while a stop was asked for is recorded as its own end, and wakes nothing', async () => {

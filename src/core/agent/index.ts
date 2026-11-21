@@ -129,9 +129,10 @@ type InboxDispatch = (event: 'inserted' | 'discarded' | 'claimed', message: Mess
  * Two-list message queue. `next-turn` holds prompts (one claimed per turn);
  * `next-step` holds steering (waking) and injected context (quiet), drained
  * wholesale at each step boundary. Mutations are durable via `record`: inserts
- * and clears at mutation time; a claim's record is RETURNED for the driver to
- * log after the entered `user/message`s (so a crash in the pre-step await
- * re-delivers a prompt rather than losing it).
+ * and clears at mutation time; a claim's record is HELD here until the driver
+ * says what became of it: `commitClaim` once the `user/message`s it entered
+ * are in the log (so a crash in the pre-step await re-delivers a prompt rather
+ * than losing it), `abandonClaim` for a turn its disposal stopped.
  */
 export class Inbox {
   private readonly turnQueue: Message[] = []
@@ -190,9 +191,21 @@ export class Inbox {
    * said "claimed" for a notice nobody saw (S20.5 review).
    */
   private pendingClaim: InboxSplice | undefined
+  /** The held notices the pending claim's count covers: recorded again, behind it, when it commits. */
+  private pendingHeld: Message[] = []
 
-  /** Removes all next-step messages plus, on the first step, one next-turn message. */
-  claim(firstStep: boolean): { messages: Message[]; splice?: InboxSplice } {
+  /**
+   * Removes all next-step messages plus, on the first step, one next-turn message.
+   *
+   * What the turn HOLDS is in the log's step queue too (`hold` recorded it),
+   * ahead of anything queued since, and a fold drains a claim's count from the
+   * front. So a claim that takes step input counts the held notices as well and
+   * records them again behind itself: the fold's front is then exactly what was
+   * taken. Counting only the live queue made the fold remove a held notice and
+   * keep a message that had entered, so a host that stopped inside that turn
+   * restored the notice as lost and the message as owed.
+   */
+  claim(firstStep: boolean): Message[] {
     const steps = this.stepQueue.length
     const claimed = this.stepQueue.splice(0, steps).map((entry) => entry.message)
     let turns = 0
@@ -201,9 +214,10 @@ export class Inbox {
       turns = 1
     }
     for (const message of claimed) this.dispatch('claimed', message)
-    const splice = steps + turns > 0 ? ({ op: 'claim', steps, turns } as const) : undefined
-    this.pendingClaim = splice
-    return { messages: claimed, ...(splice === undefined ? {} : { splice }) }
+    const held = steps > 0 ? [...this.heldQueue] : []
+    this.pendingClaim = steps + turns > 0 ? { op: 'claim', steps: steps + held.length, turns } : undefined
+    this.pendingHeld = held
+    return claimed
   }
 
   /**
@@ -218,15 +232,19 @@ export class Inbox {
   abandonClaim(): boolean {
     const pending = this.pendingClaim !== undefined
     this.pendingClaim = undefined
+    this.pendingHeld = []
     return pending
   }
 
-  /** Records the claim taken last, once: after a clear already recorded it, nothing. */
+  /** Records the claim taken last, once: after a clear already recorded it, nothing. Then the held notices its count drained, quiet (`claim`). */
   commitClaim(): void {
     const splice = this.pendingClaim
     if (splice === undefined) return
+    const held = this.pendingHeld
     this.pendingClaim = undefined
+    this.pendingHeld = []
     this.record(splice)
+    for (const message of held) this.record({ op: 'insert', queue: 'next-step', message, waking: false })
   }
 
   /**

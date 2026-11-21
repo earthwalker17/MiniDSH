@@ -176,6 +176,82 @@ describe('LlmRuntime', () => {
   })
 
   /**
+   * The block and usage rules: the one place a malformed adapter (or
+   * middleware) stream is stopped before the driver records it. Each stream
+   * below breaks exactly one rule, and is otherwise a stream the seam accepts.
+   */
+  it('enforces the stream protocol: blocks are opened once, addressed while open and by their own type, and usage is reported once', async () => {
+    const usage: StreamChunk = { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+    const finish: StreamChunk = { type: 'finish', reason: { kind: 'stop' } }
+    const text = (index: number): StreamChunk[] => [
+      { type: 'block-start', index, blockType: 'text' },
+      { type: 'text-delta', index, text: 'x' },
+      { type: 'block-end', index, block: { type: 'text', text: 'x' } },
+    ]
+    const streams: [rule: string, chunks: StreamChunk[], refusal: string][] = [
+      ['a delta after its block closed', [...text(0), { type: 'text-delta', index: 0, text: 'late' }, finish], '"text-delta" addresses closed block 0'],
+      ['a delta of another type than its block', [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'reasoning-delta', index: 0, text: 'x' }, finish], '"reasoning-delta" addresses block 0 of type "text"'],
+      ['a delta of another type than the delta that opened its block', [{ type: 'text-delta', index: 0, text: 'x' }, { type: 'tool-call-delta', index: 0, argumentsDelta: '{}' }, finish], '"tool-call-delta" addresses block 0 of type "text"'],
+      ['an open block opened again', [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'block-start', index: 0, blockType: 'text' }, finish], 'block index 0 opened twice'],
+      ['a closed block opened again', [...text(0), { type: 'block-start', index: 0, blockType: 'reasoning' }, finish], 'block index 0 opened twice'],
+      ['usage twice', [...text(0), usage, usage, finish], 'usage reported twice'],
+    ]
+    const outcomes: Record<string, string> = {}
+    for (const [rule, chunks] of streams) {
+      const { root, llm } = await harness()
+      llm.registerAdapter(root, new ScriptedAdapter().script(chunks))
+      outcomes[rule] = await collect(llm.stream(request())).then(
+        (seen) => `accepted ${seen.length} chunks`,
+        (error: unknown) => (error instanceof LlmError ? `${error.code}: ${error.message}` : `threw ${String(error)}`),
+      )
+      await root.dispose()
+    }
+    expect(outcomes).toEqual(Object.fromEntries(streams.map(([rule, , refusal]) => [rule, `PROTOCOL_VIOLATION: ${refusal}`])))
+
+    // The control: the same pieces in a legal order, two blocks and one usage, pass whole.
+    const { root, llm } = await harness()
+    const legal = [...text(0), ...text(1), usage, finish]
+    llm.registerAdapter(root, new ScriptedAdapter().script(legal))
+    expect(await collect(llm.stream(request()))).toEqual(legal)
+    await root.dispose()
+  })
+
+  // An adapter that throws is normalized into a terminal finish, never an
+  // unfinished stream. What it threw decides the code: its own `LlmError`
+  // keeps its failure; anything else is a transport failure, unless the
+  // request was cancelled, which is what the turn must then end as.
+  it('turns an adapter throw into a terminal finish: its own code, TRANSPORT for a plain error, aborted under a cancelled signal', async () => {
+    const controller = new AbortController()
+    const cases: [name: string, thrown: () => unknown, signal: AbortSignal | undefined][] = [
+      ['an LlmError', () => new LlmError('RATE_LIMIT', 'slow down', { status: 429 }), undefined],
+      ['a plain Error', () => new Error('socket hang up'), undefined],
+      ['a thrown string', () => 'no error object at all', undefined],
+      ['a plain Error under an aborted signal', () => new Error('the body was cut'), controller.signal],
+    ]
+    const finishes: Record<string, unknown> = {}
+    for (const [name, thrown, signal] of cases) {
+      const { root, llm } = await harness()
+      llm.registerAdapter(
+        root,
+        new ScriptedAdapter().script(() => {
+          // Aborted INSIDE the adapter: an already-aborted request never reaches it.
+          if (signal !== undefined) controller.abort()
+          throw thrown()
+        }),
+      )
+      const chunks = await collect(llm.stream(request(signal === undefined ? {} : { signal })))
+      finishes[name] = chunks.map((chunk) => (chunk.type === 'finish' ? chunk.reason : chunk.type))
+      await root.dispose()
+    }
+    expect(finishes).toEqual({
+      'an LlmError': [{ kind: 'error', failure: { message: 'slow down', code: 'RATE_LIMIT', status: 429 } }],
+      'a plain Error': [{ kind: 'error', failure: { message: 'socket hang up', code: 'TRANSPORT' } }],
+      'a thrown string': [{ kind: 'error', failure: { message: 'no error object at all', code: 'TRANSPORT' } }],
+      'a plain Error under an aborted signal': [{ kind: 'aborted', failure: { message: 'the body was cut', code: 'ABORTED' } }],
+    })
+  })
+
+  /**
    * An image is user- and tool-side only, and the refusal has to live HERE.
    *
    * The driver appends `assistant/chunk` to the log and only then pushes the

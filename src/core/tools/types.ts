@@ -1,3 +1,12 @@
+/**
+ * The tool vocabulary (ARCHITECTURE §3 `tools`): a definition, the execution
+ * identity and context a body is handed, a result, the gate's decisions, and
+ * the two annotation families a definition may carry: `tags`, the runtime
+ * KIND, and `display`, a surface's card.
+ *
+ * Types and constants only: the pipeline that reads them is `registry.ts`, and
+ * no runtime path reads `display`.
+ */
 import type { z } from 'zod'
 import type { CallId } from '../ids.ts'
 import type { JsonValue } from '../json.ts'
@@ -39,18 +48,18 @@ export interface ToolResult {
   readonly concludesTurn?: boolean
 }
 
-/**
- * Non-model-facing tool annotations.
- *
- * How one capability recognises a KIND of tool another registered without
- * importing it (capabilities never import each other) and without hard-coding a
- * name a deployment is free to change. Three exist: the delegation depth cap
- * hides every delegation tool at the cap, whichever row registered it; a
- * compaction summary names the recall tool a deployment mounted, if it mounted
- * one; and delegation hides every network tool from every child. The first two
- * used to be process-global maps or would have been a literal string crossing a
- * capability boundary.
- */
+// ---- tool KINDS (`ToolDefinition.tags`) ---------------------------------------
+//
+// Non-model-facing tool annotations, three constants: how one capability
+// recognises a KIND of tool another registered without importing it
+// (capabilities never import each other) and without hard-coding a name a
+// deployment is free to change. The delegation depth cap hides every
+// delegation tool at the cap, whichever row registered it; a compaction
+// summary names the recall tool a deployment mounted, if it mounted one; and
+// delegation hides every network tool from every child. The first two used to
+// be process-global maps or would have been a literal string crossing a
+// capability boundary.
+
 /** A tool that starts a delegated child agent. */
 export const DELEGATION_TOOL = 'delegation'
 /** A tool that reads back history a compaction shadowed. */
