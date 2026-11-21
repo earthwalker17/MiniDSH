@@ -366,6 +366,11 @@ describe.runIf(testBrowser !== undefined)('the network fence, for every browser 
       if (fixtureV6 === undefined) fixtureV6 = await fixtureServer({ '/': '<p>v6</p>' }, { host: '::1' }).catch(() => undefined)
       if (fixture127b === undefined) fixture127b = await fixtureServer({ '/': '<p>b</p>' }, { host: '127.0.0.2' }).catch(() => undefined)
       const launched = await launch(browser.path, ['allowed.invalid'])
+      // The measurement a CI log must carry (stderr: vitest hides a passing
+      // test's console): this is each browser's first start on a fresh runner,
+      // the one that has taken up to 64 s for Edge against the 60 s bound.
+      const { spawnedMs, firstOutputMs, answeredMs, fencedMs } = launched.startup
+      process.stderr.write(`[launch.test] ${browser.kind} ${launched.product}: spawned ${spawnedMs} ms, first output ${firstOutputMs ?? 'none'} ms, answered ${answeredMs} ms, fenced ${fencedMs} ms\n`)
       const sessionId = await page(launched.cdp)
       const at = (url: string): Promise<Landing> => land(launched.cdp, sessionId, url)
 

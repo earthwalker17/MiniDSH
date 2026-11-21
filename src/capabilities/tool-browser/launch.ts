@@ -59,6 +59,25 @@ export interface LaunchOptions {
   readonly spawner?: Spawner
 }
 
+/**
+ * Where a start's time went, in milliseconds since the spawn was asked for. A
+ * measurement for a slow host's log and for a failure's message, never an
+ * input to a decision: Edge's cold first start on a CI runner has taken 19 to
+ * 64 s, and "it did not answer in 60 s" alone cannot say whether the binary
+ * was still loading (`firstOutputMs` late) or the browser was up and busy
+ * (`firstOutputMs` early, `answeredMs` late).
+ */
+export interface StartupTimings {
+  /** The OS accepted the spawn. */
+  readonly spawnedMs: number
+  /** The first byte on the browser's stderr, if it wrote any: the process is running its own code. */
+  readonly firstOutputMs: number | undefined
+  /** `Browser.getVersion` answered over the pipe. */
+  readonly answeredMs: number
+  /** Both fence canaries were seen. */
+  readonly fencedMs: number
+}
+
 export interface LaunchedBrowser {
   readonly cdp: CdpConnection
   readonly pid: number | undefined
@@ -66,6 +85,7 @@ export interface LaunchedBrowser {
   readonly fence: Fence
   /** Product and version, as the browser reports them (`Chrome/155.0…`). */
   readonly product: string
+  readonly startup: StartupTimings
   /** True once the process is gone, for whatever reason. */
   readonly exited: boolean
   /** Graceful close, then a tree kill, then the profile removed. Idempotent; never rejects. */
@@ -160,6 +180,8 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
   // refusal leaves through the one exit below that closes the fence and
   // removes the profile. Before S20.5 the EMFILE child's missing `stdio`
   // threw an uncoded TypeError past that exit, leaking both on every call.
+  const began = performance.now()
+  const since = (): number => Math.round(performance.now() - began)
   const { child, spawned } = spawnChild(
     options.executablePath,
     args,
@@ -184,10 +206,15 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     const why = spawnRefusal(error) === 'transient' ? transientSpawnText(error) : messageOf(error)
     throw new BrowserError('BROWSER_UNAVAILABLE', `could not start ${options.executablePath}: ${why}`, { hostFault: isMissing(error) })
   }
+  const spawnedMs = since()
   const [, , errors, toBrowser, fromBrowser] = child.stdio as [null, null, Readable, Writable, Readable]
 
   let stderr = ''
+  let firstOutputMs: number | undefined
+  let lastOutputMs: number | undefined
   errors.on('data', (chunk: Buffer) => {
+    lastOutputMs = since()
+    firstOutputMs ??= lastOutputMs
     stderr = (stderr + chunk.toString('utf8')).slice(-16_384)
   })
   const cdp = new CdpConnection(toBrowser, fromBrowser)
@@ -229,6 +256,7 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
 
   try {
     const version = await cdp.send<{ product: string }>('Browser.getVersion', {}, { timeoutMs: options.startTimeoutMs ?? START_TIMEOUT_MS })
+    const answeredMs = since()
     await cdp.send('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: true })
     await proveFence(cdp, fence, options.canaryTimeoutMs ?? CANARY_TIMEOUT_MS)
     return {
@@ -237,6 +265,7 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
       profileDir: profile,
       fence,
       product: version.product,
+      startup: { spawnedMs, firstOutputMs, answeredMs, fencedMs: since() },
       get exited() {
         return exited
       },
@@ -244,10 +273,13 @@ export async function launchBrowser(options: LaunchOptions): Promise<LaunchedBro
     }
   } catch (error) {
     const tail = stderr
+    // Where the time went, read before the close adds its own: a browser that
+    // wrote nothing never ran its own code; one still writing was working.
+    const phases = `spawned after ${spawnedMs} ms; ${firstOutputMs === undefined ? 'it wrote nothing to stderr' : `its first output came after ${firstOutputMs} ms and its last after ${lastOutputMs} ms`}; gave up after ${since()} ms`
     await close()
     if (error instanceof BrowserError && error.code === 'BROWSER_FENCE_UNAVAILABLE') throw error
     const known = remedy(tail)
-    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${messageOf(error)}${known.text}`, { hostFault: known.hostFault })
+    throw new BrowserError('BROWSER_UNAVAILABLE', `${options.executablePath} did not start: ${messageOf(error)} (${phases})${known.text}`, { hostFault: known.hostFault })
   }
 }
 
