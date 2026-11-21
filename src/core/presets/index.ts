@@ -29,7 +29,7 @@ export interface AuthorityState {
 /** Reserved: the displayable non-preset. Never a table key, never applied. */
 export const CUSTOM_PRESET = 'custom'
 
-/** The shipped table (DSH's exact two); `read-only` stays a legal mode no preset selects. */
+/** The shipped table: the two the DSH presets plugin itself defaults to (its base bundle adds a `read-only` one, `references/dsh/authority.md`); here `read-only` stays a legal mode no preset selects. */
 export const DEFAULT_PRESETS: Readonly<Record<string, AuthorityPresetSpec>> = {
   'workspace-write': {
     sandbox: 'workspace-write',

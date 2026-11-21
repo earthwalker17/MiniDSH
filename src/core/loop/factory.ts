@@ -260,7 +260,7 @@ const DEFAULT_OWNED_WORK_BOUND_MS = 10_000
 
 const configSchema = z.strictObject({ ownedWorkBoundMs: z.number().int().positive().optional() }).optional()
 
-/** The one concrete loop plugin. Extension code depends on `dsh-agent` events, never on this. */
+/** The one concrete loop plugin. Extension code depends on the `agent/*` events (`core/agent/events.ts`), never on this. */
 export const loopPlugin: Plugin<LoopConfig | undefined> = {
   name: 'core-agent-loop',
   inject: [AGENTS, SESSIONS, LLM, TOOLS, PROMPT],
