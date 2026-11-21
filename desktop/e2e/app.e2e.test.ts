@@ -176,17 +176,28 @@ describe.runIf(EXE)('the packaged desktop app (keyless)', () => {
     expect(alive(app.pid)).toBe(true)
 
     // A running turn: the request reaches the model and is never answered.
+    // The second launch above made this window show and focus itself, and a
+    // key event dispatched over CDP while a window's focus is changing is
+    // dropped by the browser, silently: on the Linux runner the draft sat in
+    // the composer with nothing sent, three attempts in four (S22.5). The
+    // composer empties the moment it sends, so Enter is pressed until it has,
+    // and a press that had to be repeated is said out loud.
     await web.type('#prompt', 'say hello')
-    await web.press('Enter')
+    let presses = 0
+    while (presses < 5 && (await web.evaluate<string>(`document.querySelector('#prompt').value`)) !== '') {
+      presses++
+      await web.press('Enter')
+      await web.waitFor(`document.querySelector('#prompt').value === ''`, 3_000).catch(() => undefined)
+    }
+    if (presses !== 1) process.stderr.write(`[app.e2e] Enter was pressed ${presses} times before the composer sent its draft\n`)
     await waitUntil('the turn to reach the model', () => model.requests() > 0, 60_000).catch(async (error: Error) => {
-      // Timed out twice on the Linux runner and passed on the third attempt of
-      // the same commit (S22.5), with nothing to say where the prompt stopped:
-      // in the page (focus, a draft never sent), on the wire, or in the runtime.
+      // What a timeout here must say: where the prompt stopped, in the page
+      // (focus, a draft never sent), on the wire, or in the runtime.
       const page = await web
         .evaluate<string>(`JSON.stringify({ focus: document.activeElement?.id || document.activeElement?.tagName, draft: document.querySelector('#prompt')?.value, hasFocus: document.hasFocus(), tail: document.body.innerText.slice(-400) })`)
         .catch((unreadable: unknown) => `unreadable: ${String(unreadable)}`)
       const logged = storedEvents(home).map((event) => event.type)
-      throw new Error(`${error.message}\nlogged: ${logged.join(' ') || 'nothing'}\npage: ${page}\nmain.log (tail):\n${app.mainLog().slice(-2000)}`)
+      throw new Error(`${error.message} (Enter pressed ${presses} times)\nlogged: ${logged.join(' ') || 'nothing'}\npage: ${page}\nmain.log (tail):\n${app.mainLog().slice(-2000)}`)
     })
 
     if (win) {

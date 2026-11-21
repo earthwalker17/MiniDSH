@@ -934,7 +934,10 @@ function rebuildMenu(): void {
 
 // ---------------------------------------------------------------- start
 
-app.on('second-instance', () => showWindow())
+app.on('second-instance', () => {
+  log('a second launch deferred to this window')
+  showWindow()
+})
 app.on('web-contents-created', (_event, contents) => {
   contents.setWindowOpenHandler(({ url }) => {
     openExternalSafe(url)
