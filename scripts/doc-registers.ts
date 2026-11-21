@@ -26,7 +26,8 @@ import { join, relative, resolve } from 'node:path'
 
 const ROOT = resolve(import.meta.dirname, '..')
 const DOC = 'docs/ARCHITECTURE.md'
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage'])
+// `build` is desktop/build: the packed app, and a Node release unpacked with its own files.
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage', 'build'])
 /** A `§N` preceded by one of these names another document's section. */
 const FOREIGN = /(CLAUDE|BLUEPRINT|PROJECT|README|RFC)(\.md)?[`\s]*(\d+\s*)?$/
 
@@ -118,7 +119,9 @@ if (process.argv.includes('--pointers')) {
   writeFileSync(join(out, 'inbound-pointers.md'), grouped('Inbound pointers', `Sentences in OTHER sections of ${DOC} that point at §N. Section N must state what each relies on, or the pointer goes.`, inbound))
 
   const cited = new Map<number, string[]>()
-  for (const dir of ['src', 'scripts', 'bin', '.github']) {
+  // Every tree whose comments cite the document. `desktop` was missing until
+  // S22.5, with sixteen citations a compaction could not see.
+  for (const dir of ['src', 'scripts', 'bin', '.github', 'desktop', 'skills']) {
     for (const file of walk(join(ROOT, dir), /\.(ts|js|mjs|yml|yaml|html|css|md)$/)) {
       const lines = readFileSync(file, 'utf8').split('\n')
       lines.forEach((line, i) => {
@@ -132,7 +135,7 @@ if (process.argv.includes('--pointers')) {
   writeFileSync(join(out, 'code-citations.md'), grouped('Code and template citations', `Comments citing a section of ${DOC} (a bare §N in \`src/\` is this document's). The section must still state what the comment relies on, or the comment must stand on its own.`, cited))
 
   const readers: string[] = []
-  const documents = ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'CLAUDE.md', 'docs/PROJECT.md', 'docs/BLUEPRINT.md', ...walk(join(ROOT, 'references'), /\.md$/).map(rel)]
+  const documents = ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'CLAUDE.md', 'docs/PROJECT.md', 'docs/BLUEPRINT.md', 'desktop/README.md', 'skills/README.md', ...walk(join(ROOT, 'references'), /\.md$/).map(rel)]
   for (const document of documents) {
     readFileSync(join(ROOT, document), 'utf8')
       .split('\n')
