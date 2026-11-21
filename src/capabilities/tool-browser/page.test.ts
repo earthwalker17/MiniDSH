@@ -709,7 +709,20 @@ describe.runIf(testBrowser !== undefined)('a page in a real browser', () => {
         // viewport: the size first, then the load. A crashed page that refused
         // the size made "navigate to load it again" fail for as long as the
         // model kept the argument.
+        //
+        // What is sent, in order: the size never goes to a dead renderer.
+        // Chrome 155 and Edge 155 on Linux answer that and then the whole
+        // browser dies (this test failed 6 of 6 under WSL 2 while newer
+        // browsers passed it), so the page is given a renderer first.
+        const sent: string[] = []
+        const send = own.cdp.send.bind(own.cdp)
+        own.cdp.send = ((method: string, params?: Record<string, unknown>, options?: unknown) => {
+          if (method === 'Page.navigate') sent.push(`navigate ${String(params?.url).replace(fixture.origin, '')}`)
+          if (method === 'Emulation.setDeviceMetricsOverride') sent.push(`size ${String(params?.width)}x${String(params?.height)}`)
+          return send(method, params, options as never)
+        }) as typeof own.cdp.send
         await crashing.setViewport({ width: 390, height: 844 })
+        expect(sent, 'a crashed page is started again before it is sized').toEqual(['navigate about:blank', 'size 390x844'])
         expect(await crashing.navigate(`${fixture.origin}/counter`, { ...budget(), waitMs: 0 })).toEqual({ loaded: true })
         expect((await crashing.report()).crashed).toBe(false)
         expect(await crashing.snapshot(budget())).toContain('button "Add one"')

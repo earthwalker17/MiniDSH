@@ -482,17 +482,37 @@ class Page implements BrowserPage, PageSession {
   async setViewport(viewport: Viewport): Promise<void> {
     // Taken by a crashed page too, like the `navigate` it precedes: refusing
     // here made "navigate to load it again" fail for as long as the call
-    // carried a viewport. The override is the browser's to keep — measured on
-    // Chrome 157 and Edge 158, it answers in 2–3 ms with the renderer dead,
-    // and the document the next navigation loads has the new size from its
-    // first script.
+    // carried a viewport.
+    //
+    // But the override is never SENT to a page whose renderer is dead. Chrome
+    // 157 and Edge 158 answer it in 2–3 ms and keep it; Chrome 155 and Edge
+    // 155 on Linux answer it too, and about three seconds later the whole
+    // browser is gone (the pipe closes; Edge exits SIGSEGV; measured under
+    // WSL 2, every time). So a crashed page is given a renderer first, by the
+    // one thing that starts one: a navigation, here to the empty document.
+    // The size is then in place before the navigation this call precedes,
+    // whose document has it from its first script.
     if (this.closedReason !== undefined) throw this.closedError()
+    if (this.crashed) await this.revive()
     await this.cdp.send(
       'Emulation.setDeviceMetricsOverride',
       { width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: false },
       { sessionId: this.sessionId, timeoutMs: PLAIN_TIMEOUT_MS },
     )
     this.size = viewport
+  }
+
+  /**
+   * A crashed page's renderer, started again by a navigation to the empty
+   * document. `Page.navigate` answers at the commit, and the commit is what
+   * clears `crashed` (`onFrameNavigated`); the event can trail the answer, so
+   * it is waited for. A page that will not come back says so as the crash it is.
+   */
+  private async revive(): Promise<void> {
+    const until = Date.now() + PLAIN_TIMEOUT_MS
+    await this.cdp.send('Page.navigate', { url: 'about:blank' }, { sessionId: this.sessionId, timeoutMs: PLAIN_TIMEOUT_MS })
+    const back = await this.waitUntil(() => !this.crashed, until, { signal: new AbortController().signal, deadline: until })
+    if (!back) throw new BrowserError('BROWSER_CLOSED', 'the page crashed and did not start again; navigate to load it again')
   }
 
   async report(): Promise<PageReport> {
