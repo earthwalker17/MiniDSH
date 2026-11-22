@@ -501,8 +501,17 @@ jobs:
           # The attestation THIS package carries, named: the dependency ships
           # provenance too, so a grep for "verified attestation" over the whole
           # tree would pass with minidsh unattested.
-          "$NPM" audit signatures --json --include-attestations > "$RUNNER_TEMP/signatures.json"
-          node -e "const r=require(process.argv[1]);const p=(r.verified||[]).find(x=>x.name==='minidsh'&&x.version===process.argv[2]);if(!p||!p.attestations){console.error('minidsh@'+process.argv[2]+' has no verified attestation');process.exit(1)}console.log('minidsh@'+process.argv[2]+': verified attestation')" "$RUNNER_TEMP/signatures.json" "$VERSION"
+          #
+          # It waits like the install above: the registry served 2.0.0 before
+          # it served the attestation, the one ask this made answered HTTP 404,
+          # and the job failed with the version already public. Up to five
+          # minutes; only a verified attestation ends the wait early.
+          for attempt in $(seq 1 30); do
+            if "$NPM" audit signatures --json --include-attestations > "$RUNNER_TEMP/signatures.json" \
+              && node -e "const r=require(process.argv[1]);const p=(r.verified||[]).find(x=>x.name==='minidsh'&&x.version===process.argv[2]);if(!p||!p.attestations){console.error('minidsh@'+process.argv[2]+' has no verified attestation');process.exit(1)}console.log('minidsh@'+process.argv[2]+': verified attestation')" "$RUNNER_TEMP/signatures.json" "$VERSION"; then break; fi
+            if [ "$attempt" = 30 ]; then echo "minidsh@$VERSION has no verified attestation after five minutes"; exit 1; fi
+            sleep 10
+          done
           # Only then, every check the branch gate makes, on what a stranger now gets.
           bash "$GITHUB_WORKSPACE/scripts/smoke-installed.sh" "$PWD" "$VERSION"
 

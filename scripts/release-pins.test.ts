@@ -158,6 +158,27 @@ describe('release pins', () => {
     expect(lines.slice(0, agent)).toContain('if judge > /dev/null 2>&1; then')
   })
 
+  // The registry serves a new version before it serves its attestation. The
+  // 2.0.0 publish asked once, in between, was answered HTTP 404, and the job
+  // failed with the version already public; a re-run finished the release.
+  it('the publish job waits for the attestation as it waits for the package, and smokes only after it', () => {
+    const step = read('.github/workflows/release.yml').split('- name: Install from the public registry, verify the attestation, then smoke it')[1]?.split('\n      - name: ')[0]
+    expect(step, 'release.yml has no install-and-verify step').toBeDefined()
+    const lines = step!
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'))
+    const waits = lines.flatMap((line, index) => (/^for attempt in \$\(seq 1 \d+\); do$/.test(line) ? [index] : []))
+    const audit = lines.findIndex((line) => line.includes('audit signatures'))
+    const done = lines.indexOf('done', audit)
+    expect({ waits: waits.length, auditOpensTheSecond: audit === (waits[1] ?? -2) + 1, auditIsTheCondition: (lines[audit] ?? '').startsWith('if "$NPM" audit signatures ') }).toEqual({ waits: 2, auditOpensTheSecond: true, auditIsTheCondition: true })
+    // Between the condition and `done`: the named check that ends the wait, one exit at the last attempt, a sleep.
+    const body = lines.slice(audit + 1, done)
+    expect(body[0]).toMatch(/^&& node -e .*has no verified attestation.*; then break; fi$/)
+    expect(body.slice(1)).toEqual([expect.stringMatching(/^if \[ "\$attempt" = \d+ \]; then echo .*; exit 1; fi$/), 'sleep 10'])
+    expect(lines.findIndex((line) => line.includes('smoke-installed.sh'))).toBeGreaterThan(done)
+  })
+
   // "Electron main runs no user code" is these fuses (ARCHITECTURE §9): asked
   // for in the packer, read back from the packed binary on every desktop leg.
   it('the packer turns off every fuse the desktop leg then reads back as off', () => {
