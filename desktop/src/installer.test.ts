@@ -33,7 +33,8 @@ afterEach(async () => {
 
 /** The command lines the hook runs, in order, as Windows receives them for an app whose executable is `image`. */
 function commands(image: string): string[] {
-  const lines = [...HOOK.matchAll(/^\s*nsExec::ExecToStack\s+(["'`])(.*)\1\s*$/gm)].map((match) => match[2]!)
+  // `/TIMEOUT=<ms>` is nsExec's own switch, read by NSIS and never part of the command line.
+  const lines = [...HOOK.matchAll(/^\s*nsExec::ExecToStack\s+(?:\/TIMEOUT=\d+\s+)?(["'`])(.*)\1\s*$/gm)].map((match) => match[2]!)
   return lines.map((line) => line.replaceAll('$SYSDIR', SYSTEM32).replaceAll('${APP_EXECUTABLE_FILENAME}', image).replaceAll('$$', '$'))
 }
 
@@ -80,6 +81,10 @@ describe.runIf(process.platform === 'win32')("the installer's running-app check"
     // The codes the script answers with are the ones the hook branches on, and 0 is not among them.
     expect([...exact!.matchAll(/exit (\d+)/g)].map((match) => Number(match[1])).toSorted((a, b) => a - b)).toEqual([3, 4, 4, 10])
     expect(HOOK).toMatch(/\$\{if\} \$0 != 3\r?\n\s*\$\{andIf\} \$0 != 10\r?\n\s*nsExec::ExecToStack/)
+    // The exact check is bounded: a WMI that hangs answers "timeout", which is
+    // neither 3 nor 10, so the plain check decides instead of nobody.
+    expect(HOOK).toMatch(/^\s*nsExec::ExecToStack \/TIMEOUT=30000 `"\$SYSDIR\\WindowsPowerShell/m)
+    expect(HOOK.match(/\/TIMEOUT=/g)).toHaveLength(1)
   })
 
   it('the exact check answers 10 with nothing running there, 3 with a process from that folder, and leaves the installer itself out', async () => {
