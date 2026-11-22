@@ -435,17 +435,25 @@ describe.runIf(testBrowser)('the web UI in a real browser', { timeout: TEST_MS }
     await page.waitFor(logHas('Followed to the end.'))
     await page.waitFor(`${gap} <= 40`)
 
-    // A reader who scrolls up stays there while the next answer lands.
-    ui!.adapter.script(assistantText(`${long}\n\nA reply the reader was not following.`))
+    // A reader who scrolls up stays there while the next answer lands. The
+    // answer is HELD until they have: one that lands first leaves the claim
+    // nothing to be about, and the button was then read a frame before the
+    // scroll event that shows it (a macOS runner did exactly that, once).
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    ui!.adapter.script([gate(held), ...assistantText(`${long}\n\nA reply the reader was not following.`)])
     await page.evaluate("(() => { const s = document.querySelector('#log'); s.dispatchEvent(new WheelEvent('wheel', { deltaY: -400, bubbles: true })); s.scrollTop = 0 })()")
     await page.type('#prompt', 'once more')
     await page.press('Enter')
     // A person's own send takes them to the bottom; scrolling up after it is theirs.
     await page.waitFor(`${gap} <= 40`)
     await page.evaluate("(() => { const s = document.querySelector('#log'); s.dispatchEvent(new WheelEvent('wheel', { deltaY: -400, bubbles: true })); s.scrollTop = 0 })()")
+    expect(await page.evaluate<boolean>(logHas('A reply the reader was not following.'))).toBe(false)
+    release()
     await page.waitFor(logHas('A reply the reader was not following.'))
     expect(await page.evaluate<number>("document.querySelector('#log').scrollTop")).toBe(0)
-    expect(await page.evaluate<boolean>("!document.querySelector('#to-bottom').hidden")).toBe(true)
+    // The button follows a scroll event or a resize, so the frame after.
+    await page.waitFor("!document.querySelector('#to-bottom').hidden")
     expect(await page.unexpectedProblems()).toEqual([])
   })
 
