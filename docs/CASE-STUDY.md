@@ -1,6 +1,6 @@
 # A case study: building MiniDSH architecture-first
 
-MiniDSH is a small agent harness, written as an independent study of DeepSeek Harness. One person built it with Claude Code in about 35 sessions between 2026-08-22 and 2026-11-22, and the agent wrote nearly all of the code. This page says what happened here. It is one repository with no control group, so it does not show that the method works in general.
+MiniDSH is a small agent harness, written as an independent study of DeepSeek Harness. One person built it with Claude Code in about 35 sessions between 2026-08-22 and 2026-11-23, and the agent wrote nearly all of the code. This page says what happened here. It is one repository with no control group, so it does not show that the method works in general.
 
 The session-by-session record is [BLUEPRINT §4](BLUEPRINT.md#4-development-record). The rules are [CLAUDE.md](../CLAUDE.md). Session names come from that record: S14 is the fourteenth session, a suffix such as .1 marks a follow-up, and .5 marks a checkpoint.
 
@@ -43,8 +43,8 @@ Two more results. The checkpoints S1.5, S5.5 and S7.5 found three documented inv
 
 ## What the numbers do and do not show
 
-- **Size.** On 2026-11-21 `node scripts/count-lines.ts` reports about 42,700 lines of TypeScript in 159 files under `src/` and 50,500 lines of tests and harness. At 1.0.0 (2026-09-09) they were 19,777 and 18,027.
-- **Tests.** 2,029 passed on Windows and 2,046 under WSL 2 at S22.2 (2026-11-20). That says the suite is green. It does not say the architecture held.
+- **Size.** On 2026-11-22 `node scripts/count-lines.ts` reports about 44,000 lines of TypeScript in 159 files under `src/` and 58,500 lines of tests and harness. At 1.0.0 (2026-09-09) they were 19,777 and 18,027.
+- **Tests.** 2,505 passed on Windows at 2.0.0 (2026-11-22); two days earlier, at S22.2, 2,029. That says the suite is green. It does not say the architecture held.
 - **What suggests it held.** S21 added parallel execution with no kernel change. The desktop app (S22.2) does not import the runtime. These are two observations, not a metric.
 - **No comparison.** Nobody built a feature-first twin. Finding counts measure what reviewers wrote down, not defect density.
 - **One reader.** No second contributor has used the map to place a capability. Its only test was one probe in S15.1: a model answered 8 placement questions correctly from both the 96 KB and the 49 KB version, the smaller at half the input tokens. Most measures [PROJECT.md](PROJECT.md) §5 names were applied as judgement, not counted.

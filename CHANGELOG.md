@@ -2,7 +2,7 @@
 
 All notable changes to MiniDSH are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The session-by-session engineering record, with what each session measured, lives in [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) §4.
 
-## [2.0.0] — 2026-11-22
+## [2.0.0] — 2026-11-23
 
 This release adds a full-screen terminal and a desktop app and redesigns the web UI, all three over the one runtime. Then the whole system was audited as a release candidate, and what the audit found was fixed or written down before this was tagged.
 
