@@ -69,7 +69,7 @@ One real turn in the web UI. The first edit was refused because the model had no
 
 - **Windows has no shell confinement.** A shell command there can write wherever your account can, so by default none runs until you approve it. `--accept none` turns that off: shell commands then run unasked and unconfined, and only the editor's writes stay inside the project folder. A headless `run` cannot ask, so it refuses and prints which flag would allow the command.
 - **The installers are unsigned and do not update themselves.** A new version is a new download.
-- **Only the Windows desktop build was used by hand.** The macOS and Linux builds start and pass a test suite that needs no provider key on CI runners. Nobody has run a macOS build by hand, and the Linux app was driven only unpacked, so the AppImage's own launcher was never run. The `minidsh` command is tested on macOS in CI only.
+- **Only the Windows desktop build was used by hand.** The macOS and Linux builds start and pass a test suite that needs no provider key on CI runners. Nobody has run a macOS build by hand. The Linux app was driven only unpacked, and its AppImage needs FUSE 2 to start ([guide](docs/GUIDE.md#desktop-app)). The `minidsh` command is tested on macOS in CI only.
 - **The web sign-in cookie is scoped to the host name, not the port.** A browser also sends it to other servers on that name, and one of them could drive a session. The desktop app is not affected.
 - **There is no MCP client and no plugin marketplace.**
 

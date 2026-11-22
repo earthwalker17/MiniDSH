@@ -29,10 +29,10 @@ What the model's shell tool needs:
 The desktop app is the web UI in its own window, with its own Node inside. No build is signed by a publisher, so Windows and macOS object at first.
 
 - **[Windows](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-Setup-x64.exe).** The installer needs no administrator rights and installs for your account. SmartScreen may warn: choose More info, then Run anyway. Where Smart App Control is on, expect it to block an unsigned installer (not tested here).
-- **[Linux](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-x86_64.AppImage).** Run `chmod +x` on the AppImage, then start it. Where unprivileged user namespaces are restricted (Ubuntu 24.04's default), the window runs without Chromium's sandbox and the log says so.
+- **[Linux](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-x86_64.AppImage).** Run `chmod +x` on the AppImage, then start it. It needs FUSE 2 (on Ubuntu 24.04: `sudo apt install libfuse2t64`). Without it the AppImage says so and stops. Where unprivileged user namespaces are restricted (Ubuntu 24.04's default), the window runs without Chromium's sandbox and the log says so.
 - **macOS, [Apple silicon](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-arm64.zip) or [Intel](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-x64.zip).** Unzip and open `MiniDSH.app`. The usual route for an unidentified developer's app is to try to open it, then allow it under System Settings > Privacy & Security > Open Anyway.
 
-Only the Windows build was installed and used on a real machine. The macOS apps were unzipped, started and driven on CI runners only. The Linux app was driven on CI runners and under WSL 2 from its unpacked form, so the AppImage's own launcher was not run. What Gatekeeper does with a downloaded copy was not tested.
+Only the Windows build was installed and used on a real machine. The macOS apps were unzipped, started and driven on CI runners only. The Linux app was driven unpacked: by tests on CI runners, and under WSL 2 through its own launcher with one real turn. The AppImage's FUSE mount was not run. What Gatekeeper does with a downloaded copy was not tested.
 
 There is no updater: Help > Check for Updates asks GitHub for a newer release and offers its page. Sessions and keys live in `~/.minidsh`, shared with the npm install. The folder list lives in the app's own data folder, and Help > Show Logs opens its logs. Uninstalling removes neither.
 
