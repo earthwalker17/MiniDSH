@@ -217,6 +217,10 @@ describe('the bwrap profile', () => {
     for (const root of [runtimeDir, '/run/user', '/run']) {
       const args = bwrapArgs(policyFor('workspace-write', root), { runtimeDir })
       expect(args.slice(-5), root).toEqual(['--bind', root, root, '--tmpfs', runtimeDir])
+      // The runtime's own directories in it were left to that root's bind,
+      // which the second mask covers: they come back after it, read-only.
+      const installed = bwrapArgs(policyFor('workspace-write', root), { runtimeDir, expose: [node, '/opt/minidsh'] })
+      expect(installed.slice(-8), root).toEqual(['--bind', root, root, '--tmpfs', runtimeDir, '--ro-bind', node, node])
     }
     // A workspace merely beside it, or beneath it, is not one that holds it.
     expect(bwrapArgs(policyFor('workspace-write', '/run/media/disk'), { runtimeDir }).slice(-3)).toEqual(['--bind', '/run/media/disk', '/run/media/disk'])

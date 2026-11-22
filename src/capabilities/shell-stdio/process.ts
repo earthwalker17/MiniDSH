@@ -165,7 +165,12 @@ function oneShotCommand(dialect: ShellDialect, shellPath: string | undefined, co
     // exit code, exactly when the command failed. Measured on 16 shapes, pwsh
     // 7.6: `exit` lost lines in 5 (202 of 202 in one), `SetShouldExit` in
     // none, and both gave the same code in all 16.
-    const exitCode = '\n$minidshOk = $?; if (-not $minidshOk) { $Host.SetShouldExit($(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 })) }'
+    //
+    // Constrained Language Mode refuses the method call ("supported only on
+    // core types", measured), which would lose the code and print that error
+    // after every failing command: there the keyword is what is left.
+    const exitCode =
+      "\n$minidshOk = $?; if (-not $minidshOk) { $minidshCode = $(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }); if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { $Host.SetShouldExit($minidshCode) } else { exit $minidshCode } }"
     return { cmd: shellPath ?? 'pwsh', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8 + containment(dialect) + announce + command + exitCode] }
   }
   return { cmd: shellPath ?? 'bash', args: ['--noprofile', '--norc', '-c', started === undefined ? command : `printf '%s\\n' '${started}'\n${command}`] }

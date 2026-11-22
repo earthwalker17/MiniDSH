@@ -145,7 +145,14 @@ export function bwrapArgs(policy: SandboxExecutionPolicy, host: BwrapHost = {}):
     // opened in `/run/user/<uid>`, or in `/run`), has just bound the host's
     // directory back over the mask, sockets and all. Masked again, last: such
     // a session works beside an empty runtime directory, as every other does.
-    if (host.runtimeDir !== undefined && roots.some((root) => within(root, host.runtimeDir!))) args.push('--tmpfs', host.runtimeDir)
+    // The runtime's own directories there were left to that root's bind,
+    // which this mask has just covered: bound back as they are under the
+    // first mask, read-only.
+    if (host.runtimeDir !== undefined && roots.some((root) => within(root, host.runtimeDir!))) {
+      const mask = host.runtimeDir
+      args.push('--tmpfs', mask)
+      for (const path of exposed) if (path !== mask && within(mask, path)) args.push('--ro-bind', path, path)
+    }
   }
   return args
 }
