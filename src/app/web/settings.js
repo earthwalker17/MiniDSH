@@ -48,8 +48,12 @@ export function createSettings(options) {
     const close = iconButton('close', 'Close settings', () => dialog.close())
     const titles = { general: 'General', defaults: 'New sessions', about: 'About' }
     const body = h('div', { class: 'settings-body' }, h('div', { class: 'modal-head' }, h('h2', { text: titles[page] }), close))
+    // A show that began on an open dialog never reopens a closed one: the X
+    // button and Esc close it at once, and the `close` event that bumps
+    // `generation` is dispatched later, after an answer already on its way.
+    const wasOpen = dialog.open
     const content = page === 'general' ? general() : page === 'defaults' ? await defaults() : about()
-    if (mine !== generation) return
+    if (mine !== generation || (wasOpen && !dialog.open)) return
     body.append(content)
     dialog.replaceChildren(h('div', { class: 'settings' }, nav, body))
     if (!dialog.open) dialog.showModal()

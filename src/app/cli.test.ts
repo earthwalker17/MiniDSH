@@ -273,6 +273,15 @@ describe('a route nothing can be sent on is refused before a session exists', ()
     expect(ran.out).toBe(`ran${NL}`)
     const [options] = storedEvents(home, sessionOf(ran)).filter((event) => event.type === 'agent/options')
     expect(options?.data.options).toMatchObject({ provider: 'scripted', model: 'scripted-model' })
+    // A model the provider being LEFT lists, and the one named does not, is
+    // still the mistake: exported as a default beside the settings' provider,
+    // it would run anthropic/scripted-model and fail at the first paid step.
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({ agent: { provider: 'scripted', model: 'scripted-model' } }))
+    const before = sessionFiles(home).length
+    const left = await cli(home, ['run', 'x', '--cwd', cwd, '--provider', 'anthropic'], { model: 'scripted-model' })
+    expect(left.code, left.err).toBe(2)
+    expect(left.err).toMatch(/^--provider anthropic needs --model: the model in use \(scripted-model\) is scripted's\. anthropic lists: \S+/m)
+    expect(sessionFiles(home).length, 'a refused route stored a session').toBe(before)
   })
 
   it('refuses a provider no row mounts, naming the mounted ones, whether a flag or the settings named it', async () => {

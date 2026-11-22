@@ -631,7 +631,14 @@ function routeCheck(flags: CommonModelFlags, over: AgentOptions | { readonly sto
     // A model named by `MINIDSH_MODEL` is named: it outranks the settings file
     // for a new session (`settings.ts`), so `--provider X` beside it is a whole
     // route, and refusing it said the environment's model was "deepseek's".
-    if (settings !== undefined && envModel !== undefined) return
+    // Unless that model is plainly the provider's being left (the settings
+    // provider lists it and the flag's does not): `MINIDSH_MODEL=deepseek-flash`
+    // exported as a default, then `--provider anthropic`, is the mistake this
+    // check exists for.
+    if (settings !== undefined && envModel !== undefined) {
+      const lists = (id: string): boolean => catalog.find((entry) => entry.id === id)?.models.some((model) => model.id === envModel) === true
+      if (lists(flags.provider) || !lists(settings.provider)) return
+    }
     const base = settings ?? storedRoute(root, stored!)
     if (base === undefined || base.provider === flags.provider) return
     const listed = catalog.find((entry) => entry.id === flags.provider)?.models.map((model) => model.id) ?? []
