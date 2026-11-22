@@ -2,7 +2,7 @@
 
 MiniDSH is a small agent harness, written as an independent study of DeepSeek Harness. One person built it with Claude Code in about 35 sessions between 2026-08-22 and 2026-11-22, and the agent wrote nearly all of the code. This page says what happened here. It is one repository with no control group, so it does not show that the method works in general.
 
-The session-by-session record is [BLUEPRINT §4](BLUEPRINT.md#4-development-record). The rules are [CLAUDE.md](../CLAUDE.md). Session names such as S14 come from that record.
+The session-by-session record is [BLUEPRINT §4](BLUEPRINT.md#4-development-record). The rules are [CLAUDE.md](../CLAUDE.md). Session names come from that record: S14 is the fourteenth session, a suffix such as .1 marks a follow-up, and .5 marks a checkpoint.
 
 ## The method
 
@@ -10,7 +10,7 @@ The session-by-session record is [BLUEPRINT §4](BLUEPRINT.md#4-development-reco
 - **A home before code.** A session names a capability's layer, seam, owned state and lifecycle before implementing it. A feature with no home is an architecture question first.
 - **Plan, then phases.** Architecture-affecting sessions start in plan mode. Each phase is verified and committed before the next.
 - **Real compositions in tests.** Tests mount the real plugin composition of the one runtime. Only the model is scripted, or replayed from a recorded session log.
-- **The same ending every session.** The full gate on Windows and under WSL 2, a bounded adversarial review, and a live run against a real model API.
+- **The same ending every session.** The full check (`pnpm check`) on Windows and under WSL 2, a bounded adversarial review, and a live run against a real model API.
 - **Checkpoints.** After a cluster of architectural change, a ".5" session rereads the repository, re-audits each documented invariant against the code and re-researches upstream. There have been eight.
 
 ## What each kind of check caught

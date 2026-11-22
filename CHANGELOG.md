@@ -4,7 +4,7 @@ All notable changes to MiniDSH are recorded here. The format follows [Keep a Cha
 
 ## [2.0.0] — 2026-11-22
 
-Three surfaces over the one runtime became things a person can use every day: a full-screen terminal, a redesigned web UI and a desktop app. Then the whole system was audited as a release candidate, and what the audit found was fixed or written down before this was tagged.
+This release adds a full-screen terminal and a desktop app and redesigns the web UI, all three over the one runtime. Then the whole system was audited as a release candidate, and what the audit found was fixed or written down before this was tagged.
 
 It is a major version because some behaviour a 1.x user or script relies on changed: see **Changed**. The session log format did not. 2.0 reads, continues and forks what 1.x wrote, tested against a store the published 1.2.0 left behind. Going back is not promised, though in a test the published 1.2.0 still verified and continued a session 2.0 had appended to.
 
@@ -20,7 +20,7 @@ The desktop app, for a machine without Node:
 - Linux x64: [MiniDSH-x86_64.AppImage](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-x86_64.AppImage)
 - macOS: [Apple silicon](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-mac-arm64.zip), [Intel](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/MiniDSH-mac-x64.zip)
 
-No build is signed by a publisher, so Windows and macOS object at first run: the [guide](https://github.com/earthwalker17/MiniDSH/blob/main/docs/GUIDE.md#desktop-app) has the steps for each system and how to check a download against [SHA256SUMS](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/SHA256SUMS). Only the Windows build was installed and used on a real machine. The others were started and driven by automated tests only.
+No build is signed by a publisher, so Windows and macOS object at first run: the [guide](https://github.com/earthwalker17/MiniDSH/blob/v2.0.0/docs/GUIDE.md#desktop-app) has the steps for each system and how to check a download against [SHA256SUMS](https://github.com/earthwalker17/MiniDSH/releases/download/v2.0.0/SHA256SUMS). Only the Windows build was installed and used on a real machine. The others were started and driven by automated tests only.
 
 ### Added
 
@@ -50,7 +50,7 @@ No build is signed by a publisher, so Windows and macOS object at first run: the
 
 ### Security
 
-Each of these was reproduced before it was fixed or written down. [SECURITY.md](https://github.com/earthwalker17/MiniDSH/blob/main/SECURITY.md) has the full account.
+Each of these was reproduced before it was fixed or written down. [SECURITY.md](https://github.com/earthwalker17/MiniDSH/blob/v2.0.0/SECURITY.md) has the full account.
 
 - **Fixed.** On Linux a confined command could ask the user's own systemd, over the session bus, to write anywhere. The bubblewrap profile now hides the user runtime directory, and with it an ssh-agent or keyring socket that lives there: a confined `git push` over SSH now needs an approval.
 - **Fixed.** A new session's folder spelled through `..` after a missing directory could resolve to an unfollowed symbolic link, and the session then worked outside the host's workspace roots.

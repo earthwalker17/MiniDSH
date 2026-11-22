@@ -29,7 +29,7 @@ What the model's shell tool needs:
 The desktop app is the web UI in its own window, with its own Node inside. No build is signed by a publisher, so Windows and macOS object at first.
 
 - **[Windows](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-Setup-x64.exe).** The installer needs no administrator rights and installs for your account. SmartScreen may warn: choose More info, then Run anyway. Where Smart App Control is on, expect it to block an unsigned installer (not tested here).
-- **[Linux](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-x86_64.AppImage).** Run `chmod +x` on the AppImage, then start it. Where unprivileged user namespaces are off (Ubuntu 24.04's default), the window runs without Chromium's sandbox and the log says so.
+- **[Linux](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-x86_64.AppImage).** Run `chmod +x` on the AppImage, then start it. Where unprivileged user namespaces are restricted (Ubuntu 24.04's default), the window runs without Chromium's sandbox and the log says so.
 - **macOS, [Apple silicon](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-arm64.zip) or [Intel](https://github.com/earthwalker17/MiniDSH/releases/latest/download/MiniDSH-mac-x64.zip).** Unzip and open `MiniDSH.app`. The usual route for an unidentified developer's app is to try to open it, then allow it under System Settings > Privacy & Security > Open Anyway.
 
 Only the Windows build was installed and used on a real machine. The macOS apps were unzipped, started and driven on CI runners only. The Linux app was driven on CI runners and under WSL 2 from its unpacked form, so the AppImage's own launcher was not run. What Gatekeeper does with a downloaded copy was not tested.
@@ -77,7 +77,7 @@ New sessions default to the model in `settings.json`. `MINIDSH_MODEL` overrides 
 
 ## The four surfaces
 
-`chat`, `web`, `run` and `serve` take `--cwd <dir>`, the folder the agent works in. It defaults to the current one.
+The four are the terminal, the web UI, the desktop app and the headless `run`. Each command that starts an agent (`chat`, `web`, `run`, `serve`) takes `--cwd <dir>`, the folder the agent works in. It defaults to the current one.
 
 ### Terminal
 
@@ -104,6 +104,8 @@ The page can run commands on your machine, so who can reach it matters:
 - `--host <addr>` listens elsewhere. There are no accounts and no TLS. Whoever opens the link first controls the agent.
 
 More in [SECURITY.md](../SECURITY.md), including the cookie's scope.
+
+<p align="center"><img src="images/web-dark.png" width="100%" alt="The web UI in its dark theme, on the session the README shows in the light one"></p>
 
 ### Desktop
 
@@ -248,12 +250,12 @@ An example `settings.json`:
 |---|---|
 | `MISSING_CREDENTIAL`, `DeepSeek API key not set` | Run `minidsh credentials set DEEPSEEK_API_KEY`, or choose a provider whose key you have. |
 | `UNKNOWN_MODEL`, `no provider "..." is mounted` | A wrong model or provider id. |
-| `SANDBOX_UNAVAILABLE` | The system cannot confine the shell. See [Approvals and the sandbox](#approvals-and-the-sandbox). |
+| `SANDBOX_UNAVAILABLE` | The system cannot confine the shell. On Ubuntu 24.04 an installed bubblewrap is still refused, because AppArmor restricts unprivileged user namespaces. `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` lifts that for every program until the next boot (this project's CI does it). Otherwise see [Approvals and the sandbox](#approvals-and-the-sandbox). |
 | `unavailable` or `SANDBOX_ESCALATION_DENIED` in `minidsh run` | Nobody could answer an approval. Pass `--approve`, or `--accept none` for an unconfined shell. |
-| `install PowerShell 7 (pwsh)` | Windows ships 5.1 only. Install 7 ([npm](#npm)) and open a new terminal. |
+| `install PowerShell 7 (pwsh)` | Windows ships 5.1 only. Install 7 (`winget install Microsoft.PowerShell`) and open a new terminal. |
 | On Windows a command hangs until its time limit | It waits for input it cannot get. Ask for a non-interactive form. |
 | `that link has already been used` | Another browser spent the link. Restart `minidsh web` for a new one. |
-| `settings file ... is invalid`, `composition file ... is invalid` | Fix the named file. The command stopped before it started anything (`sessions`, `skills` and `credentials` only warn about `settings.json`). `composition.json` is an object holding a `patches` list, and a bare list is refused. |
+| `settings file ...` or `composition file ...`, then `is invalid`, `is not valid JSON` or `is unreadable` | Fix the named file. The command stopped before it started anything (`sessions`, `skills` and `credentials` only warn about `settings.json`). `composition.json` is an object holding a `patches` list, and a bare list is refused. |
 | `the stored log is locked by pid ...` | Another MiniDSH has the session open. Remove the `.lock` file only if that process is gone and a resume still refuses. |
 
 More limitations: [ARCHITECTURE section 13](ARCHITECTURE.md#13-known-limitations-current). Report a vulnerability as [SECURITY.md](../SECURITY.md) describes.

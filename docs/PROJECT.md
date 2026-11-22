@@ -80,7 +80,7 @@ The goal is **fewer concepts + stronger invariants**, not fewer source lines.
 
 ## 6. Everything Evolvable Has a Seam
 
-MiniDSH should learn from "Everything is a Plugin" without copying it as a universal rule. Plugin systems cost lifecycle machinery, service definitions, dependency resolution, configuration, package boundaries, debugging indirection and more concepts to learn. MiniDSH can be more selective than DSH:
+MiniDSH should learn from "Everything is a Plugin" without copying it as a universal rule. Plugin systems cost lifecycle machinery, service definitions, dependency resolution, configuration, package boundaries, debugging indirection and more concepts to learn. MiniDSH is much smaller, so it can afford to make fewer things plugins:
 
 > **Everything evolvable has a seam.**
 
@@ -180,7 +180,7 @@ Outcome: built in S8 and S20. A verifier is a `tool-subagent` row plus a `model-
 
 ## 11. Architecture-First Development as the Real Experiment
 
-The deepest purpose of MiniDSH is not the harness. It is an experiment in building a large AI-assisted system without letting its architecture dissolve into local feature patches.
+The harness is the test case. The experiment is building an AI-assisted system without letting its architecture dissolve into local feature patches.
 
 AI coding agents are good at locally plausible implementations. They are much less reliable at preserving a global conceptual model across months of growth, unless that model is explicit, inspectable and continuously enforced.
 
@@ -222,7 +222,7 @@ It should resist feature pressure when a feature improves neither the architectu
 
 ### Layer 1 — Useful software
 
-A lightweight agent harness that does real daily software-engineering work with low overhead.
+A lightweight agent harness that can do ordinary software-engineering tasks with low overhead.
 
 ### Layer 2 — Reference architecture
 
@@ -246,7 +246,7 @@ Outcome: session 1 (2026-08-22) did this. The current shape is ARCHITECTURE.md a
 
 ## 16. Project Positioning
 
-> **MiniDSH is an architecture-first, local-first reference harness that re-derives the essential structure of a modern coding agent from the minimum useful capability set. It studies DeepSeek Harness as an architectural reference rather than forking it, with the goal of building one small runtime that remains composable, observable, verifiable, provider-neutral, and extensible to multiple user surfaces.**
+> MiniDSH is a small, local-first coding-agent harness that studies DeepSeek Harness as an architectural reference and does not fork it. Its aim is one runtime that stays composable, observable and verifiable under several surfaces and providers.
 
 The project should be presented publicly as an independent educational and engineering experiment inspired by DeepSeek Harness, not as an official DeepSeek project.
 

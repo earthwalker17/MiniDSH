@@ -110,7 +110,19 @@ const ARCHITECTURE_HEADINGS = [
   '## 14. File map',
 ]
 
-const REPO_BLOB = 'https://github.com/earthwalker17/MiniDSH/blob/main/'
+const REPO_BLOB = 'https://github.com/earthwalker17/MiniDSH/blob/'
+/**
+ * The refs an absolute link to this repository may name and still be checked
+ * against the tree: `main`, and the tag of the version being released. The
+ * release notes are cut from CHANGELOG.md, and a link in them to `main`
+ * would point at whatever a later release made of the file.
+ */
+function repoPath(url: string): string | undefined {
+  if (!url.startsWith(REPO_BLOB)) return undefined
+  const { version } = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string }
+  const ref = ['main', `v${version}`].find((name) => url.startsWith(`${REPO_BLOB}${name}/`))
+  return ref === undefined ? undefined : url.slice(REPO_BLOB.length + ref.length + 1)
+}
 // Generated or foreign trees: `build` is desktop/build (the packed app, and
 // the Node release unpacked with ITS markdown); `worktrees` holds agents'
 // checkouts of this repository under .claude.
@@ -291,8 +303,9 @@ for (const file of walk(ROOT)) {
     } else if (inline !== undefined) {
       if (/^[a-z]+:/i.test(inline)) {
         // An absolute URL to this repository's own tree is checked like a relative link; anything else is not ours to check.
-        if (!inline.startsWith(REPO_BLOB)) continue
-        target = inline.slice(REPO_BLOB.length)
+        const ours = repoPath(inline)
+        if (ours === undefined) continue
+        target = ours
         base = ROOT
       } else {
         target = inline

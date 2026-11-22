@@ -32,7 +32,7 @@ minidsh web                  # the browser UI: open the link it prints
 minidsh sessions list        # what is stored
 minidsh resume <id>          # continue a stored session
 
-# One task from a script. --approve answers every ask with yes.
+# One task from a script. --approve answers yes to every permission request.
 minidsh run "fix the failing test" --approve
 # Another provider: name the model too.
 minidsh chat --provider anthropic --model claude-sonnet-5
@@ -44,7 +44,9 @@ The [guide](docs/GUIDE.md) has the rest: keys and models, approvals, sessions, c
 
 ## What you get
 
-<p align="center"><img src="docs/images/web-light.png" width="49%" alt="The web UI in the light theme with a finished turn's work opened: an edit refused because the file had not been read, the read, then the edit shown as a diff"> <img src="docs/images/web-dark.png" width="49%" alt="The same view in the dark theme"></p>
+<p align="center"><img src="docs/images/web-light.png" width="100%" alt="The web UI with a finished turn's work opened: an edit refused because the file had not been read, the read, then the edit shown as a diff"></p>
+
+One real turn in the web UI. The first edit was refused because the model had not read the file. It read the file, and the edit went through as the diff shown. The guide shows [the dark theme](docs/GUIDE.md#web).
 
 - **Sessions that outlive their process.** A session is one append-only log under `~/.minidsh/sessions`. Kill the process mid-turn and `minidsh resume` repairs the log and continues. `minidsh fork` branches a session at an earlier turn.
 - **Permissions you set, and a record of them.** By default writes stay inside the project folder. A shell command that needs more must ask, and the ask shows the exact command. `minidsh sessions show <id> --audit` prints what was allowed and what each call did.
@@ -55,7 +57,7 @@ The [guide](docs/GUIDE.md) has the rest: keys and models, approvals, sessions, c
 - **Long conversations are summarised.** When history nears the model's window, or the provider refuses a request as too large, the oldest part is replaced by a summary. The originals stay in the log. The model can read them back, and nothing makes it do so.
 - **Delegation.** The model can hand a bounded task to a child agent whose permissions cannot exceed its parent's. Several children can run at once.
 - **Background jobs.** A dev server or a slow test run keeps going while the agent works. Its end is reported to the session.
-- **A browser tool.** Where Chrome, Edge or Chromium is installed, the agent can open a local page, read it, click and take a screenshot. It reaches only localhost and the project's files. Web search is a separate tool, off until you add it.
+- **A browser tool.** Where Chrome, Edge or Chromium is installed, the agent can open a local page, read it, click and take a screenshot. By default it reaches only localhost and the project's files. Web search is a separate tool, off until you add it.
 - **Skills.** A folder with a `SKILL.md` teaches the agent a kind of task. Two ship, for Office documents and PDFs ([skills/README.md](skills/README.md)).
 - **Four ways in.** The terminal, the web UI, the desktop app and the headless `run` use one runtime and the same stored sessions. `minidsh serve` speaks the terminal's and the web UI's [JSON-RPC protocol](src/capabilities/protocol/README.md) on stdio, for a client of your own.
 
@@ -65,9 +67,9 @@ The [guide](docs/GUIDE.md) has the rest: keys and models, approvals, sessions, c
 
 **Version 2.0.0.** MiniDSH is one person's project. The [changelog](CHANGELOG.md) lists what each release changed. The limits you are likely to meet first:
 
-- **Windows has no shell confinement.** A shell command there can write wherever your account can, so by default it is refused and the model's retry asks you. `--accept none` stops the asking and keeps file edits fenced. A headless `run` cannot be asked. It prints which flag to pass.
+- **Windows has no shell confinement.** A shell command there can write wherever your account can, so by default none runs until you approve it. `--accept none` turns that off: shell commands then run unasked and unconfined, and only the editor's writes stay inside the project folder. A headless `run` cannot ask, so it refuses and prints which flag would allow the command.
 - **The installers are unsigned and do not update themselves.** A new version is a new download.
-- **macOS is tested in CI only.** The desktop builds launch and pass a keyless suite on Apple silicon and Intel runners. Nobody has checked them by hand.
+- **Only the Windows desktop build was used by hand.** The macOS and Linux builds start and pass a test suite that needs no provider key on CI runners. Nobody has run a macOS build by hand, and the Linux app was driven only unpacked, so the AppImage's own launcher was never run. The `minidsh` command is tested on macOS in CI only.
 - **The web sign-in cookie is scoped to the host name, not the port.** A browser also sends it to other servers on that name, and one of them could drive a session. The desktop app is not affected.
 - **There is no MCP client and no plugin marketplace.**
 

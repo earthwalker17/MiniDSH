@@ -1,7 +1,7 @@
 {
   "name": "minidsh",
   "version": "2.0.0",
-  "description": "Minimal surface, complete architecture: a small, local-first coding-agent harness re-derived from the invariants of DeepSeek Harness (independent project; not affiliated).",
+  "description": "A small coding-agent harness that runs on your own machine, written independently as a study of DeepSeek Harness (not affiliated with DeepSeek).",
   "keywords": [
     "agent",
     "agent-harness",
@@ -10,6 +10,7 @@
     "llm",
     "deepseek",
     "anthropic",
+    "openai",
     "sandbox",
     "event-sourcing",
     "plugin-architecture",
