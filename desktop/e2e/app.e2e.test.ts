@@ -34,7 +34,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { alive, answerNativeDialog, installedBesideUs, killDesktopApps, registeredInstall, type DesktopApp, type DesktopLaunch } from '../../src/test-support/desktop-app.ts'
 import { holdRuntimeStart, launchApp as launchOwned, locksUnder, nsis, scratch as scratchOwned, seed, storedEvents, turnEnds, waitUntil, type Cleanup } from './support.ts'
@@ -379,7 +379,11 @@ describe.runIf(EXE && INSTALLER && win)('the installed desktop app (Windows)', (
     // writes: seen here, so that lookup is known to find a MiniDSH that is there.
     const registered = registeredInstall()
     expect(registered, 'the installer registered nothing this test can find: the refusal above could not see a real install either').toBeDefined()
-    expect(registered!.uninstaller.toLowerCase(), 'the registration names another folder').toContain(dir.toLowerCase())
+    // Compared on the scratch folder's own name, which is ASCII and unique to
+    // this run: reg.exe answers a pipe in the console's code page, so the `ü`
+    // below it arrives as other bytes wherever that page is not UTF-8
+    // (measured on code page 936: `a8 b9`, two replacement characters).
+    expect(registered!.uninstaller.toLowerCase(), 'the registration names another folder').toContain(basename(root).toLowerCase())
 
     const userData = scratch('minidsh-e2e-ud-')
     const folder = scratch('minidsh-e2e-ws-')

@@ -17,7 +17,7 @@
  * Requires DEEPSEEK_API_KEY; skipped otherwise. Run via `pnpm test:e2e`.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -202,13 +202,37 @@ describe.skipIf(!KEY)('S17 live E2E: background jobs', () => {
     // after the kill returned: the worker dies through two Job closes behind
     // its host and beats every 500 ms, so one last beat in that gap read as
     // SURVIVED.)
+    //
+    // That pid is the host's only on Windows. Under bubblewrap the worker runs
+    // in a pid namespace of its own (`--unshare-pid`): the number it wrote
+    // names some other process of the host, or none, so asking after it says
+    // nothing about the worker and a signal sent to it goes to a stranger.
+    // Off Windows the heartbeat decides, without the old race: gone is two
+    // consecutive 1.5 s windows (three beats each) in which the file did not
+    // grow, survived is a file still growing when the bound runs out.
     const goneBy = Date.now() + 10_000
-    while (alive(worker) && Date.now() < goneBy) await new Promise((resolve) => setTimeout(resolve, 100))
-    const survived = alive(worker)
+    let survived: boolean
+    if (process.platform === 'win32') {
+      while (alive(worker) && Date.now() < goneBy) await new Promise((resolve) => setTimeout(resolve, 100))
+      survived = alive(worker)
+    } else {
+      const beats = (): number => statSync(join(workspace, 'heartbeat.txt')).size
+      let quiet = 0
+      for (let size = beats(); quiet < 2 && Date.now() < goneBy; ) {
+        await new Promise((resolve) => setTimeout(resolve, 1_500))
+        const now = beats()
+        quiet = now === size ? quiet + 1 : 0
+        size = now
+      }
+      survived = quiet < 2
+    }
     const root = pid !== undefined && alive(pid) ? 'alive' : 'gone'
-    console.log(`[jobs arc B] ${process.platform}: the job's worker (pid ${worker}) ${survived ? 'SURVIVED' : 'died with'} its host; its root (pid ${pid ?? '?'}) is ${root}`)
+    const by = process.platform === 'win32' ? `pid ${worker}` : 'by its heartbeat'
+    console.log(`[jobs arc B] ${process.platform}: the job's worker (${by}) ${survived ? 'SURVIVED' : 'died with'} its host; its root (pid ${pid ?? '?'}) is ${root}`)
+    // The root's pid is the host's on every system (it came with job/start),
+    // and off Windows its process group is the whole tree.
     if (pid !== undefined) killTree(pid)
-    killTree(worker)
+    if (process.platform === 'win32') killTree(worker)
     // On Windows the job's own pwsh holds what it starts in a kill-on-close
     // Job (S21.1, `PWSH_CONTAINMENT`): libuv's Job killed that pwsh with the
     // host, and closing its handle took the worker down too. It SURVIVED in
