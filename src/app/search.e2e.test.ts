@@ -103,9 +103,16 @@ describe.skipIf(!DEEPSEEK || !TAVILY)('S18 live E2E: a network tool under per-qu
     const decided = events.filter((event) => event.type === 'approval/decided')
     const results = events.filter((event) => event.type === 'tool/result')
     const resultOf = (callId: string) => results.find((event) => data<{ callId: string }>(event).callId === callId)
+    // What the model said last in each turn: a "never searched" below then
+    // says what it did instead.
+    const said = turnStarts.map((_, index) => {
+      const last = events.findLast((event) => event.type === 'assistant/message' && inTurn(event.seq) === index + 1)
+      const blocks = data<{ message?: { content?: { type: string; text?: string }[] } }>(last).message?.content ?? []
+      return blocks.map((block) => (block.type === 'text' ? (block.text ?? '') : '')).join('').slice(0, 240)
+    })
     const shape =
       `calls ${JSON.stringify(events.filter((event) => event.type === 'tool/call').map((event) => [inTurn(event.seq), data<{ name: string }>(event).name]))}; ` +
-      `asked ${asked.length}; decided ${JSON.stringify(decided.map((event) => data<{ outcome: string; decidedBy?: string }>(event)))}`
+      `asked ${asked.length}; decided ${JSON.stringify(decided.map((event) => data<{ outcome: string; decidedBy?: string }>(event)))}; said ${JSON.stringify(said)}`
     console.log(`[search arc] ${shape}`)
 
     // ---- consent: the runtime's record, answered by a person -----------------
