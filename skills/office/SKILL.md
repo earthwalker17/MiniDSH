@@ -3,7 +3,7 @@ name: office
 description: Create, read and edit Word (.docx), Excel (.xlsx) and PowerPoint (.pptx) files with a bundled Node helper, without Office, Python or LibreOffice. Use it when a task asks for a report, letter, spreadsheet, workbook or slide deck as an Office file, needs the text, tables, cells, formulas or slides inside one, or asks to change an existing one. It builds from a JSON spec, edits through unpack/pack of the XML parts, and verifies by reading the result back.
 license: MIT
 metadata:
-  minidsh-reviewed: "2026-10-18"
+  minidsh-reviewed: "2026-11-22"
   minidsh-verified-with: "deepseek-flash, skills arc (Windows; WSL bwrap)"
 ---
 

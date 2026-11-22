@@ -3,7 +3,7 @@ name: pdf
 description: Read and create PDF files with a bundled Node helper. Use it when a task involves a .pdf: extracting its text page by page (requirements, invoices, papers, reports), checking its page count or metadata, or producing a PDF, either directly for plain Latin-text documents or by printing HTML with a Chrome or Edge found on this machine, or converting an Office file with LibreOffice when present.
 license: MIT
 metadata:
-  minidsh-reviewed: "2026-10-18"
+  minidsh-reviewed: "2026-11-22"
   minidsh-verified-with: "deepseek-flash, skills arc (Windows; WSL bwrap)"
 ---
 
