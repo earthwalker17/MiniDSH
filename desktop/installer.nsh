@@ -41,7 +41,9 @@
   System::Call 'Kernel32::SetEnvironmentVariable(t "MINIDSH_INSTDIR", t "$INSTDIR")'
   System::Call 'Kernel32::GetCurrentProcessId() i .r0'
   System::Call 'Kernel32::SetEnvironmentVariable(t "MINIDSH_INSTALLER_PID", t "$0")'
-  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command "$$ErrorActionPreference = 'Stop'; try { if ($$ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { exit 4 }; $$d = [IO.Path]::GetFullPath($$env:MINIDSH_INSTDIR).TrimEnd([char]92) + [char]92; $$self = [int]$$env:MINIDSH_INSTALLER_PID; if (@(Get-CimInstance Win32_Process | Where-Object { $$_.ProcessId -ne $$self -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { exit 3 } else { exit 10 } } catch { exit 4 }"`
+  ; Bounded: a broken WMI repository hangs more often than it fails. nsExec
+  ; then answers "timeout", which is no answer, and step 2 decides.
+  nsExec::ExecToStack /TIMEOUT=30000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -Command "$$ErrorActionPreference = 'Stop'; try { if ($$ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { exit 4 }; $$d = [IO.Path]::GetFullPath($$env:MINIDSH_INSTDIR).TrimEnd([char]92) + [char]92; $$self = [int]$$env:MINIDSH_INSTALLER_PID; if (@(Get-CimInstance Win32_Process | Where-Object { $$_.ProcessId -ne $$self -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$d, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { exit 3 } else { exit 10 } } catch { exit 4 }"`
   Pop $0
   Pop $1
   ${if} $0 != 3

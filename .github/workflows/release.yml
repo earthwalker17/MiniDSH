@@ -287,7 +287,17 @@ jobs:
         run: |
           set -euo pipefail
           OURS="sha512-$(openssl dgst -sha512 -binary "$RUNNER_TEMP/assets/minidsh-$VERSION.tgz" | base64 -w0)"
-          PUBLISHED="$(npm view "minidsh@$VERSION" dist.integrity 2> /dev/null || true)"
+          # Asked in two steps, because "no such version" is an ERROR to npm
+          # (E404, measured) and so is a registry that did not answer: the
+          # list of versions answers for a package that exists, or stops the
+          # job here, before the draft is touched.
+          HELD="$(npm view minidsh versions --json)"
+          if printf '%s' "$HELD" | node -e 'const held = JSON.parse(require("fs").readFileSync(0, "utf8")); process.exit([held].flat().includes(process.argv[1]) ? 0 : 1)' "$VERSION"; then
+            PUBLISHED="$(npm view "minidsh@$VERSION" dist.integrity)"
+            test -n "$PUBLISHED"
+          else
+            PUBLISHED=""
+          fi
           echo "this run packed $OURS"
           if [ -z "$PUBLISHED" ]; then
             echo "minidsh@$VERSION is not on the registry yet"
@@ -332,6 +342,9 @@ jobs:
             gh release create "$RELEASE" --draft --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$RUNNER_TEMP/notes.md"
           fi
           if [ "$(gh release view "$RELEASE" --json isDraft --jq .isDraft)" = "true" ]; then
+            # A draft an earlier run made (of a tag since moved, say) is made
+            # this run's whole: its commit, title and notes with its assets.
+            gh release edit "$RELEASE" --draft --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$RUNNER_TEMP/notes.md"
             gh release upload "$RELEASE" --clobber "$RUNNER_TEMP"/assets/*
           else
             echo "release $RELEASE is already public: its assets are verified below, never replaced"
@@ -368,7 +381,8 @@ jobs:
       contents: write # the draft goes public
       id-token: write # the OIDC exchange npm trusted publishing needs
     env:
-      GH_TOKEN: ${{ github.token }}
+      # No GH_TOKEN here: only the last step calls gh, and the steps between
+      # run code installed from the registry.
       VERSION: ${{ needs.gate.outputs.version }}
     steps:
       # Said twice on purpose: the job's `if` is an expression, this is the
@@ -418,7 +432,7 @@ jobs:
       - name: An npm that can publish through OIDC
         run: |
           set -euo pipefail
-          npm install -g --prefix "$RUNNER_TEMP/npm11" npm@^11.5.1
+          npm install -g --prefix "$RUNNER_TEMP/npm11" npm@11.21.3
           NPM="$RUNNER_TEMP/npm11/bin/npm"
           echo "node $(node --version) at $(command -v node); npm $("$NPM" --version) at $NPM (PATH's npm: $(npm --version))"
           "$NPM" --version | node -e "const [a,b,c]=require('fs').readFileSync(0,'utf8').trim().split('.').map(Number); if (a<11||(a===11&&(b<5||(b===5&&c<1)))) { console.error('npm ' + [a,b,c].join('.') + ' cannot publish through trusted publishing'); process.exit(1) }"
@@ -495,6 +509,8 @@ jobs:
       # The release a person lands on from the README's download links: every
       # asset there, by name, before it goes public and becomes "latest".
       - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           EXPECTED="$(node -e "const a=[...Object.values(require('$GITHUB_WORKSPACE/desktop/release-assets.json').installers),'minidsh-'+process.argv[1]+'.tgz','SHA256SUMS'].sort();process.stdout.write(a.join(','))" "$VERSION")"
