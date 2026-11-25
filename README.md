@@ -7,6 +7,10 @@
 
 ![MiniDSH: an architecture-first, local-first agent harness](docs/images/README_hero.png)
 
+[![The MiniDSH 2.0 launch film: its thumbnail, with the web UI, the terminal and the desktop app. Click to watch it on YouTube.](docs/images/launch-film.jpg)](https://youtu.be/HpzzGoYtYEc)
+
+▶ **[Watch the 2.0 launch film](https://youtu.be/HpzzGoYtYEc)** (84 s, YouTube). Real sessions, recorded live on the published 2.0.0 package and installer: one session goes from the terminal to the browser, the desktop app keeps its session through a quit, and the one runtime under all three is shown last. The film is made in code ([its source](https://github.com/earthwalker17/AI-videos/tree/main/videos/minidsh-launch)); its thumbnail is an AI-made picture, not a screenshot.
+
 MiniDSH is a small coding-agent harness that runs on your own machine: the program around a language model that gives it tools, sessions and permissions. It studies [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) as a textbook and is written independently of it. It is an experiment and a learning resource first, and it does not compete with DSH or with any product.
 
 ## What MiniDSH is

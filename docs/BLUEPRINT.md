@@ -6,7 +6,7 @@ What comes next, the route there, what is undecided, and a compact record of how
 
 V2.0.0 is the runtime, three surfaces and four installers, audited as one system (S22.5, §4). S23 is a focused session with no planned change to the runtime: it makes what a launch needs from the released build.
 
-- **The session.** A demo video of the three surfaces doing real work on a real provider, recorded from the published package and the published installer; the launch page's text and gallery, held to what the README claims.
+- **The session.** The demo video is done: https://youtu.be/HpzzGoYtYEc (2026-11-24), made in AI-videos from the published package and installer. Left: the launch page's text and gallery, held to what the README claims.
 - **What S22.5 left ready.** `docs/images/logo/` (the square mark, `scripts/logo.test.ts`); `scripts/capture-shots.ts` and `scripts/shots/` retake every picture from a recorded session on a neutral path; `docs/images/README.md` says what each picture is.
 - **Rules it inherits.** A picture or a frame shows a real session; none shows a key, a user name or a home path (`scripts/shots/scan.mjs` reads a log for them before it is recorded from).
 - **Owed by S22.5, for the session after:** `web`'s credential and a signing identity (§3, the first two bullets); the deferred audit findings (§3).

@@ -50,3 +50,7 @@ The PNGs were rendered from the SVGs with a headless browser at the size in the 
 ## The hero
 
 `README_hero.png` opens the README. It is a drawn image, not a screenshot, and its path is kept: the npm page and older links point at it.
+
+## The launch film
+
+`launch-film.jpg` opens the README as the link to the 2.0 launch film (https://youtu.be/HpzzGoYtYEc). The film shows real sessions, recorded on the published 2.0.0 package and installer, and was made in [AI-videos](https://github.com/earthwalker17/AI-videos/tree/main/videos/minidsh-launch). The picture itself is not a screenshot: it was made with ChatGPT's image generation from the film's stills, so its three windows are the model's redrawing of the UI. The mark in it is the real one from `logo/`, put in place of the model's drawing. Its provenance is the film's `publish/thumbnail.provenance.json`.
